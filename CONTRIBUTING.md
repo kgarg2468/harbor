@@ -5,8 +5,8 @@
 - Read `docs/superpowers/specs/2026-09-01-harbor-design.md` first. Pull requests follow the
   order and scope of its section 8 table; behavior outside the current PR's row is deferred,
   not squeezed in.
-- `bin/`, `lib/`, `client/`, and `tests/` are bash 3.2: they must run under macOS's system
-  `/bin/bash`. Only `node/` may use bash 5 features.
+- `fleet/bin/`, `fleet/lib/`, `fleet/client/`, and `fleet/tests/` are bash 3.2: they must run under macOS's system
+  `/bin/bash`. Only `fleet/node/` may use bash 5 features.
 - No secrets, live tailnet IPs, private hostnames, or personal emails anywhere in the tree.
   Documentation and tests use only the placeholders from design section 3.8: `harbor-node`,
   `TAILNET.ts.net`, `TAILNET_IP`, `OPERATOR`, `operator@example.com`, `RELAY_HOSTNAME`.
@@ -28,13 +28,13 @@ git submodule update --init --recursive
 
 ```sh
 shellcheck -s bash -x -a -S warning -P 'SCRIPTDIR/..:SCRIPTDIR/../..' --enable=require-variable-braces \
-  bin/harbor lib/*.sh tests/run_unit.sh tests/shims/bin/harbor-shim \
-  tests/lint/placeholder_scan.sh tests/unit/test_helper.bash
-shfmt -i 2 -ci -bn -d bin/harbor lib tests/run_unit.sh tests/shims/bin/harbor-shim \
-  tests/lint/placeholder_scan.sh tests/unit/test_helper.bash
-tests/lint/placeholder_scan.sh
+  fleet/bin/harbor fleet/lib/*.sh fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim \
+  fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
+shfmt -i 2 -ci -bn -d fleet/bin/harbor fleet/lib fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim \
+  fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
+fleet/tests/lint/placeholder_scan.sh
 gitleaks detect --source . --config .gitleaks.toml --no-banner --redact
-npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '**/*.md' --ignore tests/vendor
+npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '**/*.md' --ignore fleet/tests/vendor
 ```
 
 Install: `shellcheck` from your package manager; `go install mvdan.cc/sh/v3/cmd/shfmt@v3.8.0`;
@@ -43,13 +43,13 @@ gitleaks 8.18.4 from its GitHub release; Node.js for `npx`.
 ## Unit tests locally
 
 ```sh
-tests/run_unit.sh                       # everything, as CI runs it
-tests/run_unit.sh tests/unit/lib/lock.bats
+fleet/tests/run_unit.sh                 # everything, as CI runs it
+fleet/tests/run_unit.sh fleet/tests/unit/lib/lock.bats
 ```
 
 On macOS the runner pins `PATH` so Bats executes under `/bin/bash` 3.2, which is what the
 `macos-14` job in CI does. Run the suite on both an Ubuntu machine and a Mac before opening a
-PR when you touched `lib/` or `bin/`.
+PR when you touched `fleet/lib/` or `fleet/bin/`.
 
 ## Commit and PR conventions
 

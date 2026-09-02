@@ -9,7 +9,7 @@ controller with it, using only the vendors' own tools (Tailscale, Node.js, Claud
 Design complete, implementation in progress. This repository currently contains:
 
 - the approved design specification, `docs/superpowers/specs/2026-09-01-harbor-design.md`;
-- the foundation from PR 2: the `bin/harbor` dispatcher, the `lib/` libraries for logging,
+- the foundation from PR 2: the `fleet/bin/harbor` dispatcher, the `fleet/lib/` libraries for logging,
   checks, version pinning, the command lock, and the ownership journal, the `harbor journal
   resolve` command, and the Bats test harness.
 
@@ -19,10 +19,11 @@ arrive in later pull requests in the order given by section 8 of the design.
 
 ## Layout
 
-- `bin/harbor`: the single entry point. It dispatches subcommands and contains no logic.
-- `lib/`: `log.sh`, `checks.sh`, `versions.sh`, `lock.sh`, `journal.sh`.
-- `versions.lock`: exact third-party versions, one per key. Empty until each component's PR.
-- `tests/`: Bats unit tests, vendor shims, fixtures, and the placeholder scan.
+- `fleet/`: all of Harbor's code. Everything below is relative to it.
+- `fleet/bin/harbor`: the single entry point. It dispatches subcommands and contains no logic.
+- `fleet/lib/`: `log.sh`, `checks.sh`, `versions.sh`, `lock.sh`, `journal.sh`.
+- `fleet/versions.lock`: exact third-party versions, one per key. Empty until each component's PR.
+- `fleet/tests/`: Bats unit tests, vendor shims, fixtures, and the placeholder scan.
 - `docs/superpowers/specs/`: the design. `docs/superpowers/plans/`: per-PR implementation plans.
 
 ## Running the checks
