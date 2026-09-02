@@ -1,0 +1,15 @@
+# Harbor version lock (design section 2): one exact value per key.
+# Each value is first set by the PR that installs the component; until then the key is empty.
+ubuntu_release=
+tailscale_apt_channel=
+tailscale_version=
+nodejs_version=
+nodejs_install=
+nodejs_sha256=
+claude_code_version=
+claude_code_install=
+codex_version=
+codex_install=
+t3_version=
+t3_install=
+t3_engines_node=
