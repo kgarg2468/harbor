@@ -80,3 +80,76 @@ harbor_die() {
   fi
   exit "${code}"
 }
+harbor_step() {
+  HARBOR_CURRENT_STEP="${1}"
+  harbor_log step "${1}"
+  harbor_test_hook "${1}"
+}
+# The pause sentinel (design section 7, "a test-controlled file"): derived from the
+# top-level PID and the step so a test can create it after reading the holder record.
+harbor_test_pause_sentinel() {
+  local dir="${TMPDIR:-/tmp}"
+  printf '%s/harbor-pause.%s.%s' "${dir%/}" "${HARBOR_PID:-$$}" "${1}"
+}
+# The only test hook in Harbor (design section 7). Inert unless HARBOR_TEST_HOOKS=1.
+# It can only kill or pause the process at a step boundary; it skips no check,
+# alters no path, and mutates nothing.
+harbor_test_hook() {
+  local sentinel i
+  [ "${HARBOR_TEST_HOOKS:-0}" = "1" ] || return 0
+  case "${HARBOR_PID:-$$}" in
+    "" | *[!0-9]*) harbor_die 3 hook.bad_pid "HARBOR_PID must be a decimal PID, got ${HARBOR_PID:-}" ;;
+  esac
+  if [ "${HARBOR_FAIL_AFTER:-}" = "${1}" ]; then
+    kill -KILL "${HARBOR_PID:-$$}"
+    exit 4
+  fi
+  if [ "${HARBOR_PAUSE_AFTER:-}" = "${1}" ]; then
+    sentinel="$(harbor_test_pause_sentinel "${1}")"
+    i=0
+    while [ ! -e "${sentinel}" ]; do
+      i=$((i + 1))
+      if [ "${i}" -gt 600 ]; then
+        harbor_die 4 hook.pause_timeout "paused at ${1} for 120s without ${sentinel}"
+      fi
+      sleep 0.2
+    done
+    rm -f "${sentinel}" 2>/dev/null || true
+  fi
+}
+harbor_on_err() {
+  local rc=$?
+  [ "${BASH_SUBSHELL:-0}" = 0 ] || return 0
+  harbor_msg "failed at step ${HARBOR_CURRENT_STEP:-startup} (exit ${rc}) running: ${BASH_COMMAND}"
+  harbor_msg "next: ${HARBOR_NEXT_COMMAND:-rerun the same command after fixing the cause}"
+}
+harbor_on_interrupt() {
+  HARBOR_INTERRUPTED=1
+  exit 4
+}
+harbor_on_exit() {
+  local rc=$?
+  if [ -n "${HARBOR_LOCK_ROOT:-}" ]; then
+    harbor_lock_release "${HARBOR_LOCK_ROOT}" || :
+  fi
+  if [ "${HARBOR_INTERRUPTED:-0}" = "1" ]; then
+    if [ "${HARBOR_JSON:-0}" = "1" ]; then
+      printf '{"error":"interrupted"}\n'
+    fi
+    harbor_log exit 4 || :
+    exit 4
+  fi
+  if [ "${rc}" = 0 ] && [ "${HARBOR_COMPLETED:-0}" != "1" ]; then
+    harbor_msg "terminated before completion (exit 2)"
+    harbor_log exit 2 incomplete || :
+    exit 2
+  fi
+  harbor_log exit "${rc}" || :
+  exit "${rc}"
+}
+harbor_install_traps() {
+  set -E
+  trap harbor_on_err ERR
+  trap harbor_on_interrupt INT TERM HUP
+  trap harbor_on_exit EXIT
+}

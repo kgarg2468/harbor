@@ -108,3 +108,164 @@ setup() {
   assert_output --regexp ' vendor tailscale up --auth-key$'
   refute_output --partial SECRETVALUE
 }
+
+@test "harbor_step records the current step and logs it" {
+  harbor_log_open "${BATS_TEST_TMPDIR}/h.log" 0600
+  harbor_step lock-gate
+  assert_equal "${HARBOR_CURRENT_STEP}" lock-gate
+  run cat "${BATS_TEST_TMPDIR}/h.log"
+  assert_output --regexp ' step lock-gate$'
+}
+
+@test "hooks are inert without HARBOR_TEST_HOOKS=1" {
+  run env HARBOR_FAIL_AFTER=lock-gate HARBOR_PAUSE_AFTER=lock-gate \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=$$; harbor_step lock-gate; echo survived'
+  assert_success
+  assert_output survived
+  run env HARBOR_TEST_HOOKS=0 HARBOR_FAIL_AFTER=lock-gate HARBOR_PAUSE_AFTER=lock-gate \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=$$; harbor_step lock-gate; echo survived'
+  assert_success
+  assert_output survived
+}
+
+@test "the pause sentinel is derived from TMPDIR, HARBOR_PID, and the step, and matches the harness helper" {
+  run env TMPDIR=/x/ bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=4242; harbor_test_pause_sentinel lock-gate'
+  assert_output '/x/harbor-pause.4242.lock-gate'
+  run env -u TMPDIR bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=4242; harbor_test_pause_sentinel lock-gate'
+  assert_output '/tmp/harbor-pause.4242.lock-gate'
+  run env TMPDIR=/x bash -c '. "${HARBOR_ROOT}/lib/log.sh"; harbor_test_pause_sentinel resolve-confirmed'
+  assert_output --regexp '^/x/harbor-pause\.[0-9]+\.resolve-confirmed$'
+  HARBOR_PID=4242
+  assert_equal "$(harbor_test_pause_sentinel lock-gate)" "$(pause_sentinel 4242 lock-gate)"
+}
+
+@test "HARBOR_FAIL_AFTER kills the process at exactly that boundary" {
+  run env HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=lock-mkdir \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=$$; harbor_step lock-gate; echo passed-gate; harbor_step lock-mkdir; echo survived'
+  assert_equal "${status}" 137
+  assert_output passed-gate
+}
+
+@test "HARBOR_PAUSE_AFTER pauses at exactly that step until this process's sentinel appears, then consumes it" {
+  env HARBOR_TEST_HOOKS=1 HARBOR_PAUSE_AFTER=lock-acquired \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=$$; harbor_step lock-gate; harbor_step lock-acquired; echo resumed' \
+    >"${BATS_TEST_TMPDIR}/out" 3>&- &
+  pid=$!
+  sleep 1
+  kill -0 "${pid}"
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/out")" ""
+  touch "$(pause_sentinel "$((pid + 1))" lock-acquired)" "$(pause_sentinel "${pid}" lock-gate)"
+  sleep 0.5
+  kill -0 "${pid}"
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/out")" ""
+  touch "$(pause_sentinel "${pid}" lock-acquired)"
+  wait "${pid}"
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/out")" resumed
+  assert [ ! -e "$(pause_sentinel "${pid}" lock-acquired)" ]
+  assert [ -e "$(pause_sentinel "$((pid + 1))" lock-acquired)" ]
+  assert [ -e "$(pause_sentinel "${pid}" lock-gate)" ]
+  rm -f "$(pause_sentinel "$((pid + 1))" lock-acquired)" "$(pause_sentinel "${pid}" lock-gate)"
+}
+
+@test "HARBOR_PAUSE_AFTER for a different step does not pause" {
+  run env HARBOR_TEST_HOOKS=1 HARBOR_PAUSE_AFTER=lock-mkdir \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; HARBOR_PID=$$; harbor_step lock-gate; echo survived'
+  assert_success
+  assert_output survived
+}
+
+@test "ERR trap names the step, the command, and the next command" {
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_step lock-gate; false'
+  assert_equal "${status}" 1
+  assert_regex "${stderr_lines[0]}" '^harbor: failed at step lock-gate \(exit 1\) running: false$'
+  assert_equal "${stderr_lines[1]}" 'harbor: next: rerun the same command after fixing the cause'
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_NEXT_COMMAND="harbor journal resolve 0001 --reverted"; false'
+  assert_equal "${stderr_lines[1]}" 'harbor: next: harbor journal resolve 0001 --reverted'
+}
+
+@test "INT and TERM exit 4 and print the interrupted JSON object under HARBOR_JSON=1" {
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_JSON=1; kill -TERM $$; sleep 5; echo survived'
+  assert_equal "${status}" 4
+  assert_equal "${output}" '{"error":"interrupted"}'
+  run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; kill -INT $$; sleep 5; echo survived'
+  assert_equal "${status}" 4
+  assert_output ''
+}
+
+@test "EXIT trap logs the exit code and preserves it" {
+  run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_log_open "'"${BATS_TEST_TMPDIR}"'/h.log" 0600; exit 3'
+  assert_equal "${status}" 3
+  run cat "${BATS_TEST_TMPDIR}/h.log"
+  assert_output --regexp ' exit 3$'
+}
+
+@test "EXIT trap reports exit 2 when the process reaches status 0 without HARBOR_COMPLETED=1" {
+  # bash 3.2 presents $? as 0 inside the EXIT trap after a fatal set -u abort, so
+  # a crash would otherwise be logged and reported as success. First the exact
+  # contract for a plain status 0 with no completion flag, which every bash gives;
+  # then the abort itself: exit 2 wherever bash discards the status, never 0.
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_log_open "'"${BATS_TEST_TMPDIR}"'/h.log" 0600; true'
+  assert_equal "${status}" 2
+  assert_equal "${stderr}" 'harbor: terminated before completion (exit 2)'
+  run tail -n 1 "${BATS_TEST_TMPDIR}/h.log"
+  assert_output --regexp ' exit 2 incomplete$'
+  probe="$(bash -c 'set -eu; trap "printf %s \$?" EXIT; echo "${NOPE}"' 2>/dev/null)"
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_log_open "'"${BATS_TEST_TMPDIR}"'/h.log" 0600; echo "${NOPE}"'
+  assert_not_equal "${status}" 0
+  assert_equal "${output}" ""
+  run tail -n 1 "${BATS_TEST_TMPDIR}/h.log"
+  if [ "${probe}" = 0 ]; then
+    assert_output --regexp ' exit 2 incomplete$'
+  else
+    assert_output --regexp " exit ${probe}\$"
+  fi
+}
+
+@test "EXIT trap keeps exit 0 once HARBOR_COMPLETED=1 is set" {
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_log_open "'"${BATS_TEST_TMPDIR}"'/h.log" 0600; HARBOR_COMPLETED=1; exit 0'
+  assert_equal "${status}" 0
+  assert_equal "${stderr}" ""
+  run tail -n 1 "${BATS_TEST_TMPDIR}/h.log"
+  assert_output --regexp ' exit 0$'
+}
+
+@test "EXIT trap keeps the exit code and the interrupt contract when the lock release fails" {
+  # harbor_lock_release arrives in Task 8; here it is undefined, so the call fails.
+  run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_LOCK_ROOT=/tmp/x; exit 3'
+  assert_equal "${status}" 3
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_JSON=1; HARBOR_LOCK_ROOT=/tmp/x; kill -TERM $$; sleep 5; echo survived'
+  assert_equal "${status}" 4
+  assert_equal "${output}" '{"error":"interrupted"}'
+}
+
+@test "HUP exits 4 and prints the interrupted JSON object under HARBOR_JSON=1" {
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_JSON=1; kill -HUP $$; sleep 5; echo survived'
+  assert_equal "${status}" 4
+  assert_equal "${output}" '{"error":"interrupted"}'
+}
+
+@test "ERR trap reports a failing command substitution once, naming the enclosing command" {
+  run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_step lock-gate; v=$(false)'
+  assert_equal "${status}" 1
+  assert_equal "${#stderr_lines[@]}" 2
+  assert_equal "${stderr_lines[0]}" 'harbor: failed at step lock-gate (exit 1) running: v=$(false)'
+  assert_equal "${stderr_lines[1]}" 'harbor: next: rerun the same command after fixing the cause'
+}
+
+@test "harbor_test_hook refuses a non-numeric HARBOR_PID before signalling, and only once gated" {
+  # A witness process proves the refusal happened before any kill: with
+  # HARBOR_PID=-1 an unguarded kill -KILL would signal every process of this user.
+  sleep 30 3>&- &
+  witness=$!
+  run --separate-stderr env HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=lock-gate HARBOR_PID=-1 \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; harbor_step lock-gate; echo survived'
+  kill -0 "${witness}"
+  kill "${witness}"
+  assert_equal "${status}" 3
+  assert_equal "${output}" ""
+  assert_regex "${stderr}" 'hook\.bad_pid'
+  run env HARBOR_FAIL_AFTER=lock-gate HARBOR_PID=-1 \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; harbor_step lock-gate; echo survived'
+  assert_success
+  assert_output survived
+}
