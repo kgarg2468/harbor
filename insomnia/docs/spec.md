@@ -59,7 +59,10 @@ change. They are the source of truth for reconcile and for the backstop.
   ("2h 14m"). The redraw timer ticks once per minute and stops entirely while
   the lid is closed.
 - Popover while active: ends-at time, Extend (+30m, +1h, +4h, custom), End now.
-- Session start: `sudo pmset -a disablesleep 1`, write session + state.
+- Session start: write session + state to disk first, then
+  `sudo pmset -a disablesleep 1`. If pmset fails, delete the session file and
+  surface the error. The journal always exists before sleep is disabled, so a
+  crash between the two steps leaves a record the backstop can act on.
 - Session end (timer, End now, Quit, battery floor, thermal critical):
   `sudo pmset -a disablesleep 0`, undo every RuntimeState entry, delete
   session, notify.
