@@ -1,0 +1,41 @@
+title = "harbor"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "harbor-tailscale-cgnat-ip"
+description = "IPv4 literal in the Tailscale carrier-grade NAT range"
+regex = '''(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}'''
+
+[[rules]]
+id = "harbor-magicdns-suffix"
+description = "MagicDNS name other than the TAILNET.ts.net placeholder"
+regex = '''[A-Za-z0-9-]+\.ts\.net'''
+[rules.allowlist]
+regexes = ['''^TAILNET\.ts\.net$''']
+
+[[rules]]
+id = "harbor-tailscale-auth-key"
+description = "Tailscale auth key prefix"
+regex = '''tskey[-][A-Za-z0-9-]+'''
+
+[[rules]]
+id = "harbor-email"
+description = "Email address outside example.com"
+regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'''
+[rules.allowlist]
+regexes = ['''@example\.com$''']
+
+[[rules]]
+id = "harbor-clerk-user-id"
+description = "Clerk user id prefix"
+regex = '''user_[A-Za-z0-9]{20,}'''
+
+[[rules]]
+id = "harbor-url-secret-param"
+description = "URL parameter or fragment named token, code, key, secret, or wsTicket"
+regex = '''[?&#](token|code|key|secret|wsTicket)=[^&#[:space:]]+'''
+
+[allowlist]
+paths = ['''^\.gitleaks\.toml$''', '''^fleet/tests/lint/placeholder-patterns\.txt$''']
