@@ -144,3 +144,96 @@ harbor_lock_classify() {
   fi
   HARBOR_LOCK_CLASS=live
 }
+harbor_lock_inspect_hint() {
+  printf 'inspect with: ls -la %s/reclaim.d %s/lock.d; cat %s/reclaim.d/holder %s/lock.d/holder. If neither pid is a running harbor process, remove %s/reclaim.d and any %s/lock.d lacking a holder file, then rerun.' \
+    "${1}" "${1}" "${1}" "${1}" "${1}" "${1}"
+}
+harbor_lock_gate_release() {
+  rm -f "${1}/reclaim.d/holder"
+  rmdir "${1}/reclaim.d"
+}
+harbor_lock_acquire() {
+  local root="${1}" kind="${2}" dmode fmode gate lock stale stamp n
+  case "${kind}" in
+    root)
+      dmode=0755
+      fmode=0644
+      ;;
+    operator)
+      dmode=0700
+      fmode=0600
+      ;;
+    *) harbor_die 3 lock.kind "unknown lock kind ${kind}" ;;
+  esac
+  gate="${root}/reclaim.d"
+  lock="${root}/lock.d"
+  [ -d "${root}" ] || harbor_die 3 lock.no_state_root "state root ${root} does not exist"
+  harbor_lock_identity
+  if ! mkdir "${gate}" 2>/dev/null; then
+    harbor_die 3 lock.gate_busy "${gate} exists: another command is inside the lock gate or a crash left it; $(harbor_lock_inspect_hint "${root}")"
+  fi
+  chmod "${dmode}" "${gate}"
+  harbor_lock_write_holder "${gate}" "${fmode}"
+  harbor_step lock-gate
+  if [ -d "${lock}" ]; then
+    harbor_lock_classify "${lock}"
+    case "${HARBOR_LOCK_CLASS}" in
+      live)
+        harbor_lock_gate_release "${root}"
+        harbor_die 3 lock.busy "${lock} is held by pid ${HARBOR_HOLDER_PID} (started ${HARBOR_HOLDER_START_TIME}) on ${HARBOR_HOLDER_HOSTNAME}: ${HARBOR_HOLDER_CMDLINE}"
+        ;;
+      stale)
+        stamp="$(harbor_utc_now)"
+        stale="${root}/lock.${stamp}.stale"
+        n=0
+        while [ -e "${stale}" ]; do
+          n=$((n + 1))
+          if [ "${n}" -gt 999 ]; then
+            harbor_lock_gate_release "${root}"
+            harbor_die 3 lock.archive "a thousand archives named lock.${stamp}*.stale already exist in ${root}; remove old ones and rerun"
+          fi
+          stale="${root}/lock.${stamp}.${n}.stale"
+        done
+        mv "${lock}" "${stale}"
+        harbor_msg "reclaimed stale lock held by pid ${HARBOR_HOLDER_PID}; archived as ${stale}"
+        ;;
+      *)
+        harbor_lock_gate_release "${root}"
+        harbor_die 3 lock.unreadable "${lock} cannot be classified (no holder file, unparseable record, different hostname, or unreadable start time); $(harbor_lock_inspect_hint "${root}")"
+        ;;
+    esac
+  fi
+  mkdir "${lock}"
+  chmod "${dmode}" "${lock}"
+  harbor_step lock-mkdir
+  harbor_lock_write_holder "${lock}" "${fmode}"
+  HARBOR_LOCK_ROOT="${root}"
+  HARBOR_LOCK_SUBSHELL="${BASH_SUBSHELL}"
+  harbor_lock_gate_release "${root}"
+  harbor_step lock-acquired
+}
+harbor_lock_owned() {
+  harbor_lock_identity
+  harbor_lock_parse_holder "${1}/lock.d/holder" || return 1
+  [ "${HARBOR_HOLDER_HOSTNAME}" = "${HARBOR_LOCK_ID_HOSTNAME}" ] || return 1
+  [ "${HARBOR_HOLDER_BOOT_ID}" = "${HARBOR_LOCK_ID_BOOT_ID}" ] || return 1
+  [ "${HARBOR_HOLDER_PID}" = "${HARBOR_LOCK_ID_PID}" ] || return 1
+  [ "${HARBOR_HOLDER_START_TIME}" = "${HARBOR_LOCK_ID_START_TIME}" ] || return 1
+}
+harbor_lock_release() {
+  local lock="${1}/lock.d"
+  HARBOR_LOCK_ROOT=""
+  [ -d "${lock}" ] || return 0
+  # A ( ) subshell, a $( ) substitution, and a Bats run capture keep the
+  # parent's $$ but raise BASH_SUBSHELL; once this shell has acquired, only
+  # the same shell level may release. Unset means no acquisition happened at
+  # this level or above it (a test that acquired inside a capture), and the
+  # identity test alone decides.
+  if [ -n "${HARBOR_LOCK_SUBSHELL:-}" ] && [ "${BASH_SUBSHELL}" != "${HARBOR_LOCK_SUBSHELL}" ]; then
+    return 0
+  fi
+  if harbor_lock_owned "${1}"; then
+    rm -f "${lock}/holder"
+    rmdir "${lock}"
+  fi
+}
