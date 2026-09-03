@@ -1,0 +1,6 @@
+Package: curl
+Status: install ok installed
+Priority: optional
+Section: web
+Architecture: amd64
+Version: 8.5.0-2ubuntu10.4

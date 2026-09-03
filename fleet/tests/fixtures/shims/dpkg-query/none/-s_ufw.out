@@ -1,0 +1,7 @@
+Package: ufw
+Status: deinstall ok config-files
+Priority: optional
+Section: admin
+Architecture: all
+Version: 0.36.2-6
+Config-Version: 0.36.2-6

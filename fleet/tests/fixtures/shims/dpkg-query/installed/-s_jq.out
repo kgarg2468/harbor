@@ -1,0 +1,6 @@
+Package: jq
+Status: install ok installed
+Priority: optional
+Section: utils
+Architecture: amd64
+Version: 1.7.1-3build1

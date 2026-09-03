@@ -1,0 +1,18 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  git-man liberror-perl
+The following NEW packages will be installed:
+  ca-certificates curl git git-man jq liberror-perl openssh-server ufw
+0 upgraded, 8 newly installed, 0 to remove and 0 not upgraded.
+Inst ca-certificates (20240203 Ubuntu:24.04/noble [all])
+Inst liberror-perl (0.17029-2 Ubuntu:24.04/noble [all])
+Inst git-man (1:2.43.0-1ubuntu7.1 Ubuntu:24.04/noble-updates [all])
+Inst git (1:2.43.0-1ubuntu7.1 Ubuntu:24.04/noble-updates [amd64])
+Inst curl (8.5.0-2ubuntu10.4 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst ufw (0.36.2-6 Ubuntu:24.04/noble [all])
+Inst jq (1.7.1-3build1 Ubuntu:24.04/noble [amd64])
+Inst openssh-server (1:9.6p1-3ubuntu13.5 Ubuntu:24.04/noble-updates [amd64])
+Conf ca-certificates (20240203 Ubuntu:24.04/noble [all])
+Conf git (1:2.43.0-1ubuntu7.1 Ubuntu:24.04/noble-updates [amd64])
