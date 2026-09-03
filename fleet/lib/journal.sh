@@ -280,3 +280,63 @@ harbor_journal_recover() {
   fi
   return 0
 }
+harbor_journal_cmd() {
+  case "${1:-}" in
+    resolve)
+      shift
+      harbor_journal_resolve ${1+"$@"}
+      ;;
+    *) harbor_die 3 usage "usage: harbor journal resolve <NNNN> --reverted" ;;
+  esac
+}
+harbor_journal_resolve() {
+  local seq entry f phase op target pre post observed typed
+  [ "$#" -eq 2 ] || harbor_die 3 usage "usage: harbor journal resolve <NNNN> --reverted"
+  seq="${1}"
+  [ "${2}" = "--reverted" ] || harbor_die 3 usage "usage: harbor journal resolve <NNNN> --reverted"
+  case "${seq}" in
+    [0-9][0-9][0-9][0-9]) ;;
+    *) harbor_die 3 usage "entry number must be four digits, got '${seq}'" ;;
+  esac
+  harbor_state_root_for_principal
+  if [ "${HARBOR_LOCK_KIND}" = "operator" ]; then
+    harbor_state_root_create "${HARBOR_STATE_ROOT}" operator
+    harbor_log_open "${HARBOR_STATE_ROOT}/harbor.log" 0600
+  else
+    [ -d "${HARBOR_STATE_ROOT}" ] || harbor_die 3 journal.no_state_root "${HARBOR_STATE_ROOT} does not exist; nothing to resolve (sudo harbor bootstrap creates it)"
+    harbor_log_open "${HARBOR_STATE_ROOT}/bootstrap.log" 0600
+  fi
+  harbor_log command "journal resolve ${seq} --reverted"
+  harbor_lock_acquire "${HARBOR_STATE_ROOT}" "${HARBOR_LOCK_KIND}"
+  harbor_journal_init "${HARBOR_STATE_ROOT}"
+  harbor_journal_recover "${HARBOR_STATE_ROOT}" "${seq}"
+  harbor_step recovery-scan
+  entry=""
+  for f in "${HARBOR_STATE_ROOT}/journal/${seq}"-*.json; do
+    if [ -e "${f}" ]; then
+      entry="${f}"
+      break
+    fi
+  done
+  [ -n "${entry}" ] || harbor_die 3 journal.resolve_missing "no journal entry ${seq} in ${HARBOR_STATE_ROOT}/journal"
+  phase="$(harbor_journal_string "${entry}" phase)"
+  [ "${phase}" = "prepared" ] || harbor_die 3 journal.resolve_not_prepared "entry ${seq} is ${phase}, not prepared; nothing to resolve"
+  op="$(harbor_journal_string "${entry}" op)"
+  target="$(harbor_journal_string "${entry}" target)"
+  pre="$(harbor_journal_raw "${entry}" pre_state)"
+  post="$(harbor_journal_raw "${entry}" post_state)"
+  observed="$(harbor_journal_observe "${op}" "${target}")"
+  if [ "${observed}" = "${pre}" ] || [ "${observed}" = "${post}" ]; then
+    harbor_die 3 journal.resolve_decidable "entry ${seq} is decidable (observed state equals a recorded state); rerun the ordinary command and recovery will mark it"
+  fi
+  harbor_journal_print_entry "${entry}" "${observed}"
+  printf 'Type the entry number %s to mark it reverted without touching %s: ' "${seq}" "${target}" >&2
+  IFS= read -r typed || typed=""
+  [ "${typed}" = "${seq}" ] || harbor_die 3 journal.resolve_unconfirmed "entry number not confirmed; nothing written"
+  harbor_step resolve-confirmed
+  harbor_journal_set_phase "${entry}" reverted operator
+  harbor_msg "entry ${seq} marked reverted (resolved_by: operator); ${target} was not touched"
+  if [ -n "${HARBOR_JOURNAL_UNDECIDABLE}" ]; then
+    harbor_msg "still undecidable and blocking ordinary commands: ${HARBOR_JOURNAL_UNDECIDABLE}"
+  fi
+}
