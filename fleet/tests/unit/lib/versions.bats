@@ -31,10 +31,15 @@ write_lock() {
   assert_equal "${HARBOR_VERSION_KEYS}" "ubuntu_release tailscale_apt_channel tailscale_version nodejs_version nodejs_install nodejs_sha256 claude_code_version claude_code_install codex_version codex_install t3_version t3_install t3_engines_node"
 }
 
-@test "the shipped versions.lock parses with every key present and empty" {
+@test "the shipped versions.lock parses with the eight PR 3 keys pinned and the five PR 4 keys empty" {
   harbor_versions_load "$(harbor_versions_lock_path)"
   assert_equal "$(harbor_versions_lock_path)" "${HARBOR_ROOT}/versions.lock"
-  for k in ${HARBOR_VERSION_KEYS}; do
+  for k in ubuntu_release tailscale_apt_channel tailscale_version nodejs_version nodejs_install nodejs_sha256 t3_version t3_engines_node; do
+    run harbor_version_require "${k}"
+    assert_success
+    refute_output ''
+  done
+  for k in claude_code_version claude_code_install codex_version codex_install t3_install; do
     assert_equal "$(harbor_version_get "${k}")" ""
   done
 }
@@ -98,4 +103,49 @@ write_lock() {
   run harbor_version_get bogus_key
   assert_equal "${status}" 3
   assert_output --partial 'versions.unknown_key'
+}
+
+@test "the pinned nodejs_version is a bare exact version and nodejs_install names that exact linux-x64 tarball" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  run printf '%s' "$(harbor_version_get nodejs_version)"
+  assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+$'
+  run printf '%s' "$(harbor_version_get nodejs_install)"
+  assert_output "https://nodejs.org/dist/v$(harbor_version_get nodejs_version)/node-v$(harbor_version_get nodejs_version)-linux-x64.tar.xz"
+}
+
+@test "the pinned nodejs_sha256 is 64 lowercase hex characters" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  run printf '%s' "$(harbor_version_get nodejs_sha256)"
+  assert_output --regexp '^[0-9a-f]{64}$'
+}
+
+@test "the pinned t3_engines_node is a semver range of exact-prefix comparators joined by || and holds no shell metacharacter" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  range="$(harbor_version_get t3_engines_node)"
+  [ -n "${range}" ]
+  # Only range syntax: digits, dots, the comparator prefixes, and the || separator.
+  # No quote, dollar, backtick, backslash, semicolon, ampersand, or bracket.
+  run printf '%s' "${range}"
+  assert_output --regexp '^[0-9.^~<>=|]+$'
+  # Every || alternative is one comparator on a numeric version prefix. The
+  # trailing newline matters: without it read skips the last alternative.
+  printf '%s\n' "${range}" | sed 's/||/\
+/g' | while IFS= read -r alt; do
+    printf '%s' "${alt}" | grep -Eq '^(\^|~|>=|>|<=|<)?[0-9]+(\.[0-9]+){0,2}$' || {
+      printf 'not a comparator: %s\n' "${alt}"
+      exit 1
+    }
+  done
+}
+
+@test "the pinned t3_version and tailscale_version are bare exact versions and ubuntu_release is the two-part LTS number" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  run printf '%s' "$(harbor_version_get t3_version)"
+  assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+$'
+  run printf '%s' "$(harbor_version_get tailscale_version)"
+  assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+$'
+  run printf '%s' "$(harbor_version_get ubuntu_release)"
+  assert_output --regexp '^[0-9]{2}\.[0-9]{2}$'
+  run printf '%s' "$(harbor_version_get tailscale_apt_channel)"
+  assert_output 'stable/ubuntu/noble'
 }
