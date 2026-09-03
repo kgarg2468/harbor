@@ -556,3 +556,18 @@ contender() {
   run find "${FIX_ROOT}" -maxdepth 1 -name 'lock.*.stale'
   assert_output ''
 }
+
+@test "ownership re-check: owned after acquire, lost after the holder is forged, exit 2 from assert_owner" {
+  start_sleeper
+  HARBOR_PID="$$"
+  harbor_lock_acquire "${FIX_ROOT}" operator
+  harbor_lock_owned "${FIX_ROOT}"
+  harbor_lock_assert_owner "${FIX_ROOT}"
+  holder_record "${KEEP_PID}" "${KEEP_START}" "harbor other" >"${FIX_ROOT}/lock.d/holder"
+  run harbor_lock_owned "${FIX_ROOT}"
+  assert_failure
+  run harbor_lock_assert_owner "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_output --partial 'lock.lost'
+  assert_output --partial 'nothing was written'
+}

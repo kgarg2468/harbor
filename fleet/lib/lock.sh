@@ -237,3 +237,6 @@ harbor_lock_release() {
     rmdir "${lock}"
   fi
 }
+harbor_lock_assert_owner() {
+  harbor_lock_owned "${1}" || harbor_die 2 lock.lost "${1}/lock.d/holder no longer names this process; the lock was reclaimed out from under it and nothing was written"
+}
