@@ -209,7 +209,8 @@ setup() {
   assert_equal "${stderr}" 'harbor: terminated before completion (exit 2)'
   run tail -n 1 "${BATS_TEST_TMPDIR}/h.log"
   assert_output --regexp ' exit 2 incomplete$'
-  probe="$(bash -c 'set -eu; trap "printf %s \$?" EXIT; echo "${NOPE}"' 2>/dev/null)"
+  # The probe shell exits non-zero on every bash except 3.2; keep that status out of the substitution.
+  probe="$(bash -c 'set -eu; trap "printf %s \$?" EXIT; echo "${NOPE}"' 2>/dev/null || true)"
   run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; harbor_log_open "'"${BATS_TEST_TMPDIR}"'/h.log" 0600; echo "${NOPE}"'
   assert_not_equal "${status}" 0
   assert_equal "${output}" ""
