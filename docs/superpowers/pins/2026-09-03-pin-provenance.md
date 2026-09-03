@@ -17,7 +17,7 @@ from. A future version-bump PR re-runs the same commands and updates both files 
 | `nodejs_install` | `https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.xz` |
 | `nodejs_sha256` | `2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2` |
 | `t3_version` | `0.0.38` |
-| `t3_engines_node` | `^22.16\|\|^23.11\|\|>=24.10` |
+| `t3_engines_node` | `^22.16 \|\| ^23.11 \|\| >=24.10` |
 
 ## `ubuntu_release`
 
@@ -186,12 +186,12 @@ https://github.com/pingdotgg/t3code
 
 ## `t3_engines_node`
 
-Value: `^22.16||^23.11||>=24.10`. The `engines.node` range of `t3@0.0.38` as npm reports it
-is `^22.16 || ^23.11 || >=24.10`; the lock stores it with the spaces around each `||` removed,
-because `harbor_versions_load` rejects any value containing whitespace. Semver treats the two
-spellings identically: `||` alternation is split on the separator and each side is trimmed.
-`nodejs_version` `24.20.0` satisfies the `>=24.10` alternative; the plan's Task 2 and Task 5
-prove that with code.
+Value: `^22.16 || ^23.11 || >=24.10`, the `engines.node` range of `t3@0.0.38` byte for byte as
+npm reports it, which is what the design requires. The lock's original space-free spelling was
+a workaround for `harbor_versions_load` rejecting every value containing whitespace; Task 2
+keyed that rule to this one key instead, because a semver AND range such as `>=22.16 <23` is a
+different range without its space. `nodejs_version` `24.20.0` satisfies the `>=24.10`
+alternative; the plan's Task 2 and Task 5 prove that with code.
 
 Command (2026-09-03):
 

@@ -12,4 +12,4 @@ codex_version=
 codex_install=
 t3_version=0.0.38
 t3_install=
-t3_engines_node=^22.16||^23.11||>=24.10
+t3_engines_node=^22.16 || ^23.11 || >=24.10
