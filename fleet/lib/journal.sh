@@ -103,11 +103,33 @@ harbor_observe_file() {
   printf '{"sha256":"%s","mode":"%s","owner":"%s"}' \
     "$(harbor_sha256 "${path}")" "$(harbor_stat_mode "${path}")" "$(harbor_json_escape "$(harbor_stat_owner "${path}")")"
 }
+harbor_observe_op_file() {
+  harbor_observe_file "${1}"
+}
+# harbor_journal_observe OP TARGET: the current state of TARGET rendered in the
+# pre_state and post_state form of OP, for recovery to compare. The observer of an op
+# is the function harbor_observe_op_<op with every hyphen replaced by an underscore>,
+# defined by the library that owns that op, so this file needs no knowledge of, and no
+# dependency on, the libraries above it. An op with no observer defined in this process
+# is unobservable, as before. The op comes out of a journal file, so it is never
+# expanded into a command line: a name outside the [a-z0-9-] journal vocabulary is
+# refused as unobservable without any lookup, and the observer runs only when
+# command -v reports a shell function of exactly that name, never an executable of the
+# same name on PATH (a function's command -v output is the bare name, an executable's
+# is a path).
 harbor_journal_observe() {
-  case "${1}" in
-    file) harbor_observe_file "${2}" ;;
-    *) printf '"unobservable:%s"' "$(harbor_json_escape "${1}")" ;;
+  local op="${1}" fn
+  case "${op}" in
+    "" | *[!a-z0-9-]*) ;;
+    *)
+      fn="harbor_observe_op_$(printf '%s' "${op}" | tr '-' '_')"
+      if [ "$(command -v "${fn}" 2>/dev/null)" = "${fn}" ]; then
+        "${fn}" "${2}"
+        return 0
+      fi
+      ;;
   esac
+  printf '"unobservable:%s"' "$(harbor_json_escape "${op}")"
 }
 harbor_journal_print_entry() {
   {
@@ -262,7 +284,8 @@ harbor_journal_recover() {
     target="$(harbor_journal_string "${entry}" target)"
     pre="$(harbor_journal_raw "${entry}" pre_state)"
     post="$(harbor_journal_raw "${entry}" post_state)"
-    observed="$(harbor_journal_observe "${op}" "${target}")"
+    # An observer that cannot observe fails closed with its own exit code.
+    observed="$(harbor_journal_observe "${op}" "${target}")" || exit "$?"
     if [ "${observed}" = "${pre}" ]; then
       harbor_journal_set_phase "${entry}" reverted
       harbor_log recovery "${base} reverted (state equals pre_state)"
@@ -325,7 +348,7 @@ harbor_journal_resolve() {
   target="$(harbor_journal_string "${entry}" target)"
   pre="$(harbor_journal_raw "${entry}" pre_state)"
   post="$(harbor_journal_raw "${entry}" post_state)"
-  observed="$(harbor_journal_observe "${op}" "${target}")"
+  observed="$(harbor_journal_observe "${op}" "${target}")" || exit "$?"
   if [ "${observed}" = "${pre}" ] || [ "${observed}" = "${post}" ]; then
     harbor_die 3 journal.resolve_decidable "entry ${seq} is decidable (observed state equals a recorded state); rerun the ordinary command and recovery will mark it"
   fi

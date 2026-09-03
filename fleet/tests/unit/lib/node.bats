@@ -281,6 +281,41 @@ tab="$(printf '\t')"
   harbor_lock_release "${FIX_ROOT}"
 }
 
+@test "recovery decides a prepared runtime-install entry: the pre version is reverted, the locked version is applied, another version is undecidable" {
+  # The crash window of design section 3.7: the swap into place landed or did not,
+  # and the applied write never happened. Recovery observes the prefix and decides.
+  acquire
+  fixture_entry "${FIX_ROOT}" 0001 runtime-install "${PREFIX}" created prepared '"absent"' "\"${NODE_VERSION}\""
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  seed_prefix 20.11.1
+  fixture_entry "${FIX_ROOT}" 0002 runtime-install "${PREFIX}" modified prepared '"20.11.1"' "\"${NODE_VERSION}\""
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  fake_node "${PREFIX}/bin/node" "${NODE_VERSION}"
+  fixture_entry "${FIX_ROOT}" 0003 runtime-install "${PREFIX}" modified prepared '"20.11.1"' "\"${NODE_VERSION}\""
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" applied
+  fake_node "${PREFIX}/bin/node" 18.20.8
+  fixture_entry "${FIX_ROOT}" 0004 runtime-install "${PREFIX}" modified prepared '"20.11.1"' "\"${NODE_VERSION}\""
+  run --separate-stderr harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_regex "${stderr}" 'journal entry 0004-runtime-install.json is undecidable:'
+  assert_regex "${stderr}" 'observed:   "18\.20\.8"'
+  assert_regex "${stderr}" 'journal.undecidable: prepared entries 0004 cannot be decided'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0004)" prepared
+  # Deciding an entry inspects only: no download, no reinstall, nothing new.
+  assert [ ! -s "${HARBOR_SHIM_LOG}" ]
+  assert_equal "$(cat "${PREFIX}/lib/marker")" previous
+  assert_equal "$(ls -A "${FIX_OPT}")" node
+  run journal_names
+  assert_equal "${#lines[@]}" 4
+  harbor_lock_release "${FIX_ROOT}"
+}
+
 @test "a foreign file at a link path or a missing link target refuses the whole step before any entry or mutation" {
   seed_prefix "${NODE_VERSION}"
   printf 'not a symlink\n' >"${BINDIR}/npx"

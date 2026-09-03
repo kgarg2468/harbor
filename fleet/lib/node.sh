@@ -20,6 +20,18 @@ harbor_node_installed_version() {
     *) harbor_die 2 node.unreadable "${node} --version printed '${out}', not a version; remove ${1} by hand and rerun so it is reinstalled" ;;
   esac
 }
+# harbor_observe_op_runtime_install PREFIX: the observer harbor_journal_observe
+# dispatches to for a runtime-install entry, so a prepared entry left by a crash
+# between the swap into place and the applied write is decidable by recovery (design
+# section 3.7). It renders what harbor_node_installed_version reports as the JSON
+# string a runtime-install entry's pre_state and post_state carry, "absent" when the
+# prefix holds no runtime. Inspection only; a runtime that cannot answer stays the
+# exit 2 of harbor_node_installed_version. Called only through harbor_journal_observe.
+harbor_observe_op_runtime_install() {
+  local version
+  version="$(harbor_node_installed_version "${1}")" || exit "$?"
+  printf '"%s"' "$(harbor_json_escape "${version}")"
+}
 # harbor_node_tar_flag URL: the tar decompression flag for the tarball URL names
 harbor_node_tar_flag() {
   case "${1}" in

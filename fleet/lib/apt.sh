@@ -42,6 +42,20 @@ harbor_apt_installed() {
   esac
   harbor_die 2 apt.inspect "dpkg-query -s ${1} failed: ${HARBOR_APT_QUERY_OUT}"
 }
+harbor_observe_op_package() {
+  # The observer harbor_journal_observe dispatches to for a package entry, so a
+  # prepared entry left by a crash between the install and the applied write is
+  # decidable by recovery (design section 3.7): the installed state in the shape
+  # harbor_apt_state renders, or the same "absent" a package entry's pre_state
+  # carries. Inspection only; a dpkg-query failure that is not "not installed" is
+  # fail-closed through harbor_apt_installed. Called only through
+  # harbor_journal_observe.
+  if harbor_apt_installed "${1}"; then
+    harbor_apt_state "${HARBOR_APT_VERSION}"
+  else
+    printf '"absent"'
+  fi
+}
 harbor_apt_candidate() {
   # harbor_apt_candidate SIMULATION PKG: the version the simulation says would be
   # installed, so a prepared entry can carry its post_state before the mutation.

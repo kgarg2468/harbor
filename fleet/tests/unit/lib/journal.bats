@@ -42,6 +42,40 @@ teardown() {
   assert_equal "$(harbor_journal_observe package curl)" '"unobservable:package"'
 }
 
+@test "harbor_journal_observe dispatches to a per-op observer, falls back to unobservable, and leaves the file op unchanged" {
+  # No observer for these ops is defined in this process: the fallback stands.
+  assert_equal "$(harbor_journal_observe package curl)" '"unobservable:package"'
+  assert_equal "$(harbor_journal_observe runtime-install "${BATS_TEST_TMPDIR}/prefix")" '"unobservable:runtime-install"'
+  harbor_observe_op_package() { printf '{"version":"%s","method":"apt"}' "${1}"; }
+  assert_equal "$(harbor_journal_observe package curl)" '{"version":"curl","method":"apt"}'
+  # Every hyphen of the op becomes an underscore in the observer's name.
+  harbor_observe_op_runtime_install() { printf '"runtime at %s"' "${1}"; }
+  assert_equal "$(harbor_journal_observe runtime-install "${BATS_TEST_TMPDIR}/prefix")" "\"runtime at ${BATS_TEST_TMPDIR}/prefix\""
+  # The file op observes exactly what it always did, and recovery still decides it.
+  printf 'hello\n' >"${BATS_TEST_TMPDIR}/f"
+  chmod 0644 "${BATS_TEST_TMPDIR}/f"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/f")" "$(harbor_observe_file "${BATS_TEST_TMPDIR}/f")"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/f")" "{\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"mode\":\"0644\",\"owner\":\"$(id -un)\"}"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/nope")" '"absent"'
+  mkdir "${BATS_TEST_TMPDIR}/d"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/d")" '"unobservable:not-a-regular-file"'
+}
+
+@test "an op name out of a journal file is data: never a command line, never an executable on PATH" {
+  # An executable named like an observer is not an observer: only a function is.
+  mkdir "${BATS_TEST_TMPDIR}/bin"
+  printf '#!/bin/sh\nprintf hijacked\n' >"${BATS_TEST_TMPDIR}/bin/harbor_observe_op_evil"
+  chmod 0755 "${BATS_TEST_TMPDIR}/bin/harbor_observe_op_evil"
+  PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  assert_equal "$(harbor_journal_observe evil /x)" '"unobservable:evil"'
+  # An op carrying shell metacharacters is neither expanded nor executed.
+  pwned="${BATS_TEST_TMPDIR}/pwned"
+  assert_equal "$(harbor_journal_observe "file;touch ${pwned}" /x)" "\"unobservable:file;touch ${pwned}\""
+  assert_equal "$(harbor_journal_observe "\$(touch ${pwned})" /x)" "\"unobservable:\$(touch ${pwned})\""
+  assert_equal "$(harbor_journal_observe '../../etc/passwd' /x)" '"unobservable:../../etc/passwd"'
+  assert [ ! -e "${pwned}" ]
+}
+
 @test "the sync helper uses per-file sync on Linux and whole-filesystem sync on Darwin" {
   printf 'x\n' >"${BATS_TEST_TMPDIR}/f"
   harbor_journal_sync_path "${BATS_TEST_TMPDIR}/f"

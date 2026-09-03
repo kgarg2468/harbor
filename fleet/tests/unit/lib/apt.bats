@@ -100,6 +100,23 @@ pkg_state() {
   printf '{"version":"%s","method":"apt"}' "${1}"
 }
 
+other_version() {
+  # other_version PKG VERSION: a dpkg-query fixture set reporting PKG installed at
+  # VERSION, the state a crash can leave that matches neither recorded state
+  rm -rf "${FX}"
+  mkdir -p "${FX}/dpkg-query/healthy"
+  printf 'Package: %s\nStatus: install ok installed\nVersion: %s\n' "${1}" "${2}" \
+    >"${FX}/dpkg-query/healthy/-s_${1}.out"
+  HARBOR_SHIM_FIXTURES="${FX}"
+  export HARBOR_SHIM_FIXTURES
+}
+
+prepared_package_entry() {
+  # prepared_package_entry SEQ PKG VERSION: the entry a crash between apt-get and
+  # the applied write leaves behind (design section 3.7)
+  fixture_entry "${FIX_ROOT}" "${1}" package "${2}" created prepared '"absent"' "$(pkg_state "${3}")"
+}
+
 @test "harbor_apt_installed inspects with dpkg-query only and never appears as a mutating call" {
   fixtures mixed none
   run harbor_apt_installed git
@@ -217,6 +234,43 @@ pkg_state() {
   run grep -l '"phase": "applied"' "${FIX_ROOT}"/journal/*.json
   assert_failure
   assert_output ''
+}
+
+@test "recovery decides a prepared package entry: absent is reverted, the recorded version is applied, another version is undecidable" {
+  # The crash window of design section 3.7: apt-get ran or did not, and the applied
+  # write never happened. Recovery observes the package and decides without asking.
+  fixtures none none
+  prepared_package_entry 0001 git 1:2.43.0-1ubuntu7.1
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  fixtures installed none
+  prepared_package_entry 0002 git 1:2.43.0-1ubuntu7.1
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  other_version git 1:2.43.0-1ubuntu7.2
+  prepared_package_entry 0003 git 1:2.43.0-1ubuntu7.1
+  run --separate-stderr harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_regex "${stderr}" 'journal entry 0003-package.json is undecidable:'
+  assert_regex "${stderr}" 'observed:   \{"version":"1:2\.43\.0-1ubuntu7\.2","method":"apt"\}'
+  assert_regex "${stderr}" 'journal.undecidable: prepared entries 0003 cannot be decided'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" prepared
+  # Deciding an entry inspects only: no apt-get call and no new entry.
+  assert_equal "$(apt_get_calls)" 0
+  run ls -A "${FIX_ROOT}/journal"
+  assert_equal "${#lines[@]}" 3
+}
+
+@test "recovery of a prepared package entry is fail-closed when dpkg-query fails for another reason" {
+  fixtures broken none
+  prepared_package_entry 0001 git 1:2.43.0-1ubuntu7.1
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_output --partial 'apt.inspect'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(apt_get_calls)" 0
 }
 
 @test "a failed candidate lookup exits 2 before any entry is prepared and before any mutating call" {
