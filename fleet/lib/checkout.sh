@@ -155,3 +155,74 @@ ${ancestors}
 ${listing}
 EOF
 }
+# harbor_git CHECKOUT ARG...: every Git command Harbor runs against a checkout, in
+# exactly the hardened form of design section 5.1:
+#
+#   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C <checkout> \
+#     -c safe.directory=<checkout> -c core.fsmonitor=false -c core.hooksPath=/dev/null <args>
+#
+# which disables system and global configuration, hooks, and the filesystem monitor for
+# the invocation, and writes nothing to any Git configuration anywhere. Repository-local
+# configuration under .git/ is still read, and is trusted only because it sits inside
+# the administrator-owned boundary harbor_checkout_trusted has just judged. Git's
+# stdout, stderr, and exit status are the caller's own, so a caller can read rev-parse
+# or pipe git archive through this function and see nothing Harbor added.
+harbor_git() {
+  local checkout="${1:-}"
+  [ "$#" -ge 2 ] || harbor_die 3 usage "usage: harbor_git <checkout> <argument>..."
+  shift
+  harbor_log_vendor git -C "${checkout}" "$@"
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "${checkout}" \
+    -c "safe.directory=${checkout}" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"
+}
+# harbor_checkout_tag CHECKOUT: the tag CHECKOUT sits at, printed on stdout, when its
+# work tree is clean and HEAD is exactly at a tag. Root installs only git archive of a
+# verified clean exact tag and never the work tree (design section 5.1), so every other
+# state exits 3 naming which of the four it found, since each has its own fix: tracked
+# changes are a dirty work tree, an untracked file is content git archive would silently
+# leave out of the installed tree, a HEAD that no tag names or follows is untagged, and
+# a HEAD past a tag is between tags. HARBOR_DEV=1 is not read here, or anywhere else in
+# this file, so the check is unconditional and no command run as root can stage or
+# execute dirty or untracked work. Inspection only: nothing here mutates the checkout.
+harbor_checkout_tag() {
+  local checkout="${1:-}" rc=0 head dirty untracked tag near
+  [ -n "${checkout}" ] || harbor_die 3 usage "usage: harbor_checkout_tag <checkout>"
+  head="$(harbor_git "${checkout}" rev-parse --verify HEAD 2>/dev/null)" || rc="$?"
+  if [ "${rc}" != 0 ] || [ -z "${head}" ]; then
+    harbor_die 3 checkout.no_head "${checkout} is not a Git checkout with a commit at HEAD"
+  fi
+  rc=0
+  dirty="$(harbor_git "${checkout}" status --porcelain --untracked-files=no)" || rc="$?"
+  [ "${rc}" = 0 ] || harbor_die 2 checkout.git "git status failed in ${checkout} (exit ${rc})"
+  if [ -n "${dirty}" ]; then
+    harbor_die 3 checkout.dirty \
+      "${checkout} has uncommitted changes to tracked files ($(printf '%s' "${dirty}" | tr '\n' ' ')): commit or stash them, then rerun"
+  fi
+  rc=0
+  untracked="$(harbor_git "${checkout}" ls-files --others --exclude-standard)" || rc="$?"
+  [ "${rc}" = 0 ] || harbor_die 2 checkout.git "git ls-files failed in ${checkout} (exit ${rc})"
+  if [ -n "${untracked}" ]; then
+    harbor_die 3 checkout.untracked \
+      "${checkout} holds untracked files ($(printf '%s' "${untracked}" | tr '\n' ' ')): git archive would leave them out of the installed tree; commit or remove them, then rerun"
+  fi
+  rc=0
+  tag="$(harbor_git "${checkout}" describe --tags --exact-match HEAD 2>/dev/null)" || rc="$?"
+  if [ "${rc}" = 0 ] && [ -n "${tag}" ]; then
+    printf '%s\n' "${tag}"
+    return 0
+  fi
+  # git describe --tags names the nearest tag HEAD follows and suffixes the distance and
+  # the abbreviated commit, so stripping the last two dash-separated fields leaves the
+  # tag itself, dashes in the tag's own name included. Its failure means no tag is an
+  # ancestor of HEAD at all, which is the untagged state rather than the between-tags one.
+  rc=0
+  near="$(harbor_git "${checkout}" describe --tags HEAD 2>/dev/null)" || rc="$?"
+  if [ "${rc}" = 0 ] && [ -n "${near}" ]; then
+    near="${near%-*}"
+    near="${near%-*}"
+    harbor_die 3 checkout.between_tags \
+      "${checkout} is at ${head}, a commit past the tag ${near} rather than at a tag: check out an exact release tag, then rerun"
+  fi
+  harbor_die 3 checkout.no_tag \
+    "${checkout} is at ${head}, which no tag names or follows: check out an exact release tag, then rerun"
+}

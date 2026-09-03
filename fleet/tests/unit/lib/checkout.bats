@@ -25,6 +25,9 @@ setup() {
   # in for SUDO_USER. The set is a stand-in, never a relaxation: every rule below still
   # runs, and lib/checkout.sh ignores this variable when the caller is root.
   HARBOR_CHECKOUT_TRUSTED_USERS="root ${TEST_USER}"
+  # The Git fixtures below judge no ownership, so they live in the per-test tmpdir
+  # rather than under ${HOME}. Built on demand: most tests here need no repository.
+  REPO="${BATS_TEST_TMPDIR}/repo"
 }
 
 teardown() {
@@ -250,4 +253,240 @@ snapshot() {
   assert_equal "${status}" 3
   after="$(snapshot "${FIX_BASE}")"
   assert_equal "${after}" "${before}"
+}
+
+# The hardened Git invocation and the clean exact tag check (design section 5.1).
+
+fixture_git() {
+  # fixture_git DIR ARGS...: the Git that builds a throwaway fixture repository, never
+  # the function under test. Isolated from the machine's configuration the same way the
+  # hardened form is, with the identity given per invocation, so building a fixture
+  # writes nothing outside the fixture repository itself.
+  local dir="${1}"
+  shift
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "${dir}" \
+    -c init.defaultBranch=main -c user.name=Harbor -c user.email=harbor@example.com \
+    -c commit.gpgsign=false -c tag.gpgSign=false -c core.hooksPath=/dev/null "$@"
+}
+
+build_repo() {
+  # build_repo DIR: one commit with the tag v0.1.0 on it, as a clone at a tag leaves it
+  mkdir -p "${1}"
+  fixture_git "${1}" init --quiet
+  printf 'one\n' >"${1}/file"
+  fixture_git "${1}" add file
+  fixture_git "${1}" commit --quiet -m one
+  fixture_git "${1}" tag v0.1.0
+}
+
+commit_repo() {
+  # commit_repo DIR MESSAGE: append MESSAGE to the tracked file and commit it
+  printf '%s\n' "${2}" >>"${1}/file"
+  fixture_git "${1}" add file
+  fixture_git "${1}" commit --quiet -m "${2}"
+}
+
+git_shim() {
+  # git_shim DIR: a git on PATH that records the environment the hardened form sets
+  # and its own argument vector, one entry per line, and does nothing else. The log is
+  # the only way to see the exact vector: the real Git would not report it.
+  mkdir -p "${1}"
+  SHIM_LOG="${1}/git.log"
+  cat >"${1}/git" <<'SHIM'
+#!/bin/bash
+{
+  printf 'GIT_CONFIG_NOSYSTEM=%s\n' "${GIT_CONFIG_NOSYSTEM-<unset>}"
+  printf 'GIT_CONFIG_GLOBAL=%s\n' "${GIT_CONFIG_GLOBAL-<unset>}"
+  printf 'argv=%s\n' "${0##*/}"
+  for shim_arg in ${1+"$@"}; do
+    printf 'argv=%s\n' "${shim_arg}"
+  done
+} >>"${HARBOR_GIT_SHIM_LOG}"
+SHIM
+  chmod 0755 "${1}/git"
+  PATH="${1}:${PATH}"
+  HARBOR_GIT_SHIM_LOG="${SHIM_LOG}"
+  export PATH HARBOR_GIT_SHIM_LOG
+}
+
+@test "harbor_git runs exactly the hardened invocation of design section 5.1" {
+  local expected
+  git_shim "${BATS_TEST_TMPDIR}/shimbin"
+  run harbor_git "${FIX_CO}" rev-parse --verify HEAD
+  assert_success
+  assert_output ""
+  expected="GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_GLOBAL=/dev/null
+argv=git
+argv=-C
+argv=${FIX_CO}
+argv=-c
+argv=safe.directory=${FIX_CO}
+argv=-c
+argv=core.fsmonitor=false
+argv=-c
+argv=core.hooksPath=/dev/null
+argv=rev-parse
+argv=--verify
+argv=HEAD"
+  assert_equal "$(cat "${SHIM_LOG}")" "${expected}"
+}
+
+@test "the hardened invocation carries arguments through unaltered, spaces and all" {
+  local expected
+  git_shim "${BATS_TEST_TMPDIR}/shimbin"
+  run harbor_git "${FIX_CO}" log -1 --format=%s 'a b'
+  assert_success
+  expected="argv=log
+argv=-1
+argv=--format=%s
+argv=a b"
+  assert_equal "$(sed -n '12,$p' "${SHIM_LOG}")" "${expected}"
+}
+
+@test "harbor_git without a checkout and arguments exits 3" {
+  run harbor_git
+  assert_equal "${status}" 3
+  assert_output --partial usage
+  run harbor_git "${FIX_CO}"
+  assert_equal "${status}" 3
+  assert_output --partial usage
+}
+
+@test "harbor_git gives Git's own stdout and exit status to its caller" {
+  local head
+  build_repo "${REPO}"
+  head="$(fixture_git "${REPO}" rev-parse HEAD)"
+  run harbor_git "${REPO}" rev-parse HEAD
+  assert_success
+  assert_output "${head}"
+  harbor_git "${REPO}" archive --format=tar v0.1.0 >"${BATS_TEST_TMPDIR}/tag.tar"
+  run tar -tf "${BATS_TEST_TMPDIR}/tag.tar"
+  assert_output "file"
+  run harbor_git "${REPO}" rev-parse --verify refs/tags/absent
+  assert_failure
+}
+
+@test "a clean work tree at an exact tag gives the tag, on a branch and detached" {
+  build_repo "${REPO}"
+  run harbor_checkout_tag "${REPO}"
+  assert_success
+  assert_output v0.1.0
+  fixture_git "${REPO}" checkout --quiet --detach v0.1.0
+  run harbor_checkout_tag "${REPO}"
+  assert_success
+  assert_output v0.1.0
+}
+
+@test "a dirty work tree at a tag exits 3 naming the modification" {
+  build_repo "${REPO}"
+  printf 'two\n' >>"${REPO}/file"
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.dirty'
+  assert_output --partial 'file'
+  fixture_git "${REPO}" add file
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.dirty'
+}
+
+@test "an untracked file at a tag exits 3 naming it, not as a dirty work tree" {
+  build_repo "${REPO}"
+  printf 'scratch\n' >"${REPO}/scratch"
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.untracked'
+  assert_output --partial 'scratch'
+  refute_output --partial 'checkout.dirty'
+}
+
+@test "a detached HEAD no tag names or follows exits 3" {
+  local repo="${BATS_TEST_TMPDIR}/untagged"
+  mkdir -p "${repo}"
+  fixture_git "${repo}" init --quiet
+  printf 'one\n' >"${repo}/file"
+  fixture_git "${repo}" add file
+  fixture_git "${repo}" commit --quiet -m one
+  fixture_git "${repo}" checkout --quiet --detach HEAD
+  run harbor_checkout_tag "${repo}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.no_tag'
+  refute_output --partial 'checkout.between_tags'
+}
+
+@test "a commit between tags exits 3 naming the tag it is past" {
+  local middle
+  build_repo "${REPO}"
+  commit_repo "${REPO}" two
+  middle="$(fixture_git "${REPO}" rev-parse HEAD)"
+  commit_repo "${REPO}" three
+  fixture_git "${REPO}" tag v0.2.0
+  run harbor_checkout_tag "${REPO}"
+  assert_success
+  assert_output v0.2.0
+  fixture_git "${REPO}" checkout --quiet --detach "${middle}"
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.between_tags'
+  assert_output --partial 'v0.1.0'
+  refute_output --partial 'checkout.no_tag'
+  fixture_git "${REPO}" checkout --quiet --detach main
+  commit_repo "${REPO}" four
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.between_tags'
+  assert_output --partial 'v0.2.0'
+}
+
+@test "a path that is not a Git checkout with a commit at HEAD exits 3" {
+  mkdir -p "${REPO}"
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.no_head'
+  run harbor_checkout_tag ""
+  assert_equal "${status}" 3
+  assert_output --partial usage
+}
+
+@test "HARBOR_DEV=1 relaxes neither function, so no root command stages dirty work" {
+  build_repo "${REPO}"
+  HARBOR_DEV=1
+  export HARBOR_DEV
+  run harbor_checkout_tag "${REPO}"
+  assert_success
+  printf 'two\n' >>"${REPO}/file"
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.dirty'
+  fixture_git "${REPO}" checkout --quiet -- file
+  printf 'scratch\n' >"${REPO}/scratch"
+  run harbor_checkout_tag "${REPO}"
+  assert_equal "${status}" 3
+  assert_output --partial 'checkout.untracked'
+  # The root case cannot be built by an unprivileged unit test, so it is proved
+  # structurally instead: no code line of lib/checkout.sh reads HARBOR_DEV at all, so
+  # there is no branch for the caller's identity to take and nothing to relax.
+  run grep -v '^[[:space:]]*#' "${HARBOR_ROOT}/lib/checkout.sh"
+  assert_success
+  refute_output --partial 'HARBOR_DEV'
+}
+
+@test "neither function writes to any Git configuration" {
+  local home="${BATS_TEST_TMPDIR}/githome" before after
+  build_repo "${REPO}"
+  mkdir -p "${home}"
+  before="$(cat "${REPO}/.git/config")"
+  HOME="${home}"
+  XDG_CONFIG_HOME="${home}/config"
+  export HOME XDG_CONFIG_HOME
+  run harbor_checkout_tag "${REPO}"
+  assert_success
+  run harbor_git "${REPO}" rev-parse HEAD
+  assert_success
+  after="$(cat "${REPO}/.git/config")"
+  assert_equal "${after}" "${before}"
+  run find "${home}" -type f
+  assert_success
+  assert_output ""
 }
