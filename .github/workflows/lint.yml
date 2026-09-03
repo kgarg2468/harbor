@@ -1,0 +1,47 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install shfmt
+        run: |
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.8.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install gitleaks
+        run: |
+          base=https://github.com/gitleaks/gitleaks/releases/download/v8.18.4
+          curl -sSfL -o gitleaks.tar.gz "${base}/gitleaks_8.18.4_linux_x64.tar.gz"
+          curl -sSfL -o checksums.txt "${base}/gitleaks_8.18.4_checksums.txt"
+          sum="$(grep 'gitleaks_8.18.4_linux_x64.tar.gz' checksums.txt | cut -d' ' -f1)"
+          printf '%s  gitleaks.tar.gz\n' "${sum}" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks gitleaks.tar.gz checksums.txt
+      - name: ShellCheck
+        run: >
+          shellcheck -s bash -x -a -S warning -P 'SCRIPTDIR/..:SCRIPTDIR/../..'
+          --enable=require-variable-braces
+          fleet/bin/harbor fleet/lib/*.sh fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim
+          fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
+      - name: shfmt
+        run: >
+          shfmt -i 2 -ci -bn -d fleet/bin/harbor fleet/lib fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim
+          fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
+      - name: Placeholder scan
+        run: fleet/tests/lint/placeholder_scan.sh
+      - name: gitleaks
+        run: gitleaks detect --source . --config .gitleaks.toml --no-banner --redact
+      - name: markdownlint
+        run: npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '**/*.md' --ignore fleet/tests/vendor
