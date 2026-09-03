@@ -115,3 +115,211 @@ teardown() {
   assert_equal "${stderr_lines[4]}" '  post_state: {"sha256":"ab","mode":"0644","owner":"root"}'
   assert_equal "${stderr_lines[5]}" '  observed:   {"sha256":"cd","mode":"0644","owner":"root"}'
 }
+
+acquire() {
+  harbor_lock_acquire "${FIX_ROOT}" operator
+}
+
+refuse_malformed() {
+  # refuse_malformed ENTRY: harbor_journal_validate exits 2 journal.malformed naming ENTRY
+  run harbor_journal_validate "${1}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  assert_output --partial "$(basename "${1}")"
+}
+
+@test "entries are created through ln with unique ascending sequence numbers and no temporary file left" {
+  acquire
+  harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  assert_equal "${HARBOR_JOURNAL_ENTRY}" "${FIX_ROOT}/journal/0001-file.json"
+  harbor_journal_create "${FIX_ROOT}" file /etc/b modified prepared '{"sha256":"cd","mode":"0644","owner":"root"}' '{"sha256":"ef","mode":"0644","owner":"root"}'
+  harbor_journal_create "${FIX_ROOT}" package curl observed applied '"unobservable:package"' '"unobservable:package"'
+  run ls -A "${FIX_ROOT}/journal"
+  assert_line --index 0 0001-file.json
+  assert_line --index 1 0002-file.json
+  assert_line --index 2 0003-package.json
+  assert_equal "${#lines[@]}" 3
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" applied
+  assert_equal "$(cat "${FIX_ROOT}/journal/0001-file.json")" "$(harbor_journal_render file /etc/a created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}')"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the sequence continues from the highest existing entry" {
+  fixture_entry "${FIX_ROOT}" 0041 file /x created applied '"absent"' '"absent"'
+  harbor_journal_next_seq "${FIX_ROOT}/journal"
+  assert_equal "${HARBOR_JOURNAL_SEQ}" 0042
+  rm "${FIX_ROOT}/journal/0041-file.json"
+  harbor_journal_next_seq "${FIX_ROOT}/journal"
+  assert_equal "${HARBOR_JOURNAL_SEQ}" 0001
+  fixture_entry "${FIX_ROOT}" 9999 file /x created applied '"absent"' '"absent"'
+  run harbor_journal_next_seq "${FIX_ROOT}/journal"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.full'
+}
+
+@test "a forced sequence collision aborts with exit 2 naming both files and overwrites nothing" {
+  acquire
+  harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '"absent"'
+  before="$(cat "${FIX_ROOT}/journal/0001-file.json")"
+  harbor_journal_next_seq() { HARBOR_JOURNAL_SEQ=0001; }
+  run harbor_journal_create "${FIX_ROOT}" file /etc/other created prepared '"absent"' '"absent"'
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.collision'
+  assert_output --partial "${FIX_ROOT}/journal/0001-file.json"
+  assert_output --partial "${FIX_ROOT}/journal/.tmp.0001.${HARBOR_PID}"
+  assert_equal "$(cat "${FIX_ROOT}/journal/0001-file.json")" "${before}"
+  run ls -A "${FIX_ROOT}/journal"
+  assert_output 0001-file.json
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "set_phase rewrites by rename-over, keeps every other field, and records operator resolution" {
+  acquire
+  harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  e="${HARBOR_JOURNAL_ENTRY}"
+  harbor_journal_set_phase "${e}" applied
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_equal "$(harbor_journal_raw "${e}" post_state)" '{"sha256":"ab","mode":"0644","owner":"root"}'
+  assert_equal "$(harbor_journal_string "${e}" target)" /etc/a
+  assert_equal "$(harbor_journal_raw "${e}" resolved_by)" ""
+  harbor_journal_set_phase "${e}" reverted operator
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  assert_equal "$(harbor_journal_string "${e}" resolved_by)" operator
+  assert_regex "$(harbor_journal_string "${e}" resolved_at)" '^[0-9]{8}T[0-9]{6}Z$'
+  harbor_journal_validate "${e}"
+  run ls -A "${FIX_ROOT}/journal"
+  assert_output 0001-file.json
+  run harbor_journal_set_phase "${e}" done
+  assert_equal "${status}" 3
+  assert_output --partial 'journal.phase'
+  printf '{\n  "phase": "prepared"\n}\n' >"${FIX_ROOT}/journal/0002-file.json"
+  run harbor_journal_set_phase "${FIX_ROOT}/journal/0002-file.json" applied
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a holder whose lock was reclaimed exits 2 before creating or rewriting any entry" {
+  sleep 30 3>&- &
+  KEEP_PID=$!
+  acquire
+  harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '"absent"'
+  e="${HARBOR_JOURNAL_ENTRY}"
+  holder_record "${KEEP_PID}" "$(harbor_lock_start_time "${KEEP_PID}")" >"${FIX_ROOT}/lock.d/holder"
+  run harbor_journal_create "${FIX_ROOT}" file /etc/b created prepared '"absent"' '"absent"'
+  assert_equal "${status}" 2
+  assert_output --partial 'lock.lost'
+  run harbor_journal_set_phase "${e}" applied
+  assert_equal "${status}" 2
+  assert_output --partial 'lock.lost'
+  run ls -A "${FIX_ROOT}/journal"
+  assert_output 0001-file.json
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  rm -r "${FIX_ROOT}/lock.d"
+}
+
+@test "validate accepts a canonical entry and rejects a missing or empty target, a bad ownership or phase, a duplicate key, and a missing or empty state" {
+  fixture_entry "${FIX_ROOT}" 0001 file /etc/a created prepared '"absent"' '"absent"'
+  good="${FIX_ROOT}/journal/0001-file.json"
+  bad="${FIX_ROOT}/journal/0002-file.json"
+  harbor_journal_validate "${good}"
+  grep -v '"target"' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  assert_output --partial '0002-file.json'
+  sed 's|"target": "/etc/a"|"target": ""|' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  sed 's/"ownership": "created"/"ownership": "owned"/' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  sed 's/"phase": "prepared"/"phase": "done"/' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  sed '/"phase"/p' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  grep -v '"post_state"' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  sed 's/"pre_state": "absent"/"pre_state": /' "${good}" >"${bad}"
+  run harbor_journal_validate "${bad}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+}
+
+@test "validate rejects every departure from the canonical shape: unknown key, extra line, trailing content, missing newline, wrong order, comma faults, brace faults" {
+  fixture_entry "${FIX_ROOT}" 0001 file /etc/a created prepared '"absent"' '"absent"'
+  good="${FIX_ROOT}/journal/0001-file.json"
+  bad="${FIX_ROOT}/journal/0002-file.json"
+  harbor_journal_validate "${good}"
+  sed 's/"ownership"/"owner"/' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  awk 'NR == 4 { print; print "  \"extra\": \"x\","; next } { print }' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  { cat "${good}"; printf 'junk\n'; } >"${bad}"
+  refuse_malformed "${bad}"
+  { cat "${good}"; printf '\n'; } >"${bad}"
+  refuse_malformed "${bad}"
+  printf '%s' "$(cat "${good}")" >"${bad}"
+  refuse_malformed "${bad}"
+  sed -e '2{h;d;}' -e '3G' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed '2s/,$//' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed '7s/$/,/' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed '1s/{/[/' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed '8s/}/]/' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed '1d' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed '$d' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/^  "op"/ "op"/' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/"op": "file"/"op":"file"/' "${good}" >"${bad}"
+  refuse_malformed "${bad}"
+  : >"${bad}"
+  refuse_malformed "${bad}"
+  harbor_journal_validate "${good}"
+}
+
+@test "validate accepts a canonical resolved entry and rejects a partial, duplicated, empty, unquoted, or misplaced resolution pair and resolution fields on a non-reverted entry" {
+  full="${FIX_ROOT}/journal/0001-file.json"
+  bad="${FIX_ROOT}/journal/0002-file.json"
+  harbor_journal_render file /etc/a created reverted '"absent"' '"absent"' operator 20260902T120000Z >"${full}"
+  harbor_journal_validate "${full}"
+  harbor_journal_render file /etc/a created reverted '"absent"' '"absent"' >"${bad}"
+  harbor_journal_validate "${bad}"
+  grep -v '"resolved_at"' "${full}" | sed '8s/,$//' >"${bad}"
+  refuse_malformed "${bad}"
+  grep -v '"resolved_by"' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/"resolved_at": "20260902T120000Z"/"resolved_by": "operator"/' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/"resolved_by": "operator",/"resolved_at": "20260902T120000Z",/' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/"resolved_by": "operator"/"resolved_by": ""/' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/"resolved_at": "20260902T120000Z"/"resolved_at": ""/' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  sed 's/"resolved_at": "20260902T120000Z"/"resolved_at": 20260902T120000Z/' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  awk 'NR == 7 { held = $0; next } NR == 9 { print; print held; next } { print }' "${full}" >"${bad}"
+  refuse_malformed "${bad}"
+  harbor_journal_render file /etc/a created prepared '"absent"' '"absent"' operator 20260902T120000Z >"${bad}"
+  refuse_malformed "${bad}"
+  harbor_journal_render file /etc/a created applied '"absent"' '"absent"' operator 20260902T120000Z >"${bad}"
+  refuse_malformed "${bad}"
+  harbor_journal_validate "${full}"
+}

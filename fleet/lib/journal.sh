@@ -119,3 +119,125 @@ harbor_journal_print_entry() {
     printf '  observed:   %s\n' "${2}"
   } >&2
 }
+harbor_journal_next_seq() {
+  local f last="" n
+  for f in "${1}"/[0-9][0-9][0-9][0-9]-*.json; do
+    [ -e "${f}" ] || continue
+    last="$(basename "${f}")"
+    last="${last%%-*}"
+  done
+  n=$((10#${last:-0} + 1))
+  [ "${n}" -le 9999 ] || harbor_die 2 journal.full "${1} has reached entry 9999"
+  HARBOR_JOURNAL_SEQ="$(printf '%04d' "${n}")"
+}
+harbor_journal_create() {
+  local root="${1}" dir final tmp
+  dir="${root}/journal"
+  harbor_lock_assert_owner "${root}"
+  harbor_journal_next_seq "${dir}"
+  final="${dir}/${HARBOR_JOURNAL_SEQ}-${2}.json"
+  tmp="${dir}/.tmp.${HARBOR_JOURNAL_SEQ}.${HARBOR_LOCK_ID_PID}"
+  harbor_journal_render "${2}" "${3}" "${4}" "${5}" "${6}" "${7}" >"${tmp}"
+  harbor_journal_sync_path "${tmp}"
+  if ! ln "${tmp}" "${final}" 2>/dev/null; then
+    rm -f "${tmp}"
+    harbor_die 2 journal.collision "entry ${final} already exists; refusing to overwrite it with ${tmp}"
+  fi
+  rm -f "${tmp}"
+  harbor_journal_sync_path "${dir}"
+  harbor_log journal "created $(basename "${final}") ${4} ${5}"
+  HARBOR_JOURNAL_ENTRY="${final}"
+}
+harbor_journal_malformed() {
+  harbor_die 2 journal.malformed "${1} is not a canonical journal entry: ${2}"
+}
+# Fail-closed shape check: the entry must be, line for line, what
+# harbor_journal_render writes. The positional parameters hold the keys still
+# expected, in canonical order, so a key that is missing, repeated, unknown, or
+# out of place fails on the first line that does not match.
+harbor_journal_validate() {
+  local entry="${1}" total n=0 line value phase=""
+  [ -f "${entry}" ] || harbor_journal_malformed "${entry}" "not a regular file"
+  total="$(awk 'END { print NR }' "${entry}")"
+  case "${total}" in
+    8) set -- op target ownership phase pre_state post_state ;;
+    10) set -- op target ownership phase pre_state post_state resolved_by resolved_at ;;
+    *) harbor_journal_malformed "${entry}" "expected 8 or 10 lines, found ${total}" ;;
+  esac
+  [ -z "$(tail -c 1 "${entry}")" ] || harbor_journal_malformed "${entry}" "line ${total} is not terminated by a newline"
+  while IFS= read -r line || [ -n "${line}" ]; do
+    n=$((n + 1))
+    if [ "${n}" -eq 1 ]; then
+      [ "${line}" = "{" ] || harbor_journal_malformed "${entry}" "line 1 must be {"
+      continue
+    fi
+    if [ "${n}" -eq "${total}" ]; then
+      [ "${line}" = "}" ] || harbor_journal_malformed "${entry}" "line ${n} must be }"
+      continue
+    fi
+    case "${line}" in
+      "  \"${1}\": "?*) ;;
+      *) harbor_journal_malformed "${entry}" "line ${n} must be the ${1} field: keys in canonical order, one per line, two-space indent, one space after the colon" ;;
+    esac
+    value="${line#*: }"
+    if [ "${n}" -lt "$((total - 1))" ]; then
+      case "${value}" in
+        *,) value="${value%,}" ;;
+        *) harbor_journal_malformed "${entry}" "line ${n} (${1}) must end with a comma" ;;
+      esac
+    else
+      case "${value}" in
+        *,) harbor_journal_malformed "${entry}" "line ${n} (${1}) must not end with a comma" ;;
+      esac
+    fi
+    [ -n "${value}" ] || harbor_journal_malformed "${entry}" "${1} is empty"
+    case "${1}" in
+      op | target | resolved_by | resolved_at)
+        case "${value}" in
+          \"?*\") ;;
+          *) harbor_journal_malformed "${entry}" "${1} must be a non-empty quoted string" ;;
+        esac
+        ;;
+      ownership)
+        case "${value}" in
+          '"created"' | '"modified"' | '"observed"') ;;
+          *) harbor_journal_malformed "${entry}" "ownership must be created, modified, or observed" ;;
+        esac
+        ;;
+      phase)
+        case "${value}" in
+          '"prepared"' | '"applied"' | '"reverted"') phase="${value}" ;;
+          *) harbor_journal_malformed "${entry}" "phase must be prepared, applied, or reverted" ;;
+        esac
+        ;;
+    esac
+    shift
+  done <"${entry}"
+  if [ "${total}" -eq 10 ] && [ "${phase}" != '"reverted"' ]; then
+    harbor_journal_malformed "${entry}" "resolved_by and resolved_at are valid only with phase reverted"
+  fi
+}
+harbor_journal_set_phase() {
+  local entry="${1}" phase="${2}" resolved_by="${3:-}"
+  local dir root tmp op target ownership pre post at=""
+  dir="$(dirname "${entry}")"
+  root="$(dirname "${dir}")"
+  case "${phase}" in
+    prepared | applied | reverted) ;;
+    *) harbor_die 3 journal.phase "unknown phase ${phase}" ;;
+  esac
+  harbor_lock_assert_owner "${root}"
+  harbor_journal_validate "${entry}"
+  op="$(harbor_journal_string "${entry}" op)"
+  target="$(harbor_journal_string "${entry}" target)"
+  ownership="$(harbor_journal_string "${entry}" ownership)"
+  pre="$(harbor_journal_raw "${entry}" pre_state)"
+  post="$(harbor_journal_raw "${entry}" post_state)"
+  [ -z "${resolved_by}" ] || at="$(harbor_utc_now)"
+  tmp="${dir}/.tmp.$(basename "${entry}").${HARBOR_LOCK_ID_PID}"
+  harbor_journal_render "${op}" "${target}" "${ownership}" "${phase}" "${pre}" "${post}" "${resolved_by}" "${at}" >"${tmp}"
+  harbor_journal_sync_path "${tmp}"
+  mv -f "${tmp}" "${entry}"
+  harbor_journal_sync_path "${dir}"
+  harbor_log journal "$(basename "${entry}") ${phase}${resolved_by:+ resolved_by=${resolved_by}}"
+}
