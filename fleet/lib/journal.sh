@@ -241,3 +241,42 @@ harbor_journal_set_phase() {
   harbor_journal_sync_path "${dir}"
   harbor_log journal "$(basename "${entry}") ${phase}${resolved_by:+ resolved_by=${resolved_by}}"
 }
+harbor_journal_recover() {
+  local root="${1}" except="${2:-}" dir entry base seq phase op target pre post observed
+  dir="${root}/journal"
+  HARBOR_JOURNAL_UNDECIDABLE=""
+  [ -d "${dir}" ] || return 0
+  # Fail closed on any malformed entry before touching any entry.
+  for entry in "${dir}"/[0-9][0-9][0-9][0-9]-*.json; do
+    [ -e "${entry}" ] || continue
+    harbor_journal_validate "${entry}"
+  done
+  for entry in "${dir}"/[0-9][0-9][0-9][0-9]-*.json; do
+    [ -e "${entry}" ] || continue
+    base="$(basename "${entry}")"
+    seq="${base%%-*}"
+    phase="$(harbor_journal_string "${entry}" phase)"
+    [ "${phase}" = "prepared" ] || continue
+    [ "${seq}" != "${except}" ] || continue
+    op="$(harbor_journal_string "${entry}" op)"
+    target="$(harbor_journal_string "${entry}" target)"
+    pre="$(harbor_journal_raw "${entry}" pre_state)"
+    post="$(harbor_journal_raw "${entry}" post_state)"
+    observed="$(harbor_journal_observe "${op}" "${target}")"
+    if [ "${observed}" = "${pre}" ]; then
+      harbor_journal_set_phase "${entry}" reverted
+      harbor_log recovery "${base} reverted (state equals pre_state)"
+    elif [ "${observed}" = "${post}" ]; then
+      harbor_journal_set_phase "${entry}" applied
+      harbor_log recovery "${base} applied (state equals post_state)"
+    else
+      harbor_journal_print_entry "${entry}" "${observed}"
+      HARBOR_JOURNAL_UNDECIDABLE="${HARBOR_JOURNAL_UNDECIDABLE} ${seq}"
+    fi
+  done
+  HARBOR_JOURNAL_UNDECIDABLE="${HARBOR_JOURNAL_UNDECIDABLE# }"
+  if [ -n "${HARBOR_JOURNAL_UNDECIDABLE}" ] && [ -z "${except}" ]; then
+    harbor_die 2 journal.undecidable "prepared entries ${HARBOR_JOURNAL_UNDECIDABLE} cannot be decided; follow docs/runbook.md for each op and rerun, or run: harbor journal resolve <NNNN> --reverted"
+  fi
+  return 0
+}

@@ -323,3 +323,124 @@ refuse_malformed() {
   refuse_malformed "${bad}"
   harbor_journal_validate "${full}"
 }
+
+@test "recovery marks a pre-equal entry reverted, a post-equal entry applied, and refuses on an undecidable one with exit 2" {
+  acquire
+  printf 'landed\n' >"${BATS_TEST_TMPDIR}/b"
+  post_b="$(harbor_observe_file "${BATS_TEST_TMPDIR}/b")"
+  fixture_entry "${FIX_ROOT}" 0001 file "${BATS_TEST_TMPDIR}/a" created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  fixture_entry "${FIX_ROOT}" 0002 file "${BATS_TEST_TMPDIR}/b" created prepared '"absent"' "${post_b}"
+  fixture_undecidable_file_entry "${FIX_ROOT}" 0003
+  fixture_entry "${FIX_ROOT}" 0004 file "${BATS_TEST_TMPDIR}/d" created applied '"absent"' '"absent"'
+  run --separate-stderr harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_regex "${stderr}" 'journal entry 0003-file.json is undecidable:'
+  assert_regex "${stderr}" 'journal.undecidable: prepared entries 0003 cannot be decided'
+  assert_regex "${stderr}" 'harbor journal resolve <NNNN> --reverted'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" prepared
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0004)" applied
+  assert_equal "$(cat "${FIX_ARTIFACT_0003}")" two
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "recovery on a clean or absent journal returns 0 and touches nothing" {
+  acquire
+  fixture_entry "${FIX_ROOT}" 0001 file /x created applied '"absent"' '"absent"'
+  harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${HARBOR_JOURNAL_UNDECIDABLE}" ""
+  rm -r "${FIX_ROOT}/journal"
+  harbor_journal_recover "${FIX_ROOT}"
+  assert [ ! -e "${FIX_ROOT}/journal" ]
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "lenient recovery skips the named entry, recovers the decidable ones, reports the other undecidable one, and returns 0" {
+  acquire
+  fixture_undecidable_file_entry "${FIX_ROOT}" 0001
+  fixture_entry "${FIX_ROOT}" 0002 file "${BATS_TEST_TMPDIR}/absent" created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  fixture_undecidable_file_entry "${FIX_ROOT}" 0003
+  run --separate-stderr harbor_journal_recover "${FIX_ROOT}" 0001
+  assert_success
+  assert_regex "${stderr}" 'journal entry 0003-file.json is undecidable:'
+  refute_regex "${stderr}" '0001-file.json'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" prepared
+  harbor_journal_recover "${FIX_ROOT}" 0001 2>/dev/null
+  assert_equal "${HARBOR_JOURNAL_UNDECIDABLE}" "0003"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "recovery refuses a malformed entry with exit 2 before rewriting anything, in strict and lenient mode alike" {
+  acquire
+  fixture_entry "${FIX_ROOT}" 0001 file "${BATS_TEST_TMPDIR}/absent" created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  fixture_entry "${FIX_ROOT}" 0002 file /x created prepared '"absent"' '"absent"'
+  grep -v '"target"' "${FIX_ROOT}/journal/0002-file.json" >"${BATS_TEST_TMPDIR}/stripped"
+  cat "${BATS_TEST_TMPDIR}/stripped" >"${FIX_ROOT}/journal/0002-file.json"
+  before="$(cat "${FIX_ROOT}/journal/0002-file.json")"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  assert_output --partial '0002-file.json'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(cat "${FIX_ROOT}/journal/0002-file.json")" "${before}"
+  run harbor_journal_recover "${FIX_ROOT}" 0001
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.malformed'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(cat "${FIX_ROOT}/journal/0002-file.json")" "${before}"
+  run ls -A "${FIX_ROOT}/journal"
+  assert_line --index 0 0001-file.json
+  assert_line --index 1 0002-file.json
+  assert_equal "${#lines[@]}" 2
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "recovery's validation pre-pass refuses every non-canonical shape before rewriting anything, in strict and lenient mode alike" {
+  acquire
+  fixture_entry "${FIX_ROOT}" 0001 file "${BATS_TEST_TMPDIR}/absent" created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  good="${BATS_TEST_TMPDIR}/good"
+  resolved="${BATS_TEST_TMPDIR}/resolved"
+  bad="${FIX_ROOT}/journal/0002-file.json"
+  harbor_journal_render file /x created prepared '"absent"' '"absent"' >"${good}"
+  harbor_journal_render file /x created reverted '"absent"' '"absent"' operator 20260902T120000Z >"${resolved}"
+  for shape in unknown-key extra-line trailing-junk missing-newline wrong-order missing-comma bad-brace partial-pair duplicate-pair empty-pair resolution-on-prepared; do
+    case "${shape}" in
+      unknown-key) sed 's/"ownership"/"owner"/' "${good}" >"${bad}" ;;
+      extra-line) awk 'NR == 4 { print; print "  \"extra\": \"x\","; next } { print }' "${good}" >"${bad}" ;;
+      trailing-junk) { cat "${good}"; printf 'junk\n'; } >"${bad}" ;;
+      missing-newline) printf '%s' "$(cat "${good}")" >"${bad}" ;;
+      wrong-order) sed -e '2{h;d;}' -e '3G' "${good}" >"${bad}" ;;
+      missing-comma) sed '2s/,$//' "${good}" >"${bad}" ;;
+      bad-brace) sed '1s/{/[/' "${good}" >"${bad}" ;;
+      partial-pair) grep -v '"resolved_at"' "${resolved}" | sed '8s/,$//' >"${bad}" ;;
+      duplicate-pair) sed 's/"resolved_at": "20260902T120000Z"/"resolved_by": "operator"/' "${resolved}" >"${bad}" ;;
+      empty-pair) sed 's/"resolved_by": "operator"/"resolved_by": ""/' "${resolved}" >"${bad}" ;;
+      resolution-on-prepared) harbor_journal_render file /x created prepared '"absent"' '"absent"' operator 20260902T120000Z >"${bad}" ;;
+    esac
+    before="$(cat "${bad}")"
+    run harbor_journal_recover "${FIX_ROOT}"
+    assert_equal "${status}" 2
+    assert_output --partial 'journal.malformed'
+    assert_output --partial '0002-file.json'
+    assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+    assert_equal "$(cat "${bad}")" "${before}"
+    run harbor_journal_recover "${FIX_ROOT}" 0001
+    assert_equal "${status}" 2
+    assert_output --partial 'journal.malformed'
+    assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+    assert_equal "$(cat "${bad}")" "${before}"
+  done
+  run ls -A "${FIX_ROOT}/journal"
+  assert_line --index 0 0001-file.json
+  assert_line --index 1 0002-file.json
+  assert_equal "${#lines[@]}" 2
+  cp "${resolved}" "${bad}"
+  harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  assert_equal "$(cat "${bad}")" "$(cat "${resolved}")"
+  harbor_lock_release "${FIX_ROOT}"
+}
