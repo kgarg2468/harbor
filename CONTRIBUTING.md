@@ -26,21 +26,15 @@ git submodule update --init --recursive
 
 ## Lint locally
 
-The checks that exist in this slice:
-
 ```sh
 shellcheck -s bash -x -a -S warning -P 'SCRIPTDIR/..:SCRIPTDIR/../..' --enable=require-variable-braces \
-  fleet/lib/*.sh fleet/tests/run_unit.sh fleet/tests/unit/test_helper.bash
-shfmt -i 2 -ci -bn -d fleet/lib fleet/tests/run_unit.sh fleet/tests/unit/test_helper.bash
-npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '**/*.md' --ignore fleet/tests/vendor
-```
-
-The follow-up pull request adds `fleet/bin/harbor`, `fleet/tests/shims/bin/harbor-shim`, and
-`fleet/tests/lint/placeholder_scan.sh` to the ShellCheck and shfmt lists, and adds these two checks:
-
-```sh
+  fleet/bin/harbor fleet/lib/*.sh fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim \
+  fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
+shfmt -i 2 -ci -bn -d fleet/bin/harbor fleet/lib fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim \
+  fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
 fleet/tests/lint/placeholder_scan.sh
 gitleaks detect --source . --config .gitleaks.toml --no-banner --redact
+npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '**/*.md' --ignore fleet/tests/vendor
 ```
 
 Install: `shellcheck` from your package manager; `go install mvdan.cc/sh/v3/cmd/shfmt@v3.8.0`;
