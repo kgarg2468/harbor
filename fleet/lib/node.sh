@@ -25,11 +25,19 @@ harbor_node_installed_version() {
 # between the swap into place and the applied write is decidable by recovery (design
 # section 3.7). It renders what harbor_node_installed_version reports as the JSON
 # string a runtime-install entry's pre_state and post_state carry, "absent" when the
-# prefix holds no runtime. Inspection only; a runtime that cannot answer stays the
-# exit 2 of harbor_node_installed_version. Called only through harbor_journal_observe.
+# prefix holds no runtime. When the prefix holds none but PREFIX.harbor-previous
+# does, it reports that version: the swap moves the displaced tree there and then
+# renames the new one into place, so a crash between the two moves leaves the prefix
+# empty and the whole previous runtime intact one path over. That is the pre-install
+# state, not a third state, and harbor_node_install puts the tree back before it does
+# anything else. Inspection only; a runtime that cannot answer stays the exit 2 of
+# harbor_node_installed_version. Called only through harbor_journal_observe.
 harbor_observe_op_runtime_install() {
   local version
   version="$(harbor_node_installed_version "${1}")" || exit "$?"
+  if [ "${version}" = absent ]; then
+    version="$(harbor_node_installed_version "${1}.harbor-previous")" || exit "$?"
+  fi
   printf '"%s"' "$(harbor_json_escape "${version}")"
 }
 # harbor_node_tar_flag URL: the tar decompression flag for the tarball URL names
@@ -54,9 +62,14 @@ harbor_node_download() {
 # applied after PREFIX/bin/node reports the locked version. The download and the
 # staging tree live in a temporary directory beside PREFIX, created by the caller's
 # identity (root in production), so the swap into place is a rename.
+# The swap is two renames: the displaced tree moves to the deterministic sibling
+# PREFIX.harbor-previous, then the staged tree moves to PREFIX. Both are checked, and
+# neither the displaced tree nor the staging directory is removed until the runtime at
+# PREFIX has been verified and the entry marked applied, so no failure between them can
+# lose the previous runtime.
 harbor_node_install() {
   local root="${1}" prefix="${2}" locked url sha flag pre pre_json ownership entry
-  local parent tmp tarball actual post
+  local parent tmp tarball actual post previous displaced=0 restored=""
   locked="$(harbor_version_require nodejs_version)" || exit "$?"
   url="$(harbor_version_require nodejs_install)" || exit "$?"
   sha="$(harbor_version_require nodejs_sha256)" || exit "$?"
@@ -65,6 +78,23 @@ harbor_node_install() {
     https://*) ;;
     *) harbor_die 3 node.install_scheme "nodejs_install must be an https:// URL, got ${url} in ${HARBOR_VERSIONS_FILE}" ;;
   esac
+  previous="${prefix}.harbor-previous"
+  # Finish an interrupted swap before inspecting anything, so real state matches what
+  # harbor_observe_op_runtime_install just told recovery: the prefix is empty and the
+  # previous runtime is parked one path over. Nothing is moved until the pinned values
+  # above have validated, and this restores a tree rather than installing one.
+  if [ ! -e "${prefix}" ] && [ ! -L "${prefix}" ] && { [ -e "${previous}" ] || [ -L "${previous}" ]; }; then
+    mv "${previous}" "${prefix}" || harbor_die 2 node.restore "an interrupted install left the previous runtime at ${previous} with nothing at ${prefix}, and moving it back failed; move it back by hand and rerun"
+    harbor_log node "restored the previous runtime from ${previous} to ${prefix} after an interrupted install"
+  fi
+  # Any tree still parked while the prefix is populated is the superseded tree of an
+  # install that reached applied and crashed before its cleanup; removing it is that
+  # cleanup, and it is never the runtime the journal calls the current state. It runs
+  # before the lock comparison below so a run with nothing to do still finishes it.
+  if { [ -e "${prefix}" ] || [ -L "${prefix}" ]; } && { [ -e "${previous}" ] || [ -L "${previous}" ]; }; then
+    harbor_log node "removing ${previous}, the superseded tree an earlier install left behind"
+    rm -rf "${previous}"
+  fi
   pre="$(harbor_node_installed_version "${prefix}")" || exit "$?"
   if [ "${pre}" = "${locked}" ]; then
     harbor_log node "Node.js ${locked} at ${prefix} equals the lock; nothing to do"
@@ -103,33 +133,38 @@ harbor_node_install() {
   fi
   harbor_step node-extracted
   if [ -e "${prefix}" ] || [ -L "${prefix}" ]; then
-    mv "${prefix}" "${tmp}/previous"
+    if ! mv "${prefix}" "${previous}"; then
+      rm -rf "${tmp}"
+      harbor_die 2 node.swap_out "moving ${prefix} aside to ${previous} failed; ${prefix} is unchanged and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+    fi
+    displaced=1
   fi
-  mv "${tmp}/node" "${prefix}"
-  rm -rf "${tmp}"
+  if ! mv "${tmp}/node" "${prefix}"; then
+    if [ "${displaced}" = 1 ]; then
+      mv "${previous}" "${prefix}" || harbor_die 2 node.swap_lost "moving the staged runtime into ${prefix} failed and moving the previous runtime back from ${previous} failed too; the previous runtime is intact at ${previous}, $(basename "${entry}") stays prepared, and the next run restores it"
+      restored=", the previous runtime was moved back from ${previous}"
+    fi
+    rm -rf "${tmp}"
+    harbor_die 2 node.swap_in "moving the staged runtime into ${prefix} failed${restored}; ${prefix} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+  fi
   post="$(harbor_node_installed_version "${prefix}")" || exit "$?"
-  [ "${post}" = "${locked}" ] || harbor_die 2 node.verify "${prefix}/bin/node --version reports ${post} after installing ${locked}; $(basename "${entry}") stays prepared"
+  if [ "${post}" != "${locked}" ]; then
+    [ "${displaced}" = 0 ] || restored=" and the previous runtime is kept at ${previous}"
+    harbor_die 2 node.verify "${prefix}/bin/node --version reports ${post} after installing ${locked}; $(basename "${entry}") stays prepared${restored}"
+  fi
   harbor_journal_set_phase "${entry}" applied
   harbor_step node-applied
+  rm -rf "${previous}" "${tmp}"
   harbor_msg "installed Node.js ${locked} at ${prefix}"
-}
-# harbor_node_link_state LINK: "absent", {"symlink":"<target>"} for a symlink, or an
-# unobservable marker for anything else
-harbor_node_link_state() {
-  if [ -L "${1}" ]; then
-    printf '{"symlink":"%s"}' "$(harbor_json_escape "$(readlink "${1}")")"
-  elif [ ! -e "${1}" ]; then
-    printf '"absent"'
-  else
-    printf '"unobservable:not-a-symlink"'
-  fi
 }
 # harbor_node_link STATE_ROOT PREFIX BINDIR: one symlink BINDIR/<name> to
 # PREFIX/bin/<name> for node, npm, npx, and corepack, each one file entry: created
 # when absent, observed (directly applied, nothing touched) when already correct,
 # modified with the prior target as pre_state when it points elsewhere. Every link
 # is inspected before any is written: a non-symlink at a link path exits 3 and a
-# missing target exits 2, both with nothing journaled.
+# missing target exits 2, both with nothing journaled. Both states are rendered by
+# harbor_observe_file, which is what recovery observes a file entry with, so an entry
+# left prepared by a crash between the rename and the applied write is decidable.
 harbor_node_link() {
   local root="${1}" prefix="${2}" bindir="${3}" name link target pre post ownership tmp entry
   [ -d "${bindir}" ] || harbor_die 3 node.bindir "${bindir} is not a directory"
@@ -147,7 +182,7 @@ harbor_node_link() {
   for name in ${HARBOR_NODE_LINKS}; do
     link="${bindir}/${name}"
     target="${prefix}/bin/${name}"
-    pre="$(harbor_node_link_state "${link}")"
+    pre="$(harbor_observe_file "${link}")"
     post="{\"symlink\":\"$(harbor_json_escape "${target}")\"}"
     if [ "${pre}" = "${post}" ]; then
       harbor_journal_create "${root}" file "${link}" observed applied "${pre}" "${post}"
@@ -165,7 +200,7 @@ harbor_node_link() {
     rm -f "${tmp}"
     ln -s "${target}" "${tmp}"
     mv -f "${tmp}" "${link}"
-    [ "$(harbor_node_link_state "${link}")" = "${post}" ] || harbor_die 2 node.link_verify "${link} does not point at ${target} after linking; $(basename "${entry}") stays prepared"
+    [ "$(harbor_observe_file "${link}")" = "${post}" ] || harbor_die 2 node.link_verify "${link} does not point at ${target} after linking; $(basename "${entry}") stays prepared"
     harbor_journal_set_phase "${entry}" applied
   done
 }

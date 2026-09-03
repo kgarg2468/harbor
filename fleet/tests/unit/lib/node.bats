@@ -19,6 +19,8 @@ setup() {
   # The production paths /opt/harbor/node and /usr/local/bin become fixture paths.
   FIX_OPT="${BATS_TEST_TMPDIR}/opt/harbor"
   PREFIX="${FIX_OPT}/node"
+  # The sibling an interrupted swap parks the displaced runtime at.
+  PREVIOUS="${PREFIX}.harbor-previous"
   BINDIR="${BATS_TEST_TMPDIR}/usr/local/bin"
   mkdir -p "${BINDIR}"
   # curl and runuser resolve to the shim; tar, mktemp, and sha256 are real.
@@ -66,12 +68,14 @@ build_tarball() {
 }
 
 write_lock() {
-  # write_lock SHA256: every schema key empty except the Node.js triple
-  local k
+  # write_lock SHA256 [VERSION]: every schema key empty except the Node.js triple.
+  # VERSION overrides the locked nodejs_version only, leaving the tarball the URL
+  # names alone, so a test can lock a version the tarball does not carry.
+  local k want="${2:-${NODE_VERSION}}"
   : >"${LOCK}"
   for k in ${HARBOR_VERSION_KEYS}; do
     case "${k}" in
-      nodejs_version) printf 'nodejs_version=%s\n' "${NODE_VERSION}" ;;
+      nodejs_version) printf 'nodejs_version=%s\n' "${want}" ;;
       nodejs_install) printf 'nodejs_install=%s\n' "${NODE_URL}" ;;
       nodejs_sha256) printf 'nodejs_sha256=%s\n' "${1}" ;;
       *) printf '%s=\n' "${k}" ;;
@@ -94,6 +98,25 @@ seed_prefix() {
 
 acquire() {
   harbor_lock_acquire "${FIX_ROOT}" operator
+}
+
+fake_mv_failing_swap() {
+  # A mv on PATH that refuses exactly the move of the staged tree into PREFIX and
+  # passes every other move, the restore of PREVIOUS included, to the real one.
+  local bin="${BATS_TEST_TMPDIR}/fakebin"
+  mkdir -p "${bin}"
+  {
+    printf '#!/bin/sh\n'
+    printf 'last=""\n'
+    printf 'for a in "$@"; do last="${a}"; done\n'
+    printf 'if [ "${1}" != "%s" ] && [ "${last}" = "%s" ]; then\n' "${PREVIOUS}" "${PREFIX}"
+    printf '  echo "mv: refused by the test" >&2\n'
+    printf '  exit 1\n'
+    printf 'fi\n'
+    printf 'exec /bin/mv "$@"\n'
+  } >"${bin}/mv"
+  chmod 0755 "${bin}/mv"
+  PATH="${bin}:${PATH}"
 }
 
 journal_names() {
@@ -313,6 +336,99 @@ tab="$(printf '\t')"
   assert_equal "$(ls -A "${FIX_OPT}")" node
   run journal_names
   assert_equal "${#lines[@]}" 4
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "an interrupted swap observes as the parked runtime, recovers reverted, and the next install restores it before reinstalling" {
+  # The crash window inside the swap: the displaced tree is parked at PREVIOUS and
+  # nothing is at the prefix yet. That is the pre-install state with the tree one
+  # path over, so the observer reports the parked version rather than "absent".
+  seed_prefix 20.11.1
+  mv "${PREFIX}" "${PREVIOUS}"
+  assert_equal "$(harbor_observe_op_runtime_install "${PREFIX}")" '"20.11.1"'
+  acquire
+  fixture_entry "${FIX_ROOT}" 0001 runtime-install "${PREFIX}" modified prepared '"20.11.1"' "\"${NODE_VERSION}\""
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  # Recovery inspected only: the tree is still parked and nothing was downloaded.
+  assert_equal "$(cat "${PREVIOUS}/lib/marker")" previous
+  assert [ ! -e "${PREFIX}" ]
+  assert [ ! -s "${HARBOR_SHIM_LOG}" ]
+  # The next install puts the tree back where that observation says it is, says so,
+  # and then installs over it.
+  HARBOR_VERBOSE=1 run harbor_node_install "${FIX_ROOT}" "${PREFIX}"
+  assert_success
+  assert_output --partial "${PREVIOUS}"
+  assert_equal "$(harbor_node_installed_version "${PREFIX}")" "${NODE_VERSION}"
+  assert [ ! -e "${PREFIX}/lib/marker" ]
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 ownership)" '"modified"'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 pre_state)" '"20.11.1"'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 post_state)" "\"${NODE_VERSION}\""
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  # Neither the parked tree nor the staging directory outlives the applied write.
+  assert_equal "$(ls -A "${FIX_OPT}")" node
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a swap into place that fails restores the previous runtime, leaves the entry prepared and decidable, and exits 2" {
+  seed_prefix 20.11.1
+  fake_mv_failing_swap
+  acquire
+  run harbor_node_install "${FIX_ROOT}" "${PREFIX}"
+  assert_equal "${status}" 2
+  assert_output --partial 'node.swap_in'
+  assert_output --partial "${PREFIX}"
+  assert_output --partial "${PREVIOUS}"
+  # The previous runtime is back at the prefix, whole, and nothing stays parked.
+  assert_equal "$(harbor_node_installed_version "${PREFIX}")" 20.11.1
+  assert_equal "$(cat "${PREFIX}/lib/marker")" previous
+  assert [ ! -e "${PREVIOUS}" ]
+  assert_equal "$(ls -A "${FIX_OPT}")" node
+  assert_equal "$(journal_names)" 0001-runtime-install.json
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  # The prefix holds pre_state again, so recovery decides the entry instead of blocking.
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a runtime that verifies as another version keeps both the previous tree and the staged tree: nothing is deleted before the applied write" {
+  # The lock names a version the tarball does not carry, so both moves land and the
+  # verification at the prefix fails. The previous runtime must still exist.
+  write_lock "${TARBALL_SHA}" 24.0.0
+  harbor_versions_load "${LOCK}"
+  seed_prefix 20.11.1
+  acquire
+  run harbor_node_install "${FIX_ROOT}" "${PREFIX}"
+  assert_equal "${status}" 2
+  assert_output --partial 'node.verify'
+  assert_equal "$(journal_names)" 0001-runtime-install.json
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(harbor_node_installed_version "${PREVIOUS}")" 20.11.1
+  assert_equal "$(cat "${PREVIOUS}/lib/marker")" previous
+  assert [ -n "$(find "${FIX_OPT}" -maxdepth 1 -name '.node-install.*')" ]
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a prepared link entry left by a crash after the rename is decidable: the link in place is applied, the others are reverted" {
+  seed_prefix "${NODE_VERSION}"
+  acquire
+  ln -s "${PREFIX}/bin/node" "${BINDIR}/node"
+  ln -s /usr/bin/npx "${BINDIR}/npx"
+  fixture_entry "${FIX_ROOT}" 0001 file "${BINDIR}/node" created prepared '"absent"' "{\"symlink\":\"${PREFIX}/bin/node\"}"
+  fixture_entry "${FIX_ROOT}" 0002 file "${BINDIR}/npm" created prepared '"absent"' "{\"symlink\":\"${PREFIX}/bin/npm\"}"
+  fixture_entry "${FIX_ROOT}" 0003 file "${BINDIR}/npx" modified prepared '{"symlink":"/usr/bin/npx"}' "{\"symlink\":\"${PREFIX}/bin/npx\"}"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" reverted
+  # Deciding an entry inspects only.
+  assert_equal "$(readlink "${BINDIR}/node")" "${PREFIX}/bin/node"
+  assert_equal "$(readlink "${BINDIR}/npx")" /usr/bin/npx
+  assert_equal "$(ls -A "${BINDIR}" | sort | tr '\n' ' ')" 'node npx '
   harbor_lock_release "${FIX_ROOT}"
 }
 

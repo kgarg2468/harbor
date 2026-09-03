@@ -90,13 +90,24 @@ harbor_json_unquote() {
 harbor_journal_string() {
   harbor_json_unquote "$(harbor_journal_raw "${1}" "${2}")"
 }
+# harbor_observe_file PATH: the state of PATH in the pre_state and post_state form of
+# the file op. A symlink is the artifact itself, not what it points at, so it is
+# observed as {"symlink":"<target>"}, the shape and the escaping every symlink step
+# records; a dangling link is therefore still a link and never "absent". Without this
+# a crash after a link is renamed into place and before its applied write would leave
+# an entry recovery could never decide (design section 3.7). A directory or any other
+# non-regular file stays unobservable. A regular file is its sha256, mode, and owner.
 harbor_observe_file() {
   local path="${1}"
-  if [ ! -e "${path}" ] && [ ! -L "${path}" ]; then
+  if [ -L "${path}" ]; then
+    printf '{"symlink":"%s"}' "$(harbor_json_escape "$(readlink "${path}")")"
+    return 0
+  fi
+  if [ ! -e "${path}" ]; then
     printf '"absent"'
     return 0
   fi
-  if [ ! -f "${path}" ] || [ -L "${path}" ]; then
+  if [ ! -f "${path}" ]; then
     printf '"unobservable:not-a-regular-file"'
     return 0
   fi
