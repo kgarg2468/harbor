@@ -358,13 +358,12 @@ harbor_bootstrap_install() {
   local observed recorded
   if [ "${HARBOR_BOOTSTRAP_FORM}" = checkout ]; then
     # What is staged is git archive of the tag the checkout rules verified, never the
-    # work tree. A tag is a mutable ref and staging resolves it once more, so the
-    # commit those rules approved is carried in HARBOR_BOOTSTRAP_COMMIT and recorded
-    # in the log beside the tag; binding the staging itself to that object is
-    # harbor_release_stage's own optional expected-commit argument, which the
-    # lib/release.sh in this tree does not take.
+    # work tree. Both HEAD and the tag are mutable refs and staging resolves them once
+    # more, so the commit those rules approved is passed as the expected commit and
+    # staging installs that object or nothing: refs moved together after the preflight
+    # would otherwise still agree, on a tree nothing checked.
     harbor_release_stage "${HARBOR_BOOTSTRAP_STATE_ROOT}" "${HARBOR_BOOTSTRAP_CHECKOUT}" \
-      "${HARBOR_BOOTSTRAP_TAG}" "${HARBOR_BOOTSTRAP_RELEASE}"
+      "${HARBOR_BOOTSTRAP_TAG}" "${HARBOR_BOOTSTRAP_RELEASE}" "${HARBOR_BOOTSTRAP_COMMIT}"
   else
     observed="$(harbor_observe_op_harbor_install "${HARBOR_BOOTSTRAP_RELEASE}")" || exit "$?"
     recorded="$(harbor_release_applied_state "${HARBOR_BOOTSTRAP_STATE_ROOT}" "${HARBOR_BOOTSTRAP_RELEASE}")"
