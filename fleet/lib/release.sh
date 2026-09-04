@@ -99,7 +99,7 @@ harbor_release_normalize_modes() {
       || harbor_die 2 release.modes "cannot make ${dir}/bin/harbor executable"
   fi
 }
-# harbor_release_stage STATE_ROOT CHECKOUT TAG DEST: install the tag preflight has
+# harbor_release_stage STATE_ROOT CHECKOUT TAG DEST [EXPECTED_COMMIT]: install the tag preflight has
 # already verified at DEST, from git archive of the commit that tag resolves to rather
 # than from the work tree, so what lands is the tagged tree and nothing a work tree could
 # carry. The preflight proved the work tree clean and HEAD exactly at TAG, and a tag is a
@@ -116,13 +116,15 @@ harbor_release_normalize_modes() {
 # new; one with no such entry, or with a differing hash, is an orphan: exit 3, and
 # Harbor removes nothing it cannot prove it created.
 harbor_release_stage() {
-  local root checkout tag dest
+  local root checkout tag dest expected
   local observed recorded parent tmp work commit head post entry
-  [ "$#" -eq 4 ] || harbor_die 3 usage "usage: harbor_release_stage <state-root> <checkout> <tag> <destination>"
+  { [ "$#" -eq 4 ] || [ "$#" -eq 5 ]; } \
+    || harbor_die 3 usage "usage: harbor_release_stage <state-root> <checkout> <tag> <destination> [expected-commit]"
   root="${1}"
   checkout="${2}"
   tag="${3}"
   dest="${4}"
+  expected="${5:-}"
   if [ -e "${dest}" ] || [ -L "${dest}" ]; then
     observed="$(harbor_observe_op_harbor_install "${dest}")" || exit "$?"
     recorded="$(harbor_release_applied_state "${root}" "${dest}")"
@@ -158,6 +160,17 @@ harbor_release_stage() {
   if [ "${head}" != "${commit}" ]; then
     rm -rf "${tmp}"
     harbor_die 3 release.tag_moved "${tag} now resolves to ${commit} in ${checkout} but HEAD is at ${head}, so the tag no longer names the commit the preflight verified this checkout to be exactly at and Harbor will not install a tree that was never approved; nothing was staged: check that no one moved the tag, check out an exact release tag, and rerun"
+  fi
+  # HEAD and the tag agreeing is not by itself the preflight's approval: both are
+  # mutable refs, and moving both to one new commit would leave them agreeing on a
+  # commit whose work tree nothing checked. A caller that resolved the commit at
+  # preflight passes it here, and staging then installs that object or nothing. The
+  # window this closes is a second root process moving refs mid-bootstrap, so it is
+  # robustness rather than a privilege boundary: harbor_checkout_trusted has already
+  # proved the checkout writable by no one but root and the trusted installation user.
+  if [ -n "${expected}" ] && [ "${commit}" != "${expected}" ]; then
+    rm -rf "${tmp}"
+    harbor_die 3 release.commit_moved "${tag} and HEAD both resolve to ${commit} in ${checkout} now, but the preflight approved ${expected}, so the refs moved together after the checkout was verified and this tree was never checked; nothing was staged: find out what moved them, then rerun"
   fi
   if ! harbor_git "${checkout}" archive --format=tar "${commit}" >"${tmp}/release.tar"; then
     rm -rf "${tmp}"

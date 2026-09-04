@@ -674,3 +674,47 @@ echo not harbor'
   fixture_entry "${FIX_ROOT}" 0004 harbor-install "${LIBDIR}/v0.0.9" created reverted '"absent"' "${hash}"
   assert_equal "$(harbor_release_applied_state "${FIX_ROOT}" "${DEST}")" "${hash}"
 }
+
+@test "refs moved together after the preflight exit 3 naming the approved commit and stage nothing" {
+  # HEAD and the tag agreeing is not the preflight's approval: moving both to one new
+  # commit leaves them agreeing on a tree nothing checked, which the tag_moved arm
+  # above cannot see. A caller that resolved the commit at preflight passes it here.
+  git_repo
+  approved="$(gitc rev-parse "${TAG}^{commit}")"
+  gitc commit -q --allow-empty -m 'a commit the preflight never approved'
+  gitc tag -f "${TAG}" >/dev/null 2>&1
+  moved="$(gitc rev-parse "HEAD^{commit}")"
+  refute [ "${moved}" = "${approved}" ]
+  # Both refs now name the moved commit, so HEAD and the tag still agree.
+  assert_equal "$(gitc rev-parse "${TAG}^{commit}")" "${moved}"
+  acquire
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}" "${approved}"
+  assert_equal "${status}" 3
+  assert_output --partial 'release.commit_moved'
+  assert_output --partial "${approved}"
+  assert_output --partial "${moved}"
+  assert_equal "$(grep -c '^archive' "${GIT_LOG}")" 0
+  assert [ ! -e "${DEST}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(ls -A "${LIBDIR}")" ""
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the expected commit is the one staged when it still matches, and omitting it stages as before" {
+  git_repo
+  approved="$(gitc rev-parse "${TAG}^{commit}")"
+  acquire
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}" "${approved}"
+  assert_success
+  assert_equal "$(sed -n 's/^commit=//p' "${DEST}/RELEASE")" "${approved}"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "harbor_release_stage takes four arguments or five and refuses any other count" {
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}"
+  assert_equal "${status}" 3
+  assert_output --partial usage
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}" deadbeef extra
+  assert_equal "${status}" 3
+  assert_output --partial usage
+}
