@@ -56,8 +56,8 @@ harbor_ssh_source() {
       || harbor_die 3 ssh.source_not_file "--authorized-key-file ${given} is not a regular file"
     [ -r "${given}" ] \
       || harbor_die 3 ssh.source_unreadable "--authorized-key-file ${given} cannot be read"
-    [ -s "${given}" ] \
-      || harbor_die 3 ssh.source_empty "--authorized-key-file ${given} is empty; Harbor copies a key, it never invents one"
+    harbor_ssh_has_usable_key "${given}" \
+      || harbor_die 3 ssh.source_empty "--authorized-key-file ${given} holds no usable authorized-key line: it is empty, or every line in it is blank or a comment; Harbor copies a key, it never invents one, and it will not install a file with no key in it and then disable password authentication for the account that would need it"
     printf '%s' "${given}"
     return 0
   fi
@@ -74,8 +74,8 @@ harbor_ssh_source() {
     || harbor_die 3 ssh.default_key_not_file "${path} is not a regular file; pass --authorized-key-file PATH"
   [ -r "${path}" ] \
     || harbor_die 3 ssh.unreadable_default_key "${path} cannot be read; pass --authorized-key-file PATH"
-  [ -s "${path}" ] \
-    || harbor_die 3 ssh.empty_default_key "${path} is empty, so ${user} has no authorized key to copy; pass --authorized-key-file PATH"
+  harbor_ssh_has_usable_key "${path}" \
+    || harbor_die 3 ssh.empty_default_key "${path} holds no usable authorized-key line (it is empty, or every line in it is blank or a comment), so ${user} has no authorized key to copy; pass --authorized-key-file PATH"
   printf '%s' "${path}"
 }
 # harbor_observe_op_authorized_key TARGET and harbor_observe_op_authorized_key_source
@@ -90,19 +90,121 @@ harbor_observe_op_authorized_key() {
 harbor_observe_op_authorized_key_source() {
   harbor_observe_file "${1}"
 }
+# harbor_ssh_device PATH: the number this platform gives the filesystem PATH sits on,
+# printed on stdout, or nothing when it cannot be read. Inspection only, in the same
+# two-platform shape harbor_stat_mode and harbor_stat_owner use.
+harbor_ssh_device() {
+  case "$(harbor_os)" in
+    Linux) stat -c '%d' "${1}" 2>/dev/null || true ;;
+    Darwin) stat -f '%d' "${1}" 2>/dev/null || true ;;
+  esac
+}
+# harbor_ssh_assert_one_filesystem STAGE DEST WHAT: refuse unless STAGE and DEST are on
+# one filesystem, naming both paths. Everything root writes, chmods, and chowns for the
+# operator's key is staged in the root-owned state root and moved into the operator's
+# own directory in one step, and that step is sound only because rename(2) never
+# resolves the final component of either path: a symlink an unprivileged user planted at
+# the destination is unlinked by the rename rather than written through. mv degrades to
+# copy-and-unlink across filesystems, and a copy does follow that symlink, so a
+# destination on another filesystem is refused rather than served by the weaker
+# mechanism. Exit 3: it is a property of how this node is partitioned, which Harbor
+# cannot fix and will not work around.
+harbor_ssh_assert_one_filesystem() {
+  local stage="${1}" dest="${2}" what="${3}" from to
+  from="$(harbor_ssh_device "${stage}")"
+  to="$(harbor_ssh_device "${dest}")"
+  { [ -n "${from}" ] && [ -n "${to}" ]; } \
+    || harbor_die 3 ssh.device "the filesystem of ${stage} or of ${dest} cannot be read, so Harbor cannot prove that moving ${what} between them would be a rename rather than a copy that follows a symlink an unprivileged user can plant; nothing was written; install ${what} by hand"
+  [ "${from}" = "${to}" ] \
+    || harbor_die 3 ssh.cross_filesystem "${stage} and ${dest} are on different filesystems, so moving ${what} between them would be a copy that follows a symlink an unprivileged user can plant at the destination, not a rename that unlinks it; Harbor stages every mode and every owner where only root can write and will not weaken that: install ${what} by hand, or give ${stage} and ${dest} one filesystem, and rerun; nothing was written"
+}
+# harbor_ssh_has_usable_key PATH: 0 when PATH holds at least one line sshd would read as
+# an authorized key. It is the one predicate every place in this library that asks "is
+# there a key here" uses, because the three places that ask are the three that stand
+# between a flag and an unreachable node, and three copies of the question are how they
+# drift apart:
+#   harbor_ssh_source              the key Harbor is about to copy, in both its branches
+#   harbor_ssh_authorize           the operator's own file, already at the target
+#   harbor_ssh_admin_authorized_keys  the installation user's file, gating --harden-sshd
+# Every one of them used to ask [ -s PATH ], which is "not zero bytes". A file holding
+# one newline, or one line reading '# my key is elsewhere', is not zero bytes and holds
+# no key, and each of those three sites then went on to take password authentication
+# away from the account whose file it had just approved.
+#
+# The rule is sshd's own and no more: sshd skips leading blanks and then ignores a line
+# that is empty or whose first non-blank character is '#' (auth2-pubkey.c), so a file of
+# nothing but blank lines and comments carries no key however many bytes it has. Anything
+# else counts. That is deliberately generous rather than clever: an authorized_keys line
+# may carry options before the key type, so a line like
+# restrict,from="10.0.0.0/8" ssh-ed25519 AAAA... is a key and a test anchored on a key
+# type token at the start of the line would reject it. Refusing a real key is a lockout
+# of its own kind, the administrator denied a flag they should have had, so this rejects
+# only what cannot be a key and never guesses at what can.
+#
+# Text rather than ssh-keygen -l -f, which would be OpenSSH's own answer: the unit lane's
+# fixture keys are the deliberately unreal placeholder strings of design section 3.8, so
+# ssh-keygen would refuse every one of them, and answering it instead would mean a shim
+# under tests/shims/. Inspection only, and stderr is discarded because an unreadable file
+# is a separate refusal each caller makes before this one.
+harbor_ssh_has_usable_key() {
+  grep -q -v -e '^[[:space:]]*$' -e '^[[:space:]]*#' -- "${1}" 2>/dev/null
+}
+# harbor_ssh_prepared_entry_for STATE_ROOT PATH: the newest journal entry that is still
+# prepared, targets PATH, and records as its post_state exactly what PATH observes as
+# now, printed on stdout, or nothing. That is the signature of a file transaction whose
+# artifact landed and whose transaction never completed, which is what makes the reload
+# below owed by a rerun rather than only by the run that wrote the file. An entry whose
+# post_state is not what is on disk is a crash window recovery decides, never this.
+# Inspection only.
+harbor_ssh_prepared_entry_for() {
+  local root="${1}" path="${2}" dir observed entry found=""
+  dir="${root}/journal"
+  [ -d "${dir}" ] || return 0
+  observed="$(harbor_observe_file "${path}")"
+  for entry in "${dir}"/[0-9][0-9][0-9][0-9]-*.json; do
+    [ -e "${entry}" ] || continue
+    [ "$(harbor_journal_string "${entry}" phase)" = prepared ] || continue
+    [ "$(harbor_journal_string "${entry}" target)" = "${path}" ] || continue
+    [ "$(harbor_journal_raw "${entry}" post_state)" = "${observed}" ] || continue
+    found="${entry}"
+  done
+  printf '%s' "${found}"
+}
 # harbor_ssh_authorize STATE_ROOT OPERATOR OPERATOR_HOME [SOURCE]: give OPERATOR the
 # authorized key it needs before password authentication is disabled for it. The step
 # is decided by inspection first (design section 6.1): an authorized_keys already at
 # the target is journaled observed and left byte for byte alone, no source is consulted
 # for it, and Harbor never appends to, rewrites, re-modes, or removes a key it did not
-# place. Otherwise the source of harbor_ssh_source is copied to a temporary file beside
-# the target, chmod 0600 and chowned to OPERATOR before it is anywhere the operator can
-# read, journaled prepared, renamed into place in one step, and verified: owned by
-# OPERATOR, mode 0600, inside a 0700 .ssh owned by OPERATOR. Only a .ssh Harbor creates
-# is created 0700; one that is already there and is not a 0700 directory owned by
-# OPERATOR is a precondition rather than a mode Harbor silently changes.
+# place. Otherwise the source of harbor_ssh_source is staged, chmod 0600 and chowned to
+# OPERATOR before it is anywhere the operator can read, journaled prepared, renamed into
+# place in one step, and verified: owned by OPERATOR, mode 0600, inside a 0700 .ssh owned
+# by OPERATOR. Only a .ssh Harbor creates is created 0700; one that is already there and
+# is not a 0700 directory owned by OPERATOR is a precondition rather than a mode Harbor
+# silently changes.
+#
+# Where the staging happens is a privilege boundary, not a convenience. OPERATOR may be
+# an account that already existed and that a real person is logged into: the design
+# section 5.2 preflight refuses root, the invoking SUDO_USER, and any sudo or admin group
+# member, but an ordinary existing account is allowed, and the branch below that accepts
+# a pre-existing ~/.ssh exists for exactly that account. Everything root writes, chmods,
+# or chowns therefore happens inside STATE_ROOT, which design section 5.2 creates 0755
+# root-owned under root-owned ancestors, so no unprivileged user can create, replace, or
+# redirect any component of a staging path. cp, chmod, and chown all resolve the final
+# component of their argument through whatever symlink is there; run inside ~/.ssh, which
+# the operator owns and may empty at will, chown alone would hand the operator any file
+# on this node it could name. Run inside STATE_ROOT there is nothing to name.
+#
+# The one step that touches a path the operator controls is the rename, and rename(2)
+# resolves neither final component: a symlink planted at the destination is unlinked by
+# the rename rather than written through, so the operator can destroy their own planted
+# link and nothing else. That holds only for a true rename, which is why both renames are
+# gated on harbor_ssh_assert_one_filesystem: mv degrades to copy-and-unlink across
+# filesystems and a copy does follow the destination symlink. The directory is created
+# the same way and for the same reason, staged and renamed rather than mkdir'd and then
+# chowned in place, because ~/.ssh is itself an entry in a directory the operator owns
+# and a chown of it is the same escalation as a chown of the key.
 harbor_ssh_authorize() {
-  local root operator home group ssh_dir target pre source src_state post tmp entry
+  local root operator home group ssh_dir target pre source src_state post tmp stage entry
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
     || harbor_die 3 usage "usage: harbor_ssh_authorize <state-root> <operator> <operator-home> [source]"
   root="${1}"
@@ -110,6 +212,10 @@ harbor_ssh_authorize() {
   home="${3}"
   group="$(id -gn "${operator}" 2>/dev/null)" \
     || harbor_die 3 ssh.no_operator "${operator} is not an account on this node, so its authorized key cannot be placed"
+  # The staging root is the whole soundness argument above, so its absence is a
+  # precondition rather than something to work around by staging somewhere weaker.
+  [ -d "${root}" ] \
+    || harbor_die 3 ssh.no_state_root "${root} is not a directory, and it is the only place Harbor will stage the mode and the owner of an authorized key, because it is the only directory on the path no unprivileged user can replace; nothing was written"
   [ -d "${home}" ] \
     || harbor_die 3 ssh.no_home "${home} is not a directory, so ${operator} has no home to place an authorized key in"
   ssh_dir="${home}/.ssh"
@@ -122,17 +228,35 @@ harbor_ssh_authorize() {
     [ "$(harbor_stat_mode "${ssh_dir}")" = 0700 ] \
       || harbor_die 3 ssh.ssh_dir_mode "${ssh_dir} is mode $(harbor_stat_mode "${ssh_dir}"), not 0700, and Harbor does not change the mode of a directory it did not create; fix it by hand and rerun"
   else
-    mkdir "${ssh_dir}" \
-      || harbor_die 2 ssh.ssh_dir_create "cannot create ${ssh_dir}"
-    chmod 0700 "${ssh_dir}"
-    chown "${operator}:${group}" "${ssh_dir}" \
-      || harbor_die 2 ssh.ssh_dir_chown "cannot give ${ssh_dir} to ${operator}:${group}"
+    harbor_ssh_assert_one_filesystem "${root}" "${home}" "${ssh_dir}"
+    stage="${root}/.tmp.ssh.${HARBOR_LOCK_ID_PID:-$$}"
+    rm -rf "${stage}"
+    mkdir "${stage}" \
+      || harbor_die 2 ssh.ssh_dir_stage "cannot create ${stage}, where ${ssh_dir} is staged; ${ssh_dir} does not exist and nothing was written"
+    chmod 0700 "${stage}" \
+      || harbor_die 2 ssh.ssh_dir_stage "cannot give ${stage} mode 0700; ${ssh_dir} does not exist and nothing was written"
+    chown "${operator}:${group}" "${stage}" \
+      || harbor_die 2 ssh.ssh_dir_chown "cannot give ${stage} to ${operator}:${group}; ${ssh_dir} does not exist and nothing was written"
+    if ! mv "${stage}" "${ssh_dir}"; then
+      rm -rf "${stage}"
+      harbor_die 2 ssh.ssh_dir_create "cannot create ${ssh_dir} by renaming ${stage} onto it; nothing was written"
+    fi
     harbor_log ssh "created ${ssh_dir} 0700 for ${operator}"
   fi
   pre="$(harbor_observe_file "${target}")"
   case "${pre}" in
     '"absent"') ;;
     '{"sha256":'*)
+      # A file is not a key. harbor_ssh_configure writes the drop-in that takes password
+      # and keyboard-interactive authentication away from this one account, and the row
+      # order of design section 5.2 puts the key before the drop-in so that no ordering
+      # of the two can leave the operator with no way in. Ordering does not save an
+      # account whose authorized_keys is empty or is nothing but comments, so an existing
+      # file is accepted only once it is proved to hold a line sshd would read as a key.
+      # Harbor changes nothing it cannot prove it created, so the file is named for the
+      # administrator rather than silently overwritten.
+      harbor_ssh_has_usable_key "${target}" \
+        || harbor_die 3 ssh.target_no_key "${target} is already there and holds no usable authorized-key line (it is empty, or every line in it is blank or a comment), so ${operator} has no key to log in with. Harbor will not disable password authentication for an account that would then have no way in, and it overwrites nothing it cannot prove it created: add ${operator}'s public key to ${target}, or remove ${target} and rerun to have Harbor copy one in; nothing was written"
       harbor_journal_create "${root}" authorized-key "${target}" observed applied "${pre}" "${pre}"
       harbor_log ssh "${target} is already there; leaving it exactly as it is"
       harbor_msg "${operator} already has ${target}; it was recorded and left untouched"
@@ -142,14 +266,18 @@ harbor_ssh_authorize() {
       harbor_die 3 ssh.target_foreign "${target} is already there and is not a regular file; Harbor removes nothing it cannot prove it created: inspect it, remove it by hand if it is not needed, and rerun"
       ;;
   esac
+  # Before the first journal entry of the copy, so a node whose partitioning makes the
+  # sound mechanism impossible is refused having written nothing and recorded nothing.
+  harbor_ssh_assert_one_filesystem "${root}" "${ssh_dir}" "${target}"
   source="$(harbor_ssh_source "${4:-}")" || exit "$?"
   src_state="$(harbor_observe_file "${source}")"
   harbor_journal_create "${root}" authorized-key-source "${source}" observed applied "${src_state}" "${src_state}"
-  tmp="${ssh_dir}/.tmp.authorized_keys.${HARBOR_LOCK_ID_PID:-$$}"
+  tmp="${root}/.tmp.authorized_keys.${HARBOR_LOCK_ID_PID:-$$}"
   rm -f "${tmp}"
   cp "${source}" "${tmp}" \
     || harbor_die 2 ssh.copy "copying ${source} to ${tmp} failed; ${target} is unchanged"
-  chmod 0600 "${tmp}"
+  chmod 0600 "${tmp}" \
+    || harbor_die 2 ssh.mode "cannot give ${tmp} mode 0600; ${target} is unchanged"
   chown "${operator}:${group}" "${tmp}" \
     || harbor_die 2 ssh.chown "cannot give ${tmp} to ${operator}:${group}; ${target} is unchanged"
   post="$(harbor_observe_file "${tmp}")"
@@ -390,15 +518,33 @@ harbor_ssh_dropin_write() {
   HARBOR_SSH_DROPIN_ENTRY="${entry}"
 }
 # harbor_ssh_assert_operator OPERATOR SITUATION: the operator half of the design section
-# 3.5 acceptance. sshd itself is asked what it would do for that account, and both
-# values the row names must be no; anything else means the drop-in did not take effect
-# and is exit 2 with the node's state, before any reload.
+# 3.5 acceptance. sshd itself is asked what it would do for that account, and all three
+# values harbor_ssh_operator_render writes must be the values it wrote; anything else
+# means the drop-in did not take effect and is exit 2 with the node's state, before any
+# reload.
+#
+# All three, not only the two the row turns off. OpenSSH keeps the first value it obtains
+# for a keyword, Ubuntu's /etc/ssh/sshd_config begins with Include
+# /etc/ssh/sshd_config.d/*.conf, and those files are read in lexical order, so a drop-in
+# sorting before Harbor's, or a global PubkeyAuthentication no obtained ahead of this
+# Match block, leaves the block's own value ignored. sshd -T -C user=OPERATOR then
+# reports pubkey, password, and keyboard-interactive all no: asserting only the two no
+# values would pass on exactly the node where the operator has been left with no way in
+# at all, on an account whose drop-in says public-key-only authentication. The expected
+# value therefore travels with each directive rather than being assumed to be no, and the
+# refusal quotes what sshd actually reported for the directive that failed.
 harbor_ssh_assert_operator() {
-  local operator="${1}" situation="${2}" effective directive
+  local operator="${1}" situation="${2}" effective pair directive expected reported
   effective="$(harbor_sshd_effective "${operator}" "${situation}")" || exit "$?"
-  for directive in passwordauthentication kbdinteractiveauthentication; do
-    printf '%s\n' "${effective}" | grep -qxF -- "${directive} no" \
-      || harbor_die 2 ssh.operator_not_hardened "sshd -T -C user=${operator} does not report '${directive} no', so the drop-in did not take effect for ${operator}; nothing was reloaded; ${situation}"
+  for pair in pubkeyauthentication=yes passwordauthentication=no kbdinteractiveauthentication=no; do
+    directive="${pair%%=*}"
+    expected="${pair#*=}"
+    if printf '%s\n' "${effective}" | grep -qxF -- "${directive} ${expected}"; then
+      continue
+    fi
+    reported="$(printf '%s\n' "${effective}" | grep -- "^${directive} " | sed -n 1p || true)"
+    [ -n "${reported}" ] || reported="no ${directive} line at all"
+    harbor_die 2 ssh.operator_not_hardened "sshd -T -C user=${operator} does not report '${directive} ${expected}', it reports '${reported}', so the drop-in did not take effect for ${operator}; nothing was reloaded; ${situation}"
   done
 }
 # harbor_ssh_configure STATE_ROOT OPERATOR ADMIN [DEST_ROOT]: the SSH row of design
@@ -426,7 +572,7 @@ harbor_ssh_assert_operator() {
 # strings the tests below read, so it is recorded here and left to the upgrade slice
 # rather than papered over with a mutation taken before its entry exists.
 harbor_ssh_configure() {
-  local root operator admin dest path before after changed entry situation diff
+  local root operator admin dest path before after changed entry owed situation diff
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
     || harbor_die 3 usage "usage: harbor_ssh_configure <state-root> <operator> <installation-user> [dest-root]"
   root="${1}"
@@ -460,29 +606,57 @@ ${diff}
 nothing was reloaded, so the running sshd still has the configuration it had before; ${situation}; remove ${path} and rerun"
   fi
   harbor_ssh_assert_operator "${operator}" "${situation}"
-  [ -z "${entry}" ] || harbor_journal_set_phase "${entry}" applied
   harbor_step ssh-dropin-applied
   harbor_log ssh "${path} leaves ${admin} unchanged for every directive and gives ${operator} public-key-only authentication"
-  [ "${changed}" = 1 ] || return 0
+  # What decides the reload is whether this drop-in's transaction has completed, not
+  # whether this run happened to be the one that wrote the file. A run whose reload
+  # failed exits 2 leaving its entry prepared, so the drop-in is on disk and the running
+  # sshd is still holding the configuration it had; the next run finds the file byte for
+  # byte what it renders and writes nothing, and would report a hardened node while sshd
+  # had never read the file. The prepared entry is what that unfinished transaction left
+  # behind, and it is what makes the reload still owed. The applied write comes after the
+  # reload for the same reason: until sshd has read the file the transaction is not done.
+  #
+  # A rerun on a healthy node finds no such entry and returns here, before
+  # harbor_ssh_reload asks systemctl anything, so it still makes no mutating call and no
+  # vendor call about the unit at all.
+  owed="${entry}"
+  [ -n "${owed}" ] || owed="$(harbor_ssh_prepared_entry_for "${root}" "${path}")"
+  if [ "${changed}" != 1 ] && [ -z "${owed}" ]; then
+    return 0
+  fi
   harbor_ssh_reload
-  harbor_msg "wrote ${path} and reloaded ${HARBOR_SSH_UNIT}"
+  [ -z "${owed}" ] || harbor_journal_set_phase "${owed}" applied
+  if [ "${changed}" = 1 ]; then
+    harbor_msg "wrote ${path} and reloaded ${HARBOR_SSH_UNIT}"
+  else
+    harbor_msg "${path} was already in place but its transaction had not completed, so ${HARBOR_SSH_UNIT} was reloaded"
+  fi
 }
 # harbor_ssh_admin_authorized_keys ADMIN: the installation user's own authorized_keys,
 # printed on stdout, or exit 3. This is the refusal --harden-sshd is gated on: the global
 # drop-in takes away password authentication for every account and root's login with it,
 # so an installation user with no key of their own would be left with no way back into
-# the node. The file must exist, be a regular file, be readable, and be non-empty, the
-# same test harbor_ssh_source applies to the key it copies, and it is asked of the
-# installation user's own account whatever --authorized-key-file said, because it is that
-# account the flag could lock out.
+# the node. The file must exist, be a regular file, be readable, and hold a key, the same
+# test harbor_ssh_source applies to the key it copies, and it is asked of the installation
+# user's own account whatever --authorized-key-file said, because it is that account the
+# flag could lock out.
+#
+# "The same test" is literally the same predicate, harbor_ssh_has_usable_key, and not a
+# second spelling of it. This is the one refusal standing between --harden-sshd and an
+# unreachable node: the flag takes password authentication away from every account and
+# root's login with it, and the account it would strand is the administrator running the
+# command over SSH at that moment. Asking [ -s PATH ] here meant that a file holding a
+# single newline, or a single line reading '# my key is elsewhere', satisfied the check
+# that exists precisely to prove a key is there.
 harbor_ssh_admin_authorized_keys() {
   local admin="${1}" home path
   [ "${admin}" != root ] \
     || harbor_die 3 ssh.harden_no_key "--harden-sshd sets PermitRootLogin no, so root is not the installation user it can be given to; rerun through sudo from your own account, or drop --harden-sshd; nothing was written"
   home="$(harbor_ssh_user_home "${admin}")" || exit "$?"
   path="${home}/.ssh/authorized_keys"
-  { [ -f "${path}" ] && [ -r "${path}" ] && [ -s "${path}" ]; } \
-    || harbor_die 3 ssh.harden_no_key "--harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, and ${path} is missing, unreadable, or empty, so ${admin} would have no way left to log in to this node; add ${admin}'s own public key to that file and rerun, or rerun without --harden-sshd; nothing was written"
+  { [ -f "${path}" ] && [ -r "${path}" ] && harbor_ssh_has_usable_key "${path}"; } \
+    || harbor_die 3 ssh.harden_no_key "--harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, and ${path} is missing, unreadable, or holds no usable authorized-key line (it is empty, or every line in it is blank or a comment), so ${admin} would have no way left to log in to this node; add ${admin}'s own public key to that file and rerun, or rerun without --harden-sshd; nothing was written"
   printf '%s' "${path}"
 }
 # harbor_ssh_harden STATE_ROOT ADMIN [DEST_ROOT]: the --harden-sshd drop-in of design
@@ -494,7 +668,7 @@ harbor_ssh_admin_authorized_keys() {
 # effective configuration of every account, the installation user included, is what this
 # flag is, and what protects that account is the authorized-key refusal instead.
 harbor_ssh_harden() {
-  local root admin dest path key changed entry situation
+  local root admin dest path key changed entry situation owed
   [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
     || harbor_die 3 usage "usage: harbor_ssh_harden <state-root> <installation-user> [dest-root]"
   root="${1}"
@@ -514,9 +688,24 @@ harbor_ssh_harden() {
     situation="${path} was already there byte for byte and was not rewritten"
   fi
   harbor_sshd_test "${situation}"
-  [ -z "${entry}" ] || harbor_journal_set_phase "${entry}" applied
   harbor_step ssh-global-applied
-  [ "${changed}" = 1 ] || return 0
+  # The same unfinished transaction the operator drop-in above guards against, and for a
+  # sharper reason: this file is what takes password authentication away from every
+  # account on the node. A run that wrote it and then failed to reload left sshd holding
+  # the configuration it had, and a rerun that finds the file byte for byte what it
+  # renders would otherwise write nothing, reload nothing, and report a hardened node
+  # sshd had never read. So the reload is owed while the transaction is unfinished, and
+  # the applied write comes after it rather than before.
+  owed="${entry}"
+  [ -n "${owed}" ] || owed="$(harbor_ssh_prepared_entry_for "${root}" "${path}")"
+  if [ "${changed}" != 1 ] && [ -z "${owed}" ]; then
+    return 0
+  fi
   harbor_ssh_reload
-  harbor_msg "--harden-sshd wrote ${path}; remove it with: harbor teardown --unharden-sshd"
+  [ -z "${owed}" ] || harbor_journal_set_phase "${owed}" applied
+  if [ "${changed}" = 1 ]; then
+    harbor_msg "--harden-sshd wrote ${path}; remove it with: harbor teardown --unharden-sshd"
+  else
+    harbor_msg "${path} was already in place but its transaction had not completed, so ${HARBOR_SSH_UNIT} was reloaded"
+  fi
 }

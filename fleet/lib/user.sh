@@ -14,14 +14,37 @@ harbor_user_field() {
   # harbor_user_field LINE N: field N of a colon-separated passwd or group line
   printf '%s\n' "${1}" | cut -d: -f"${2}"
 }
+harbor_user_home_state() {
+  # harbor_user_home_state OPERATOR HOME: how much of an account the directory at HOME
+  # is, in one word. present when it is a directory belonging to OPERATOR, foreign when
+  # it is a directory somebody else owns, and absent when there is no directory there at
+  # all. Inspection only. The word matters because useradd --create-home commits the
+  # passwd and group databases before it creates the home: a /home that is full,
+  # read-only, or not mounted leaves the account listed, its home directory absent, and
+  # useradd exiting 12. Without this the account is indistinguishable from a finished
+  # one, and the operator has nowhere to log in to and no .ssh for a key.
+  local operator="${1}" home="${2}"
+  if [ ! -d "${home}" ]; then
+    printf 'absent'
+    return 0
+  fi
+  if [ "$(harbor_stat_owner "${home}")" = "${operator}" ]; then
+    printf 'present'
+  else
+    printf 'foreign'
+  fi
+}
 harbor_user_state() {
-  # The account state of design section 3.7. The login shell alone: it is the one
-  # property the operator-user row fixes, so it is the one property both a prepared
-  # entry can name before useradd runs and recovery can compare afterwards. The uid
-  # and the home directory are allocated by useradd rather than requested, so no
-  # honest post_state could carry them, and the state record reads them from
-  # harbor_user_query instead.
-  printf '{"shell":"%s"}' "$(harbor_json_escape "${1}")"
+  # harbor_user_state SHELL HOME_STATE: the account state of design section 3.7. The
+  # login shell and the one word harbor_user_home_state renders: together they are the
+  # properties the operator-user row promises, so together they are what a prepared entry
+  # can name before useradd runs and what recovery can compare afterwards. The shell
+  # alone would not do it: it cannot tell an account this row finished from one useradd
+  # committed to the passwd database and then left without its home, and recovery
+  # comparing it alone would resolve that half-made account applied. The uid and the home
+  # path are allocated by useradd rather than requested, so no honest post_state could
+  # carry them, and the state record reads them from harbor_user_query instead.
+  printf '{"shell":"%s","home":"%s"}' "$(harbor_json_escape "${1}")" "$(harbor_json_escape "${2}")"
 }
 harbor_user_query() {
   # harbor_user_query OPERATOR: inspection only, never a mutation. Sets
@@ -57,14 +80,15 @@ harbor_observe_op_user() {
   # The observer harbor_journal_observe dispatches to for a user entry, so a prepared
   # entry left by a crash between useradd and the applied write is decidable by
   # recovery (design section 3.7): the account state in the shape harbor_user_state
-  # renders, or the same "absent" a user entry's pre_state carries. useradd either
-  # created the account with the login shell the entry names or it did not, so the two
-  # recorded states are the two states that crash can leave, and anything else is an
-  # account Harbor did not make, which recovery must refuse to decide. Inspection
-  # only; a name service failure that is not "not found" is fail-closed through
-  # harbor_user_query. Called only through harbor_journal_observe.
+  # renders, or the same "absent" a user entry's pre_state carries. useradd either made
+  # the whole account the entry names or it did not, so the two recorded states are the
+  # two states that crash can leave, and anything else — an account with another shell,
+  # or one whose home useradd never got to after it had committed the passwd database —
+  # is not a state Harbor promised, which recovery must refuse to decide rather than
+  # resolve applied. Inspection only; a name service failure that is not "not found" is
+  # fail-closed through harbor_user_query. Called only through harbor_journal_observe.
   if harbor_user_query "${1}"; then
-    harbor_user_state "${HARBOR_USER_SHELL}"
+    harbor_user_state "${HARBOR_USER_SHELL}" "$(harbor_user_home_state "${1}" "${HARBOR_USER_HOME}")"
   else
     printf '"absent"'
   fi
@@ -124,23 +148,41 @@ harbor_user_refuse_sudo_capable() {
 }
 harbor_user_ensure() {
   # harbor_user_ensure STATE_ROOT OPERATOR: the operator-user row of design section
-  # 5.2. An account the name service already lists is journaled observed and never
-  # recreated; an absent one is prepared, created by exactly
-  # useradd --create-home --shell /bin/bash OPERATOR, with no sudo and no extra
-  # groups, verified, and marked applied. A failed useradd leaves the entry prepared
-  # for recovery. Either way HARBOR_USER_UID, HARBOR_USER_GID, and HARBOR_USER_HOME
-  # hold the account as it now is, for the state record to write.
-  local root operator pre post entry out rc=0
+  # 5.2. An account the name service already lists with the whole state this row
+  # promises is journaled observed and never recreated; an absent one is prepared,
+  # created by exactly useradd --create-home --shell /bin/bash OPERATOR, with no sudo
+  # and no extra groups, verified, and marked applied. A failed useradd leaves the entry
+  # prepared for recovery. An account that exists as only part of what this row promises
+  # is neither, and is reported rather than called done: the name service listing it is
+  # not proof that useradd finished, because useradd commits the passwd and group
+  # databases before it creates the home. Either way HARBOR_USER_UID, HARBOR_USER_GID,
+  # and HARBOR_USER_HOME hold the account as it now is, for the state record to write.
+  local root operator home pre post entry out rc=0
   [ "$#" -eq 2 ] || harbor_die 3 usage "usage: harbor_user_ensure <state-root> <operator>"
   root="${1}"
   operator="${2}"
-  post="$(harbor_user_state "${HARBOR_USER_LOGIN_SHELL}")"
+  post="$(harbor_user_state "${HARBOR_USER_LOGIN_SHELL}" present)"
   if harbor_user_query "${operator}"; then
     # An account that exists with another login shell is not the account this row
     # describes, and Harbor never alters one it did not create: report it and stop.
     [ "${HARBOR_USER_SHELL}" = "${HARBOR_USER_LOGIN_SHELL}" ] \
       || harbor_die 3 user.shell "${operator} already exists with login shell ${HARBOR_USER_SHELL}, not ${HARBOR_USER_LOGIN_SHELL}; Harbor does not change an account it did not create, so either set it by hand with: chsh -s ${HARBOR_USER_LOGIN_SHELL} ${operator}, or rerun with --operator naming another account; nothing was written"
-    pre="$(harbor_user_state "${HARBOR_USER_SHELL}")"
+    # The account exists; the row promises a home directory as well, so the home the
+    # passwd line names is inspected rather than assumed. Section 6.1 decides on the
+    # state of the node, and a listed account whose home is not there is not the state
+    # this row promises: calling it applied here is what would let every later step run
+    # against a home that does not exist and fail naming the wrong cause.
+    home="$(harbor_user_home_state "${operator}" "${HARBOR_USER_HOME}")"
+    case "${home}" in
+      present) ;;
+      foreign)
+        harbor_die 3 user.home "${operator} already exists but its home directory ${HARBOR_USER_HOME} belongs to $(harbor_stat_owner "${HARBOR_USER_HOME}"), not to ${operator}, so ${operator} cannot write in it and everything Harbor writes under it would land in somebody else's directory; either give it to ${operator} with: chown -R ${operator} ${HARBOR_USER_HOME}, or rerun with --operator naming another account; nothing was written"
+        ;;
+      *)
+        harbor_die 3 user.home "${operator} already exists but its home directory ${HARBOR_USER_HOME} is not there, which is what useradd --create-home leaves behind when it has committed the account to the passwd database and then failed to create the home (its exit 12): ${operator} has nowhere to log in to and no directory to hold an authorized key, so create it with: mkhomedir_helper ${operator}, or by hand with: mkdir -p ${HARBOR_USER_HOME} && chown ${operator} ${HARBOR_USER_HOME} && chmod 0755 ${HARBOR_USER_HOME}, then rerun; nothing was written"
+        ;;
+    esac
+    pre="$(harbor_user_state "${HARBOR_USER_SHELL}" "${home}")"
     harbor_journal_create "${root}" user "${operator}" observed applied "${pre}" "${pre}"
     harbor_log user "${operator} exists with shell ${HARBOR_USER_SHELL} and home ${HARBOR_USER_HOME}; nothing to do"
     return 0
@@ -156,8 +198,15 @@ harbor_user_ensure() {
   # naming the account, leaving its entry prepared.
   harbor_user_query "${operator}" \
     || harbor_die 2 user.verify "useradd reported success but getent passwd ${operator} does not list the account; $(basename "${entry}") stays prepared"
-  [ "$(harbor_user_state "${HARBOR_USER_SHELL}")" = "${post}" ] \
+  [ "${HARBOR_USER_SHELL}" = "${HARBOR_USER_LOGIN_SHELL}" ] \
     || harbor_die 2 user.verify "useradd reported success but ${operator} has login shell ${HARBOR_USER_SHELL}, not ${HARBOR_USER_LOGIN_SHELL}; $(basename "${entry}") stays prepared"
+  # The whole recorded post_state, not the passwd line alone: useradd exits 0 having
+  # created the home, so a home that is not there is a useradd that reported a success
+  # it did not have, and the entry stays prepared rather than being marked applied over
+  # an account only half of which exists.
+  home="$(harbor_user_home_state "${operator}" "${HARBOR_USER_HOME}")"
+  [ "$(harbor_user_state "${HARBOR_USER_SHELL}" "${home}")" = "${post}" ] \
+    || harbor_die 2 user.verify_home "useradd --create-home reported success but ${HARBOR_USER_HOME}, the home directory it recorded for ${operator}, is ${home}, not a directory belonging to ${operator}; $(basename "${entry}") stays prepared, and ${operator} has no home until the cause is fixed and this is rerun"
   harbor_journal_set_phase "${entry}" applied
   harbor_msg "created the operator account ${operator} (uid ${HARBOR_USER_UID}, home ${HARBOR_USER_HOME})"
 }

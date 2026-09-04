@@ -70,6 +70,10 @@ setup() {
   GLOBAL_DROPIN="${ETC}/ssh/sshd_config.d/51-harbor-global.conf"
   LOGIND="${ETC}/systemd/logind.conf.d/harbor.conf"
   TARGETS="sleep.target suspend.target hibernate.target hybrid-sleep.target"
+  # The three lid properties the Power row promises, under the names the running logind
+  # publishes them on its D-Bus interface, which is what the row reads to decide whether
+  # a restart is owed.
+  PROPERTIES="HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked"
   PACKAGES="git curl ufw jq openssh-server ca-certificates"
   RULE="allow in on tailscale0 to any port 22 proto tcp comment harbor"
   LAN_RULE="allow in from 192.168.1.0/24 to any port 22 proto tcp comment harbor-lan"
@@ -230,6 +234,7 @@ vendor_init() {
   VENDOR_ENV="${FIX_BASE}/vendor.env"
   mkdir -p "${SHIM}" "${VST}" "${FX}/apt-get" "${FX}/dpkg-query" \
     "${FX}/useradd/healthy" "${FX}/loginctl/healthy" "${FX}/systemctl/healthy" \
+    "${FX}/busctl/healthy" \
     "${FX}/sshd/healthy" "${FX}/ufw/healthy" "${FX}/ip/healthy" "${FX}/runuser/healthy"
   {
     printf 'FX="%s"\n' "${FX}"
@@ -239,6 +244,8 @@ vendor_init() {
     printf 'HOMES="%s"\n' "${HOMES}"
     printf 'DROPIN="%s"\n' "${DROPIN}"
     printf 'GLOBAL_DROPIN="%s"\n' "${GLOBAL_DROPIN}"
+    printf 'LOGIND="%s"\n' "${LOGIND}"
+    printf 'PROPERTIES="%s"\n' "${PROPERTIES}"
     printf 'OPUSER="%s"\n' "${OPUSER}"
   } >"${VENDOR_ENV}"
   # Packages: the repository's own dpkg-query and apt-get fixture sets, a node on
@@ -293,9 +300,27 @@ WRAPPER
   : >"${FX}/systemctl/healthy/restart_systemd-logind.service.out"
   : >"${FX}/systemctl/healthy/reload_ssh.service.out"
   printf 'active\n' >"${FX}/systemctl/healthy/is-active_ssh.service.out"
+  # The running logind: it still suspends on a closed lid, as a node that has never seen
+  # the Power row does, until a restart makes it read the drop-in. busctl is how the row
+  # asks it, and it has no state of its own to model.
+  local property
+  for property in ${PROPERTIES}; do
+    lid_handler "${property}" suspend
+  done
+  vendor_direct busctl
   vendor_wrapper systemctl <<'WRAPPER'
 rc=0
 "${SHIM}/systemctl" "$@" || rc="$?"
+if [ "${rc}" = 0 ] && [ "${1}" = restart ] && [ "${2}" = systemd-logind.service ]; then
+  # What restarting logind does: it reads the lid drop-in and runs what it finds there,
+  # and goes on suspending on a lid it is told nothing about.
+  for property in ${PROPERTIES}; do
+    value=""
+    [ ! -f "${LOGIND}" ] || value="$(sed -n "s/^${property}=//p" "${LOGIND}" | sed -n 1p)"
+    key="$(printf '%s' "get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ${property}" | tr ' /' '_%')"
+    printf 's "%s"\n' "${value:-suspend}" >"${FX}/busctl/healthy/${key}.out"
+  done
+fi
 if [ "${rc}" = 0 ] && [ "${1}" = mask ]; then
   printf 'masked\n' >"${FX}/systemctl/healthy/is-enabled_${2}.out"
   printf '1\n' >"${FX}/systemctl/healthy/is-enabled_${2}.exit"
@@ -394,6 +419,13 @@ linger_state() {
   # linger_state yes|no: what loginctl reports for the operator
   printf '%s\n' "${1}" \
     >"${FX}/loginctl/healthy/$(vkey show-user "${OPUSER}" --property=Linger --value).out"
+}
+
+lid_handler() {
+  # lid_handler PROPERTY VALUE: what the running logind answers when busctl asks it for
+  # PROPERTY, in the signature-and-value shape busctl prints a string property in.
+  printf 's "%s"\n' "${2}" \
+    >"${FX}/busctl/healthy/$(vkey get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "${1}").out"
 }
 
 unit_state() {
@@ -536,6 +568,7 @@ mutating_calls() {
     | grep -v '^loginctl show-user ' \
     | grep -v '^systemctl is-enabled ' \
     | grep -v '^systemctl is-active ' \
+    | grep -v '^busctl get-property ' \
     | grep -v '^sshd -t$' \
     | grep -v '^sshd -T -C user=' \
     | grep -v '^ufw status verbose$' \

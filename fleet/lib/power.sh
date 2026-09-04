@@ -10,6 +10,15 @@
 # teardown (section 5.7).
 HARBOR_POWER_SLEEP_TARGETS="sleep.target suspend.target hibernate.target hybrid-sleep.target"
 HARBOR_POWER_LOGIND_UNIT="systemd-logind.service"
+# Where the running logind publishes what it is actually doing with the lid: the three
+# properties harbor_power_dropin_render writes, live on the login1 manager object, under
+# the same names the drop-in uses. Reading them is how this row asks the daemon rather
+# than the file, exactly as lib/ssh.sh asks sshd with sshd -T what it would really do.
+HARBOR_POWER_LOGIND_BUS_NAME="org.freedesktop.login1"
+HARBOR_POWER_LOGIND_OBJECT="/org/freedesktop/login1"
+HARBOR_POWER_LOGIND_INTERFACE="org.freedesktop.login1.Manager"
+HARBOR_POWER_LID_PROPERTIES="HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked"
+HARBOR_POWER_LID_HANDLER="ignore"
 # harbor_power_dropin_path [DEST_ROOT]: the logind drop-in under the configuration
 # root DEST_ROOT, which defaults to the production /etc.
 harbor_power_dropin_path() {
@@ -33,11 +42,11 @@ harbor_power_dropin_render() {
 # entry left prepared by a crash between the rename and the applied write is
 # decidable. A drop-in that is already byte for byte what would be written is
 # journaled observed and left alone; anything at the path that is not a regular
-# file is foreign and exits 3 untouched. Sets HARBOR_POWER_LID_CHANGED to 1 when
-# the file was written, which is what makes the logind restart conditional.
+# file is foreign and exits 3 untouched. Whether this step wrote the file decides
+# nothing beyond the file: the logind restart is decided by what logind is running, not
+# by what this step did to the drop-in.
 harbor_power_lid() {
   local root="${1}" path dir pre post ownership tmp entry
-  HARBOR_POWER_LID_CHANGED=0
   path="$(harbor_power_dropin_path "${2:-}")"
   dir="$(dirname "${path}")"
   if [ ! -d "${dir}" ]; then
@@ -72,7 +81,6 @@ harbor_power_lid() {
   harbor_journal_sync_path "${dir}"
   harbor_step power-lid
   harbor_journal_set_phase "${entry}" applied
-  HARBOR_POWER_LID_CHANGED=1
 }
 # harbor_power_unit_file_state UNIT: the unit file state systemctl reports for UNIT,
 # one word. Whether a unit is masked is a property of systemd's unit file lookup,
@@ -150,24 +158,76 @@ harbor_power_mask_sleep() {
     harbor_power_mask "${root}" "${unit}"
   done
 }
-# harbor_power_restart_logind: restart logind so the drop-in takes effect. Nothing
-# is journaled: a restart leaves no artifact to own or invert.
+# harbor_power_lid_handler PROPERTY: the value the running logind reports for PROPERTY,
+# read from the D-Bus interface it publishes its live configuration on. Inspection only,
+# and the same shape as lib/ssh.sh's harbor_sshd_effective: the question this row has to
+# answer is what the daemon is really doing with the lid, which neither the drop-in on
+# disk nor anything Harbor remembers writing can answer, since logind reads that file
+# once at start and keeps what it read. busctl prints a property as its signature and
+# its value, s "ignore", so an answer in any other shape is not an answer about the lid.
+# A busctl that is missing, that fails, or that prints something else is fail-closed,
+# exit 2: reading an unanswerable question as "already applied" is exactly the failure
+# that would skip the restart on every run forever and leave the node suspending on a
+# closed lid while Harbor called the row applied.
+harbor_power_lid_handler() {
+  local property="${1}" out rc=0 value
+  harbor_log_vendor busctl get-property "${HARBOR_POWER_LOGIND_BUS_NAME}" \
+    "${HARBOR_POWER_LOGIND_OBJECT}" "${HARBOR_POWER_LOGIND_INTERFACE}" "${property}"
+  out="$(busctl get-property "${HARBOR_POWER_LOGIND_BUS_NAME}" \
+    "${HARBOR_POWER_LOGIND_OBJECT}" "${HARBOR_POWER_LOGIND_INTERFACE}" "${property}" 2>&1)" || rc="$?"
+  [ "${rc}" = 0 ] \
+    || harbor_die 2 power.lid_policy "busctl get-property ${HARBOR_POWER_LOGIND_BUS_NAME} ${HARBOR_POWER_LOGIND_OBJECT} ${HARBOR_POWER_LOGIND_INTERFACE} ${property} failed (exit ${rc}): ${out}; what logind is doing with the lid cannot be read, so nothing was restarted"
+  value="$(printf '%s\n' "${out}" | sed -n 1p | sed -n 's/^s "\(.*\)"$/\1/p')"
+  [ -n "${value}" ] \
+    || harbor_die 2 power.lid_policy "busctl get-property ${HARBOR_POWER_LOGIND_BUS_NAME} ${HARBOR_POWER_LOGIND_OBJECT} ${HARBOR_POWER_LOGIND_INTERFACE} ${property} exited 0 and printed '${out}', which is not the string property logind publishes ${property} as; nothing was restarted"
+  printf '%s' "${value}"
+}
+# harbor_power_lid_policy_applied: 0 when the running logind already handles the lid the
+# three ways the drop-in asks it to, 1 when any of the three differs. Inspection only,
+# and each read is fail-closed on its own, so an unreadable logind stops the row rather
+# than reading as applied.
+harbor_power_lid_policy_applied() {
+  local property value
+  for property in ${HARBOR_POWER_LID_PROPERTIES}; do
+    value="$(harbor_power_lid_handler "${property}")" || exit "$?"
+    [ "${value}" = "${HARBOR_POWER_LID_HANDLER}" ] || return 1
+  done
+  return 0
+}
+# harbor_power_restart_logind: restart logind so the drop-in takes effect. Nothing is
+# journaled: a restart leaves no artifact to own or invert.
+# harbor_power_restart_logind [DEST_ROOT]: DEST_ROOT is carried only so the refusal
+# below can name the drop-in the administrator should look at, and defaults to the
+# production /etc the way every other function in this file defaults it.
 harbor_power_restart_logind() {
-  local out rc=0
+  local dest="${1:-}" out rc=0
   harbor_log_vendor systemctl restart "${HARBOR_POWER_LOGIND_UNIT}"
   out="$(systemctl restart "${HARBOR_POWER_LOGIND_UNIT}" 2>&1)" || rc="$?"
   [ "${rc}" = 0 ] \
-    || harbor_die 2 power.logind_restart "systemctl restart ${HARBOR_POWER_LOGIND_UNIT} failed (exit ${rc}): ${out}; the drop-in is in place but logind is still running with the previous lid policy, so fix the cause and rerun"
+    || harbor_die 2 power.logind_restart "systemctl restart ${HARBOR_POWER_LOGIND_UNIT} failed (exit ${rc}): ${out}; the drop-in is in place but logind is still running with the previous lid policy, so fix the cause and rerun: the next run asks logind what it is doing with the lid, finds it is still not what the drop-in asks for, and makes the restart again even though it rewrites nothing"
   harbor_step power-logind-restarted
+  # Section 6.1: the check runs again after the apply. systemctl restart returns once
+  # the unit is active, and logind reads its configuration before it takes the bus
+  # name, so the properties this reads are the ones the restarted daemon is running.
+  # A restart that reported success and changed nothing is the one failure the row
+  # could otherwise report as applied, and it is the failure a stale drop-in logind
+  # declined to read would look like.
+  harbor_power_lid_policy_applied \
+    || harbor_die 2 power.logind_verify "${HARBOR_POWER_LOGIND_UNIT} restarted without error but logind still does not handle the lid the way $(harbor_power_dropin_path "${dest}") asks it to; the drop-in is in place and the sleep targets are masked, so inspect logind with: busctl get-property ${HARBOR_POWER_LOGIND_BUS_NAME} ${HARBOR_POWER_LOGIND_OBJECT} ${HARBOR_POWER_LOGIND_INTERFACE} HandleLidSwitch, and rerun"
 }
-# harbor_power_configure STATE_ROOT [DEST_ROOT]: the whole Power step, in the order
-# of the design section 5.2 table: the lid drop-in, the four masked sleep targets,
-# then the logind restart, which runs only when the drop-in was written, so a second
-# run makes no mutating call at all.
+# harbor_power_configure STATE_ROOT [DEST_ROOT]: the whole Power step, in the order of
+# the design section 5.2 table: the lid drop-in, the four masked sleep targets, then the
+# logind restart, which is owed whenever the running logind is not already handling the
+# lid the way the drop-in asks it to. That is a question about the node and not about
+# this run, so a run whose restart failed makes it again on the next run even though it
+# finds the drop-in byte for byte what it would write, a logind somebody restarted on
+# another policy is restarted again even though Harbor rewrote nothing, and a second run
+# on a node that is already in the promised state makes no mutating call at all.
 harbor_power_configure() {
   local root="${1}"
   harbor_power_lid "${root}" "${2:-}"
   harbor_power_mask_sleep "${root}"
-  [ "${HARBOR_POWER_LID_CHANGED}" = 1 ] || return 0
-  harbor_power_restart_logind
+  if ! harbor_power_lid_policy_applied; then
+    harbor_power_restart_logind "${2:-}"
+  fi
 }

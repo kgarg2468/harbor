@@ -15,10 +15,17 @@ setup() {
   . "${HARBOR_ROOT}/lib/user.sh"
   fixture_state_root
   HARBOR_PID="$$"
-  OPERATOR=harbor
-  # The invoking administrator of design section 5.1. Tests that need the clash
-  # set SUDO_USER themselves.
-  SUDO_USER=ubuntu
+  # The operator-user row promises a home directory belonging to the operator, and the
+  # only account an unprivileged test may own a directory as is the one it already runs
+  # as, exactly as tests/unit/node/bootstrap.bats and tests/unit/lib/ssh.bats resolve the
+  # same problem. Every fixture home lives under the test's own temporary directory.
+  TEST_USER="$(id -un)"
+  OPERATOR="${TEST_USER}"
+  HOMES="${BATS_TEST_TMPDIR}/homes"
+  mkdir -p "${HOMES}"
+  # The invoking administrator of design section 5.1, an account that is deliberately
+  # not the operator. Tests that need the clash set SUDO_USER themselves.
+  SUDO_USER="${TEST_USER}-admin"
   # getent, useradd, and loginctl resolve to the PR 2 shim through a link the test
   # makes in its own temporary directory, so no real account, group, or user
   # manager is ever consulted and nothing outside BATS_TEST_TMPDIR is written.
@@ -52,11 +59,20 @@ teardown() {
 }
 
 passwd_entry() {
-  # passwd_entry USER SHELL [HOME] [UID] [GID]: what getent passwd USER answers
-  local user="${1}" shell="${2}" home="${3:-/home/${1}}" uid="${4:-1001}" gid="${5:-1001}"
+  # passwd_entry USER SHELL [HOME] [UID] [GID]: what getent passwd USER answers. The
+  # name service only: whether the home directory it names is really there is the
+  # separate fact the row inspects, so make_home is what puts one there.
+  local user="${1}" shell="${2}" home="${3:-${HOMES}/${1}}" uid="${4:-1001}" gid="${5:-1001}"
   printf '%s:x:%s:%s:Harbor operator:%s:%s\n' "${user}" "${uid}" "${gid}" "${home}" "${shell}" \
     >"${FX}/getent/healthy/passwd_${user}.out"
   rm -f "${FX}/getent/healthy/passwd_${user}.exit"
+}
+
+make_home() {
+  # make_home USER: the home directory of USER, created and belonging to it, which is
+  # what useradd --create-home leaves behind when it gets that far. Prints the path.
+  mkdir -p "${HOMES}/${1}"
+  printf '%s' "${HOMES}/${1}"
 }
 
 absent_account() {
@@ -83,26 +99,48 @@ no_group_entry() {
 }
 
 useradd_succeeds() {
-  # useradd_succeeds SHELL: the shim exits 0 and the account exists afterwards
-  # with SHELL, which is the effect the real useradd has on the name service.
+  # useradd_succeeds SHELL: the shim exits 0 and the account exists afterwards with
+  # SHELL and with its home directory, which is the effect the real
+  # useradd --create-home has on the node.
   : >"${FX}/useradd/healthy/${USERADD_KEY}.out"
   rm -f "${FX}/useradd/healthy/${USERADD_KEY}.exit"
   USERADD_AFTER_SHELL="${1}"
+  USERADD_AFTER_HOME=1
 }
 
 useradd_fails() {
-  printf 'useradd: cannot create directory /home/%s\n' "${OPERATOR}" \
+  # A useradd that got nowhere: nothing is committed and the account stays absent.
+  printf 'useradd: failure while writing changes to /etc/passwd\n' \
+    >"${FX}/useradd/healthy/${USERADD_KEY}.out"
+  printf '1\n' >"${FX}/useradd/healthy/${USERADD_KEY}.exit"
+  USERADD_AFTER_SHELL=""
+  USERADD_AFTER_HOME=0
+}
+
+useradd_leaves_no_home() {
+  # The half of useradd --create-home that the design section 3.7 crash window does not
+  # cover, because it is not a crash: useradd commits the passwd and group databases
+  # before it creates the home directory, so a /home that is full, read-only, or not
+  # mounted leaves the account listed, its home directory absent, and useradd exiting 12.
+  printf 'useradd: cannot create directory %s/%s\n' "${HOMES}" "${OPERATOR}" \
     >"${FX}/useradd/healthy/${USERADD_KEY}.out"
   printf '12\n' >"${FX}/useradd/healthy/${USERADD_KEY}.exit"
-  USERADD_AFTER_SHELL=""
+  USERADD_AFTER_SHELL=/bin/bash
+  USERADD_AFTER_HOME=0
 }
 
 useradd() {
-  # The shim is stateless, so the effect a real useradd has on the name service is
-  # modeled here: the shim is still what runs and logs, and after a successful call
-  # getent answers with the account.
-  command useradd ${1+"$@"} || return "$?"
-  [ -z "${USERADD_AFTER_SHELL}" ] || passwd_entry "${OPERATOR}" "${USERADD_AFTER_SHELL}"
+  # The shim is stateless, so the effect a real useradd has on the node is modeled here:
+  # the shim is still what runs and logs, and what it leaves behind, the passwd line and
+  # the home directory, is set independently of the exit code, because the real command
+  # leaves the first without the second when it fails at exit 12.
+  local rc=0
+  command useradd ${1+"$@"} || rc="$?"
+  if [ -n "${USERADD_AFTER_SHELL}" ]; then
+    [ "${USERADD_AFTER_HOME}" = 0 ] || make_home "${OPERATOR}" >/dev/null
+    passwd_entry "${OPERATOR}" "${USERADD_AFTER_SHELL}"
+  fi
+  return "${rc}"
 }
 
 linger_state() {
@@ -158,17 +196,19 @@ assert_entry() {
 }
 
 user_state() {
-  printf '{"shell":"%s"}' "${1}"
+  # user_state SHELL [HOME_STATE]: the account state a user entry records, which is the
+  # pair the row promises and not the shell alone.
+  printf '{"shell":"%s","home":"%s"}' "${1}" "${2:-present}"
 }
 
 @test "inspection reports the account, its shell, and its home, and never calls useradd" {
-  passwd_entry "${OPERATOR}" /bin/bash /home/harbor 1001 1002
+  passwd_entry "${OPERATOR}" /bin/bash "${HOMES}/${OPERATOR}" 1001 1002
   run harbor_user_query "${OPERATOR}"
   assert_success
   harbor_user_query "${OPERATOR}"
   assert_equal "${HARBOR_USER_UID}" 1001
   assert_equal "${HARBOR_USER_GID}" 1002
-  assert_equal "${HARBOR_USER_HOME}" /home/harbor
+  assert_equal "${HARBOR_USER_HOME}" "${HOMES}/${OPERATOR}"
   assert_equal "${HARBOR_USER_SHELL}" /bin/bash
   absent_account "${OPERATOR}"
   run harbor_user_query "${OPERATOR}"
@@ -207,7 +247,7 @@ user_state() {
 }
 
 @test "an existing account with the right shell and home is journaled observed and useradd is never called" {
-  passwd_entry "${OPERATOR}" /bin/bash /home/harbor
+  passwd_entry "${OPERATOR}" /bin/bash "$(make_home "${OPERATOR}")"
   run harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
   assert_success
   assert_equal "$(shim_calls "^useradd${TAB}")" 0
@@ -216,7 +256,7 @@ user_state() {
   # The caller of design section 5.2's state-record step reads uid, gid, and home
   # from the inspection, which the observed path leaves set.
   harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
-  assert_equal "${HARBOR_USER_HOME}" /home/harbor
+  assert_equal "${HARBOR_USER_HOME}" "${HOMES}/${OPERATOR}"
   assert_equal "${HARBOR_USER_UID}" 1001
 }
 
@@ -260,12 +300,81 @@ user_state() {
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
 }
 
+@test "an account useradd committed without its home does not read as done on the rerun" {
+  # The convergence defect this asserts against is the failure and the rerun as one
+  # sequence, which is the only order it appears in: each half on its own passes.
+  # Run 1: useradd commits the passwd database, fails to create the home, and exits 12,
+  # so the entry stays prepared and the account exists as only half of what it promised.
+  useradd_leaves_no_home
+  run harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
+  assert_equal "${status}" 2
+  assert_output --partial 'user.create'
+  assert_entry 0001 user "${OPERATOR}" created prepared '"absent"' "$(user_state /bin/bash)"
+  assert [ ! -d "${HOMES}/${OPERATOR}" ]
+  # Run 2: the name service lists the account and its shell is the one the row fixes,
+  # which is everything the passwd line can say. It is not enough to call the row done:
+  # the home the account names is not there, so the account is reported, by the cause
+  # rather than by the .ssh directory that would fail three rows later.
+  : >"${HARBOR_SHIM_LOG}"
+  run harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'user.home'
+  assert_output --partial "${HOMES}/${OPERATOR}"
+  assert_output --partial "mkhomedir_helper ${OPERATOR}"
+  assert_equal "$(shim_calls "^useradd${TAB}")" 0
+  run ls -A "${FIX_ROOT}/journal"
+  assert_equal "${#lines[@]}" 1
+  # And recovery does not resolve the entry run 1 left prepared: the account it observes
+  # is neither the absent one the entry names nor the whole one it promised.
+  run --separate-stderr harbor_journal_recover "${FIX_ROOT}"
+  assert_equal "${status}" 2
+  assert_regex "${stderr}" 'journal entry 0001-user.json is undecidable:'
+  assert_regex "${stderr}" 'observed:   \{"shell":"/bin/bash","home":"absent"\}'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  # Run 3, with the cause fixed: the row observes a whole account, journals it observed,
+  # calls no useradd, and recovery now decides the entry the interrupted run left.
+  make_home "${OPERATOR}"
+  run harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
+  assert_success
+  assert_equal "$(shim_calls "^useradd${TAB}")" 0
+  assert_entry 0002 user "${OPERATOR}" observed applied "$(user_state /bin/bash)" "$(user_state /bin/bash)"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+}
+
+@test "a useradd that reports success without the home it was asked for leaves the entry prepared" {
+  # The other side of the same fact: exit 0 is not proof either, and section 6.1's
+  # check after the apply is what catches it.
+  useradd_succeeds /bin/bash
+  USERADD_AFTER_HOME=0
+  run harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
+  assert_equal "${status}" 2
+  assert_output --partial 'user.verify_home'
+  assert_output --partial "${HOMES}/${OPERATOR}"
+  assert_entry 0001 user "${OPERATOR}" created prepared '"absent"' "$(user_state /bin/bash)"
+}
+
+@test "an existing account whose home belongs to somebody else is reported and mutates nothing" {
+  # A home directory that is not the operator's is not a home Harbor may write an
+  # authorized key into. The root directory is the one directory an unprivileged test
+  # can count on existing and belonging to another account, and it is only ever stat'd.
+  passwd_entry "${OPERATOR}" /bin/bash /
+  run harbor_user_ensure "${FIX_ROOT}" "${OPERATOR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'user.home'
+  assert_output --partial "chown -R ${OPERATOR} /"
+  assert_equal "$(shim_calls "^useradd${TAB}")" 0
+  run ls -A "${FIX_ROOT}/journal"
+  assert_output ''
+}
+
 @test "recovery decides a prepared user entry: absent is reverted, the created account is applied, another shell is undecidable" {
   fixture_entry "${FIX_ROOT}" 0001 user "${OPERATOR}" created prepared '"absent"' "$(user_state /bin/bash)"
   run harbor_journal_recover "${FIX_ROOT}"
   assert_success
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
-  passwd_entry "${OPERATOR}" /bin/bash
+  passwd_entry "${OPERATOR}" /bin/bash "$(make_home "${OPERATOR}")"
   fixture_entry "${FIX_ROOT}" 0002 user "${OPERATOR}" created prepared '"absent"' "$(user_state /bin/bash)"
   run harbor_journal_recover "${FIX_ROOT}"
   assert_success
@@ -275,7 +384,7 @@ user_state() {
   run --separate-stderr harbor_journal_recover "${FIX_ROOT}"
   assert_equal "${status}" 2
   assert_regex "${stderr}" 'journal entry 0003-user.json is undecidable:'
-  assert_regex "${stderr}" 'observed:   \{"shell":"/bin/sh"\}'
+  assert_regex "${stderr}" 'observed:   \{"shell":"/bin/sh","home":"present"\}'
   assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" prepared
   assert_equal "$(shim_calls "^useradd${TAB}")" 0
 }
