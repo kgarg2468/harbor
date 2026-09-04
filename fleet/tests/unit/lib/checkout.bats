@@ -197,18 +197,23 @@ snapshot() {
 @test "a file in the operator's group exits 3 naming it, writable by that group or not" {
   local group
   group="$(operator_group)" || skip "the test user is in no group that is not also an account name"
-  chgrp "${group}" "${FIX_CO}/lib/log.sh"
+  # node/bootstrap.sh, not lib/log.sh: lib/alias.sh is a symlink to log.sh, and the
+  # walk follows symlinks, so putting log.sh in the group puts two paths in it and
+  # which one the walk reaches first is filesystem order. The rule rejects either,
+  # but the name in the message would then differ by platform. bootstrap.sh has no
+  # alias, so the path the message names is the path this test changed.
+  chgrp "${group}" "${FIX_CO}/node/bootstrap.sh"
   run harbor_checkout_trusted "${FIX_CO}"
   assert_success
   run harbor_checkout_trusted "${FIX_CO}" "${group}"
   assert_equal "${status}" 3
   assert_output --partial 'checkout.operator_group'
-  assert_output --partial "${FIX_CO}/lib/log.sh"
-  chmod 0664 "${FIX_CO}/lib/log.sh"
+  assert_output --partial "${FIX_CO}/node/bootstrap.sh"
+  chmod 0664 "${FIX_CO}/node/bootstrap.sh"
   run harbor_checkout_trusted "${FIX_CO}" "${group}"
   assert_equal "${status}" 3
   assert_output --partial 'checkout.operator_group'
-  assert_output --partial "${FIX_CO}/lib/log.sh"
+  assert_output --partial "${FIX_CO}/node/bootstrap.sh"
 }
 
 @test "a symlink inside the checkout whose target breaks the rule exits 3 naming both" {

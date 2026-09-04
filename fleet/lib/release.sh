@@ -56,16 +56,22 @@ harbor_observe_op_harbor_install() {
   fi
   printf '{"tree_sha256":"%s"}' "$(harbor_release_tree_hash "${dest}")"
 }
-# harbor_release_applied_state STATE_ROOT DEST: the post_state of the newest applied
-# harbor-install entry whose target is DEST, empty when the journal holds none. This
-# is the proof that Harbor created that directory; without it the directory is an
-# orphan and Harbor removes nothing.
+# harbor_release_applied_state STATE_ROOT DEST: the post_state of the newest
+# harbor-install entry whose target is DEST, empty unless that newest entry is
+# applied. This is the proof that Harbor created that directory; without it the
+# directory is an orphan and Harbor removes nothing. Only the newest entry for DEST
+# decides, which is why a non-applied one clears what an older entry recorded rather
+# than being skipped: a teardown interrupted after it marked its entry reverted and
+# before it removed the tree leaves a directory the journal says is unwound, and an
+# older applied entry must not outvote that and let staging retain it. This is the
+# same rule the install proof in lib/entrypoint.sh applies to the same entries.
 harbor_release_applied_state() {
   local root="${1}" dest="${2}" entry state=""
   for entry in "${root}"/journal/[0-9][0-9][0-9][0-9]-harbor-install.json; do
     [ -e "${entry}" ] || continue
-    [ "$(harbor_journal_string "${entry}" phase)" = "applied" ] || continue
     [ "$(harbor_journal_string "${entry}" target)" = "${dest}" ] || continue
+    state=""
+    [ "$(harbor_journal_string "${entry}" phase)" = "applied" ] || continue
     state="$(harbor_journal_raw "${entry}" post_state)"
   done
   printf '%s' "${state}"

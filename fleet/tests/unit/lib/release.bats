@@ -654,3 +654,23 @@ echo not harbor'
   assert_equal "$(readlink "${LINK}")" "${LIBDIR}/v0.0.9/bin/harbor"
   harbor_lock_release "${FIX_ROOT}"
 }
+
+@test "the newest harbor-install entry for a destination decides, so a reverted one clears an older applied one" {
+  local hash='{"tree_sha256":"aaaa"}'
+  # A teardown interrupted after it marked its entry reverted and before it removed
+  # the tree leaves exactly this journal: an older applied entry and a newer reverted
+  # one, both naming the same destination. The directory is still on disk, so without
+  # the newest-wins rule the older entry would prove Harbor still owns it and staging
+  # would retain a release the journal records as unwound.
+  fixture_entry "${FIX_ROOT}" 0001 harbor-install "${DEST}" created applied '"absent"' "${hash}"
+  assert_equal "$(harbor_release_applied_state "${FIX_ROOT}" "${DEST}")" "${hash}"
+  fixture_entry "${FIX_ROOT}" 0002 harbor-install "${DEST}" created reverted '"absent"' "${hash}"
+  assert_equal "$(harbor_release_applied_state "${FIX_ROOT}" "${DEST}")" ""
+  # A reinstall after that teardown is the same shape the other way around, and the
+  # newest entry decides there too.
+  fixture_entry "${FIX_ROOT}" 0003 harbor-install "${DEST}" created applied '"absent"' "${hash}"
+  assert_equal "$(harbor_release_applied_state "${FIX_ROOT}" "${DEST}")" "${hash}"
+  # Another destination's newer entry says nothing about this one.
+  fixture_entry "${FIX_ROOT}" 0004 harbor-install "${LIBDIR}/v0.0.9" created reverted '"absent"' "${hash}"
+  assert_equal "$(harbor_release_applied_state "${FIX_ROOT}" "${DEST}")" "${hash}"
+}
