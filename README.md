@@ -1,0 +1,42 @@
+# Harbor
+
+Harbor provisions a single Ubuntu 24.04 node as a T3 Code agent host and pairs a macOS
+controller with it, using only the vendors' own tools (Tailscale, Node.js, Claude Code, Codex,
+`t3`), with every mutation journaled so it can be inspected and undone exactly.
+
+## Status
+
+Design complete, implementation in progress. This repository currently contains:
+
+- the approved design specification, `docs/superpowers/specs/2026-09-01-harbor-design.md`;
+- the first slice of the PR 2 foundation under `fleet/`: the libraries for logging, checks,
+  version pinning, and lock identity, plus the Bats test harness.
+
+The rest of the foundation (the `fleet/bin/harbor` dispatcher, lock acquisition, the ownership
+journal, `harbor journal resolve`, the vendor shim, the placeholder scan, and CI) lands in the
+follow-up pull request stacked on this one.
+
+Nothing here installs, configures, or removes anything on a node yet. `harbor bootstrap`,
+`harbor provision`, `harbor status`, `harbor upgrade`, `harbor teardown`, and the macOS client
+arrive in later pull requests in the order given by section 8 of the design.
+
+## Layout (target for the full foundation)
+
+- `fleet/`: all of Harbor's code. Everything below is relative to it.
+- `fleet/bin/harbor`: the single entry point. It dispatches subcommands and contains no logic.
+- `fleet/lib/`: `log.sh`, `checks.sh`, `versions.sh`, `lock.sh`, `journal.sh`.
+- `fleet/versions.lock`: exact third-party versions, one per key. Empty until each component's PR.
+- `fleet/tests/`: Bats unit tests, vendor shims, fixtures, and the placeholder scan.
+- `docs/superpowers/specs/`: the design. `docs/superpowers/plans/`: per-PR implementation plans.
+
+## Running the checks
+
+See `CONTRIBUTING.md` for the exact lint and unit-test commands. They are the same commands
+CI runs.
+
+## Documents
+
+- Design: `docs/superpowers/specs/2026-09-01-harbor-design.md`
+- Security policy: `SECURITY.md`
+- Contributing: `CONTRIBUTING.md`
+- License: `LICENSE`

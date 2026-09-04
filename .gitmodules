@@ -1,0 +1,9 @@
+[submodule "tests/vendor/bats-core"]
+	path = fleet/tests/vendor/bats-core
+	url = https://github.com/bats-core/bats-core.git
+[submodule "tests/vendor/bats-support"]
+	path = fleet/tests/vendor/bats-support
+	url = https://github.com/bats-core/bats-support.git
+[submodule "tests/vendor/bats-assert"]
+	path = fleet/tests/vendor/bats-assert
+	url = https://github.com/bats-core/bats-assert.git
