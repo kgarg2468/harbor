@@ -239,3 +239,216 @@ EOF
   harbor_die 3 entrypoint.record_mismatch \
     "the executing release is ${tag} but ${record} records ${recorded}: either a system upgrade was interrupted after switching the entrypoint and before rewriting the record, or a node-level teardown was interrupted while its reverse walk had restored the entrypoint symlink to an earlier release, which is the case whose reverted symlink entry stands in the root journal; tell them apart with sudo harbor journal list, then resume the upgrade with sudo harbor upgrade --system --from <checkout> from a checkout at ${tag}, which fails closed naming the missing proof when an upgrade is not what was interrupted, or finish the teardown with sudo harbor teardown --level node; sudo harbor bootstrap ends either one by rewriting the record to ${tag}"
 }
+# The flag binding (design section 5.2, "Flag binding") and the harbor-install proof
+# the two deferral forms above owe. Unlike the check above, the functions below read
+# and write the root journal, so they additionally depend on lib/journal.sh and, through
+# it, on the lock ownership assertion of lib/lock.sh: the caller has already resolved
+# the executing release with harbor_entrypoint_check, created the state root, acquired
+# the root lock, and run journal recovery before it calls any of them, which is the
+# earliest point at which the journal is decided and therefore the earliest point at
+# which either can be judged. Both run before any mutation of the node.
+# harbor_bootstrap_flags_key_path PATH: PATH spelled canonically, so two spellings of
+# one key source render one flag set. The directory is canonicalized with cd -P and
+# pwd -P, which settles . and .., a repeated or trailing slash, a relative spelling, and
+# a symlinked ancestor; the leaf is kept as spelled and a leaf symlink is not followed,
+# because what the set records is the path the administrator named, and the Authorized
+# key step of design section 5.2 judges what it finds there by the journaled hash rather
+# than by the path alone. The directory must exist, since the path is canonicalized
+# through it; a source whose directory is absent is refused rather than recorded as
+# written, because a path Harbor cannot resolve is a path it cannot compare.
+harbor_bootstrap_flags_key_path() {
+  local path="${1}" dir base canon
+  case "${path}" in
+    "" | */)
+      harbor_die 3 flags.key_source "'${path}' does not name an authorized-key file"
+      ;;
+    */*)
+      dir="${path%/*}"
+      base="${path##*/}"
+      ;;
+    *)
+      dir="."
+      base="${path}"
+      ;;
+  esac
+  [ -n "${dir}" ] || dir="/"
+  case "${base}" in
+    . | ..) harbor_die 3 flags.key_source "'${path}' names a directory, not an authorized-key file" ;;
+  esac
+  if ! canon="$(cd -P -- "${dir}" 2>/dev/null && pwd -P)"; then
+    harbor_die 3 flags.key_source \
+      "the directory of the authorized-key source '${path}' does not exist, so Harbor cannot resolve which file this run's intent names"
+  fi
+  case "${canon}" in
+    /) printf '/%s' "${base}" ;;
+    *) printf '%s/%s' "${canon}" "${base}" ;;
+  esac
+}
+# harbor_bootstrap_flags_word VALUE LABEL: VALUE must be one non-empty word. The
+# normalized set is one line of space-separated fields, so a value carrying a space, a
+# tab, or a newline could not be read back out of it field by field; Harbor refuses to
+# record an intent it could not later print back beside another run's rather than record
+# an ambiguous one. No Ubuntu account name can carry whitespace either.
+harbor_bootstrap_flags_word() {
+  case "${1}" in
+    "") harbor_die 3 flags.empty "${2} is empty, and the flag set records it" ;;
+    *[[:space:]]*)
+      harbor_die 3 flags.whitespace \
+        "${2} '${1}' carries whitespace, which the one-line flag set cannot record unambiguously"
+      ;;
+  esac
+}
+# harbor_bootstrap_flags_normalize OPERATOR KEY_SOURCE [FLAG...]: the security-relevant
+# intent of a bootstrap run as one canonical line: the operator name, the resolved
+# authorized-key source path, and whether each of --tailscale-ssh, --allow-lan-ssh,
+# --harden-sshd, --adopt-firewall, and --adopt-tailscale was given. Canonical means one
+# rendering per intent. The fields are printed in one fixed order that owes nothing to
+# the order the flags were given in, and each flag contributes exactly yes or no whether
+# it was given once, twice, or not at all, so no reordering and no repetition can change
+# the line; the key path is canonicalized, so no respelling of one path can either; and
+# every field is printed whether or not it was given, so no two intents share a
+# rendering. A flag outside the five is refused rather than ignored, because a set
+# silently missing a flag would bind every later run to a posture no run asked for.
+harbor_bootstrap_flags_normalize() {
+  local operator key flag
+  local tailscale_ssh=no allow_lan_ssh=no harden_sshd=no adopt_firewall=no adopt_tailscale=no
+  if [ "$#" -lt 2 ]; then
+    harbor_die 3 usage "usage: harbor_bootstrap_flags_normalize <operator> <authorized-key-source> [flag...]"
+  fi
+  operator="${1}"
+  key="${2}"
+  shift 2
+  harbor_bootstrap_flags_word "${operator}" "the operator name"
+  for flag in ${1+"$@"}; do
+    case "${flag}" in
+      --tailscale-ssh) tailscale_ssh=yes ;;
+      --allow-lan-ssh) allow_lan_ssh=yes ;;
+      --harden-sshd) harden_sshd=yes ;;
+      --adopt-firewall) adopt_firewall=yes ;;
+      --adopt-tailscale) adopt_tailscale=yes ;;
+      *)
+        harbor_die 3 flags.unknown \
+          "'${flag}' is not one of the flags the bootstrap flag set records (--tailscale-ssh, --allow-lan-ssh, --harden-sshd, --adopt-firewall, --adopt-tailscale), and an unrecorded flag would leave the recorded intent silently short of what was asked for"
+        ;;
+    esac
+  done
+  key="$(harbor_bootstrap_flags_key_path "${key}")" || exit "$?"
+  harbor_bootstrap_flags_word "${key}" "the authorized-key source path"
+  printf 'operator=%s authorized-key-source=%s adopt-firewall=%s adopt-tailscale=%s allow-lan-ssh=%s harden-sshd=%s tailscale-ssh=%s\n' \
+    "${operator}" "${key}" "${adopt_firewall}" "${adopt_tailscale}" "${allow_lan_ssh}" \
+    "${harden_sshd}" "${tailscale_ssh}"
+}
+# harbor_bootstrap_flags_field SET NAME: the value of the NAME field of SET, so a run's
+# own set and the recorded one can be printed field beside field. No field value carries
+# whitespace, so the fields of the line are its words.
+harbor_bootstrap_flags_field() {
+  printf '%s\n' "${1}" | awk -v k="${2}=" '{ for (i = 1; i <= NF; i++) if (index($i, k) == 1) { print substr($i, length(k) + 1); exit } }'
+}
+# harbor_observe_op_bootstrap_flags TARGET: the observer harbor_journal_observe
+# dispatches to for a bootstrap-flags entry, defined here because the library that emits
+# an op owns its observer and an op with none is unrecoverable (design section 3.7). A
+# bootstrap-flags entry records the intent a run was given, not an artifact: there is
+# nothing on disk whose observation could equal its pre_state or its post_state, and the
+# entry itself is not evidence about itself. So the truthful answer is that intent is
+# unobservable, and it is a different answer from the "unobservable:<op>" of an op whose
+# library is simply not loaded in this process. Harbor writes this entry directly
+# applied, so recovery, which scans prepared entries only, never asks; an entry of this
+# op found prepared can only come from a forged or hand-edited journal, and this answer
+# makes it undecidable, so recovery refuses to continue and prints it rather than guess a
+# phase for an intent no observation can settle. Inspection only.
+harbor_observe_op_bootstrap_flags() {
+  printf '"unobservable:intent"'
+}
+# harbor_bootstrap_flags_recorded STATE_ROOT: the flag set the newest applied
+# bootstrap-flags entry records, empty when the journal holds none. That set is the
+# entry's target, the intent being what such an entry is about.
+harbor_bootstrap_flags_recorded() {
+  local root="${1}" entry flags=""
+  for entry in "${root}"/journal/[0-9][0-9][0-9][0-9]-bootstrap-flags.json; do
+    [ -e "${entry}" ] || continue
+    [ "$(harbor_journal_string "${entry}" phase)" = "applied" ] || continue
+    flags="$(harbor_journal_string "${entry}" target)"
+  done
+  printf '%s' "${flags}"
+}
+# harbor_bootstrap_flags_bind STATE_ROOT SET: bind this run to the intent of the first
+# one (design section 5.2). With no applied bootstrap-flags entry in the journal this is
+# the first run: SET is journaled as one, ownership observed because it mutates nothing,
+# created directly applied with no prepared window, as design section 3.7 requires of an
+# entry that mutates nothing and as recovery, which can never decide an intent, needs.
+# The caller calls this before it journals or mutates anything else, so the entry is the
+# journal's first and the intent is recorded before the first mutation and long before
+# bootstrap.json exists. With one recorded, this run's set must equal it: an equal set
+# proceeds and writes nothing new, and a differing one exits 3 having mutated nothing,
+# printing the recorded value beside this run's for each field that differs, which for a
+# recovery run by another administrator is the recorded key path it must be rerun with.
+harbor_bootstrap_flags_bind() {
+  local root flags recorded field label mine theirs state recorded_key
+  if [ "$#" -ne 2 ]; then
+    harbor_die 3 usage "usage: harbor_bootstrap_flags_bind <state-root> <normalized-flag-set>"
+  fi
+  root="${1}"
+  flags="${2}"
+  recorded="$(harbor_bootstrap_flags_recorded "${root}")"
+  if [ -z "${recorded}" ]; then
+    state="{\"flags\":\"$(harbor_json_escape "${flags}")\"}"
+    harbor_journal_create "${root}" bootstrap-flags "${flags}" observed applied "${state}" "${state}"
+    harbor_step bootstrap-flags
+    harbor_log bootstrap "recorded the flag set of this run: ${flags}"
+    return 0
+  fi
+  if [ "${recorded}" = "${flags}" ]; then
+    harbor_log bootstrap "this run's flag set equals the recorded one: ${flags}"
+    return 0
+  fi
+  harbor_msg "this run's flag set differs from the one the first bootstrap of this node recorded, so nothing was mutated:"
+  for field in operator authorized-key-source adopt-firewall adopt-tailscale allow-lan-ssh harden-sshd tailscale-ssh; do
+    mine="$(harbor_bootstrap_flags_field "${flags}" "${field}")"
+    theirs="$(harbor_bootstrap_flags_field "${recorded}" "${field}")"
+    [ "${mine}" != "${theirs}" ] || continue
+    case "${field}" in
+      operator | authorized-key-source) label="${field}" ;;
+      *) label="--${field}" ;;
+    esac
+    harbor_msg "  ${label}: this run ${mine}, recorded ${theirs}"
+  done
+  recorded_key="$(harbor_bootstrap_flags_field "${recorded}" authorized-key-source)"
+  harbor_die 3 flags.mismatch \
+    "every later bootstrap run must carry the intent the first one recorded, so this run finished no posture it did not intend and applied none it did not either: rerun with the recorded values, which for a recovery run by another administrator, whose own account resolves another key path, means --authorized-key-file ${recorded_key}; changing the flag set of a bootstrapped node is not a rerun, so run sudo harbor teardown --level node and bootstrap again with the new flags"
+}
+# harbor_entrypoint_install_proof STATE_ROOT RELEASE: the proof the record-less and the
+# mismatch deferral forms of harbor_entrypoint_check additionally owe (design section
+# 5.2). Both forms let a run proceed against a release bootstrap.json does not vouch for,
+# so the root journal has to: RELEASE must be the target of an applied harbor-install
+# entry, which only Harbor writes, into a root-only journal, about a root-owned tree with
+# the installed modes, so the code such a run executes is code Harbor installed and no
+# operator can forge the proof. A journal holding none, or holding one that a teardown's
+# reverse walk has already marked reverted, exits 3 naming the reinstall and, since that
+# reinstall meets the release directory as an orphan under the section 5.2 rule and
+# removes nothing it cannot prove it created, what the administrator must clear by hand
+# first. Read-only: it takes no lock, writes nothing, and touches no artifact.
+harbor_entrypoint_install_proof() {
+  local root release entry phase proven="" newest=""
+  if [ "$#" -ne 2 ]; then
+    harbor_die 3 usage "usage: harbor_entrypoint_install_proof <state-root> <release>"
+  fi
+  root="${1}"
+  release="${2}"
+  for entry in "${root}"/journal/[0-9][0-9][0-9][0-9]-harbor-install.json; do
+    [ -e "${entry}" ] || continue
+    [ "$(harbor_journal_string "${entry}" target)" = "${release}" ] || continue
+    phase="$(harbor_journal_string "${entry}" phase)"
+    newest="${phase}"
+    [ "${phase}" != "applied" ] || proven=yes
+  done
+  if [ -n "${proven}" ]; then
+    harbor_log entrypoint "${release} is proven by an applied harbor-install entry in ${root}/journal"
+    return 0
+  fi
+  if [ "${newest}" = "reverted" ]; then
+    harbor_die 3 entrypoint.install_reverted \
+      "the harbor-install entry for ${release} in ${root}/journal is reverted, so the root journal records that release as unwound rather than installed, which is what a node-level teardown leaves behind: finish that teardown with sudo harbor teardown --level node, or reinstall with sudo ./bin/harbor bootstrap from a clean trusted checkout at an exact release tag, which meets ${release} as an orphan and removes nothing, so confirm nothing of yours is inside it and remove it, and any /usr/local/bin/harbor pointing into it, by hand first"
+  fi
+  harbor_die 3 entrypoint.install_proof \
+    "${root}/journal holds no applied harbor-install entry for ${release}, so Harbor cannot prove it installed the release it is executing and will not defer bootstrap.json's judgement to code it cannot vouch for: reinstall with sudo ./bin/harbor bootstrap from a clean trusted checkout at an exact release tag, which meets ${release} as an orphan and removes nothing, so confirm nothing of yours is inside it and remove it, and any /usr/local/bin/harbor pointing into it, by hand first"
+}

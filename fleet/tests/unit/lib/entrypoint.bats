@@ -2,14 +2,20 @@
 load '../test_helper'
 
 setup() {
-  # lib/entrypoint.sh depends on lib/log.sh (harbor_die, harbor_log) and lib/lock.sh
-  # (harbor_os), so this file sources those three rather than harbor_load_libs.
+  # lib/entrypoint.sh depends on lib/log.sh (harbor_die, harbor_log), lib/lock.sh
+  # (harbor_os, and the ownership assertion every journal write makes), and, for the
+  # flag binding and the harbor-install proof below, lib/journal.sh, so this file
+  # sources those four rather than harbor_load_libs.
   # shellcheck source=lib/log.sh
   . "${HARBOR_ROOT}/lib/log.sh"
   # shellcheck source=lib/lock.sh
   . "${HARBOR_ROOT}/lib/lock.sh"
+  # shellcheck source=lib/journal.sh
+  . "${HARBOR_ROOT}/lib/journal.sh"
   # shellcheck source=lib/entrypoint.sh
   . "${HARBOR_ROOT}/lib/entrypoint.sh"
+  # The lock identity is derived from the top-level PID, as it is for every command.
+  HARBOR_PID="$$"
   TEST_USER="$(id -un)"
   TAG="v0.3.0"
   OTHER_TAG="v0.2.0"
@@ -356,4 +362,264 @@ snapshot() {
   assert_equal "${status}" 3
   after="$(snapshot "${FIX_BASE}")"
   assert_equal "${after}" "${before}"
+}
+
+# The flag binding of design section 5.2 and the harbor-install proof the two
+# deferral forms owe. FIX_STATE stands in for /var/lib/harbor, as it already does
+# for the record above; nothing here writes outside the test's own directory.
+
+flags_fixture() {
+  # The invoking administrator's authorized_keys, the source a bootstrap run
+  # resolves when no --authorized-key-file is given.
+  OPERATOR=harbor
+  KEY_DIR="${FIX_BASE}/home/admin/.ssh"
+  mkdir -p "${KEY_DIR}"
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1 admin@example\n' >"${KEY_DIR}/authorized_keys"
+  KEY="${KEY_DIR}/authorized_keys"
+}
+
+other_admin_key() {
+  # A second administrator's own key path, the one a recovery run resolves.
+  OTHER_KEY_DIR="${FIX_BASE}/home/other/.ssh"
+  mkdir -p "${OTHER_KEY_DIR}"
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1 other@example\n' >"${OTHER_KEY_DIR}/authorized_keys"
+  OTHER_KEY="${OTHER_KEY_DIR}/authorized_keys"
+}
+
+state_journal() {
+  # The root state root as bootstrap leaves it before the flag binding runs: the
+  # journal directory exists and recovery has run over it.
+  harbor_journal_init "${FIX_STATE}"
+}
+
+hold_lock() {
+  harbor_lock_acquire "${FIX_STATE}" root
+}
+
+flags_set() {
+  harbor_bootstrap_flags_normalize "${OPERATOR}" "${KEY}" ${1+"$@"}
+}
+
+all_flags() {
+  printf '%s' '--tailscale-ssh --allow-lan-ssh --harden-sshd --adopt-firewall --adopt-tailscale'
+}
+
+flags_without() {
+  # all_flags with the named one left out, so a set differing in exactly one flag
+  local drop="${1}" f out="" sep=""
+  for f in $(all_flags); do
+    [ "${f}" != "${drop}" ] || continue
+    out="${out}${sep}${f}"
+    sep=" "
+  done
+  printf '%s' "${out}"
+}
+
+journal_entries() {
+  ls -A "${FIX_STATE}/journal"
+}
+
+@test "the normalized set is identical however the flags were ordered" {
+  flags_fixture
+  local forward reverse
+  forward="$(flags_set --tailscale-ssh --allow-lan-ssh --harden-sshd --adopt-firewall --adopt-tailscale)"
+  reverse="$(flags_set --adopt-tailscale --adopt-firewall --harden-sshd --allow-lan-ssh --tailscale-ssh)"
+  assert_equal "${reverse}" "${forward}"
+  assert_equal "$(flags_set --harden-sshd --tailscale-ssh)" "$(flags_set --tailscale-ssh --harden-sshd)"
+  # Whether a flag was given is the intent, so giving one twice is the same set.
+  assert_equal "$(flags_set --harden-sshd --harden-sshd)" "$(flags_set --harden-sshd)"
+  # Every flag of the set is rendered, given or not, in one fixed order.
+  assert_equal "${forward}" \
+    "operator=harbor authorized-key-source=${KEY} adopt-firewall=yes adopt-tailscale=yes allow-lan-ssh=yes harden-sshd=yes tailscale-ssh=yes"
+  assert_equal "$(flags_set)" \
+    "operator=harbor authorized-key-source=${KEY} adopt-firewall=no adopt-tailscale=no allow-lan-ssh=no harden-sshd=no tailscale-ssh=no"
+}
+
+@test "the normalized set is identical however the key path was spelled" {
+  flags_fixture
+  local canonical spelling
+  canonical="$(flags_set --harden-sshd)"
+  for spelling in "${KEY_DIR}/./authorized_keys" "${KEY_DIR}//authorized_keys" \
+    "${KEY_DIR}/../.ssh/authorized_keys" "${FIX_BASE}/home/admin/../admin/.ssh/authorized_keys"; do
+    assert_equal "$(harbor_bootstrap_flags_normalize "${OPERATOR}" "${spelling}" --harden-sshd)" "${canonical}"
+  done
+  # A spelling through a symlinked ancestor is the same path.
+  ln -s "${KEY_DIR}" "${FIX_BASE}/keys"
+  assert_equal "$(harbor_bootstrap_flags_normalize "${OPERATOR}" "${FIX_BASE}/keys/authorized_keys" --harden-sshd)" \
+    "${canonical}"
+  # A relative spelling is resolved against the working directory, never recorded.
+  assert_equal "$(cd "${KEY_DIR}" && harbor_bootstrap_flags_normalize "${OPERATOR}" authorized_keys --harden-sshd)" \
+    "${canonical}"
+}
+
+@test "the normalized set differs when any one flag, the operator, or the key path differs" {
+  flags_fixture
+  other_admin_key
+  local base f
+  base="$(flags_set --tailscale-ssh --allow-lan-ssh --harden-sshd --adopt-firewall --adopt-tailscale)"
+  for f in $(all_flags); do
+    refute [ "$(flags_set $(flags_without "${f}"))" = "${base}" ]
+  done
+  refute [ "$(harbor_bootstrap_flags_normalize other "${KEY}" $(all_flags))" = "${base}" ]
+  refute [ "$(harbor_bootstrap_flags_normalize "${OPERATOR}" "${OTHER_KEY}" $(all_flags))" = "${base}" ]
+}
+
+@test "an unrecognized flag is refused rather than dropped from the intent" {
+  flags_fixture
+  run harbor_bootstrap_flags_normalize "${OPERATOR}" "${KEY}" --harden-sshd --adopt-everything
+  assert_equal "${status}" 3
+  assert_output --partial 'flags.unknown'
+  assert_output --partial 'adopt-everything'
+  run harbor_bootstrap_flags_normalize "" "${KEY}"
+  assert_equal "${status}" 3
+  run harbor_bootstrap_flags_normalize "${OPERATOR}" "${FIX_BASE}/absent-dir/authorized_keys"
+  assert_equal "${status}" 3
+  assert_output --partial 'flags.key_source'
+}
+
+@test "the bootstrap-flags observer answers that intent has no observable state" {
+  flags_fixture
+  state_journal
+  # The op is dispatched by lib/journal.sh, so an entry of it is never unobservable
+  # for want of an observer; what it answers is that intent has no artifact to read.
+  assert_equal "$(harbor_journal_observe bootstrap-flags "$(flags_set)")" '"unobservable:intent"'
+  # An entry written directly applied is never observed by recovery. One that is
+  # prepared can only be a forged or hand-edited journal, and is undecidable rather
+  # than guessed.
+  fixture_entry "${FIX_STATE}" 0001 bootstrap-flags "$(flags_set)" observed prepared \
+    '{"flags":"x"}' '{"flags":"x"}'
+  run harbor_journal_recover "${FIX_STATE}"
+  assert_equal "${status}" 2
+  assert_output --partial 'journal.undecidable'
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" prepared
+}
+
+@test "the first run creates the bootstrap-flags entry applied, before any other entry and before any mutation" {
+  flags_fixture
+  state_journal
+  hold_lock
+  local flags before
+  flags="$(flags_set --harden-sshd --adopt-firewall)"
+  before="$(snapshot "${FIX_INSTALL}"; snapshot "${RECORD}"; snapshot "${KEY_DIR}")"
+  run harbor_bootstrap_flags_bind "${FIX_STATE}" "${flags}"
+  assert_success
+  # It is the journal's first entry, so it precedes every mutation Harbor journals.
+  assert_equal "$(journal_entries)" 0001-bootstrap-flags.json
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" applied
+  assert_equal "$(entry_raw "${FIX_STATE}" 0001 ownership)" '"observed"'
+  assert_equal "$(entry_raw "${FIX_STATE}" 0001 target)" "\"${flags}\""
+  assert_equal "$(entry_raw "${FIX_STATE}" 0001 pre_state)" "$(entry_raw "${FIX_STATE}" 0001 post_state)"
+  harbor_journal_validate "${FIX_STATE}/journal/0001-bootstrap-flags.json"
+  # Nothing was mutated: not the release, not the record, not the key source.
+  assert_equal "$(snapshot "${FIX_INSTALL}"; snapshot "${RECORD}"; snapshot "${KEY_DIR}")" "${before}"
+  harbor_lock_release "${FIX_STATE}"
+}
+
+@test "a later run whose set equals the recorded set proceeds and writes no new entry" {
+  flags_fixture
+  state_journal
+  hold_lock
+  local flags entry before
+  flags="$(flags_set --harden-sshd --adopt-firewall)"
+  harbor_bootstrap_flags_bind "${FIX_STATE}" "${flags}"
+  entry="${FIX_STATE}/journal/0001-bootstrap-flags.json"
+  before="$(cat "${entry}")"
+  # The same intent spelled another way is the same set, so a rerun proceeds.
+  run harbor_bootstrap_flags_bind "${FIX_STATE}" \
+    "$(harbor_bootstrap_flags_normalize "${OPERATOR}" "${KEY_DIR}/./authorized_keys" --adopt-firewall --harden-sshd)"
+  assert_success
+  assert_equal "$(journal_entries)" 0001-bootstrap-flags.json
+  assert_equal "$(cat "${entry}")" "${before}"
+  harbor_lock_release "${FIX_STATE}"
+}
+
+@test "each differing flag, the operator, and the key path exit 3 printing both values" {
+  flags_fixture
+  other_admin_key
+  state_journal
+  hold_lock
+  local recorded f
+  recorded="$(flags_set $(all_flags))"
+  harbor_bootstrap_flags_bind "${FIX_STATE}" "${recorded}"
+  for f in $(all_flags); do
+    run harbor_bootstrap_flags_bind "${FIX_STATE}" "$(flags_set $(flags_without "${f}"))"
+    assert_equal "${status}" 3
+    assert_output --partial 'flags.mismatch'
+    assert_output --partial " ${f}: this run no, recorded yes"
+  done
+  # The sixth differing input: the operator name.
+  run harbor_bootstrap_flags_bind "${FIX_STATE}" "$(harbor_bootstrap_flags_normalize other "${KEY}" $(all_flags))"
+  assert_equal "${status}" 3
+  assert_output --partial 'flags.mismatch'
+  assert_output --partial ' operator: this run other, recorded harbor'
+  # The seventh: the authorized-key source path.
+  run harbor_bootstrap_flags_bind "${FIX_STATE}" \
+    "$(harbor_bootstrap_flags_normalize "${OPERATOR}" "${OTHER_KEY}" $(all_flags))"
+  assert_equal "${status}" 3
+  assert_output --partial "${OTHER_KEY}"
+  assert_output --partial "${KEY}"
+  # Nothing was written by any of the refusals.
+  assert_equal "$(journal_entries)" 0001-bootstrap-flags.json
+  assert_equal "$(entry_raw "${FIX_STATE}" 0001 target)" "\"${recorded}\""
+  harbor_lock_release "${FIX_STATE}"
+}
+
+@test "a different administrator's key path exits 3 naming the recorded path" {
+  flags_fixture
+  other_admin_key
+  state_journal
+  hold_lock
+  local before
+  harbor_bootstrap_flags_bind "${FIX_STATE}" "$(flags_set --harden-sshd)"
+  before="$(snapshot "${FIX_INSTALL}"; snapshot "${RECORD}")"
+  run harbor_bootstrap_flags_bind "${FIX_STATE}" \
+    "$(harbor_bootstrap_flags_normalize "${OPERATOR}" "${OTHER_KEY}" --harden-sshd)"
+  assert_equal "${status}" 3
+  assert_output --partial 'flags.mismatch'
+  assert_output --partial " authorized-key-source: this run ${OTHER_KEY}, recorded ${KEY}"
+  # The runbook's line for that case, with the recorded path to pass back.
+  assert_output --partial "--authorized-key-file ${KEY}"
+  assert_equal "$(snapshot "${FIX_INSTALL}"; snapshot "${RECORD}")" "${before}"
+  harbor_lock_release "${FIX_STATE}"
+}
+
+@test "a release with no applied harbor-install entry exits 3 naming the reinstall" {
+  state_journal
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_proof'
+  assert_output --partial "${RELEASE_DIR}"
+  assert_output --partial './bin/harbor bootstrap'
+  # An applied entry for another release directory proves nothing about this one.
+  fixture_entry "${FIX_STATE}" 0001 harbor-install "${FIX_INSTALL}/${OTHER_TAG}" created applied \
+    '"absent"' '{"tree_sha256":"aaaa"}'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_proof'
+  # Nor does one that recovery could not decide.
+  fixture_entry "${FIX_STATE}" 0002 harbor-install "${RELEASE_DIR}" created prepared \
+    '"absent"' '{"tree_sha256":"bbbb"}'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_proof'
+  # The applied entry for this release directory is the proof.
+  fixture_entry "${FIX_STATE}" 0003 harbor-install "${RELEASE_DIR}" created applied \
+    '"absent"' '{"tree_sha256":"bbbb"}'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+}
+
+@test "a reverted harbor-install entry for the executing release exits 3 naming the reinstall" {
+  state_journal
+  fixture_entry "${FIX_STATE}" 0001 harbor-install "${RELEASE_DIR}" created reverted \
+    '"absent"' '{"tree_sha256":"bbbb"}'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_reverted'
+  assert_output --partial "${RELEASE_DIR}"
+  assert_output --partial './bin/harbor bootstrap'
+  assert_output --partial 'teardown'
+  # The proof is read-only: a refusal leaves the journal exactly as it was.
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" reverted
+  assert_equal "$(journal_entries)" 0001-harbor-install.json
 }
