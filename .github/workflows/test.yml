@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Show the shell the unit lane runs under
+        run: /bin/bash -c 'echo "bash ${BASH_VERSION} on $(uname -sr)"'
+      - name: Unit tests (Ubuntu, every directory)
+        if: runner.os == 'Linux'
+        working-directory: fleet
+        run: tests/run_unit.sh
+      - name: Unit tests (macOS, lib and bin under the system bash 3.2)
+        if: runner.os == 'macOS'
+        working-directory: fleet
+        env:
+          HARBOR_EXPECT_BASH32: "1"
+        run: tests/run_unit.sh tests/unit/lib tests/unit/bin

@@ -1,0 +1,42 @@
+#!/bin/bash
+# Generic vendor shim (design section 7). Vendor shims are symlinks to this file and
+# take their name from the symlink. The shim appends "<name>\t<arg>..." to
+# ${HARBOR_SHIM_LOG} when set, then replies from
+# ${HARBOR_SHIM_FIXTURES}/<name>/<scenario>/<key>.out with the exit code in <key>.exit
+# (default 0), where <key> is the argv joined by "_" with "/" replaced by "%" and
+# "_noargs" for no arguments, and <scenario> is ${HARBOR_SHIM_SCENARIO:-healthy}.
+# A missing fixture is a test error: exit 97.
+set -euo pipefail
+shim_name="$(basename "${0}")"
+shim_self="${0}"
+while [ -L "${shim_self}" ]; do
+  shim_link="$(readlink "${shim_self}")"
+  case "${shim_link}" in
+    /*) shim_self="${shim_link}" ;;
+    *) shim_self="$(dirname "${shim_self}")/${shim_link}" ;;
+  esac
+done
+shim_dir="$(cd "$(dirname "${shim_self}")" && pwd -P)"
+fixtures="${HARBOR_SHIM_FIXTURES:-${shim_dir}/../../fixtures/shims}"
+scenario="${HARBOR_SHIM_SCENARIO:-healthy}"
+if [ -n "${HARBOR_SHIM_LOG:-}" ]; then
+  {
+    printf '%s' "${shim_name}"
+    for shim_arg in ${1+"$@"}; do
+      printf '\t%s' "${shim_arg}"
+    done
+    printf '\n'
+  } >>"${HARBOR_SHIM_LOG}"
+fi
+key="$(printf '%s' ${1+"$*"} | tr ' /' '_%')"
+[ -n "${key}" ] || key="_noargs"
+reply="${fixtures}/${shim_name}/${scenario}/${key}"
+if [ ! -f "${reply}.out" ]; then
+  printf 'harbor-shim: no fixture %s.out\n' "${reply}" >&2
+  exit 97
+fi
+cat "${reply}.out"
+if [ -f "${reply}.exit" ]; then
+  exit "$(cat "${reply}.exit")"
+fi
+exit 0

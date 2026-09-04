@@ -1,0 +1,62 @@
+#!/bin/bash
+# Harbor entry point (design section 4): dispatches subcommands and contains no logic.
+set -euo pipefail
+LC_ALL=C
+export LC_ALL
+HARBOR_PID=$$
+HARBOR_CMDLINE="harbor ${*:-}"
+HARBOR_JSON=0
+harbor_self="${0}"
+while [ -L "${harbor_self}" ]; do
+  harbor_link="$(readlink "${harbor_self}")"
+  case "${harbor_link}" in
+    /*) harbor_self="${harbor_link}" ;;
+    *) harbor_self="$(dirname "${harbor_self}")/${harbor_link}" ;;
+  esac
+done
+HARBOR_BIN_DIR="$(cd "$(dirname "${harbor_self}")" && pwd -P)"
+HARBOR_ROOT="$(dirname "${HARBOR_BIN_DIR}")"
+export HARBOR_ROOT
+# shellcheck source=lib/log.sh
+. "${HARBOR_ROOT}/lib/log.sh"
+# shellcheck source=lib/checks.sh
+. "${HARBOR_ROOT}/lib/checks.sh"
+# shellcheck source=lib/versions.sh
+. "${HARBOR_ROOT}/lib/versions.sh"
+# shellcheck source=lib/lock.sh
+. "${HARBOR_ROOT}/lib/lock.sh"
+# shellcheck source=lib/journal.sh
+. "${HARBOR_ROOT}/lib/journal.sh"
+harbor_usage() {
+  cat <<'USAGE'
+usage: harbor <subcommand> [options]
+
+subcommands:
+  journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
+                                      without touching its artifact (design section 3.7)
+  help                                print this text
+
+Exit codes: 0 success, 1 degraded, 2 broken, 3 precondition or usage, 4 interrupted.
+USAGE
+}
+harbor_install_traps
+harbor_cmd="${1:-}"
+case "${harbor_cmd}" in
+  '')
+    harbor_usage >&2
+    exit 3
+    ;;
+  help | --help | -h)
+    harbor_usage
+    ;;
+  journal)
+    shift
+    harbor_journal_cmd ${1+"$@"}
+    ;;
+  *)
+    printf '{"error":"unknown_subcommand","subcommand":"%s"}\n' "$(harbor_json_escape "${harbor_cmd}")"
+    printf 'harbor: unknown subcommand: %s\n' "${harbor_cmd}" >&2
+    exit 3
+    ;;
+esac
+HARBOR_COMPLETED=1

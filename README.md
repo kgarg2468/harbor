@@ -9,18 +9,16 @@ controller with it, using only the vendors' own tools (Tailscale, Node.js, Claud
 Design complete, implementation in progress. This repository currently contains:
 
 - the approved design specification, `docs/superpowers/specs/2026-09-01-harbor-design.md`;
-- the first slice of the PR 2 foundation under `fleet/`: the libraries for logging, checks,
-  version pinning, and lock identity, plus the Bats test harness.
-
-The rest of the foundation (the `fleet/bin/harbor` dispatcher, lock acquisition, the ownership
-journal, `harbor journal resolve`, the vendor shim, the placeholder scan, and CI) lands in the
-follow-up pull request stacked on this one.
+- the foundation from PR 2 under `fleet/`: the `fleet/bin/harbor` dispatcher, the `fleet/lib/`
+  libraries for logging, checks, version pinning, the command lock, and the ownership journal,
+  the `harbor journal resolve` command, the Bats test harness, the vendor shim skeleton, the
+  placeholder scan, and CI.
 
 Nothing here installs, configures, or removes anything on a node yet. `harbor bootstrap`,
 `harbor provision`, `harbor status`, `harbor upgrade`, `harbor teardown`, and the macOS client
 arrive in later pull requests in the order given by section 8 of the design.
 
-## Layout (target for the full foundation)
+## Layout
 
 - `fleet/`: all of Harbor's code. Everything below is relative to it.
 - `fleet/bin/harbor`: the single entry point. It dispatches subcommands and contains no logic.
