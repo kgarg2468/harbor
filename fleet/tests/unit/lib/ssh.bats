@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 load '../test_helper'
 
+TAB="$(printf '\t')"
+
 setup() {
   # lib/ssh.sh depends on lib/log.sh, lib/lock.sh, and lib/journal.sh, so this file
   # sources those four rather than harbor_load_libs.
@@ -39,6 +41,197 @@ setup() {
   chmod 0644 "${GIVEN}"
   SUDO_USER=alice
   export SUDO_USER
+  # The installation user of design section 3.5: the account that invoked sudo, whose
+  # effective sshd configuration the operator drop-in must leave untouched.
+  ADMIN=alice
+  # sshd and systemctl resolve to the PR 2 shim through links this test makes in its
+  # own temporary directory, so no real daemon is ever asked and no real unit is ever
+  # reloaded. The destination configuration root is a fixture directory, never /etc:
+  # it is a parameter of the functions under test.
+  BIN="${BATS_TEST_TMPDIR}/bin"
+  mkdir -p "${BIN}"
+  ln -s "${HARBOR_ROOT}/tests/shims/bin/harbor-shim" "${BIN}/sshd"
+  ln -s "${HARBOR_ROOT}/tests/shims/bin/harbor-shim" "${BIN}/systemctl"
+  PATH="${BIN}:${PATH}"
+  export PATH
+  HARBOR_SHIM_LOG="${BATS_TEST_TMPDIR}/shim.log"
+  export HARBOR_SHIM_LOG
+  FX="${BATS_TEST_TMPDIR}/fx"
+  HARBOR_SHIM_FIXTURES="${FX}"
+  export HARBOR_SHIM_FIXTURES
+  WITNESS="${BATS_TEST_TMPDIR}/witness.log"
+  ETC="${BATS_TEST_TMPDIR}/etc"
+  DROPIN="${ETC}/ssh/sshd_config.d/50-harbor-operator.conf"
+  GLOBAL_DROPIN="${ETC}/ssh/sshd_config.d/51-harbor-global.conf"
+  mkdir -p "${FX}/sshd/healthy" "${FX}/systemctl/healthy"
+  service_state active
+  reload_succeeds
+  sshd_refresh
+}
+
+sshd_config_lines() {
+  # The effective configuration of a node whose sshd has been asked nothing yet: the
+  # directives both users start with. Only the keywords the drop-ins can move are
+  # interesting; the rest are here so that "unchanged for every directive" has more
+  # than the interesting ones to be true of.
+  printf 'port 22\n'
+  printf 'permitrootlogin prohibit-password\n'
+  printf 'pubkeyauthentication yes\n'
+  printf 'passwordauthentication yes\n'
+  printf 'kbdinteractiveauthentication yes\n'
+  printf 'usepam yes\n'
+  printf 'x11forwarding yes\n'
+  printf 'clientaliveinterval 0\n'
+}
+
+admin_config() {
+  # What sshd -T -C user=<installation user> prints, computed from the drop-ins that
+  # are on disk at this instant rather than canned, which is what makes the
+  # before-and-after proof a real one.
+  local lines
+  lines="$(sshd_config_lines)"
+  # The global drop-in of --harden-sshd changes the installation user's own
+  # configuration: that is what the flag is.
+  if [ -f "${GLOBAL_DROPIN}" ]; then
+    lines="$(printf '%s\n' "${lines}" \
+      | sed -e 's/^permitrootlogin .*/permitrootlogin no/' -e 's/^passwordauthentication .*/passwordauthentication no/')"
+  fi
+  # LEAK=1 models the defect the proof exists to catch: an operator drop-in that also
+  # moves a directive for the installation user, and adds one they never had.
+  if [ "${LEAK:-0}" = 1 ] && [ -f "${DROPIN}" ]; then
+    lines="$(printf '%s\n' "${lines}" | sed -e 's/^passwordauthentication .*/passwordauthentication no/')"
+    lines="${lines}
+maxauthtries 3"
+  fi
+  # SHUFFLE=1 prints the same directives in another order, which a proof that compares
+  # the whole normalized output must be indifferent to.
+  if [ "${SHUFFLE:-0}" = 1 ]; then
+    lines="$(printf '%s\n' "${lines}" | sort -r)"
+  fi
+  printf '%s\n' "${lines}"
+}
+
+operator_config() {
+  # What sshd -T -C user=<operator> prints. The drop-in on disk is what makes the two
+  # no values appear; OPERATOR_HARDENING says which of them the modeled sshd honors,
+  # so a drop-in that did not take effect can be tested one directive at a time.
+  local lines
+  lines="$(sshd_config_lines)"
+  [ -f "${DROPIN}" ] || {
+    printf '%s\n' "${lines}"
+    return 0
+  }
+  case "${OPERATOR_HARDENING:-both}" in
+    both)
+      lines="$(printf '%s\n' "${lines}" \
+        | sed -e 's/^passwordauthentication .*/passwordauthentication no/' \
+          -e 's/^kbdinteractiveauthentication .*/kbdinteractiveauthentication no/')"
+      ;;
+    password)
+      lines="$(printf '%s\n' "${lines}" | sed -e 's/^passwordauthentication .*/passwordauthentication no/')"
+      ;;
+    none) ;;
+  esac
+  printf '%s\n' "${lines}"
+}
+
+sshd_refresh() {
+  # The shim replies from files, so the modeled answers are rewritten immediately
+  # before every call from the drop-ins that exist at that moment.
+  admin_config >"${FX}/sshd/healthy/-T_-C_user=${ADMIN}.out"
+  operator_config >"${FX}/sshd/healthy/-T_-C_user=${OPERATOR}.out"
+  # EMPTY_CONFIG=1 models an sshd that exits 0 and says nothing, which no comparison
+  # can be made against.
+  [ "${EMPTY_CONFIG:-0}" = 0 ] || : >"${FX}/sshd/healthy/-T_-C_user=${ADMIN}.out"
+  if [ "${SYNTAX_OK:-1}" = 1 ]; then
+    : >"${FX}/sshd/healthy/-t.out"
+    rm -f "${FX}/sshd/healthy/-t.exit"
+  else
+    printf 'line 5: Bad configuration option: Matchh\n' >"${FX}/sshd/healthy/-t.out"
+    printf '255\n' >"${FX}/sshd/healthy/-t.exit"
+  fi
+}
+
+sshd() {
+  # The shim is stateless, so the effect the drop-ins have on sshd is modeled here and
+  # the shim is still what runs and logs. The witness records, for every call, whether
+  # the operator drop-in was on disk when the call was made, which is how "the
+  # installation user's baseline was taken before the drop-in existed" is asserted.
+  if [ -f "${DROPIN}" ]; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi >>"${WITNESS}"
+  printf '\t%s\n' "${*}" >>"${WITNESS}"
+  sshd_refresh
+  command sshd ${1+"$@"} || return "$?"
+}
+
+service_state() {
+  # service_state WORD: what systemctl is-active ssh.service answers. Only active
+  # exits 0, as the real systemctl does, so the library is proven to decide on the
+  # word it prints and not on the exit code.
+  printf '%s\n' "${1}" >"${FX}/systemctl/healthy/is-active_ssh.service.out"
+  if [ "${1}" = active ]; then
+    rm -f "${FX}/systemctl/healthy/is-active_ssh.service.exit"
+  else
+    printf '3\n' >"${FX}/systemctl/healthy/is-active_ssh.service.exit"
+  fi
+}
+
+reload_succeeds() {
+  : >"${FX}/systemctl/healthy/reload_ssh.service.out"
+  rm -f "${FX}/systemctl/healthy/reload_ssh.service.exit"
+}
+
+reload_fails() {
+  printf 'Job for ssh.service failed.\n' >"${FX}/systemctl/healthy/reload_ssh.service.out"
+  printf '1\n' >"${FX}/systemctl/healthy/reload_ssh.service.exit"
+}
+
+shim_lines() {
+  # Every shim call, in order. A shim log that was never created is no calls.
+  [ -e "${HARBOR_SHIM_LOG}" ] || return 0
+  cat "${HARBOR_SHIM_LOG}"
+}
+
+shim_calls() {
+  # shim_calls [PATTERN]: how many shim calls the log holds, all of them by default
+  [ -e "${HARBOR_SHIM_LOG}" ] || {
+    printf '0\n'
+    return 0
+  }
+  grep -c "${1:-.}" "${HARBOR_SHIM_LOG}" || true
+}
+
+dropin_settings() {
+  # A drop-in without its comment header and blank lines.
+  grep -v -e '^#' -e '^[[:space:]]*$' "${1}"
+}
+
+assert_entry() {
+  # assert_entry SEQ OP TARGET OWNERSHIP PHASE PRE POST
+  assert [ -f "${FIX_ROOT}/journal/${1}-${2}.json" ]
+  assert_equal "$(entry_raw "${FIX_ROOT}" "${1}" target)" "\"${3}\""
+  assert_equal "$(entry_raw "${FIX_ROOT}" "${1}" ownership)" "\"${4}\""
+  assert_equal "$(entry_phase "${FIX_ROOT}" "${1}")" "${5}"
+  assert_equal "$(entry_raw "${FIX_ROOT}" "${1}" pre_state)" "${6}"
+  assert_equal "$(entry_raw "${FIX_ROOT}" "${1}" post_state)" "${7}"
+}
+
+code_naming() {
+  # code_naming PATTERN: the lines of lib/ssh.sh that are not comments and name
+  # PATTERN. The prose above a function may name a production path to explain itself;
+  # only the code can reach one.
+  grep -v '^[[:space:]]*#' "${HARBOR_ROOT}/lib/ssh.sh" | grep "${1}" || true
+}
+
+configure() {
+  harbor_ssh_configure "${FIX_ROOT}" "${OPERATOR}" "${ADMIN}" "${ETC}"
+}
+
+harden() {
+  harbor_ssh_harden "${FIX_ROOT}" "${ADMIN}" "${ETC}"
 }
 
 seed_key() {
@@ -337,5 +530,343 @@ authorize() {
   run harbor_ssh_authorize "${FIX_ROOT}" "${OPERATOR}" "${OP_HOME}" "${GIVEN}" extra
   assert_equal "${status}" 3
   assert_output --partial usage
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the operator drop-in is one Match block for the operator, at 0644 under the destination root it is given" {
+  acquire
+  run configure
+  assert_success
+  run dropin_settings "${DROPIN}"
+  assert_line --index 0 "Match User ${OPERATOR}"
+  assert_line --index 1 '  PubkeyAuthentication yes'
+  assert_line --index 2 '  PasswordAuthentication no'
+  assert_line --index 3 '  KbdInteractiveAuthentication no'
+  assert_equal "${#lines[@]}" 4
+  # No directive that changes who may log in, anywhere in the file, comments included.
+  run cat "${DROPIN}"
+  refute_output --partial AllowUsers
+  refute_output --partial DenyUsers
+  refute_output --partial AllowGroups
+  refute_output --partial DenyGroups
+  refute_output --partial PermitRootLogin
+  assert_equal "$(harbor_stat_mode "${DROPIN}")" 0644
+  assert_equal "$(harbor_stat_mode "$(dirname "${DROPIN}")")" 0755
+  assert_entry 0001 file "${DROPIN}" created applied '"absent"' "$(harbor_observe_file "${DROPIN}")"
+  run ls -A "$(dirname "${DROPIN}")"
+  refute_output --partial '.tmp'
+  assert_output 50-harbor-operator.conf
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the production drop-in paths are the design section 3.5 paths and are only defaults" {
+  assert_equal "$(harbor_ssh_dropin_path)" /etc/ssh/sshd_config.d/50-harbor-operator.conf
+  assert_equal "$(harbor_ssh_global_dropin_path)" /etc/ssh/sshd_config.d/51-harbor-global.conf
+  assert_equal "$(harbor_ssh_dropin_path "${ETC}")" "${DROPIN}"
+  assert_equal "$(harbor_ssh_global_dropin_path "${ETC}")" "${GLOBAL_DROPIN}"
+  acquire
+  run configure
+  assert_success
+  run harden
+  assert_success
+  # Nothing outside the fixture configuration root was written.
+  run find "${BATS_TEST_TMPDIR}" -name '5?-harbor-*.conf'
+  assert_line --index 0 --regexp "^${ETC}/ssh/sshd_config.d/5[01]-harbor-"
+  assert_equal "${#lines[@]}" 2
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the installation user's whole effective configuration is captured before the drop-in and proved unchanged after it" {
+  acquire
+  run configure
+  assert_success
+  run shim_lines
+  assert_line --index 0 "sshd${TAB}-T${TAB}-C${TAB}user=${ADMIN}"
+  assert_line --index 1 "sshd${TAB}-t"
+  assert_line --index 2 "sshd${TAB}-T${TAB}-C${TAB}user=${ADMIN}"
+  assert_line --index 3 "sshd${TAB}-T${TAB}-C${TAB}user=${OPERATOR}"
+  assert_line --index 4 "systemctl${TAB}is-active${TAB}ssh.service"
+  assert_line --index 5 "systemctl${TAB}reload${TAB}ssh.service"
+  assert_equal "${#lines[@]}" 6
+  # The baseline is the state of the node before the drop-in existed, and the second
+  # reading is taken with it in place: that is what makes the comparison a proof.
+  run cat "${WITNESS}"
+  assert_line --index 0 "absent${TAB}-T -C user=${ADMIN}"
+  assert_line --index 1 "present${TAB}-t"
+  assert_line --index 2 "present${TAB}-T -C user=${ADMIN}"
+  assert_line --index 3 "present${TAB}-T -C user=${OPERATOR}"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a drop-in that moves or adds any directive for the installation user exits 2, names it, and reloads nothing" {
+  LEAK=1
+  acquire
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.admin_changed'
+  assert_output --partial "${ADMIN}"
+  # Every directive that differs is named, the one that moved and the one that appeared.
+  assert_output --partial '-passwordauthentication yes'
+  assert_output --partial '+passwordauthentication no'
+  assert_output --partial '+maxauthtries 3'
+  assert_output --partial "${DROPIN}"
+  assert_equal "$(shim_calls "reload")" 0
+  # The file is in place and the entry stays prepared for recovery, which is what the
+  # message says.
+  assert [ -f "${DROPIN}" ]
+  assert_entry 0001 file "${DROPIN}" created prepared '"absent"' "$(harbor_observe_file "${DROPIN}")"
+  # The operator is never asked about while the installation user's proof is failing.
+  assert_equal "$(shim_calls "user=${OPERATOR}")" 0
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the order sshd prints its directives in does not defeat the proof" {
+  SHUFFLE=1
+  acquire
+  run configure
+  assert_success
+  assert_equal "$(shim_calls "reload")" 1
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "both no values are asserted for the operator, and a drop-in that did not take effect exits 2 without reloading" {
+  OPERATOR_HARDENING=none
+  acquire
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.operator_not_hardened'
+  assert_output --partial 'passwordauthentication no'
+  assert_output --partial "${OPERATOR}"
+  assert_equal "$(shim_calls "reload")" 0
+  assert_entry 0001 file "${DROPIN}" created prepared '"absent"' "$(harbor_observe_file "${DROPIN}")"
+  # The other half of the pair: password authentication is off but keyboard-interactive
+  # is not, which is still not the row of design section 5.2.
+  OPERATOR_HARDENING=password
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.operator_not_hardened'
+  assert_output --partial 'kbdinteractiveauthentication no'
+  assert_equal "$(shim_calls "reload")" 0
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a failing sshd -t reloads nothing and leaves the entry prepared" {
+  SYNTAX_OK=0
+  acquire
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.syntax'
+  assert_output --partial 'Bad configuration option'
+  assert_output --partial "${DROPIN}"
+  assert_equal "$(shim_calls "reload")" 0
+  # sshd is never asked for an effective configuration once its own syntax check has
+  # refused the file.
+  assert_equal "$(shim_calls "user=${OPERATOR}")" 0
+  assert_entry 0001 file "${DROPIN}" created prepared '"absent"' "$(harbor_observe_file "${DROPIN}")"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a rerun that finds the drop-in identical journals observed, rewrites nothing, and reloads nothing" {
+  acquire
+  run configure
+  assert_success
+  before="$(harbor_observe_file "${DROPIN}")"
+  : >"${HARBOR_SHIM_LOG}"
+  run configure
+  assert_success
+  assert_equal "$(harbor_observe_file "${DROPIN}")" "${before}"
+  assert_equal "$(shim_calls "reload")" 0
+  assert_equal "$(shim_calls "is-active")" 0
+  # The assertions still run: they are inspections, and they are what proves the
+  # posture of a node Harbor did not have to touch.
+  assert_equal "$(shim_calls "^sshd${TAB}-t\$")" 1
+  assert_entry 0002 file "${DROPIN}" observed applied "${before}" "${before}"
+  run ls -A "${FIX_ROOT}/journal"
+  assert_equal "${#lines[@]}" 2
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a failing reload exits 2 after the entry is applied" {
+  reload_fails
+  acquire
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.reload'
+  assert_output --partial 'ssh.service'
+  assert_entry 0001 file "${DROPIN}" created applied '"absent"' "$(harbor_observe_file "${DROPIN}")"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a socket-activated ssh.service is not reloaded, and an unreadable unit state is fail-closed" {
+  service_state inactive
+  acquire
+  run configure
+  assert_success
+  assert_output --partial 'inactive'
+  assert_equal "$(shim_calls "reload")" 0
+  assert_entry 0001 file "${DROPIN}" created applied '"absent"' "$(harbor_observe_file "${DROPIN}")"
+  # A word outside the vocabulary is what an unreachable manager prints, and it is
+  # fail-closed rather than read as "nothing to reload".
+  rm -f "${DROPIN}"
+  service_state 'Failed to connect to bus: No such file or directory'
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.service_state'
+  assert_equal "$(shim_calls "reload")" 0
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a foreign non-regular file at a drop-in path exits 3 untouched, with nothing journaled and no sshd call" {
+  mkdir -p "${DROPIN}"
+  acquire
+  run configure
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.dropin_foreign'
+  assert_output --partial "${DROPIN}"
+  assert [ -d "${DROPIN}" ]
+  assert_equal "$(shim_calls)" 0
+  assert_equal "$(journal_names)" ""
+  # A symlink is not a regular file either, and Harbor removes nothing it cannot prove
+  # it created.
+  rm -r "${DROPIN}"
+  ln -s "${BATS_TEST_TMPDIR}/elsewhere" "${DROPIN}"
+  run configure
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.dropin_foreign'
+  assert [ -L "${DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "recovery decides a prepared drop-in entry from the states harbor_observe_file renders" {
+  acquire
+  run configure
+  assert_success
+  post="$(harbor_observe_file "${DROPIN}")"
+  rm -f "${DROPIN}"
+  fixture_entry "${FIX_ROOT}" 0002 file "${DROPIN}" created prepared '"absent"' "${post}"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  run configure
+  assert_success
+  fixture_entry "${FIX_ROOT}" 0004 file "${DROPIN}" created prepared '"absent"' "${post}"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0004)" applied
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd refuses unless the installation user has an authorized key" {
+  acquire
+  # Missing: the global drop-in would take away the installation user's password and
+  # leave them nothing to log in with.
+  rm "${HOMES}/${ADMIN}/.ssh/authorized_keys"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_no_key'
+  assert_output --partial "${HOMES}/${ADMIN}/.ssh/authorized_keys"
+  assert_output --partial '--harden-sshd'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  # Empty is not a key either.
+  : >"${HOMES}/${ADMIN}/.ssh/authorized_keys"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_no_key'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  # Unreadable is not a key either: these tests are unprivileged, so mode 0000 really
+  # is unreadable.
+  printf '%s\n' "${ALICE_KEY}" >"${HOMES}/${ADMIN}/.ssh/authorized_keys"
+  chmod 0000 "${HOMES}/${ADMIN}/.ssh/authorized_keys"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_no_key'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  chmod 0600 "${HOMES}/${ADMIN}/.ssh/authorized_keys"
+  run harden
+  assert_success
+  assert [ -f "${GLOBAL_DROPIN}" ]
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd writes a separate journaled file that the unchanged-directive proof does not judge" {
+  acquire
+  run configure
+  assert_success
+  operator_dropin="$(harbor_observe_file "${DROPIN}")"
+  : >"${HARBOR_SHIM_LOG}"
+  run harden
+  assert_success
+  run dropin_settings "${GLOBAL_DROPIN}"
+  assert_line --index 0 'PermitRootLogin no'
+  assert_line --index 1 'PasswordAuthentication no'
+  assert_equal "${#lines[@]}" 2
+  assert_equal "$(harbor_stat_mode "${GLOBAL_DROPIN}")" 0644
+  # Its own entry, at its own path, and the operator drop-in untouched.
+  assert_entry 0002 file "${GLOBAL_DROPIN}" created applied '"absent"' "$(harbor_observe_file "${GLOBAL_DROPIN}")"
+  assert_equal "$(harbor_observe_file "${DROPIN}")" "${operator_dropin}"
+  # Global hardening changes the installation user's own effective configuration, so
+  # the operator drop-in's unchanged-for-every-directive proof is not applied to it.
+  run admin_config
+  assert_output --partial 'permitrootlogin no'
+  run shim_lines
+  assert_line --index 0 "sshd${TAB}-t"
+  assert_line --index 1 "systemctl${TAB}is-active${TAB}ssh.service"
+  assert_line --index 2 "systemctl${TAB}reload${TAB}ssh.service"
+  assert_equal "${#lines[@]}" 3
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a user name sshd could not safely be told is refused, and the argument list is checked" {
+  acquire
+  run harbor_ssh_configure "${FIX_ROOT}" 'harbor
+Match User root' "${ADMIN}" "${ETC}"
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.user_name'
+  assert [ ! -e "${DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  run harbor_ssh_configure "${FIX_ROOT}" "${OPERATOR}" 'alice bob' "${ETC}"
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.user_name'
+  run harbor_ssh_configure "${FIX_ROOT}" "${OPERATOR}"
+  assert_equal "${status}" 3
+  assert_output --partial usage
+  run harbor_ssh_configure "${FIX_ROOT}" "${OPERATOR}" "${ADMIN}" "${ETC}" extra
+  assert_equal "${status}" 3
+  assert_output --partial usage
+  run harbor_ssh_harden "${FIX_ROOT}"
+  assert_equal "${status}" 3
+  assert_output --partial usage
+  assert_equal "$(journal_names)" ""
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "lib/ssh.sh names no state root and reaches no system path but the /etc default" {
+  run code_naming '/var/lib\|/usr/local\|/opt\|/home'
+  assert_output ''
+  # /etc is reached by no line of code but the default of the two destination-root
+  # parameters, so no unit test can reach the production configuration root.
+  run code_naming '/etc'
+  assert_line --index 0 --partial '"${1:-/etc}"'
+  assert_line --index 1 --partial '"${1:-/etc}"'
+  assert_equal "${#lines[@]}" 2
+}
+
+@test "an sshd that exits 0 and prints no effective configuration at all is fail-closed" {
+  EMPTY_CONFIG=1
+  acquire
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.effective'
+  assert_output --partial "${ADMIN}"
+  # It is refused before anything is written, so the proof is never passed by an empty
+  # answer being equal to another empty answer.
+  assert [ ! -e "${DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls "reload")" 0
   harbor_lock_release "${FIX_ROOT}"
 }

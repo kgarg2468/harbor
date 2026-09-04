@@ -175,3 +175,348 @@ harbor_ssh_authorize() {
   harbor_step ssh-key-applied
   harbor_msg "copied the authorized key from ${source} to ${target}"
 }
+# The operator-scoped sshd drop-in of design section 3.5 and the SSH row of section
+# 5.2, the global --harden-sshd drop-in beside it, and the assertions that prove both.
+# The destination configuration root is a parameter defaulting to the production /etc,
+# exactly as lib/power.sh takes the root of its logind drop-in, so a unit test writes
+# inside its own fixture root and no unit test can reach /etc. Each drop-in is one
+# journaled file transaction of design section 3.7: a temporary file, a rename, and
+# both states rendered by harbor_observe_file, which is what harbor_journal_observe
+# hands a file entry, so an entry left prepared by a crash between the rename and the
+# applied write is decidable by recovery. sshd and systemctl are asked through the
+# PATH, which is the seam the unit lane substitutes.
+HARBOR_SSH_UNIT="ssh.service"
+# harbor_ssh_dropin_path [DEST_ROOT] and harbor_ssh_global_dropin_path [DEST_ROOT]: the
+# two drop-ins of design section 3.5 under the configuration root DEST_ROOT, which
+# defaults to the production /etc. They are separate files with separate journal
+# entries because --harden-sshd is removable on its own with
+# harbor teardown --unharden-sshd, which can only be true of a file of its own.
+harbor_ssh_dropin_path() {
+  printf '%s/ssh/sshd_config.d/50-harbor-operator.conf' "${1:-/etc}"
+}
+harbor_ssh_global_dropin_path() {
+  printf '%s/ssh/sshd_config.d/51-harbor-global.conf' "${1:-/etc}"
+}
+# harbor_ssh_operator_render OPERATOR: the operator drop-in. One Match block naming one
+# account, holding only the three authentication keywords of design section 3.5, and no
+# keyword that changes who may log in. Byte-stable, so a rerun observes the same sha256
+# and rewrites nothing.
+#
+# The Match block is the whole file and ends with it. OpenSSH's Include saves the
+# including file's match state and restores it after the included file is parsed
+# (servconf.c, "Don't let included files clobber the containing file's Match state"), so
+# this block scopes to this file alone and nothing in /etc/ssh/sshd_config after the
+# Include line becomes conditional on it. That is what lets the drop-in be a Match block
+# at all: a block that leaked would put the rest of the distribution's own configuration
+# inside it, where keywords like UsePAM and Subsystem are not permitted, and sshd -t
+# would refuse the whole configuration.
+harbor_ssh_operator_render() {
+  printf '# Managed by Harbor: public-key-only authentication for one account.\n'
+  printf '# It is scoped to that account and adds no keyword that decides who may log in.\n'
+  printf '# Remove this file and reload %s to restore the system default for it.\n' "${HARBOR_SSH_UNIT}"
+  printf 'Match User %s\n' "${1}"
+  printf '  PubkeyAuthentication yes\n'
+  printf '  PasswordAuthentication no\n'
+  printf '  KbdInteractiveAuthentication no\n'
+}
+# harbor_ssh_global_render: the --harden-sshd drop-in of design section 3.5. It is
+# global by intent, which is why it is opt-in, journaled on its own, and refused unless
+# the installation user has an authorized key.
+harbor_ssh_global_render() {
+  printf '# Managed by Harbor: global SSH hardening, written only for --harden-sshd.\n'
+  printf '# Remove it with: harbor teardown --unharden-sshd.\n'
+  printf 'PermitRootLogin no\n'
+  printf 'PasswordAuthentication no\n'
+}
+# harbor_ssh_check_user_name NAME ROLE: refuse a name that could not be written into a
+# configuration file as one word. The operator name reaches both the drop-in and an
+# sshd -C argument, so a name carrying a newline, a space, or a shell or glob character
+# is refused before anything is written rather than rendered into a file where it would
+# be a second directive.
+harbor_ssh_check_user_name() {
+  case "${1}" in
+    "" | -* | *[!A-Za-z0-9._-]*)
+      harbor_die 3 ssh.user_name "the ${2} name '${1}' is not a portable account name (letters, digits, dot, underscore, and hyphen, not leading with a hyphen); Harbor will not write it into an sshd configuration file; nothing was written"
+      ;;
+  esac
+}
+# harbor_sshd_effective USER SITUATION: the effective configuration sshd reports for
+# USER, normalized by sorting so that the comparison below is over the set of
+# directives and not over the order sshd happens to print them in. Inspection only. A
+# non-zero exit is fail-closed, exit 2, naming SITUATION, the state the node is in at
+# that point, because a configuration that cannot be read cannot be proved unchanged.
+harbor_sshd_effective() {
+  local user="${1}" situation="${2}" out rc=0
+  harbor_log_vendor sshd -T -C "user=${user}"
+  out="$(sshd -T -C "user=${user}" 2>&1)" || rc="$?"
+  [ "${rc}" = 0 ] \
+    || harbor_die 2 ssh.effective "sshd -T -C user=${user} failed (exit ${rc}): ${out}; ${situation}"
+  # An empty answer would make every comparison below trivially true, so it is refused
+  # rather than read as "the configuration is unchanged".
+  [ -n "${out}" ] \
+    || harbor_die 2 ssh.effective "sshd -T -C user=${user} exited 0 and printed no configuration at all, so nothing can be proved about it; ${situation}"
+  printf '%s\n' "${out}" | LC_ALL=C sort
+}
+# harbor_ssh_config_diff BEFORE AFTER: every directive the two normalized outputs do not
+# share, one per line, "-" for one only BEFORE holds and "+" for one only AFTER holds.
+# Used only to say exactly what changed when the proof below fails.
+harbor_ssh_config_diff() {
+  local before="${1}" after="${2}" line
+  printf '%s\n' "${before}" | while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    printf '%s\n' "${after}" | grep -qxF -- "${line}" || printf -- '  -%s\n' "${line}"
+  done
+  printf '%s\n' "${after}" | while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    printf '%s\n' "${before}" | grep -qxF -- "${line}" || printf -- '  +%s\n' "${line}"
+  done
+}
+# harbor_sshd_test SITUATION: sshd's own syntax check. A configuration sshd refuses is
+# exit 2 naming SITUATION, and nothing is reloaded after it, so the running sshd keeps
+# the configuration it has rather than being told to read one sshd has just refused.
+harbor_sshd_test() {
+  local out rc=0
+  harbor_log_vendor sshd -t
+  out="$(sshd -t 2>&1)" || rc="$?"
+  [ "${rc}" = 0 ] \
+    || harbor_die 2 ssh.syntax "sshd -t refuses the configuration (exit ${rc}): ${out}; nothing was reloaded, so the running sshd still has the configuration it had before; ${1}"
+}
+# harbor_ssh_service_state: the activation state systemctl reports for the ssh unit, one
+# word. The decision is made on the word printed, never on the exit status, because
+# systemctl is-active exits non-zero for every state that is not active, inactive among
+# them, and inactive is the ordinary state of a socket-activated sshd. A word outside
+# the vocabulary, which is what an unreachable manager prints, is fail-closed: exit 2,
+# nothing reloaded.
+harbor_ssh_service_state() {
+  local out rc=0
+  out="$(systemctl is-active "${HARBOR_SSH_UNIT}" 2>&1)" || rc="$?"
+  out="$(printf '%s\n' "${out}" | sed -n 1p)"
+  case "${out}" in
+    active | reloading | activating | deactivating | inactive | failed)
+      printf '%s' "${out}"
+      ;;
+    *)
+      harbor_die 2 ssh.service_state "systemctl is-active ${HARBOR_SSH_UNIT} printed '${out}' (exit ${rc}), which is not a unit activation state; nothing was reloaded"
+      ;;
+  esac
+}
+# harbor_ssh_reload: tell the running sshd to read the drop-in. Nothing is journaled: a
+# reload leaves no artifact to own or invert. A unit that is not running is not reloaded
+# and is not a failure, because Ubuntu 24.04 activates sshd from a socket by default and
+# a socket-activated sshd reads the configuration afresh for every connection; that is
+# reported rather than guessed at.
+harbor_ssh_reload() {
+  local state out rc=0
+  state="$(harbor_ssh_service_state)" || exit "$?"
+  case "${state}" in
+    active | reloading) ;;
+    *)
+      harbor_log ssh "${HARBOR_SSH_UNIT} is ${state}, so there is no running sshd to reload"
+      harbor_msg "${HARBOR_SSH_UNIT} is ${state}, so nothing was reloaded; the drop-in is read by the next connection"
+      return 0
+      ;;
+  esac
+  harbor_log_vendor systemctl reload "${HARBOR_SSH_UNIT}"
+  out="$(systemctl reload "${HARBOR_SSH_UNIT}" 2>&1)" || rc="$?"
+  [ "${rc}" = 0 ] \
+    || harbor_die 2 ssh.reload "systemctl reload ${HARBOR_SSH_UNIT} failed (exit ${rc}): ${out}; the drop-in is in place and sshd -t accepts it, but the running sshd still has the configuration it had before, so fix the cause and rerun"
+  harbor_step ssh-reloaded
+}
+# harbor_ssh_dropin_refuse_foreign PATH: anything at PATH that is not a regular file is
+# foreign. Harbor removes nothing it cannot prove it created, so it exits 3 naming the
+# path for manual inspection and touches nothing. Called before any vendor command, so
+# a node in that state is refused without sshd being asked anything at all.
+harbor_ssh_dropin_refuse_foreign() {
+  case "$(harbor_observe_file "${1}")" in
+    '"unobservable:'* | '{"symlink":'*)
+      harbor_die 3 ssh.dropin_foreign "${1} is already there and is not a regular file; Harbor removes nothing it cannot prove it created: inspect it, remove it by hand if it is not needed, and rerun; nothing was written"
+      ;;
+  esac
+}
+# harbor_ssh_dropin_write STATE_ROOT PATH STEP RENDER [ARG]: one drop-in as one journaled
+# file transaction. A drop-in already byte for byte what RENDER would write is journaled
+# observed and left alone, which is what makes a rerun write nothing and reload nothing.
+# Otherwise the entry is prepared before the rename, the rename is checked, and what
+# landed is compared with the post_state the entry recorded; a failure at any of those
+# leaves the entry prepared and says so. Sets HARBOR_SSH_DROPIN_CHANGED to 1 when the
+# file was written and HARBOR_SSH_DROPIN_ENTRY to the entry still to be marked applied,
+# which is empty when there was nothing to write.
+harbor_ssh_dropin_write() {
+  local root="${1}" path="${2}" step="${3}" render="${4}" arg="${5:-}"
+  local dir pre post ownership tmp entry
+  HARBOR_SSH_DROPIN_CHANGED=0
+  HARBOR_SSH_DROPIN_ENTRY=""
+  dir="$(dirname "${path}")"
+  if [ ! -d "${dir}" ]; then
+    mkdir -p "${dir}" \
+      || harbor_die 2 ssh.dropin_dir "cannot create ${dir}; nothing was written and nothing was reloaded"
+    chmod 0755 "${dir}" \
+      || harbor_die 2 ssh.dropin_dir "cannot give ${dir} mode 0755; nothing was written and nothing was reloaded"
+  fi
+  harbor_ssh_dropin_refuse_foreign "${path}"
+  pre="$(harbor_observe_file "${path}")"
+  tmp="${dir}/.tmp.$(basename "${path}").${HARBOR_LOCK_ID_PID:-$$}"
+  rm -f "${tmp}"
+  if [ -n "${arg}" ]; then
+    "${render}" "${arg}" >"${tmp}" \
+      || harbor_die 2 ssh.dropin_stage "cannot stage ${tmp}; ${path} is unchanged and nothing was reloaded"
+  else
+    "${render}" >"${tmp}" \
+      || harbor_die 2 ssh.dropin_stage "cannot stage ${tmp}; ${path} is unchanged and nothing was reloaded"
+  fi
+  chmod 0644 "${tmp}" \
+    || harbor_die 2 ssh.dropin_stage "cannot give ${tmp} mode 0644; ${path} is unchanged and nothing was reloaded"
+  post="$(harbor_observe_file "${tmp}")"
+  if [ "${post}" = "${pre}" ]; then
+    rm -f "${tmp}"
+    harbor_journal_create "${root}" file "${path}" observed applied "${pre}" "${post}"
+    harbor_log ssh "${path} is already byte for byte what Harbor writes; leaving it exactly as it is"
+    return 0
+  fi
+  ownership=modified
+  [ "${pre}" != '"absent"' ] || ownership=created
+  harbor_journal_create "${root}" file "${path}" "${ownership}" prepared "${pre}" "${post}"
+  entry="${HARBOR_JOURNAL_ENTRY}"
+  harbor_journal_sync_path "${tmp}"
+  if ! mv -f "${tmp}" "${path}"; then
+    rm -f "${tmp}"
+    harbor_die 2 ssh.dropin_rename "renaming ${tmp} onto ${path} failed; ${path} holds what it held before, nothing was reloaded, and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+  fi
+  harbor_journal_sync_path "${dir}"
+  harbor_step "${step}"
+  [ "$(harbor_observe_file "${path}")" = "${post}" ] \
+    || harbor_die 2 ssh.dropin_verify "${path} is not what was staged for it; nothing was reloaded and $(basename "${entry}") stays prepared"
+  HARBOR_SSH_DROPIN_CHANGED=1
+  HARBOR_SSH_DROPIN_ENTRY="${entry}"
+}
+# harbor_ssh_assert_operator OPERATOR SITUATION: the operator half of the design section
+# 3.5 acceptance. sshd itself is asked what it would do for that account, and both
+# values the row names must be no; anything else means the drop-in did not take effect
+# and is exit 2 with the node's state, before any reload.
+harbor_ssh_assert_operator() {
+  local operator="${1}" situation="${2}" effective directive
+  effective="$(harbor_sshd_effective "${operator}" "${situation}")" || exit "$?"
+  for directive in passwordauthentication kbdinteractiveauthentication; do
+    printf '%s\n' "${effective}" | grep -qxF -- "${directive} no" \
+      || harbor_die 2 ssh.operator_not_hardened "sshd -T -C user=${operator} does not report '${directive} no', so the drop-in did not take effect for ${operator}; nothing was reloaded; ${situation}"
+  done
+}
+# harbor_ssh_configure STATE_ROOT OPERATOR ADMIN [DEST_ROOT]: the SSH row of design
+# section 5.2. Write the operator drop-in, run sshd's own syntax check, prove with sshd
+# that the drop-in changed nothing at all for the installation user and that it did
+# change both authentication settings for the operator, and only then reload.
+#
+# The proof is a comparison of two whole normalized sshd -T -C user=ADMIN outputs, one
+# taken before the drop-in exists and one with it in place, not a check of a chosen
+# subset: a drop-in that moved a directive nobody thought to name would fail it just as
+# a directive that was named would. Because the earlier reading has to be of a node
+# without the drop-in, it is taken before anything is written, and because the later one
+# has to be of a node with it, it is taken after the rename and before the reload. A
+# difference is exit 2 naming every directive that differs, with the drop-in still in
+# place, its entry still prepared, and the running sshd still holding the configuration
+# it had, which is the state the message reports.
+#
+# The baseline is a true with-versus-without reading in the two states that matter: a
+# path that was absent, and a path already holding byte for byte what Harbor renders,
+# where the file is provably Harbor's own bytes and the proof belongs to the run that
+# created it. It is not one when a differing drop-in was already at the path, which is
+# an upgrade from an older render: there the comparison is between two drop-ins rather
+# than between having one and not, so a leak both of them share would not show. That is
+# a property of two Harbor renders rather than of this node, and the renders are fixed
+# strings the tests below read, so it is recorded here and left to the upgrade slice
+# rather than papered over with a mutation taken before its entry exists.
+harbor_ssh_configure() {
+  local root operator admin dest path before after changed entry situation diff
+  [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
+    || harbor_die 3 usage "usage: harbor_ssh_configure <state-root> <operator> <installation-user> [dest-root]"
+  root="${1}"
+  operator="${2}"
+  admin="${3}"
+  dest="${4:-}"
+  harbor_ssh_check_user_name "${operator}" operator
+  harbor_ssh_check_user_name "${admin}" "installation user"
+  path="$(harbor_ssh_dropin_path "${dest}")"
+  # A foreign file at the path is refused before sshd is asked anything, so a node in
+  # that state is left exactly as it is.
+  harbor_ssh_dropin_refuse_foreign "${path}"
+  before="$(harbor_sshd_effective "${admin}" "nothing has been written and nothing has been reloaded")" || exit "$?"
+  if [ -e "${path}" ]; then
+    harbor_log ssh "${path} was already there before this run, so the reading above is of a node that already had a drop-in"
+  fi
+  harbor_ssh_dropin_write "${root}" "${path}" ssh-dropin-operator harbor_ssh_operator_render "${operator}"
+  changed="${HARBOR_SSH_DROPIN_CHANGED}"
+  entry="${HARBOR_SSH_DROPIN_ENTRY}"
+  if [ "${changed}" = 1 ]; then
+    situation="${path} is in place and $(basename "${entry}") stays prepared for recovery"
+  else
+    situation="${path} was already there byte for byte and was not rewritten"
+  fi
+  harbor_sshd_test "${situation}"
+  after="$(harbor_sshd_effective "${admin}" "${situation}")" || exit "$?"
+  if [ "${after}" != "${before}" ]; then
+    diff="$(harbor_ssh_config_diff "${before}" "${after}")"
+    harbor_die 2 ssh.admin_changed "the operator drop-in changes the effective sshd configuration of the installation user ${admin}, which it must leave untouched directive for directive; - is what sshd reported before it and + what sshd reports with it:
+${diff}
+nothing was reloaded, so the running sshd still has the configuration it had before; ${situation}; remove ${path} and rerun"
+  fi
+  harbor_ssh_assert_operator "${operator}" "${situation}"
+  [ -z "${entry}" ] || harbor_journal_set_phase "${entry}" applied
+  harbor_step ssh-dropin-applied
+  harbor_log ssh "${path} leaves ${admin} unchanged for every directive and gives ${operator} public-key-only authentication"
+  [ "${changed}" = 1 ] || return 0
+  harbor_ssh_reload
+  harbor_msg "wrote ${path} and reloaded ${HARBOR_SSH_UNIT}"
+}
+# harbor_ssh_admin_authorized_keys ADMIN: the installation user's own authorized_keys,
+# printed on stdout, or exit 3. This is the refusal --harden-sshd is gated on: the global
+# drop-in takes away password authentication for every account and root's login with it,
+# so an installation user with no key of their own would be left with no way back into
+# the node. The file must exist, be a regular file, be readable, and be non-empty, the
+# same test harbor_ssh_source applies to the key it copies, and it is asked of the
+# installation user's own account whatever --authorized-key-file said, because it is that
+# account the flag could lock out.
+harbor_ssh_admin_authorized_keys() {
+  local admin="${1}" home path
+  [ "${admin}" != root ] \
+    || harbor_die 3 ssh.harden_no_key "--harden-sshd sets PermitRootLogin no, so root is not the installation user it can be given to; rerun through sudo from your own account, or drop --harden-sshd; nothing was written"
+  home="$(harbor_ssh_user_home "${admin}")" || exit "$?"
+  path="${home}/.ssh/authorized_keys"
+  { [ -f "${path}" ] && [ -r "${path}" ] && [ -s "${path}" ]; } \
+    || harbor_die 3 ssh.harden_no_key "--harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, and ${path} is missing, unreadable, or empty, so ${admin} would have no way left to log in to this node; add ${admin}'s own public key to that file and rerun, or rerun without --harden-sshd; nothing was written"
+  printf '%s' "${path}"
+}
+# harbor_ssh_harden STATE_ROOT ADMIN [DEST_ROOT]: the --harden-sshd drop-in of design
+# section 3.5, a file of its own with a journal entry of its own so that
+# harbor teardown --unharden-sshd can remove it and nothing else. The refusal above runs
+# before anything is written or any vendor command is called. sshd's syntax check runs
+# after the write and a refusal reloads nothing, exactly as for the operator drop-in;
+# the unchanged-for-every-directive proof does not apply here, because changing the
+# effective configuration of every account, the installation user included, is what this
+# flag is, and what protects that account is the authorized-key refusal instead.
+harbor_ssh_harden() {
+  local root admin dest path key changed entry situation
+  [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
+    || harbor_die 3 usage "usage: harbor_ssh_harden <state-root> <installation-user> [dest-root]"
+  root="${1}"
+  admin="${2}"
+  dest="${3:-}"
+  harbor_ssh_check_user_name "${admin}" "installation user"
+  key="$(harbor_ssh_admin_authorized_keys "${admin}")" || exit "$?"
+  path="$(harbor_ssh_global_dropin_path "${dest}")"
+  harbor_ssh_dropin_refuse_foreign "${path}"
+  harbor_log ssh "--harden-sshd: ${admin} has an authorized key in ${key}"
+  harbor_ssh_dropin_write "${root}" "${path}" ssh-dropin-global harbor_ssh_global_render
+  changed="${HARBOR_SSH_DROPIN_CHANGED}"
+  entry="${HARBOR_SSH_DROPIN_ENTRY}"
+  if [ "${changed}" = 1 ]; then
+    situation="${path} is in place and $(basename "${entry}") stays prepared for recovery"
+  else
+    situation="${path} was already there byte for byte and was not rewritten"
+  fi
+  harbor_sshd_test "${situation}"
+  [ -z "${entry}" ] || harbor_journal_set_phase "${entry}" applied
+  harbor_step ssh-global-applied
+  [ "${changed}" = 1 ] || return 0
+  harbor_ssh_reload
+  harbor_msg "--harden-sshd wrote ${path}; remove it with: harbor teardown --unharden-sshd"
+}
