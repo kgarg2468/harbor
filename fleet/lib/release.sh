@@ -157,3 +157,85 @@ harbor_release_stage() {
   harbor_step release-applied
   harbor_msg "installed ${tag} at ${dest}"
 }
+# harbor_release_link_owned TARGET RELEASE_ROOT: whether TARGET, the recorded text of
+# an existing symlink, names a path inside RELEASE_ROOT. The decision is made on that
+# text alone and never on what the link resolves to, so a link cannot claim a release
+# it does not name; a text carrying a .. component is refused rather than normalized,
+# so no link reaches outside RELEASE_ROOT through one.
+harbor_release_link_owned() {
+  case "${1}" in
+    "${2}"/*) ;;
+    *) return 1 ;;
+  esac
+  case "/${1}/" in
+    */../*) return 1 ;;
+  esac
+  return 0
+}
+# harbor_release_link STATE_ROOT RELEASE LINK [RELEASE_ROOT]: point LINK, Harbor's
+# only entrypoint after bootstrap (design section 5.2), at RELEASE/bin/harbor by
+# writing a temporary symlink beside LINK and renaming it into place, so the link
+# never resolves to a partial target and never briefly disappears: the temporary link
+# already names the whole target before the rename, and the rename replaces the link
+# in one step rather than unlinking it first. One file entry: observed (directly
+# applied, nothing touched) when the link already points there, created with pre_state
+# "absent" when nothing is there, modified with the prior target when a symlink into
+# RELEASE_ROOT is there, which is the reinstall after a mid-unwind teardown crash of
+# design section 5.7, and the reverse walk restores that target from the entry.
+# Anything else at the link path is foreign: exit 3 naming it for manual inspection,
+# and Harbor removes nothing it cannot prove it created. Both states are rendered by
+# harbor_observe_file, the observer recovery uses for a file entry, so an entry left
+# prepared by a crash between the rename and the applied write is decidable.
+# RELEASE_ROOT defaults to the production /usr/local/lib/harbor; unit tests pass a
+# fixture path, as the destination of harbor_release_stage already is.
+harbor_release_link() {
+  local root release link libroot target pre post ownership prior tmp entry
+  [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
+    || harbor_die 3 usage "usage: harbor_release_link <state-root> <release> <link> [release-root]"
+  root="${1}"
+  release="${2}"
+  link="${3}"
+  libroot="${4:-/usr/local/lib/harbor}"
+  libroot="${libroot%/}"
+  target="${release}/bin/harbor"
+  [ -f "${target}" ] \
+    || harbor_die 2 release.link_target "${target} does not exist, so ${link} would not resolve to a release entrypoint; the release at ${release} is incomplete, remove it by hand and rerun"
+  pre="$(harbor_observe_file "${link}")"
+  post="{\"symlink\":\"$(harbor_json_escape "${target}")\"}"
+  if [ "${pre}" = "${post}" ]; then
+    harbor_journal_create "${root}" file "${link}" observed applied "${pre}" "${post}"
+    harbor_log release "${link} already points at ${target}; keeping it"
+    return 0
+  fi
+  if [ "${pre}" = '"absent"' ]; then
+    ownership=created
+  else
+    if [ ! -L "${link}" ]; then
+      harbor_die 3 release.link_foreign "${link} is already there and is not a symlink; Harbor removes nothing it cannot prove it created: inspect it, remove it by hand if it is not needed, and rerun"
+    fi
+    if [ -d "${link}" ]; then
+      harbor_die 3 release.link_foreign "${link} is a symlink to a directory, which a rename would write into rather than replace; inspect it, remove it by hand if it is not needed, and rerun"
+    fi
+    prior="$(readlink "${link}")"
+    harbor_release_link_owned "${prior}" "${libroot}" \
+      || harbor_die 3 release.link_foreign "${link} is a symlink to ${prior}, which is not a path under ${libroot}/, so it is not a Harbor release entrypoint; inspect it, remove it by hand if it is not needed, and rerun"
+    ownership=modified
+  fi
+  harbor_journal_create "${root}" file "${link}" "${ownership}" prepared "${pre}" "${post}"
+  entry="${HARBOR_JOURNAL_ENTRY}"
+  harbor_step release-link-prepared
+  tmp="$(dirname "${link}")/.$(basename "${link}").harbor.${HARBOR_LOCK_ID_PID:-$$}"
+  rm -f "${tmp}"
+  ln -s "${target}" "${tmp}" \
+    || harbor_die 2 release.link_write "cannot write the temporary symlink ${tmp}; ${link} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+  if ! mv -f "${tmp}" "${link}"; then
+    rm -f "${tmp}"
+    harbor_die 2 release.link_swap "renaming ${tmp} onto ${link} failed; ${link} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+  fi
+  harbor_journal_sync_path "$(dirname "${link}")"
+  [ "$(harbor_observe_file "${link}")" = "${post}" ] \
+    || harbor_die 2 release.link_verify "${link} does not point at ${target} after linking; $(basename "${entry}") stays prepared"
+  harbor_journal_set_phase "${entry}" applied
+  harbor_step release-link-applied
+  harbor_msg "pointed ${link} at ${target}"
+}
