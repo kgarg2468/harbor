@@ -39,6 +39,7 @@ Everything in the PR 2 plan's "Global Constraints" still binds: the bash 3.2 sub
 - Test first: write the failing tests, run them, record the failure, then write the code until they pass. Run `tests/run_unit.sh` for the whole lane and `tests/run_unit.sh <file>` while iterating.
 - Every library function is prefixed `harbor_`, every global `HARBOR_`. Libraries define functions only.
 - Two-space indent, braced variables, `case` arms one level in, no space after a redirection operator.
+- Every operation that can fail is checked, and the failure says what state the node is in. This has been the single most common defect at the gate: an unchecked `mv` into place, an unchecked `find` feeding a loop that judges what it enumerates, an unchecked `mkdir`. An operation whose failure is silent leaves a journal entry vouching for a state that is not there, and a `find` that gives up partway hands its loop a short list the loop happily approves. A failed mutation must leave its entry `prepared` and say so; a failed inspection must refuse.
 - Each task ends in a handoff: the test commands with their verbatim results, the deviations, `git status --short`, `git diff --stat`, and the concerns worth flagging. The orchestrator gates and commits.
 - A handoff with a failing test, a lint finding, or a file outside the task's list is not ready. Say so instead of working around it.
 
