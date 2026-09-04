@@ -219,6 +219,14 @@ inode_of() {
   assert_equal "$(harbor_stat_mode "${BATS_TEST_TMPDIR}/odd/tools/hook.sh")" 0777
   assert_equal "$(harbor_stat_mode "${BATS_TEST_TMPDIR}/odd/README.md")" 0666
   assert_equal "$(harbor_stat_mode "${BATS_TEST_TMPDIR}/odd/bin/harbor")" 0600
+  # tools/ is the setgid case, and it is the one an octal chmod alone does not settle:
+  # GNU chmod leaves a directory's setuid, setgid, and sticky bits alone when the mode
+  # does not mention them. Only the Linux lane proves it, because macOS drops the bit
+  # when the fixture sets it, so the assertion below is 2775 there and 0775 here.
+  case "$(harbor_stat_mode "${BATS_TEST_TMPDIR}/odd/tools")" in
+    2775 | 0775) ;;
+    *) fail "the odd-mode fixture directory is neither 2775 nor 0775" ;;
+  esac
   acquire
   run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}"
   assert_success

@@ -73,13 +73,21 @@ harbor_release_applied_state() {
 # harbor_release_normalize_modes DIR: the installed modes of design section 5.2,
 # whatever modes the archived tag carried: every directory 0755, every ordinary file
 # 0644, and only the release's own bin/harbor also executable. Symlinks are neither
-# matched nor followed by either find.
+# matched nor followed by either find. The symbolic a-st is not redundant beside the
+# octal mode: GNU chmod leaves a directory's setuid, setgid, and sticky bits alone
+# when a numeric mode does not mention them, so on Linux chmod 0755 alone leaves a
+# setgid directory setgid, and an installed release would carry a bit the archived tag
+# happened to hold. BSD chmod clears them, which is why only the Linux lane sees it.
 harbor_release_normalize_modes() {
   local dir="${1}"
   find "${dir}" -type d -exec chmod 0755 {} + \
     || harbor_die 2 release.modes "cannot normalize the directory modes under ${dir}"
+  find "${dir}" -type d -exec chmod a-st {} + \
+    || harbor_die 2 release.modes "cannot clear the setuid, setgid, and sticky bits of the directories under ${dir}"
   find "${dir}" -type f -exec chmod 0644 {} + \
     || harbor_die 2 release.modes "cannot normalize the file modes under ${dir}"
+  find "${dir}" -type f -exec chmod a-st {} + \
+    || harbor_die 2 release.modes "cannot clear the setuid and setgid bits of the files under ${dir}"
   if [ -f "${dir}/bin/harbor" ] && [ ! -L "${dir}/bin/harbor" ]; then
     chmod 0755 "${dir}/bin/harbor" \
       || harbor_die 2 release.modes "cannot make ${dir}/bin/harbor executable"
