@@ -583,7 +583,33 @@ journal_entries() {
   harbor_lock_release "${FIX_STATE}"
 }
 
+release_observer() {
+  # The harbor-install observer lives in lib/release.sh, the library that owns the op.
+  # The proof reaches it through harbor_journal_observe's dispatch, exactly as recovery
+  # does, so lib/entrypoint.sh keeps its dependencies (lib/log.sh, lib/lock.sh,
+  # lib/journal.sh) and gains none on lib/release.sh; what must have loaded it is the
+  # command that runs the proof, and this helper stands in for that command.
+  # shellcheck source=lib/release.sh
+  . "${HARBOR_ROOT}/lib/release.sh"
+}
+
+release_state() {
+  # The state a harbor-install entry's post_state carries for RELEASE_DIR, rendered by
+  # the same observer the proof reads the release back with, so a fixture entry vouches
+  # for the release the way harbor_release_stage's does.
+  harbor_journal_observe harbor-install "${RELEASE_DIR}"
+}
+
+proven_release() {
+  # The journal of a node whose executing release Harbor installed: one applied
+  # harbor-install entry naming it and recording the state it observes as now.
+  state_journal
+  fixture_entry "${FIX_STATE}" 0001 harbor-install "${RELEASE_DIR}" created applied \
+    '"absent"' "$(release_state)"
+}
+
 @test "a release with no applied harbor-install entry exits 3 naming the reinstall" {
+  release_observer
   state_journal
   run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
   assert_equal "${status}" 3
@@ -602,9 +628,11 @@ journal_entries() {
   run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
   assert_equal "${status}" 3
   assert_output --partial 'entrypoint.install_proof'
-  # The applied entry for this release directory is the proof.
+  # The applied entry for this release directory is the proof, and only while it
+  # vouches for what is in the release now, so its post_state is the state the
+  # release observes as rather than a stand-in hash.
   fixture_entry "${FIX_STATE}" 0003 harbor-install "${RELEASE_DIR}" created applied \
-    '"absent"' '{"tree_sha256":"bbbb"}'
+    '"absent"' "$(release_state)"
   run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
   assert_success
 }
@@ -622,4 +650,91 @@ journal_entries() {
   # The proof is read-only: a refusal leaves the journal exactly as it was.
   assert_equal "$(entry_phase "${FIX_STATE}" 0001)" reverted
   assert_equal "$(journal_entries)" 0001-harbor-install.json
+}
+
+@test "a release whose tree hash equals its applied harbor-install entry passes" {
+  release_observer
+  proven_release
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+  assert_output ""
+  # The proof writes nothing and touches no artifact, on the passing path as on the
+  # refusing ones.
+  assert_equal "$(journal_entries)" 0001-harbor-install.json
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" applied
+}
+
+@test "a release altered since its harbor-install entry was written exits 3 naming the reinstall" {
+  release_observer
+  proven_release
+  local before
+  before="$(snapshot "${FIX_STATE}/journal")"
+  # A file's content changed. The entry still names this release directory, so only the
+  # tree hash tells Harbor that what it installed is not what it would now execute.
+  printf '# altered\n' >>"${RELEASE_DIR}/lib/log.sh"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_changed'
+  assert_output --partial "${RELEASE_DIR}"
+  assert_output --partial './bin/harbor bootstrap'
+  # The same reinstall-and-clear-by-hand resume the other two refusals name.
+  assert_output --partial 'by hand'
+  printf '# lib\n' >"${RELEASE_DIR}/lib/log.sh"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+  # A file added. Nothing that was installed changed, and the release is still not the
+  # tree the entry vouches for.
+  printf '# extra\n' >"${RELEASE_DIR}/lib/extra.sh"
+  chmod 0644 "${RELEASE_DIR}/lib/extra.sh"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_changed'
+  rm -f "${RELEASE_DIR}/lib/extra.sh"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+  # A file's mode changed, with every byte of content the same.
+  chmod 0600 "${RELEASE_DIR}/lib/journal.sh"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_changed'
+  chmod 0644 "${RELEASE_DIR}/lib/journal.sh"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+  # None of the refusals wrote anything: the journal is byte for byte what it was.
+  assert_equal "$(snapshot "${FIX_STATE}/journal")" "${before}"
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" applied
+}
+
+@test "an applied entry recording another tree hash proves nothing about this release" {
+  release_observer
+  state_journal
+  # The entry names the executing release and is applied, so the target and the phase
+  # are satisfied; what it records is another tree, which is the state a release
+  # reinstalled by hand over an old entry, or a hand-edited journal, presents.
+  fixture_entry "${FIX_STATE}" 0001 harbor-install "${RELEASE_DIR}" created applied \
+    '"absent"' '{"tree_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_changed'
+  assert_output --partial "${RELEASE_DIR}"
+  assert_output --partial './bin/harbor bootstrap'
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" applied
+  assert_equal "$(journal_entries)" 0001-harbor-install.json
+}
+
+@test "the proof refuses rather than passes when the harbor-install observer is not loaded" {
+  release_observer
+  proven_release
+  # A process that never loaded lib/release.sh cannot read the release's current state:
+  # the dispatch answers that the op is unobservable here, which is not a match and must
+  # never be read as one, since the entry alone names the release without vouching for
+  # what is in it now.
+  unset -f harbor_observe_op_harbor_install
+  assert_equal "$(harbor_journal_observe harbor-install "${RELEASE_DIR}")" '"unobservable:harbor-install"'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_observer'
+  assert_output --partial "${RELEASE_DIR}"
+  assert_output --partial 'lib/release.sh'
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" applied
 }

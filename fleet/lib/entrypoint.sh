@@ -421,14 +421,29 @@ harbor_bootstrap_flags_bind() {
 # 5.2). Both forms let a run proceed against a release bootstrap.json does not vouch for,
 # so the root journal has to: RELEASE must be the target of an applied harbor-install
 # entry, which only Harbor writes, into a root-only journal, about a root-owned tree with
-# the installed modes, so the code such a run executes is code Harbor installed and no
-# operator can forge the proof. A journal holding none, or holding one that a teardown's
-# reverse walk has already marked reverted, exits 3 naming the reinstall and, since that
-# reinstall meets the release directory as an orphan under the section 5.2 rule and
-# removes nothing it cannot prove it created, what the administrator must clear by hand
-# first. Read-only: it takes no lock, writes nothing, and touches no artifact.
+# the installed modes, and the release must still observe as the tree hash that entry
+# recorded, so the code such a run executes is code Harbor installed, is code Harbor
+# installed unaltered, and no operator can forge the proof. Naming the release is not
+# enough on its own: an entry records a directory path, and a file changed inside that
+# directory after the install leaves the path it names intact, so without the hash clause
+# a release altered after installation would still pass. A journal holding no entry,
+# holding one that a teardown's reverse walk has already marked reverted, or holding one
+# whose recorded hash is no longer what the release observes as, exits 3 naming the
+# reinstall and, since that reinstall meets the release directory as an orphan under the
+# section 5.2 rule and removes nothing it cannot prove it created, what the administrator
+# must clear by hand first. Read-only: it takes no lock, writes nothing, and touches no
+# artifact.
+# The release is read through harbor_journal_observe, the dispatch recovery itself uses,
+# so this file keeps its dependencies (lib/log.sh, lib/lock.sh, lib/journal.sh) and gains
+# none on lib/release.sh, which owns the harbor-install op and its observer: the entry is
+# compared against exactly the observation that wrote it and that recovery would decide it
+# by, rather than against a second rendering of the same tree that could drift from it.
+# The dispatch is honest about a process that has not loaded that library, answering
+# "unobservable:harbor-install", and that answer is a refusal here and never a pass: an
+# unread release is an unproven release, and a proof that cannot read what it is proving
+# has failed rather than succeeded.
 harbor_entrypoint_install_proof() {
-  local root release entry phase proven="" newest=""
+  local root release entry phase recorded="" newest="" observed
   if [ "$#" -ne 2 ]; then
     harbor_die 3 usage "usage: harbor_entrypoint_install_proof <state-root> <release>"
   fi
@@ -439,11 +454,22 @@ harbor_entrypoint_install_proof() {
     [ "$(harbor_journal_string "${entry}" target)" = "${release}" ] || continue
     phase="$(harbor_journal_string "${entry}" phase)"
     newest="${phase}"
-    [ "${phase}" != "applied" ] || proven=yes
+    [ "${phase}" != "applied" ] || recorded="$(harbor_journal_raw "${entry}" post_state)"
   done
-  if [ -n "${proven}" ]; then
-    harbor_log entrypoint "${release} is proven by an applied harbor-install entry in ${root}/journal"
-    return 0
+  if [ -n "${recorded}" ]; then
+    observed="$(harbor_journal_observe harbor-install "${release}")" || exit "$?"
+    case "${observed}" in
+      '"unobservable:harbor-install"')
+        harbor_die 3 entrypoint.install_observer \
+          "the applied harbor-install entry in ${root}/journal names ${release}, but this process cannot observe that release: the harbor-install observer, which lib/release.sh defines, is not loaded here, so nothing can tell whether the release still holds what the entry recorded, and an entry that names a release without vouching for its content is not a proof: this is a defect in the command that ran the proof, which must source lib/release.sh before it does; report it"
+        ;;
+    esac
+    if [ "${observed}" = "${recorded}" ]; then
+      harbor_log entrypoint "${release} is proven by an applied harbor-install entry in ${root}/journal recording ${recorded}"
+      return 0
+    fi
+    harbor_die 3 entrypoint.install_changed \
+      "${release} observes as ${observed}, not the ${recorded} its applied harbor-install entry in ${root}/journal records, so the content of the executing release has changed since Harbor installed it and the journal vouches for a tree this is no longer: reinstall with sudo ./bin/harbor bootstrap from a clean trusted checkout at an exact release tag, which meets ${release} as an orphan and removes nothing, so confirm nothing of yours is inside it and remove it, and any /usr/local/bin/harbor pointing into it, by hand first"
   fi
   if [ "${newest}" = "reverted" ]; then
     harbor_die 3 entrypoint.install_reverted \
