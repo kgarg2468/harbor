@@ -51,8 +51,19 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/ssh.sh"
 # shellcheck source=../lib/user.sh
 . "${HARBOR_ROOT}/lib/user.sh"
+# shellcheck source=../lib/apt.sh
+. "${HARBOR_ROOT}/lib/apt.sh"
+# shellcheck source=../lib/node.sh
+. "${HARBOR_ROOT}/lib/node.sh"
+# shellcheck source=../lib/firewall.sh
+. "${HARBOR_ROOT}/lib/firewall.sh"
+# shellcheck source=../lib/power.sh
+. "${HARBOR_ROOT}/lib/power.sh"
 # The operator account of design section 5.2 when --operator names none.
 HARBOR_BOOTSTRAP_DEFAULT_OPERATOR=harbor
+# The Packages row of the design section 5.2 table, in the table's order. The list
+# belongs here rather than in lib/apt.sh, which names no package of its own.
+HARBOR_BOOTSTRAP_PACKAGES="git curl ufw jq openssh-server ca-certificates"
 HARBOR_BOOTSTRAP_FLAGS=()
 harbor_bootstrap_usage() {
   cat <<'USAGE'
@@ -93,6 +104,14 @@ harbor_bootstrap_bind() {
   HARBOR_BOOTSTRAP_STATE_ROOT="/var/lib/harbor"
   HARBOR_BOOTSTRAP_INSTALL_ROOT="/usr/local/lib/harbor"
   HARBOR_BOOTSTRAP_LINK="/usr/local/bin/harbor"
+  # The Node.js prefix of design section 2 and the configuration root both the sshd
+  # and the logind drop-ins are written under. lib/node.sh, lib/ssh.sh, and
+  # lib/power.sh all take theirs as a parameter and name no absolute path of their
+  # own, so these two are where the production paths of those rows are decided. The
+  # bin directory of the four Node.js symlinks is not a value of its own: it is the
+  # directory the entrypoint link already lives in, so the two can never disagree.
+  HARBOR_BOOTSTRAP_NODE_PREFIX="/opt/harbor/node"
+  HARBOR_BOOTSTRAP_ETC="/etc"
   HARBOR_BOOTSTRAP_ARCH="$(harbor_bootstrap_machine_arch)" || exit "$?"
   HARBOR_BOOTSTRAP_EXEC_LOG=""
   HARBOR_BOOTSTRAP_IS_ROOT=no
@@ -105,6 +124,8 @@ harbor_bootstrap_bind() {
   HARBOR_BOOTSTRAP_STATE_ROOT="${HARBOR_BOOTSTRAP_FIXTURE_STATE_ROOT:-${HARBOR_BOOTSTRAP_STATE_ROOT}}"
   HARBOR_BOOTSTRAP_INSTALL_ROOT="${HARBOR_BOOTSTRAP_FIXTURE_INSTALL_ROOT:-${HARBOR_BOOTSTRAP_INSTALL_ROOT}}"
   HARBOR_BOOTSTRAP_LINK="${HARBOR_BOOTSTRAP_FIXTURE_LINK:-${HARBOR_BOOTSTRAP_LINK}}"
+  HARBOR_BOOTSTRAP_NODE_PREFIX="${HARBOR_BOOTSTRAP_FIXTURE_NODE_PREFIX:-${HARBOR_BOOTSTRAP_NODE_PREFIX}}"
+  HARBOR_BOOTSTRAP_ETC="${HARBOR_BOOTSTRAP_FIXTURE_ETC:-${HARBOR_BOOTSTRAP_ETC}}"
   HARBOR_BOOTSTRAP_ARCH="${HARBOR_BOOTSTRAP_FIXTURE_ARCH:-${HARBOR_BOOTSTRAP_ARCH}}"
   HARBOR_BOOTSTRAP_EXEC_LOG="${HARBOR_BOOTSTRAP_FIXTURE_EXEC:-}"
   # The one stand-in that is not a path: a caller that is not root may run the ordered
@@ -293,7 +314,7 @@ harbor_bootstrap_check_link() {
 # the lock, journal recovery, and the bootstrap-flags entry, which are where that
 # order says they are. Nothing before the state root writes anything at all.
 harbor_bootstrap_preflight() {
-  local record flags key_source release
+  local record flags release
   # 1. /etc/os-release reports the locked release, and the node is amd64. The locked
   # release is read into a variable of its own rather than substituted into the call,
   # because an unpinned key exits 3 from harbor_version_require, and a substitution
@@ -341,8 +362,11 @@ harbor_bootstrap_preflight() {
   # set must equal the newest applied one, and on a journal holding none the set is
   # written as that entry, observed and directly applied, before any other entry and
   # before the first mutation of the node.
-  key_source="$(harbor_ssh_source "${HARBOR_BOOTSTRAP_KEY_FILE}")" || exit "$?"
-  flags="$(harbor_bootstrap_flags_normalize "${HARBOR_BOOTSTRAP_OPERATOR}" "${key_source}" \
+  # The source resolved here is the one the flag set binds this run to, so the
+  # Authorized key row below copies from exactly the path the binding recorded and
+  # never resolves a second, possibly different, one of its own.
+  HARBOR_BOOTSTRAP_KEY_SOURCE="$(harbor_ssh_source "${HARBOR_BOOTSTRAP_KEY_FILE}")" || exit "$?"
+  flags="$(harbor_bootstrap_flags_normalize "${HARBOR_BOOTSTRAP_OPERATOR}" "${HARBOR_BOOTSTRAP_KEY_SOURCE}" \
     ${HARBOR_BOOTSTRAP_FLAGS[@]+"${HARBOR_BOOTSTRAP_FLAGS[@]}"})" || exit "$?"
   harbor_bootstrap_flags_bind "${HARBOR_BOOTSTRAP_STATE_ROOT}" "${flags}"
   # 10. The entrypoint symlink is absent or Harbor's own.
@@ -404,6 +428,146 @@ harbor_bootstrap_reexec() {
     || harbor_die 2 bootstrap.exec "${link} is not executable, so the installed image of this command cannot be run; the release is installed and the root lock is released, so fix the mode and rerun sudo harbor bootstrap"
   exec "${link}" bootstrap ${1+"$@"}
 }
+# harbor_bootstrap_has_flag FLAG: 0 when this run was given FLAG. The parse above
+# keeps the flag set exactly as it was given, so this is the one place a row asks
+# whether the flag it belongs to is in it.
+harbor_bootstrap_has_flag() {
+  local want="${1}" flag
+  for flag in ${HARBOR_BOOTSTRAP_FLAGS[@]+"${HARBOR_BOOTSTRAP_FLAGS[@]}"}; do
+    [ "${flag}" != "${want}" ] || return 0
+  done
+  return 1
+}
+# harbor_bootstrap_degraded ID NOTE: one row that reported a precondition rather
+# than a failure (exit 1 of design section 6.2). The node is usable and every row
+# after it still runs; the run ends with exit 1 and the notes rather than with 0, so
+# a caller is never told a degraded node is a finished one. The row has already
+# printed the note itself, and it is kept here only to be repeated at the end, where
+# it is not buried under the rows that ran after it.
+harbor_bootstrap_degraded() {
+  HARBOR_BOOTSTRAP_DEGRADED=1
+  HARBOR_BOOTSTRAP_NOTES="${HARBOR_BOOTSTRAP_NOTES}  ${1}: ${2}
+"
+  harbor_log bootstrap "degraded: ${1}: ${2}"
+}
+# harbor_bootstrap_row NAME STATE: the row about to run and the state this node is
+# in while it runs. It emits no step boundary of its own, because every row's
+# boundary between its mutation and its applied write is the one its own library
+# emits and a second one there would name the same instant twice. What it does set
+# is what the ERR trap of lib/log.sh prints when anything inside the row fails: the
+# row's name as the failing step, and a next command that says what is already
+# applied, what has not been touched, and how to resume.
+harbor_bootstrap_row() {
+  # Both are read by the ERR trap of lib/log.sh, never in this file.
+  # shellcheck disable=SC2034
+  HARBOR_CURRENT_STEP="${1}"
+  # shellcheck disable=SC2034
+  HARBOR_NEXT_COMMAND="${2}; no row after ${1} was attempted, so rerun sudo harbor bootstrap ${HARBOR_BOOTSTRAP_REDACTED} with the same flags once the cause is fixed and it will resume at the first check that still fails"
+  harbor_log bootstrap "row ${1}"
+}
+# The remaining rows of the design section 5.2 table, in the table's order, run from
+# the installed copy and under the root lock this run holds. The order is the order
+# in which nothing is touched before whatever would touch it is proved sound: the
+# packages before the account that needs openssh-server, the account before the
+# runtime that is probed as it, the authorized key before the drop-in that takes
+# password authentication away from that account, the sshd assertions before the
+# firewall that starts filtering, and the firewall before the power policy that
+# keeps a lid-closed node up (design section 6.2).
+#
+# Each row is one journaled transaction of design section 3.7, and each is decided
+# by inspection first (section 6.1), so a rerun on a healthy node makes no mutating
+# vendor call at all. Every failure inside a row is that row's library's own: it
+# exits 2 or 3 naming the artifact, the vendor output, and the entry it left
+# prepared, and this function adds the row and the node's state around it rather
+# than a second message of its own.
+harbor_bootstrap_steps() {
+  local root operator admin etc bindir prefix home probe=0
+  local firewall_args=()
+  root="${HARBOR_BOOTSTRAP_STATE_ROOT}"
+  operator="${HARBOR_BOOTSTRAP_OPERATOR}"
+  etc="${HARBOR_BOOTSTRAP_ETC}"
+  prefix="${HARBOR_BOOTSTRAP_NODE_PREFIX}"
+  bindir="$(dirname "${HARBOR_BOOTSTRAP_LINK}")"
+  # The installation user of design section 3.5, whose effective sshd configuration
+  # the operator drop-in must leave untouched and whom --harden-sshd could lock out.
+  # A run with --authorized-key-file needs no SUDO_USER (the principal check above),
+  # and the only account left to judge those two things against is then root, which
+  # is also the account --harden-sshd refuses to be given.
+  admin="${SUDO_USER:-root}"
+  # Packages.
+  harbor_bootstrap_row packages "the release is installed and this node's packages are being brought to the six of the design section 5.2 Packages row; each package is its own entry and any that failed stays prepared"
+  # The list is a word list, and each word is one package name, so the split is
+  # deliberate.
+  # shellcheck disable=SC2086
+  harbor_apt_install "${root}" ${HARBOR_BOOTSTRAP_PACKAGES}
+  # Operator user. It comes after the packages because the account is worth nothing
+  # on a node without openssh-server, and before every row that acts as it.
+  harbor_bootstrap_row operator-user "the packages are installed and the operator account ${operator} is being created; no runtime, key, drop-in, rule, or linger has been touched"
+  harbor_user_ensure "${root}" "${operator}"
+  [ -n "${HARBOR_USER_HOME:-}" ] \
+    || harbor_die 2 bootstrap.operator_home "the name service lists ${operator} without a home directory, so Harbor has nowhere to place the operator's authorized key; the packages and the account are applied and nothing after them was attempted, so fix the account with getent passwd ${operator} and rerun"
+  # Taken here rather than read at the authorized key row below, so the directory the
+  # key is written under is the one this row proved, and no row added between the two
+  # can move it by looking the operator up again for a reason of its own.
+  home="${HARBOR_USER_HOME}"
+  # Node.js: the pinned runtime at the root-owned prefix, its four /usr/local/bin
+  # symlinks, and then the report-only probe of what the operator's own login shell
+  # sees. The probe never makes root reinstall or alter anything, so a probe that
+  # fails is a precondition for the operator, exit 1, and not a reason to stop.
+  harbor_bootstrap_row nodejs "the operator account exists and the pinned Node.js runtime is being installed at ${prefix} with its symlinks in ${bindir}; nothing after it has been touched"
+  harbor_node_install "${root}" "${prefix}"
+  harbor_node_link "${root}" "${prefix}" "${bindir}"
+  harbor_node_operator_probe "${operator}" || probe="$?"
+  [ "${probe}" = 0 ] \
+    || harbor_bootstrap_degraded node.operator_probe "sh -lc 'node --version' as ${operator} does not print the locked version; the runtime root installed at ${prefix} is the locked one and was not altered, so this is the operator's own shell profile to fix"
+  # Authorized key: before the drop-in below takes password authentication away from
+  # that account, never after, so no ordering of these two can leave the operator
+  # with no way in. The source is the path the flag binding recorded, copied by path
+  # and journaled by hash; no key ever reaches a command line or a message.
+  harbor_bootstrap_row authorized-key "Node.js is installed and the operator's authorized key is being copied from ${HARBOR_BOOTSTRAP_KEY_SOURCE}; the sshd drop-in that would need it has not been written, so password authentication for ${operator} is still whatever this node had"
+  harbor_ssh_authorize "${root}" "${operator}" "${home}" "${HARBOR_BOOTSTRAP_KEY_SOURCE}"
+  # SSH: the operator-scoped drop-in, sshd's own syntax check, the two sshd
+  # assertions, and only then the reload. --harden-sshd is a second file with a
+  # journal entry of its own, refused unless the installation user has a key.
+  harbor_bootstrap_row sshd "the operator has an authorized key and the sshd drop-in under ${etc}/ssh/sshd_config.d/ is being written and proved; the firewall, the power policy, and linger are untouched"
+  harbor_ssh_configure "${root}" "${operator}" "${admin}" "${etc}"
+  if harbor_bootstrap_has_flag --harden-sshd; then
+    harbor_ssh_harden "${root}" "${admin}" "${etc}"
+  fi
+  # Firewall, after the sshd assertions passed and never before them (design section
+  # 6.2). --allow-lan-ssh opens port 22 to this node's own RFC 1918 network, which is
+  # a wider posture than the tailnet alone and so is a status warning: exit 1.
+  harbor_bootstrap_row firewall "sshd accepts the drop-in and the firewall rules of design section 3.4 are being applied; the tagged tailscale0 rule is added before anything starts filtering, and the power policy and linger are untouched"
+  ! harbor_bootstrap_has_flag --adopt-firewall \
+    || firewall_args[${#firewall_args[@]}]=--adopt-firewall
+  ! harbor_bootstrap_has_flag --allow-lan-ssh \
+    || firewall_args[${#firewall_args[@]}]=--allow-lan-ssh
+  harbor_firewall_apply "${root}" ${firewall_args[@]+"${firewall_args[@]}"}
+  [ -z "${HARBOR_FIREWALL_LAN_WARNING}" ] \
+    || harbor_bootstrap_degraded firewall.lan_ssh "${HARBOR_FIREWALL_LAN_WARNING}"
+  # Power: the lid drop-in and the four masked sleep targets, so a laptop node stays
+  # up with its lid closed.
+  harbor_bootstrap_row power "the firewall is applied and the logind lid policy under ${etc}/systemd/logind.conf.d/ and the four masked sleep targets are being written; linger is untouched"
+  harbor_power_configure "${root}" "${etc}"
+  # The Tailscale install row of the design section 5.2 table sits here, between
+  # Power and Linger. It is slice 3d and belongs to lib/tailscale.sh and its own
+  # commits, so this release applies nothing for it and journals nothing for it.
+  #
+  # Linger, so the operator's user manager runs without a login session.
+  harbor_bootstrap_row linger "the power policy is applied and linger is being enabled for ${operator}"
+  harbor_user_linger "${root}" "${operator}"
+  # The Tailscale operator row of the design section 5.2 table sits here, between
+  # Linger and the state record, and belongs to slice 3d with the row above it.
+  #
+  # The state record row, /var/lib/harbor/bootstrap.json and the operator's next
+  # command, is the last row of the table and belongs to its own commit; this
+  # release writes no record and leaves any record already there exactly as it is.
+  #
+  # Every row is applied, so a failure after this point is no longer one row's.
+  # Read by the ERR trap of lib/log.sh, never in this file.
+  # shellcheck disable=SC2034
+  HARBOR_NEXT_COMMAND="rerun the same bootstrap command with the same flags once the cause is fixed"
+}
 harbor_bootstrap_main() {
   HARBOR_PID="${HARBOR_PID:-$$}"
   HARBOR_BOOTSTRAP_REDACTED="$(harbor_redact_argv ${1+"$@"})"
@@ -411,6 +575,8 @@ harbor_bootstrap_main() {
   # Read by the ERR and EXIT traps of lib/log.sh, never in this file.
   # shellcheck disable=SC2034
   HARBOR_NEXT_COMMAND="rerun the same bootstrap command with the same flags once the cause is fixed"
+  HARBOR_BOOTSTRAP_DEGRADED=0
+  HARBOR_BOOTSTRAP_NOTES=""
   harbor_bootstrap_bind "${0}"
   harbor_bootstrap_parse ${1+"$@"}
   harbor_bootstrap_preflight
@@ -424,17 +590,20 @@ harbor_bootstrap_main() {
     return 0
   fi
   # The remaining rows of the design section 5.2 table run here, from the installed
-  # copy and under the lock this run still holds: packages, the operator user, Node.js,
-  # the authorized key, sshd, the firewall, power, Tailscale, linger, and last the
-  # bootstrap.json state record with the operator's next command. Each is one journaled
-  # transaction with its own named step boundary, and each is the subject of its own
-  # commit; this release installs the preflight, the intent entry, the install step,
-  # and the re-exec, and applies nothing else to the node.
+  # copy and under the lock this run still holds.
   harbor_msg "installed ${HARBOR_BOOTSTRAP_TAG} at ${HARBOR_BOOTSTRAP_RELEASE} and pointed ${HARBOR_BOOTSTRAP_LINK} at it"
+  harbor_bootstrap_steps
   # Read by the EXIT trap of lib/log.sh, which turns a zero exit without it into the
   # exit 2 of a command that stopped before it finished.
   # shellcheck disable=SC2034
   HARBOR_COMPLETED=1
+  [ "${HARBOR_BOOTSTRAP_DEGRADED}" = 1 ] || return 0
+  # Exit 1 of design section 6.2: every row applied, the node is usable, and one or
+  # more of them reported a precondition somebody has to act on. The notes are
+  # repeated here so they are not buried under the rows that ran after them.
+  harbor_msg "bootstrap.degraded: this node is bootstrapped and every row above applied, and these need attention:"
+  printf '%s' "${HARBOR_BOOTSTRAP_NOTES}" >&2
+  exit 1
 }
 harbor_install_traps
 harbor_bootstrap_main ${1+"$@"}

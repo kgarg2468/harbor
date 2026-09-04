@@ -7,6 +7,17 @@ load '../test_helper'
 # is root, and the exec itself from HARBOR_BOOTSTRAP_FIXTURE_* variables it consults
 # only when id -u is not 0, exactly as lib/checkout.sh, lib/entrypoint.sh, and
 # lib/ssh.sh consult their own stand-ins, so no root code path can ever see one.
+#
+# Every vendor command the design section 5.2 rows reach (apt-get, dpkg-query,
+# getent, useradd, loginctl, systemctl, sshd, ufw, ip, runuser) is the PR 2 shim
+# under a link in this test's own fixture base, first on PATH, and no real package
+# manager, account database, unit manager, daemon, or firewall is ever asked
+# anything. The subject here is a subprocess rather than a sourced function, so the
+# state a real command leaves behind is modeled by a wrapper script beside the shim
+# rather than by a shell function overriding it, exactly as tests/unit/lib/apt.bats,
+# power.bats, ssh.bats, and firewall.bats model it in-process: the shim is still
+# what answers and what logs, and the wrapper only rewrites the fixture the next
+# call reads.
 
 setup() {
   # The tree hash of a fixture release is needed to seed a harbor-install entry, and
@@ -43,7 +54,30 @@ setup() {
   HOMES="${FIX_BASE}/home"
   ARCH=amd64
   ASSUME_ROOT=1
-  mkdir -p "${FIX_BASE}/var/lib" "${INSTALL}" "${FIX_BASE}/usr/local/bin" \
+  # The remaining rows of the design section 5.2 table reach three more production
+  # paths, each of which becomes a fixture path here: the Node.js prefix, the
+  # configuration root both drop-ins are written under, and the bin directory
+  # beside the entrypoint link, which the script derives from the link itself.
+  NODE_PREFIX="${FIX_BASE}/opt/harbor/node"
+  ETC="${FIX_BASE}/etc"
+  BINDIR="${FIX_BASE}/usr/local/bin"
+  DROPIN="${ETC}/ssh/sshd_config.d/50-harbor-operator.conf"
+  GLOBAL_DROPIN="${ETC}/ssh/sshd_config.d/51-harbor-global.conf"
+  LOGIND="${ETC}/systemd/logind.conf.d/harbor.conf"
+  TARGETS="sleep.target suspend.target hibernate.target hybrid-sleep.target"
+  PACKAGES="git curl ufw jq openssh-server ca-certificates"
+  RULE="allow in on tailscale0 to any port 22 proto tcp comment harbor"
+  LAN_RULE="allow in from 192.168.1.0/24 to any port 22 proto tcp comment harbor-lan"
+  # The account the rows act on. lib/ssh.sh chowns the operator's authorized key to
+  # it and lib/node.sh runs a login shell as it, so it has to be an account that
+  # really exists, and the only account an unprivileged test may chown to is the one
+  # it already runs as, exactly as tests/unit/lib/ssh.bats resolves the same
+  # problem. It is deliberately not the script's own default operator, so every
+  # journal entry and every drop-in naming it is proof that --operator reached that
+  # row rather than proof of a default.
+  OPUSER="${TEST_USER}"
+  NODE_LOCKED="$(sed -n 's/^nodejs_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  mkdir -p "${FIX_BASE}/var/lib" "${INSTALL}" "${BINDIR}" \
     "${HOMES}/${ADMIN}/.ssh"
   KEYSRC="${HOMES}/${ADMIN}/.ssh/authorized_keys"
   printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture\n' >"${KEYSRC}"
@@ -55,8 +89,10 @@ setup() {
   mkdir -p "${BIN}" "${FX}/getent/healthy"
   ln -s "${HARBOR_ROOT}/tests/shims/bin/harbor-shim" "${BIN}/getent"
   absent_account "${OPERATOR}"
+  absent_account "${OPUSER}"
   group_entry sudo 27 "${ADMIN}"
   no_group_entry admin
+  vendor_init
   build_checkout
   ARGV0="${CHECKOUT}/bin/harbor"
 }
@@ -145,11 +181,366 @@ no_group_entry() {
   printf '2\n' >"${FX}/getent/healthy/group_${1}.exit"
 }
 
+vkey() {
+  # vkey WORD...: the fixture key the PR 2 shim derives from an argv
+  printf '%s' "${*}" | tr ' /' '_%'
+}
+
+vendor_shim() {
+  # vendor_shim NAME: the shim under NAME in a directory that is not on PATH, so a
+  # wrapper can be NAME on PATH, model the state the real command leaves, and still
+  # let the shim be what answers and what logs.
+  ln -s "${HARBOR_ROOT}/tests/shims/bin/harbor-shim" "${SHIM}/${1}"
+}
+
+vendor_direct() {
+  # vendor_direct NAME: a command with no state to model, straight to the shim.
+  ln -s "${HARBOR_ROOT}/tests/shims/bin/harbor-shim" "${BIN}/${1}"
+}
+
+vendor_wrapper() {
+  # vendor_wrapper NAME: BIN/NAME, whose body is this function's stdin and whose
+  # paths come from the one file every wrapper sources, so the body can be written
+  # with its own quoting intact.
+  vendor_shim "${1}"
+  {
+    printf '#!/bin/bash\nset -euo pipefail\n'
+    printf '. "${HARBOR_TEST_VENDOR}"\n'
+    cat
+  } >"${BIN}/${1}"
+  chmod 0755 "${BIN}/${1}"
+}
+
+vendor_init() {
+  # Every vendor command of the design section 5.2 rows, answering from this test's
+  # own fixture tree, with the state a real command would leave modeled beside it.
+  local unit
+  REPO_FX="${HARBOR_ROOT}/tests/fixtures/shims"
+  SHIM="${FIX_BASE}/shim"
+  VST="${FIX_BASE}/vendor-state"
+  SHIMLOG="${FIX_BASE}/shim.log"
+  VENDOR_ENV="${FIX_BASE}/vendor.env"
+  mkdir -p "${SHIM}" "${VST}" "${FX}/apt-get" "${FX}/dpkg-query" \
+    "${FX}/useradd/healthy" "${FX}/loginctl/healthy" "${FX}/systemctl/healthy" \
+    "${FX}/sshd/healthy" "${FX}/ufw/healthy" "${FX}/ip/healthy" "${FX}/runuser/healthy"
+  {
+    printf 'FX="%s"\n' "${FX}"
+    printf 'SHIM="%s"\n' "${SHIM}"
+    printf 'VST="%s"\n' "${VST}"
+    printf 'REPO_FX="%s"\n' "${REPO_FX}"
+    printf 'HOMES="%s"\n' "${HOMES}"
+    printf 'DROPIN="%s"\n' "${DROPIN}"
+    printf 'GLOBAL_DROPIN="%s"\n' "${GLOBAL_DROPIN}"
+    printf 'OPUSER="%s"\n' "${OPUSER}"
+  } >"${VENDOR_ENV}"
+  # Packages: the repository's own dpkg-query and apt-get fixture sets, a node on
+  # which none of the six is installed, and the installed set the mutating call
+  # switches to, exactly as tests/unit/lib/apt.bats composes them.
+  ln -s "${REPO_FX}/dpkg-query/none" "${FX}/dpkg-query/healthy"
+  ln -s "${REPO_FX}/apt-get/none" "${FX}/apt-get/healthy"
+  vendor_direct dpkg-query
+  vendor_wrapper apt-get <<'WRAPPER'
+rc=0
+"${SHIM}/apt-get" "$@" || rc="$?"
+if [ "${rc}" = 0 ] && [ "${1}" = install ]; then
+  rm -f "${FX}/dpkg-query/healthy"
+  ln -s "${REPO_FX}/dpkg-query/installed" "${FX}/dpkg-query/healthy"
+fi
+exit "${rc}"
+WRAPPER
+  # The operator account: useradd creates the home and makes the name service
+  # answer, which is what the row's own verification then reads back.
+  : >"${FX}/useradd/healthy/$(vkey --create-home --shell /bin/bash "${OPUSER}").out"
+  vendor_wrapper useradd <<'WRAPPER'
+rc=0
+op=""
+for arg in "$@"; do op="${arg}"; done
+"${SHIM}/useradd" "$@" || rc="$?"
+if [ "${rc}" = 0 ]; then
+  mkdir -p "${HOMES}/${op}"
+  printf '%s:x:4242:4242:Harbor:%s/%s:/bin/bash\n' "${op}" "${HOMES}" "${op}" \
+    >"${FX}/getent/healthy/passwd_${op}.out"
+  rm -f "${FX}/getent/healthy/passwd_${op}.exit"
+fi
+exit "${rc}"
+WRAPPER
+  # Linger: logind answers no until enable-linger has run, and yes afterwards.
+  linger_state no
+  : >"${FX}/loginctl/healthy/$(vkey enable-linger "${OPUSER}").out"
+  vendor_wrapper loginctl <<'WRAPPER'
+rc=0
+"${SHIM}/loginctl" "$@" || rc="$?"
+if [ "${rc}" = 0 ] && [ "${1}" = enable-linger ]; then
+  printf 'yes\n' \
+    >"${FX}/loginctl/healthy/show-user_${2}_--property=Linger_--value.out"
+fi
+exit "${rc}"
+WRAPPER
+  # Power and the sshd reload: the four sleep targets ship static, and a mask makes
+  # systemctl report the unit masked, which is what the row verifies.
+  for unit in ${TARGETS}; do
+    unit_state "${unit}" static
+    : >"${FX}/systemctl/healthy/mask_${unit}.out"
+  done
+  : >"${FX}/systemctl/healthy/restart_systemd-logind.service.out"
+  : >"${FX}/systemctl/healthy/reload_ssh.service.out"
+  printf 'active\n' >"${FX}/systemctl/healthy/is-active_ssh.service.out"
+  vendor_wrapper systemctl <<'WRAPPER'
+rc=0
+"${SHIM}/systemctl" "$@" || rc="$?"
+if [ "${rc}" = 0 ] && [ "${1}" = mask ]; then
+  printf 'masked\n' >"${FX}/systemctl/healthy/is-enabled_${2}.out"
+  printf '1\n' >"${FX}/systemctl/healthy/is-enabled_${2}.exit"
+fi
+exit "${rc}"
+WRAPPER
+  # sshd: what it reports for a user is computed from the drop-ins on disk at the
+  # instant it is asked, which is what makes the row's before-and-after proof a real
+  # one rather than a canned answer.
+  : >"${FX}/sshd/healthy/-t.out"
+  vendor_wrapper sshd <<'WRAPPER'
+who=""
+for arg in "$@"; do
+  case "${arg}" in user=*) who="${arg#user=}" ;; esac
+done
+if [ -n "${who}" ]; then
+  lines='port 22
+permitrootlogin prohibit-password
+pubkeyauthentication yes
+passwordauthentication yes
+kbdinteractiveauthentication yes
+usepam yes
+x11forwarding yes'
+  if [ "${who}" = "${OPUSER}" ] && [ -f "${DROPIN}" ]; then
+    lines="$(printf '%s\n' "${lines}" \
+      | sed -e 's/^passwordauthentication .*/passwordauthentication no/' \
+        -e 's/^kbdinteractiveauthentication .*/kbdinteractiveauthentication no/')"
+  fi
+  if [ "${who}" != "${OPUSER}" ] && [ -f "${GLOBAL_DROPIN}" ]; then
+    lines="$(printf '%s\n' "${lines}" \
+      | sed -e 's/^permitrootlogin .*/permitrootlogin no/' \
+        -e 's/^passwordauthentication .*/passwordauthentication no/')"
+  fi
+  printf '%s\n' "${lines}" >"${FX}/sshd/healthy/-T_-C_user=${who}.out"
+fi
+exec "${SHIM}/sshd" "$@"
+WRAPPER
+  # The firewall, as ufw itself reports it: a state machine in files, because every
+  # ufw call the library makes runs in a command substitution of its own.
+  printf 'inactive\n' >"${VST}/status"
+  printf 'deny\n' >"${VST}/in"
+  printf 'allow\n' >"${VST}/out"
+  : >"${VST}/added"
+  vendor_wrapper ufw <<'WRAPPER'
+{
+  printf 'Status: %s\n' "$(cat "${VST}/status")"
+  if [ "$(cat "${VST}/status")" = active ]; then
+    printf 'Logging: on (low)\n'
+    printf 'Default: %s (incoming), %s (outgoing), disabled (routed)\n' \
+      "$(cat "${VST}/in")" "$(cat "${VST}/out")"
+    printf 'New profiles: skip\n'
+  fi
+} >"${FX}/ufw/healthy/status_verbose.out"
+{
+  printf "Added user rules (see 'ufw status' for running firewall):\n"
+  cat "${VST}/added"
+} >"${FX}/ufw/healthy/show_added.out"
+key="$(printf '%s' "${*}" | tr ' /' '_%')"
+case "${*}" in
+  'status verbose' | 'show added') ;;
+  'default '*' incoming' | 'default '*' outgoing' | '--force enable' | 'allow '*)
+    : >"${FX}/ufw/healthy/${key}.out"
+    ;;
+esac
+rc=0
+"${SHIM}/ufw" "$@" || rc="$?"
+if [ "${rc}" = 0 ]; then
+  case "${*}" in
+    'default '*' incoming') printf '%s\n' "${2}" >"${VST}/in" ;;
+    'default '*' outgoing') printf '%s\n' "${2}" >"${VST}/out" ;;
+    '--force enable') printf 'active\n' >"${VST}/status" ;;
+    'allow '*)
+      rule="${*}"
+      case "${rule}" in
+        *' comment '*) rule="${rule% comment *} comment '${rule##* comment }'" ;;
+      esac
+      printf 'ufw %s\n' "${rule}" >>"${VST}/added"
+      ;;
+  esac
+fi
+exit "${rc}"
+WRAPPER
+  # The node's own routing table and interface, for --allow-lan-ssh.
+  printf 'default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.23 metric 100 \n' \
+    >"${FX}/ip/healthy/$(vkey -o -4 route show to default).out"
+  printf '2: eth0    inet 192.168.1.23/24 brd 192.168.1.255 scope global dynamic eth0\n' \
+    >"${FX}/ip/healthy/$(vkey -o -4 addr show dev eth0).out"
+  vendor_direct ip
+  # The report-only Node.js probe of the operator's own login shell.
+  operator_sees_node "v${NODE_LOCKED}" 0
+  vendor_direct runuser
+  seed_node_prefix
+}
+
+linger_state() {
+  # linger_state yes|no: what loginctl reports for the operator
+  printf '%s\n' "${1}" \
+    >"${FX}/loginctl/healthy/$(vkey show-user "${OPUSER}" --property=Linger --value).out"
+}
+
+unit_state() {
+  # unit_state UNIT WORD: what systemctl is-enabled UNIT answers. A masked unit
+  # exits 1, as the real systemctl does.
+  printf '%s\n' "${2}" >"${FX}/systemctl/healthy/is-enabled_${1}.out"
+  if [ "${2}" = masked ]; then
+    printf '1\n' >"${FX}/systemctl/healthy/is-enabled_${1}.exit"
+  else
+    rm -f "${FX}/systemctl/healthy/is-enabled_${1}.exit"
+  fi
+}
+
+operator_sees_node() {
+  # operator_sees_node OUTPUT EXIT: what sh -lc 'node --version' prints for the
+  # operator, which the Node.js row reports and never acts on
+  local key
+  key="$(vkey -u "${OPUSER}" -- sh -lc node --version)"
+  printf '%s\n' "${1}" >"${FX}/runuser/healthy/${key}.out"
+  printf '%s\n' "${2}" >"${FX}/runuser/healthy/${key}.exit"
+}
+
+seed_node_prefix() {
+  # A runtime already at the prefix answering with the locked version, so the
+  # Node.js row's install is the no-op its own inspection makes it and the row is
+  # its four journaled symlinks. The install itself is proved against a fixture
+  # tarball in tests/unit/lib/node.bats, which owns the pinned download.
+  local n
+  mkdir -p "${NODE_PREFIX}/bin"
+  printf '#!/bin/sh\necho v%s\n' "${NODE_LOCKED}" >"${NODE_PREFIX}/bin/node"
+  chmod 0755 "${NODE_PREFIX}/bin/node"
+  for n in npm npx corepack; do
+    printf '#!/bin/sh\nexit 0\n' >"${NODE_PREFIX}/bin/${n}"
+    chmod 0755 "${NODE_PREFIX}/bin/${n}"
+  done
+}
+
+install_form() {
+  # An installed release this run is executing, with the applied harbor-install
+  # entry the mismatch form requires, which is the form every row below runs in:
+  # the rows run from the installed copy, never from a checkout.
+  build_release "${TAG}"
+  write_record "${OTHER_TAG}"
+  mkdir -p "${STATE}/journal"
+  chmod 0700 "${STATE}/journal"
+  fixture_entry "${STATE}" 0001 harbor-install "${RELEASE_DIR}" created applied '"absent"' \
+    "{\"tree_sha256\":\"$(harbor_release_tree_hash "${RELEASE_DIR}")\"}"
+}
+
+rows() {
+  # The sequence, run from the installed copy with the operator this test can act
+  # as. --operator is passed on every call, so an entry naming OPUSER is an entry
+  # the flag reached.
+  bootstrap --operator "${OPUSER}" ${1+"$@"}
+}
+
+journal_ops() {
+  # Every journal entry in the order the sequence wrote them, "op target".
+  local f
+  for f in "${STATE}"/journal/*.json; do
+    printf '%s %s\n' "$(harbor_journal_string "${f}" op)" \
+      "$(harbor_journal_string "${f}" target)"
+  done
+}
+
+entry_file() {
+  # entry_file OP TARGET: the journal entry for that op and target, or nothing
+  local f
+  for f in "${STATE}"/journal/*-"${1}".json; do
+    [ -e "${f}" ] || continue
+    if [ "$(harbor_journal_string "${f}" target)" = "${2}" ]; then
+      printf '%s' "${f}"
+      return 0
+    fi
+  done
+}
+
+phase_of() {
+  # phase_of OP TARGET: the phase of that entry, or "none" when there is none
+  local f
+  f="$(entry_file "${1}" "${2}")"
+  if [ -z "${f}" ]; then
+    printf 'none'
+    return 0
+  fi
+  harbor_journal_string "${f}" phase
+}
+
+ownership_of() {
+  local f
+  f="$(entry_file "${1}" "${2}")"
+  if [ -z "${f}" ]; then
+    printf 'none'
+    return 0
+  fi
+  harbor_journal_string "${f}" ownership
+}
+
+seq_of() {
+  # seq_of OP TARGET: the journal sequence number of that entry
+  local f
+  f="$(entry_file "${1}" "${2}")"
+  [ -n "${f}" ] || return 0
+  f="${f##*/}"
+  printf '%s' "${f%%-*}"
+}
+
+entries_owned() {
+  # entries_owned OWNERSHIP: how many entries the journal holds with it
+  grep -l "^  \"ownership\": \"${1}\",\$" "${STATE}"/journal/*.json 2>/dev/null \
+    | wc -l | tr -d ' '
+}
+
+ufw_pre_state() {
+  # ufw_pre_state STATUS DEFAULT_IN DEFAULT_OUT: the firewall this node already has
+  printf '%s\n' "${1}" >"${VST}/status"
+  printf '%s\n' "${2}" >"${VST}/in"
+  printf '%s\n' "${3}" >"${VST}/out"
+}
+
+vendor_calls() {
+  # Every vendor argv this run made, one per line, tabs turned into spaces.
+  [ -e "${SHIMLOG}" ] || return 0
+  tr '\t' ' ' <"${SHIMLOG}"
+}
+
+call_index() {
+  # call_index ARGV: how many vendor calls preceded that exact one, so the order
+  # two rows ran in can be asserted rather than assumed
+  vendor_calls | grep -nxF -- "${1}" | sed -n 1p | cut -d: -f1
+}
+
+mutating_calls() {
+  # Every vendor call that changes the node rather than inspecting it. The
+  # inspections are named, so a call this list does not know about counts as
+  # mutating: a rerun that made one would fail rather than be quietly excused.
+  vendor_calls | grep -v '^dpkg-query -s ' \
+    | grep -v '^getent ' \
+    | grep -v '^apt-get -s install ' \
+    | grep -v '^loginctl show-user ' \
+    | grep -v '^systemctl is-enabled ' \
+    | grep -v '^systemctl is-active ' \
+    | grep -v '^sshd -t$' \
+    | grep -v '^sshd -T -C user=' \
+    | grep -v '^ufw status verbose$' \
+    | grep -v '^ufw show added$' \
+    | grep -v '^ip -o -4 ' \
+    | grep -v '^runuser -u ' || true
+}
+
 expected_flags() {
-  # expected_flags [KEY_SOURCE]: the normalized flag set of a default run, in the
-  # one canonical field order lib/entrypoint.sh prints.
+  # expected_flags [KEY_SOURCE] [OPERATOR]: the normalized flag set of a default
+  # run, in the one canonical field order lib/entrypoint.sh prints.
   printf 'operator=%s authorized-key-source=%s adopt-firewall=no adopt-tailscale=no allow-lan-ssh=no harden-sshd=no tailscale-ssh=no' \
-    "${OPERATOR}" "${1:-${KEYSRC}}"
+    "${2:-${OPERATOR}}" "${1:-${KEYSRC}}"
 }
 
 bootstrap() {
@@ -160,6 +551,8 @@ bootstrap() {
     PATH="${BIN}:${PATH}" \
     SUDO_USER="${ADMIN}" \
     HARBOR_SHIM_FIXTURES="${FX}" \
+    HARBOR_SHIM_LOG="${SHIMLOG}" \
+    HARBOR_TEST_VENDOR="${VENDOR_ENV}" \
     HARBOR_BOOTSTRAP_FIXTURE_ROOT="${ASSUME_ROOT}" \
     HARBOR_BOOTSTRAP_FIXTURE_OS_RELEASE="${OSREL}" \
     HARBOR_BOOTSTRAP_FIXTURE_ARCH="${ARCH}" \
@@ -168,6 +561,8 @@ bootstrap() {
     HARBOR_BOOTSTRAP_FIXTURE_LINK="${LINK}" \
     HARBOR_BOOTSTRAP_FIXTURE_ARGV0="${ARGV0}" \
     HARBOR_BOOTSTRAP_FIXTURE_EXEC="${EXECLOG}" \
+    HARBOR_BOOTSTRAP_FIXTURE_NODE_PREFIX="${NODE_PREFIX}" \
+    HARBOR_BOOTSTRAP_FIXTURE_ETC="${ETC}" \
     HARBOR_CHECKOUT_TRUSTED_USERS="root ${TEST_USER}" \
     HARBOR_ENTRYPOINT_INSTALL_ROOT="${INSTALL}" \
     HARBOR_ENTRYPOINT_TRUSTED_OWNER="${TEST_USER}" \
@@ -340,13 +735,8 @@ bootstrap() {
 }
 
 @test "the installed-entrypoint form with the proof continues without staging or exec'ing" {
-  build_release "${TAG}"
-  write_record "${OTHER_TAG}"
-  mkdir -p "${STATE}/journal"
-  chmod 0700 "${STATE}/journal"
-  fixture_entry "${STATE}" 0001 harbor-install "${RELEASE_DIR}" created applied '"absent"' \
-    "{\"tree_sha256\":\"$(harbor_release_tree_hash "${RELEASE_DIR}")\"}"
-  bootstrap
+  install_form
+  rows
   assert_success
   assert [ ! -e "${EXECLOG}" ]
   assert_equal "$(readlink "${LINK}")" "${RELEASE_DIR}/bin/harbor"
@@ -516,4 +906,412 @@ bootstrap() {
   assert_output --partial 'bootstrap.usage'
   assert_output --partial '--operator'
   assert [ ! -e "${STATE}" ]
+}
+
+# The remaining rows of the design section 5.2 table, in the table's order
+
+expected_rows() {
+  # Every journal entry a first run of the sequence writes, in the order the table
+  # puts the rows in and the order each library journals within its row. The list
+  # is written out here rather than derived, so a reordering of the sequence is a
+  # failure and never a silently different node.
+  local pkg unit name
+  printf '%s\n' "harbor-install ${RELEASE_DIR}"
+  printf '%s\n' "bootstrap-flags $(expected_flags "${KEYSRC}" "${OPUSER}")"
+  printf '%s\n' "file ${LINK}"
+  for pkg in ${PACKAGES}; do
+    printf '%s\n' "package ${pkg}"
+  done
+  printf '%s\n' "user ${OPUSER}"
+  for name in node npm npx corepack; do
+    printf '%s\n' "file ${BINDIR}/${name}"
+  done
+  printf '%s\n' "authorized-key-source ${KEYSRC}"
+  printf '%s\n' "authorized-key ${HOMES}/${OPUSER}/.ssh/authorized_keys"
+  printf '%s\n' "file ${DROPIN}"
+  printf '%s\n' "ufw-rule ${RULE}"
+  printf '%s\n' 'ufw-default incoming'
+  printf '%s\n' 'ufw-default outgoing'
+  printf '%s\n' "file ${LOGIND}"
+  for unit in ${TARGETS}; do
+    printf '%s\n' "systemd-mask ${unit}"
+  done
+  printf '%s\n' "linger ${OPUSER}"
+}
+
+@test "the rows run in the table's order, each as its own journaled transaction" {
+  install_form
+  rows
+  assert_success
+  run journal_ops
+  assert_output "$(expected_rows)"
+}
+
+@test "every row of a first run reaches applied" {
+  install_form
+  rows
+  assert_success
+  local line
+  while IFS= read -r line; do
+    assert_equal "$(phase_of "${line%% *}" "${line#* }")" applied
+  done <<<"$(expected_rows)"
+}
+
+@test "the packages row installs the six packages of the table in one apt-get invocation" {
+  install_form
+  rows
+  assert_success
+  run vendor_calls
+  assert_line "apt-get -s install ${PACKAGES}"
+  assert_line "apt-get install -y ${PACKAGES}"
+  assert_equal "$(ownership_of package git)" created
+}
+
+@test "the operator user row creates exactly the account --operator names, with no extra group" {
+  install_form
+  rows
+  assert_success
+  run vendor_calls
+  assert_line "useradd --create-home --shell /bin/bash ${OPUSER}"
+  refute_output --partial 'usermod'
+  refute_output --partial '--groups'
+  assert_equal "$(ownership_of user "${OPUSER}")" created
+}
+
+@test "the Node.js row links the runtime into the bin directory beside the entrypoint" {
+  install_form
+  rows
+  assert_success
+  local name
+  for name in node npm npx corepack; do
+    assert_equal "$(readlink "${BINDIR}/${name}")" "${NODE_PREFIX}/bin/${name}"
+    assert_equal "$(phase_of file "${BINDIR}/${name}")" applied
+  done
+  assert_output --partial "sh -lc 'node --version' as ${OPUSER} prints v${NODE_LOCKED}"
+}
+
+@test "the authorized key row copies the key by path and records it by hash, never printing it" {
+  install_form
+  rows
+  assert_success
+  # No key material reaches a message, a log line, or any command line.
+  refute_output --partial 'AAAAC3NzaC1lZDI1NTE5'
+  local target
+  target="${HOMES}/${OPUSER}/.ssh/authorized_keys"
+  assert_equal "$(cat "${target}")" "$(cat "${KEYSRC}")"
+  assert_equal "$(harbor_stat_mode "${target}")" 0600
+  run cat "$(entry_file authorized-key "${target}")"
+  assert_output --partial "$(harbor_sha256 "${KEYSRC}")"
+  refute_output --partial 'AAAAC3NzaC1lZDI1NTE5'
+  run cat "${STATE}/bootstrap.log"
+  refute_output --partial 'AAAAC3NzaC1lZDI1NTE5'
+  run vendor_calls
+  refute_output --partial 'AAAAC3NzaC1lZDI1NTE5'
+}
+
+@test "the sshd row writes the operator drop-in under the configuration root and reloads" {
+  install_form
+  rows
+  assert_success
+  assert [ -f "${DROPIN}" ]
+  run cat "${DROPIN}"
+  assert_line "Match User ${OPUSER}"
+  assert_line '  PasswordAuthentication no'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  run vendor_calls
+  assert_line 'sshd -t'
+  assert_line "sshd -T -C user=${OPUSER}"
+  assert_line "sshd -T -C user=${ADMIN}"
+  assert_line 'systemctl reload ssh.service'
+}
+
+@test "the firewall row runs after the sshd assertions and adds only the tailscale0 rule" {
+  install_form
+  rows
+  assert_success
+  run vendor_calls
+  assert_line "ufw ${RULE}"
+  assert_line 'ufw default deny incoming'
+  assert_line 'ufw --force enable'
+  # Design section 6.2: the rule that keeps the node reachable is in place before
+  # anything starts filtering, and the drop-in is proved before either.
+  local rule_at enable_at sshd_at
+  rule_at="$(call_index "ufw ${RULE}")"
+  enable_at="$(call_index 'ufw --force enable')"
+  sshd_at="$(call_index 'sshd -t')"
+  assert [ "${sshd_at}" -lt "${rule_at}" ]
+  assert [ "${rule_at}" -lt "${enable_at}" ]
+  # No rule names a physical interface (design section 3.4).
+  refute_output --partial 'on eth0'
+}
+
+@test "the power row writes the lid drop-in and masks the four sleep targets" {
+  install_form
+  rows
+  assert_success
+  run cat "${LOGIND}"
+  assert_line 'HandleLidSwitch=ignore'
+  assert_line 'HandleLidSwitchDocked=ignore'
+  local unit
+  run vendor_calls
+  for unit in ${TARGETS}; do
+    assert_line "systemctl mask ${unit}"
+  done
+  assert_line 'systemctl restart systemd-logind.service'
+}
+
+@test "the linger row is the last row this release applies" {
+  install_form
+  rows
+  assert_success
+  run vendor_calls
+  assert_line "loginctl enable-linger ${OPUSER}"
+  assert_equal "$(ownership_of linger "${OPUSER}")" created
+}
+
+@test "the Tailscale rows and the state record are not applied by this release" {
+  install_form
+  rows
+  assert_success
+  # No entry of a tailscale-install, tailscale-operator, or tailscale-serve op, and
+  # no tailscale command at all: the flag set names the two Tailscale flags because
+  # it records the run's whole intent, and that is the only tailscale text here.
+  run journal_ops
+  refute_line --regexp '^tailscale'
+  run vendor_calls
+  refute_line --regexp '^tailscale '
+  # bootstrap.json is the last row of the table and belongs to its own commit, so
+  # this release leaves the record exactly as it found it.
+  run cat "${STATE}/bootstrap.json"
+  assert_output --partial "${OTHER_TAG}"
+  refute_output --partial "${TAG}"
+}
+
+# Every flag of the bound set reaches the row it belongs to
+
+@test "--operator reaches the user, Node.js probe, authorized key, sshd, and linger rows" {
+  install_form
+  rows
+  assert_success
+  assert_equal "$(phase_of user "${OPUSER}")" applied
+  assert_equal "$(phase_of authorized-key "${HOMES}/${OPUSER}/.ssh/authorized_keys")" applied
+  assert_equal "$(phase_of linger "${OPUSER}")" applied
+  run cat "${DROPIN}"
+  assert_line "Match User ${OPUSER}"
+  # The script's own default operator was reached by no row at all.
+  assert [ ! -e "${HOMES}/${OPERATOR}" ]
+  assert_equal "$(phase_of user "${OPERATOR}")" none
+}
+
+@test "--authorized-key-file reaches the authorized key row as the source it records" {
+  install_form
+  local alt="${FIX_BASE}/given-authorized-keys"
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 given\n' >"${alt}"
+  rows --authorized-key-file "${alt}"
+  assert_success
+  assert_equal "$(phase_of authorized-key-source "${alt}")" applied
+  assert_equal "$(phase_of authorized-key-source "${KEYSRC}")" none
+  assert_equal "$(cat "${HOMES}/${OPUSER}/.ssh/authorized_keys")" "$(cat "${alt}")"
+}
+
+@test "--harden-sshd reaches the sshd row as a drop-in and a journal entry of its own" {
+  install_form
+  rows --harden-sshd
+  assert_success
+  assert [ -f "${GLOBAL_DROPIN}" ]
+  assert_equal "$(phase_of file "${GLOBAL_DROPIN}")" applied
+  run cat "${GLOBAL_DROPIN}"
+  assert_line 'PermitRootLogin no'
+}
+
+@test "--harden-sshd refuses when the installation user has no key of their own" {
+  install_form
+  rm "${KEYSRC}"
+  rows --harden-sshd --authorized-key-file "${CHECKOUT}/bin/harbor"
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_no_key'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+}
+
+@test "--adopt-firewall reaches the firewall row and journals the prior default" {
+  install_form
+  ufw_pre_state active allow allow
+  rows --adopt-firewall
+  assert_success
+  assert_equal "$(ownership_of ufw-default incoming)" modified
+  assert_equal "$(entry_raw "${STATE}" "$(seq_of ufw-default incoming)" pre_state)" '"allow"'
+  run vendor_calls
+  assert_line 'ufw default deny incoming'
+}
+
+@test "an already active firewall without --adopt-firewall is journaled observed and left alone" {
+  install_form
+  ufw_pre_state active allow allow
+  rows
+  assert_success
+  assert_equal "$(ownership_of ufw-default incoming)" observed
+  run vendor_calls
+  refute_output --partial 'ufw default deny incoming'
+  refute_output --partial 'ufw --force enable'
+}
+
+@test "--allow-lan-ssh reaches the firewall row and is a degraded status warning" {
+  install_form
+  rows --allow-lan-ssh
+  assert_equal "${status}" 1
+  assert_output --partial 'firewall.lan_ssh'
+  assert_output --partial '192.168.1.0/24'
+  assert_equal "$(phase_of ufw-rule "${LAN_RULE}")" applied
+  # Degraded, so every row after the firewall still ran.
+  assert_equal "$(phase_of linger "${OPUSER}")" applied
+}
+
+@test "--tailscale-ssh and --adopt-tailscale are bound and consume no row here" {
+  install_form
+  rows --tailscale-ssh --adopt-tailscale
+  assert_success
+  assert_equal "$(entry_raw "${STATE}" 0002 target)" \
+    "\"$(printf 'operator=%s authorized-key-source=%s adopt-firewall=no adopt-tailscale=yes allow-lan-ssh=no harden-sshd=no tailscale-ssh=yes' "${OPUSER}" "${KEYSRC}")\""
+  run journal_ops
+  refute_line --regexp '^tailscale'
+  run vendor_calls
+  refute_line --regexp '^tailscale '
+}
+
+# Step boundaries: HARBOR_FAIL_AFTER cuts each row between its mutation and its
+# applied write, and every row after it is untouched
+
+@test "HARBOR_FAIL_AFTER cuts the packages row between apt-get and the applied write" {
+  install_form
+  HOOKS=apt-install
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of package git)" prepared
+  assert_equal "$(phase_of user "${OPUSER}")" none
+}
+
+@test "HARBOR_FAIL_AFTER cuts the operator user row between useradd and the applied write" {
+  install_form
+  HOOKS=user-created
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of package git)" applied
+  assert_equal "$(phase_of user "${OPUSER}")" prepared
+  assert [ ! -e "${BINDIR}/node" ]
+}
+
+@test "HARBOR_FAIL_AFTER cuts the Node.js row before the link it prepared" {
+  install_form
+  HOOKS=node-link-node
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of user "${OPUSER}")" applied
+  assert_equal "$(phase_of file "${BINDIR}/node")" prepared
+  assert [ ! -e "${HOMES}/${OPUSER}/.ssh/authorized_keys" ]
+}
+
+@test "HARBOR_FAIL_AFTER cuts the authorized key row between the copy and the applied write" {
+  install_form
+  HOOKS=ssh-key-copied
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of authorized-key "${HOMES}/${OPUSER}/.ssh/authorized_keys")" prepared
+  assert [ -f "${HOMES}/${OPUSER}/.ssh/authorized_keys" ]
+  assert [ ! -e "${DROPIN}" ]
+}
+
+@test "HARBOR_FAIL_AFTER cuts the sshd row between the drop-in and the applied write" {
+  install_form
+  HOOKS=ssh-dropin-operator
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of file "${DROPIN}")" prepared
+  assert [ -f "${DROPIN}" ]
+  run vendor_calls
+  refute_output --partial 'ufw --force enable'
+}
+
+@test "HARBOR_FAIL_AFTER cuts the firewall row between the enable and the applied write" {
+  install_form
+  HOOKS=firewall-enable
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of ufw-rule "${RULE}")" prepared
+  assert_equal "$(phase_of ufw-default incoming)" prepared
+  assert [ ! -e "${LOGIND}" ]
+}
+
+@test "HARBOR_FAIL_AFTER cuts the power row between the drop-in and the applied write" {
+  install_form
+  HOOKS=power-lid
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of file "${LOGIND}")" prepared
+  assert [ -f "${LOGIND}" ]
+  run vendor_calls
+  refute_output --partial 'systemctl mask'
+  refute_output --partial 'loginctl enable-linger'
+}
+
+@test "HARBOR_FAIL_AFTER cuts the linger row between loginctl and the applied write" {
+  install_form
+  HOOKS=linger-enabled
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of file "${LOGIND}")" applied
+  assert_equal "$(phase_of linger "${OPUSER}")" prepared
+}
+
+# A rerun of a fully bootstrapped node
+
+@test "a rerun of a fully bootstrapped node makes no mutating vendor call at all" {
+  install_form
+  rows
+  assert_success
+  local created modified
+  created="$(entries_owned created)"
+  modified="$(entries_owned modified)"
+  : >"${SHIMLOG}"
+  rows
+  assert_success
+  run mutating_calls
+  assert_output ''
+  assert_equal "$(entries_owned created)" "${created}"
+  assert_equal "$(entries_owned modified)" "${modified}"
+}
+
+@test "a rerun leaves every artifact the first run wrote byte for byte" {
+  install_form
+  rows
+  assert_success
+  local before
+  before="$(harbor_sha256 "${DROPIN}")$(harbor_sha256 "${LOGIND}")"
+  rows
+  assert_success
+  assert_equal "$(harbor_sha256 "${DROPIN}")$(harbor_sha256 "${LOGIND}")" "${before}"
+}
+
+# Degraded rows do not stop the rows after them (design sections 5.2 and 6.2)
+
+@test "a Node.js the operator's shell does not see is degraded and stops nothing" {
+  install_form
+  operator_sees_node 'v18.0.0' 0
+  rows
+  assert_equal "${status}" 1
+  assert_output --partial 'node.operator_probe'
+  assert_output --partial 'root will not reinstall'
+  assert_equal "$(phase_of linger "${OPUSER}")" applied
+  # Root reinstalls nothing and alters nothing: the runtime is still the locked one.
+  assert_equal "$("${NODE_PREFIX}/bin/node" --version)" "v${NODE_LOCKED}"
+}
+
+@test "a broken row is fatal and leaves its entry prepared with every later row untouched" {
+  install_form
+  printf 'ERROR: fixture failure\n' >"${FX}/loginctl/healthy/$(vkey enable-linger "${OPUSER}").out"
+  printf '1\n' >"${FX}/loginctl/healthy/$(vkey enable-linger "${OPUSER}").exit"
+  rows
+  assert_equal "${status}" 2
+  assert_output --partial 'user.linger'
+  assert_output --partial 'stays prepared'
+  assert_equal "$(phase_of linger "${OPUSER}")" prepared
 }
