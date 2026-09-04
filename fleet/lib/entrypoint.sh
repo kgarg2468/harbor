@@ -62,20 +62,18 @@ harbor_entrypoint_resolve() {
   esac
 }
 # harbor_entrypoint_record_tag RECORD: the release tag bootstrap.json records, or a
-# non-zero status when the record names none. The record is flat, non-secret JSON
-# written by the last step of bootstrap; it is read with sed rather than jq because
-# every function under lib/ runs before the packages step could have installed one.
+# non-zero status when the record names none. The key is release_tag and nothing else:
+# lib/state.sh, which writes the record (design section 5.2, the State record row), spells
+# it that way, so a record spelling it any other way is not a record Harbor wrote and is
+# refused rather than read under a second name. The record is flat, non-secret JSON written
+# by the last step of bootstrap; it is read with sed rather than jq because every function
+# under lib/ runs before the packages step could have installed one.
 harbor_entrypoint_record_tag() {
-  local record="${1}" key value
-  for key in release_tag tag; do
-    value="$(sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
-      "${record}" 2>/dev/null | sed -n '1p')"
-    if [ -n "${value}" ]; then
-      printf '%s' "${value}"
-      return 0
-    fi
-  done
-  return 1
+  local record="${1}" value
+  value="$(sed -n 's/.*"release_tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "${record}" 2>/dev/null | sed -n '1p')"
+  [ -n "${value}" ] || return 1
+  printf '%s' "${value}"
 }
 # harbor_entrypoint_check ARGV0 RECORD [COMMAND]: exits 3 unless ARGV0 resolves to
 # bin/harbor inside an installed release directory <install root>/<tag>/ whose

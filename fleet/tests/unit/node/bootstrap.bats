@@ -31,6 +31,11 @@ setup() {
   . "${HARBOR_ROOT}/lib/journal.sh"
   # shellcheck source=../../../lib/release.sh
   . "${HARBOR_ROOT}/lib/release.sh"
+  # The state record's first reader in production is lib/entrypoint.sh, so the record the
+  # last row writes is asserted with that reader rather than with a second one of this
+  # file's own.
+  # shellcheck source=../../../lib/entrypoint.sh
+  . "${HARBOR_ROOT}/lib/entrypoint.sh"
   TEST_USER="$(id -un)"
   # The checkout trust rules judge every component from / to the checkout root, so the
   # checkout fixture cannot live under BATS_TEST_TMPDIR: on Linux that sits under
@@ -150,8 +155,11 @@ build_release() {
 }
 
 write_record() {
-  # write_record TAG: bootstrap.json as the last step of bootstrap writes it.
+  # write_record TAG: a bootstrap.json an earlier run left, in the state root with the
+  # modes bootstrap creates it with. It carries the two keys the preflight reads and not
+  # the whole contract, which is the last row's to write.
   mkdir -p "${STATE}"
+  chmod 0755 "${STATE}"
   printf '{\n  "release_tag": "%s",\n  "entrypoint": "%s"\n}\n' "${1}" "${LINK}" \
     >"${STATE}/bootstrap.json"
   chmod 0644 "${STATE}/bootstrap.json"
@@ -937,6 +945,7 @@ expected_rows() {
     printf '%s\n' "systemd-mask ${unit}"
   done
   printf '%s\n' "linger ${OPUSER}"
+  printf '%s\n' "file ${STATE}/bootstrap.json"
 }
 
 @test "the rows run in the table's order, each as its own journaled transaction" {
@@ -1060,7 +1069,7 @@ expected_rows() {
   assert_line 'systemctl restart systemd-logind.service'
 }
 
-@test "the linger row is the last row this release applies" {
+@test "the linger row is the last row before the state record" {
   install_form
   rows
   assert_success
@@ -1069,7 +1078,7 @@ expected_rows() {
   assert_equal "$(ownership_of linger "${OPUSER}")" created
 }
 
-@test "the Tailscale rows and the state record are not applied by this release" {
+@test "the Tailscale rows are not applied by this release, and the record says so" {
   install_form
   rows
   assert_success
@@ -1080,11 +1089,116 @@ expected_rows() {
   refute_line --regexp '^tailscale'
   run vendor_calls
   refute_line --regexp '^tailscale '
-  # bootstrap.json is the last row of the table and belongs to its own commit, so
-  # this release leaves the record exactly as it found it.
+  # This release installs no Tailscale and adopts none, so the ownership the record can
+  # honestly name is pre-existing and there is no version to name beside it. Slice 3d is
+  # what makes harbor-installed and adopted reachable and what adds the version key.
   run cat "${STATE}/bootstrap.json"
-  assert_output --partial "${OTHER_TAG}"
-  refute_output --partial "${TAG}"
+  assert_line '  "tailscale_ownership": "pre-existing",'
+  refute_output --partial 'tailscale_version'
+}
+
+# The state record, the last row of the design section 5.2 table
+
+@test "the state record is written last, mode 0644, carrying what the rows above proved" {
+  install_form
+  rows
+  assert_success
+  local record lock_sha flags rec_seq linger_seq
+  record="${STATE}/bootstrap.json"
+  lock_sha="$(harbor_sha256 "${HARBOR_ROOT}/versions.lock")"
+  flags="$(expected_flags "${KEYSRC}" "${OPUSER}")"
+  assert_equal "$(harbor_stat_mode "${record}")" 0644
+  # Written last: its entry is the journal's newest, after the linger row's.
+  rec_seq="$(seq_of file "${record}")"
+  linger_seq="$(seq_of linger "${OPUSER}")"
+  assert [ "$((10#${rec_seq}))" -gt "$((10#${linger_seq}))" ]
+  assert_equal "$(phase_of file "${record}")" applied
+  # Every value is the one the row that owns it proved: the tag of the executing release,
+  # the absolute entrypoint, the hash of the lock the preflight loaded, the intent the
+  # flag binding recorded, the locked Node.js version, and the account the operator-user
+  # row created, uid, gid, and home as the name service now lists them.
+  run cat "${record}"
+  assert_line --index 0 '{'
+  assert_line --index 1 "  \"release_tag\": \"${TAG}\","
+  assert_line --index 2 "  \"entrypoint\": \"${LINK}\","
+  assert_line --index 3 "  \"lock_sha256\": \"${lock_sha}\","
+  assert_line --index 4 "  \"flags\": \"${flags}\","
+  assert_line --index 5 "  \"nodejs_version\": \"${NODE_LOCKED}\","
+  assert_line --index 6 '  "tailscale_ownership": "pre-existing",'
+  assert_line --index 7 "  \"operator\": \"${OPUSER}\","
+  assert_line --index 8 '  "operator_uid": 4242,'
+  assert_line --index 9 '  "operator_gid": 4242,'
+  assert_line --index 10 "  \"operator_home\": \"${HOMES}/${OPUSER}\","
+  assert_line --index 11 --regexp '^  "timestamp": "[0-9]{8}T[0-9]{6}Z"$'
+  assert_line --index 12 '}'
+  assert_equal "${#lines[@]}" 13
+  # Non-secret: no key material and no holder identity reach it.
+  refute_output --partial 'AAAAC3NzaC1lZDI1NTE5'
+}
+
+@test "the record the run writes ends the mismatch form and is read back by the entrypoint check" {
+  # install_form seeds a record naming another tag, which is the mismatch form of design
+  # section 5.2; the last row is what ends it by rewriting the record to the executing
+  # release, and lib/entrypoint.sh's own reader is what has to be able to read it.
+  install_form
+  assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${OTHER_TAG}"
+  rows
+  assert_success
+  assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${TAG}"
+  assert_equal "$(ownership_of file "${STATE}/bootstrap.json")" modified
+}
+
+@test "the state root, its journal, and the log keep the modes of the design section 5.2 contract" {
+  install_form
+  rows
+  assert_success
+  # 0755 with a 0644 record, so the operator can stat the lock, read its holder, and read
+  # the record; the journal and the log stay root-only.
+  assert_equal "$(harbor_stat_mode "${STATE}")" 0755
+  assert_equal "$(harbor_stat_mode "${STATE}/bootstrap.json")" 0644
+  assert_equal "$(harbor_stat_mode "${STATE}/journal")" 0700
+  assert_equal "$(harbor_stat_mode "${STATE}/bootstrap.log")" 0600
+  # The lock and its gate are released, so neither is left behind for the next command.
+  assert [ ! -e "${STATE}/lock.d" ]
+  assert [ ! -e "${STATE}/reclaim.d" ]
+}
+
+@test "bootstrap prints the operator's next command and switches no user to do it" {
+  install_form
+  rows
+  assert_success
+  assert_output --partial "next, as ${OPUSER} over SSH: harbor provision"
+  local switches
+  # The one runuser of the whole sequence is the report-only Node.js probe of the design
+  # section 5.2 Node.js row. Bootstrap starts no shell as the operator and no login of any
+  # kind: it prints the command and exits (design section 5.2).
+  switches="$(vendor_calls | grep -c '^runuser ' || true)"
+  assert_equal "${switches}" 1
+  run vendor_calls
+  assert_line "runuser -u ${OPUSER} -- sh -lc node --version"
+  refute_line --regexp '^(su|login|sudo|machinectl) '
+}
+
+@test "HARBOR_FAIL_AFTER cuts the record row between the rename and the applied write" {
+  install_form
+  HOOKS=state-record
+  rows
+  assert [ "${status}" -ne 0 ]
+  # The rename is atomic, so what the cut leaves is the whole new record and an entry the
+  # next run's recovery can decide against it, never half a record.
+  assert_equal "$(phase_of file "${STATE}/bootstrap.json")" prepared
+  assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${TAG}"
+  run cat "${STATE}/bootstrap.json"
+  assert_equal "${#lines[@]}" 13
+  assert_equal "$(harbor_stat_mode "${STATE}/bootstrap.json")" 0644
+  # And the rerun decides that entry and converges without rewriting the record.
+  local before
+  before="$(harbor_sha256 "${STATE}/bootstrap.json")"
+  HOOKS=""
+  rows
+  assert_success
+  assert_equal "$(phase_of file "${STATE}/bootstrap.json")" applied
+  assert_equal "$(harbor_sha256 "${STATE}/bootstrap.json")" "${before}"
 }
 
 # Every flag of the bound set reaches the row it belongs to
@@ -1162,8 +1276,11 @@ expected_rows() {
   assert_output --partial 'firewall.lan_ssh'
   assert_output --partial '192.168.1.0/24'
   assert_equal "$(phase_of ufw-rule "${LAN_RULE}")" applied
-  # Degraded, so every row after the firewall still ran.
+  # Degraded, so every row after the firewall still ran and the record was written before
+  # the exit 1 (design section 6.2): a degraded node is a bootstrapped one.
   assert_equal "$(phase_of linger "${OPUSER}")" applied
+  assert_equal "$(phase_of file "${STATE}/bootstrap.json")" applied
+  assert_output --partial "next, as ${OPUSER} over SSH: harbor provision"
 }
 
 @test "--tailscale-ssh and --adopt-tailscale are bound and consume no row here" {
@@ -1260,6 +1377,10 @@ expected_rows() {
   assert [ "${status}" -ne 0 ]
   assert_equal "$(phase_of file "${LOGIND}")" applied
   assert_equal "$(phase_of linger "${OPUSER}")" prepared
+  # A cut before the record row leaves the record whole as it was, still naming the tag
+  # the mismatch form found there, and journals nothing for it.
+  assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${OTHER_TAG}"
+  assert_equal "$(phase_of file "${STATE}/bootstrap.json")" none
 }
 
 # A rerun of a fully bootstrapped node
@@ -1285,10 +1406,12 @@ expected_rows() {
   rows
   assert_success
   local before
-  before="$(harbor_sha256 "${DROPIN}")$(harbor_sha256 "${LOGIND}")"
+  before="$(harbor_sha256 "${DROPIN}")$(harbor_sha256 "${LOGIND}")$(harbor_sha256 "${STATE}/bootstrap.json")"
   rows
   assert_success
-  assert_equal "$(harbor_sha256 "${DROPIN}")$(harbor_sha256 "${LOGIND}")" "${before}"
+  # The record's timestamp is what a rerun would most easily churn, and it does not: a
+  # record that is already what would be written is journaled observed and left alone.
+  assert_equal "$(harbor_sha256 "${DROPIN}")$(harbor_sha256 "${LOGIND}")$(harbor_sha256 "${STATE}/bootstrap.json")" "${before}"
 }
 
 # Degraded rows do not stop the rows after them (design sections 5.2 and 6.2)

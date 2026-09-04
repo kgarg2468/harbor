@@ -59,6 +59,8 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/firewall.sh"
 # shellcheck source=../lib/power.sh
 . "${HARBOR_ROOT}/lib/power.sh"
+# shellcheck source=../lib/state.sh
+. "${HARBOR_ROOT}/lib/state.sh"
 # The operator account of design section 5.2 when --operator names none.
 HARBOR_BOOTSTRAP_DEFAULT_OPERATOR=harbor
 # The Packages row of the design section 5.2 table, in the table's order. The list
@@ -369,6 +371,9 @@ harbor_bootstrap_preflight() {
   flags="$(harbor_bootstrap_flags_normalize "${HARBOR_BOOTSTRAP_OPERATOR}" "${HARBOR_BOOTSTRAP_KEY_SOURCE}" \
     ${HARBOR_BOOTSTRAP_FLAGS[@]+"${HARBOR_BOOTSTRAP_FLAGS[@]}"})" || exit "$?"
   harbor_bootstrap_flags_bind "${HARBOR_BOOTSTRAP_STATE_ROOT}" "${flags}"
+  # The set this run is bound to, kept for the state record row, which records the intent
+  # rather than deriving a second one of its own from the arguments.
+  HARBOR_BOOTSTRAP_FLAG_SET="${flags}"
   # 10. The entrypoint symlink is absent or Harbor's own.
   harbor_bootstrap_check_link "${HARBOR_BOOTSTRAP_LINK}" "${HARBOR_BOOTSTRAP_INSTALL_ROOT}"
 }
@@ -481,7 +486,7 @@ harbor_bootstrap_row() {
 # prepared, and this function adds the row and the node's state around it rather
 # than a second message of its own.
 harbor_bootstrap_steps() {
-  local root operator admin etc bindir prefix home probe=0
+  local root operator admin etc bindir prefix home uid gid lock_sha nodejs probe=0
   local firewall_args=()
   root="${HARBOR_BOOTSTRAP_STATE_ROOT}"
   operator="${HARBOR_BOOTSTRAP_OPERATOR}"
@@ -508,8 +513,12 @@ harbor_bootstrap_steps() {
     || harbor_die 2 bootstrap.operator_home "the name service lists ${operator} without a home directory, so Harbor has nowhere to place the operator's authorized key; the packages and the account are applied and nothing after them was attempted, so fix the account with getent passwd ${operator} and rerun"
   # Taken here rather than read at the authorized key row below, so the directory the
   # key is written under is the one this row proved, and no row added between the two
-  # can move it by looking the operator up again for a reason of its own.
+  # can move it by looking the operator up again for a reason of its own. The uid and
+  # the gid are taken with it, for the same reason and for the state record row, which
+  # records the account as this row left it (design section 5.2, the State record row).
   home="${HARBOR_USER_HOME}"
+  uid="${HARBOR_USER_UID}"
+  gid="${HARBOR_USER_GID}"
   # Node.js: the pinned runtime at the root-owned prefix, its four /usr/local/bin
   # symlinks, and then the report-only probe of what the operator's own login shell
   # sees. The probe never makes root reinstall or alter anything, so a probe that
@@ -559,10 +568,28 @@ harbor_bootstrap_steps() {
   # The Tailscale operator row of the design section 5.2 table sits here, between
   # Linger and the state record, and belongs to slice 3d with the row above it.
   #
-  # The state record row, /var/lib/harbor/bootstrap.json and the operator's next
-  # command, is the last row of the table and belongs to its own commit; this
-  # release writes no record and leaves any record already there exactly as it is.
+  # The state record, the last row of the table: bootstrap.json, mode 0644, carrying
+  # the values the rows above already proved rather than any this row goes looking for
+  # again. The lock hash is the hash of the very file the preflight loaded, the flag
+  # set is the intent the binding recorded, the Node.js version is the locked one the
+  # Node.js row proved the prefix reports, and the operator name, uid, gid, and home
+  # are the account as the operator-user row left it.
   #
+  # Tailscale ownership is pre-existing, and there is no version to record beside it:
+  # this release installs no Tailscale and adopts none, so pre-existing is the only
+  # ownership it can truthfully name. Slice 3d, which owns the two Tailscale rows
+  # above, is what makes harbor-installed and adopted reachable and what adds the
+  # installed version beside the ownership.
+  harbor_bootstrap_row state-record "every row of the design section 5.2 table is applied and ${root}/bootstrap.json is being written; until it names this release, every command but bootstrap and journal resolve refuses to run against this node"
+  # Both values are read into variables of their own rather than substituted into the
+  # call, for the reason the preflight reads the locked release into one: a failure
+  # inside a substitution would exit its own subshell and hand the row an empty value.
+  lock_sha="$(harbor_sha256 "${HARBOR_VERSIONS_FILE}")" \
+    || harbor_die 2 bootstrap.lock_hash "the sha256 of ${HARBOR_VERSIONS_FILE} cannot be computed, so the record cannot name the lock this node was bootstrapped from; every row above is applied, so fix the cause and rerun"
+  nodejs="$(harbor_version_require nodejs_version)" || exit "$?"
+  harbor_state_record "${root}" "${HARBOR_BOOTSTRAP_TAG}" "${HARBOR_BOOTSTRAP_LINK}" \
+    "${lock_sha}" "${HARBOR_BOOTSTRAP_FLAG_SET}" "${nodejs}" pre-existing \
+    "${operator}" "${uid}" "${gid}" "${home}"
   # Every row is applied, so a failure after this point is no longer one row's.
   # Read by the ERR trap of lib/log.sh, never in this file.
   # shellcheck disable=SC2034
@@ -593,6 +620,13 @@ harbor_bootstrap_main() {
   # copy and under the lock this run still holds.
   harbor_msg "installed ${HARBOR_BOOTSTRAP_TAG} at ${HARBOR_BOOTSTRAP_RELEASE} and pointed ${HARBOR_BOOTSTRAP_LINK} at it"
   harbor_bootstrap_steps
+  # The record names this release, so this node is bootstrapped. Design section 5.2:
+  # bootstrap prints the operator's next command and exits without switching user, so
+  # this is a printed line and never a runuser, an su, or a login of any kind. The
+  # command is design section 5.4's, run as the operator over SSH from the Mac; the
+  # Tailscale login of design section 5.3 that comes before it on a Harbor-installed
+  # Tailscale is reported by the Tailscale operator row, which is slice 3d's.
+  harbor_msg "this node is bootstrapped; next, as ${HARBOR_BOOTSTRAP_OPERATOR} over SSH: harbor provision"
   # Read by the EXIT trap of lib/log.sh, which turns a zero exit without it into the
   # exit 2 of a command that stopped before it finished.
   # shellcheck disable=SC2034
