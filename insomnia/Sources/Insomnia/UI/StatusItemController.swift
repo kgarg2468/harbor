@@ -3,47 +3,49 @@ import SwiftUI
 
 /// Owns the NSStatusItem and drives every state change of the menu bar UI.
 ///
-/// The status bar button hosts a SwiftUI view; the item's width follows the
-/// SwiftUI layout frame by frame so neighbours slide instead of jumping.
+/// The status bar button hosts a SwiftUI view and the item's width is set to
+/// whatever that view fits into; there is no popover, so the status item is
+/// the whole interface apart from a right-click NSMenu.
 /// Keyboard input never reaches a text field inside a status bar window, so
 /// a local key monitor routes digits / Tab / Enter / Esc / Delete to the
 /// focused pill while the pills are open.
 @MainActor
-final class StatusItemController {
+final class StatusItemController: NSObject {
     let manager: SessionManager
     let status: any StatusSource
     let model = MenuBarModel()
     let reminder = ReminderScheduler()
+    /// Opens the settings window. Injected because the window is owned by the
+    /// app delegate, which outlives any one status item.
+    private let showSettings: () -> Void
 
     private let statusItem: NSStatusItem
-    private var hostingView: NSHostingView<StatusRootView>?
-    private var presetPopover: NSPopover?
-    private var sessionPopover: NSPopover?
+    private var hostingView: StatusHostingView?
 
     private var keyMonitor: Any?
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
+    /// Holds keyboard focus while the pills are open; see `KeyCatcherPanel`.
+    private var keyCatcher: KeyCatcherPanel?
 
     /// Whoever was frontmost before we activated for typing; reactivated on collapse.
     private var previousApp: NSRunningApplication?
     /// Invalidates in-flight stagger steps when expand/collapse interleave.
     private var stageGeneration = 0
     private var lastWidth: CGFloat = 0
-    private var widthTarget: CGFloat = 0
-    private var widthStart: CGFloat = 0
-    private var widthStartedAt: TimeInterval = 0
-    private var widthTimer: Timer?
 
     /// Autosave name so macOS remembers where the user drags the item.
     static let autosaveName = "insomnia.status"
 
-    init(manager: SessionManager, status: any StatusSource) {
+    init(manager: SessionManager, status: any StatusSource, showSettings: @escaping () -> Void) {
         self.manager = manager
         self.status = status
+        self.showSettings = showSettings
         Self.seedPreferredPositionIfNeeded()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.autosaveName = Self.autosaveName
         statusItem.behavior = [.terminationOnRemoval]
+        super.init()
         installHostingView()
         observeManager()
     }
@@ -67,11 +69,12 @@ final class StatusItemController {
             manager: manager,
             onTapIcon: { [weak self] in self?.iconTapped() },
             onTapPill: { [weak self] field in self?.focus(field) },
-            onTapCountdown: { [weak self] in self?.toggleSessionPopover() },
+            onTapCountdown: { [weak self] in self?.customExtend() },
             onHoldEnd: { [weak self] in self?.holdToEnd() },
             onWidthChange: { [weak self] w in self?.widthChanged(w) }
         )
         let host = Self.makeHostingView(root)
+        host.onRightMouseDown = { [weak self] in self?.showMenu() }
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
         host.frame = button.bounds
@@ -88,8 +91,8 @@ final class StatusItemController {
 
     /// Centralizes the AppKit/SwiftUI boundary so its sizing contract can be
     /// regression-tested independently of a live menu bar.
-    static func makeHostingView(_ root: StatusRootView) -> NSHostingView<StatusRootView> {
-        let host = NSHostingView(rootView: root)
+    static func makeHostingView(_ root: StatusRootView) -> StatusHostingView {
+        let host = StatusHostingView(rootView: root)
         host.sizingOptions = [.intrinsicContentSize]
         return host
     }
@@ -105,43 +108,15 @@ final class StatusItemController {
         }
     }
 
+    /// Set the item's width to what SwiftUI just laid out. Deliberately not
+    /// animated: every change of `NSStatusItem.length` forces a full menu bar
+    /// relayout, so interpolating it at display cadence made the whole bar
+    /// stutter. The content animates inside the new width instead.
     private func widthChanged(_ width: CGFloat) {
         let w = max(width.rounded(.up), 24)
-        guard w != widthTarget else { return }
-        widthTarget = w
-        if lastWidth == 0 || reduceMotion {
-            widthTimer?.invalidate()
-            widthTimer = nil
-            lastWidth = w
-            statusItem.length = w
-            return
-        }
-
-        widthStart = statusItem.length
-        widthStartedAt = Date.timeIntervalSinceReferenceDate
-        widthTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickWidth() }
-        }
-        widthTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-        tickWidth()
-    }
-
-    private func tickWidth() {
-        guard let timer = widthTimer else { return }
-        let elapsed = Date.timeIntervalSinceReferenceDate - widthStartedAt
-        if elapsed >= Motion.widthSettleDuration {
-            statusItem.length = widthTarget
-            lastWidth = widthTarget
-            timer.invalidate()
-            widthTimer = nil
-            return
-        }
-        let progress = Motion.springProgress(elapsed: elapsed)
-        let width = max(widthStart + (widthTarget - widthStart) * progress, 24)
-        lastWidth = width
-        statusItem.length = width
+        guard w != lastWidth else { return }
+        lastWidth = w
+        statusItem.length = w
     }
 
     private var button: NSStatusBarButton? { statusItem.button }
@@ -167,24 +142,36 @@ final class StatusItemController {
 
     private func managerChanged() {
         reminder.sync(endsAt: manager.session?.endsAt)
-        switch (manager.isActive, model.phase) {
+        guard let next = Self.phase(forActive: manager.isActive, phase: model.phase) else { return }
+        switch next {
+        case .idle, .running:
+            withAnimation(Motion.base(reduceMotion: reduceMotion)) {
+                model.pendingCountdown = nil
+                model.phase = next
+            }
+        case .entering:
+            // Only the mode of the open pills changes, so nothing to animate.
+            model.phase = next
+        }
+    }
+
+    /// The phase a manager-side change puts the UI in, or nil to leave it
+    /// alone. Pure so the transitions can be checked without a status item.
+    static func phase(forActive active: Bool, phase: MenuBarModel.Phase) -> MenuBarModel.Phase? {
+        switch (active, phase) {
         case (true, .idle):
-            withAnimation(Motion.base(reduceMotion: reduceMotion)) {
-                model.pendingCountdown = nil
-                model.phase = .running
-            }
+            .running
         case (false, .running):
-            closeSessionPopover()
-            withAnimation(Motion.base(reduceMotion: reduceMotion)) {
-                model.pendingCountdown = nil
-                model.phase = .idle
-            }
+            .idle
         case (false, .entering(.extend)):
             // The session ended under the extend pills: they now start a new one.
-            model.phase = .entering(.start)
-            refreshPresetPopover()
+            .entering(.start)
+        case (true, .entering(.start)):
+            // A session came up while the start pills were open (the user
+            // reopened them before the start finished): they now extend it.
+            .entering(.extend)
         default:
-            break
+            nil
         }
     }
 
@@ -202,17 +189,16 @@ final class StatusItemController {
                 collapse()
             }
         case .running:
-            toggleSessionPopover()
+            customExtend()
         }
     }
 
     // MARK: Expand / collapse
 
     func expand(mode: MenuBarModel.Mode) {
-        closeSessionPopover()
         previousApp = NSWorkspace.shared.frontmostApplication
-        NSApp.activate(ignoringOtherApps: true)
-
+        // The activation happens in `installMonitors()`, once there is a
+        // window for it to make key.
         model.input = DurationInput()
         model.focused = .hours
         model.focusVisible = false
@@ -222,25 +208,34 @@ final class StatusItemController {
         }
         stagePills(to: DurationInput.Field.allCases.count)
         installMonitors()
-        showPresetPopover(mode: mode)
     }
 
-    /// Collapse to idle, or back to the countdown when extending.
+    /// Collapse to idle, or back to the countdown when a session is running.
     func collapse() {
-        guard case let .entering(mode) = model.phase else { return }
+        guard model.phase.isEntering else { return }
         removeMonitors()
-        closePresetPopover()
         withAnimation(Motion.base(reduceMotion: reduceMotion)) {
             model.focusVisible = false
         }
-        let target: MenuBarModel.Phase = (mode == .extend && manager.isActive) ? .running : .idle
         stagePills(to: 0) { [weak self] in
             guard let self else { return }
+            // Read the session here, not before the stagger: the pills take a
+            // moment to retract and the session can end (or a restored one can
+            // land) in that window, which would make a target captured up
+            // front install a countdown for a session that is already over.
+            let target = Self.collapseTarget(sessionActive: self.manager.isActive)
             withAnimation(Motion.base(reduceMotion: self.reduceMotion)) {
                 self.model.phase = target
             }
         }
         restorePreviousApp()
+    }
+
+    /// Where the pills land when dismissed. A live session always goes back
+    /// to its countdown, whichever mode the pills were opened in: start-mode
+    /// pills can outlive the start they were typed into.
+    static func collapseTarget(sessionActive: Bool) -> MenuBarModel.Phase {
+        sessionActive ? .running : .idle
     }
 
     /// Step `visiblePills` towards `target`, one pill per `Motion.stagger`.
@@ -309,7 +304,6 @@ final class StatusItemController {
                 model.rejectBounce += 1
             }
         }
-        refreshPresetPopover()
     }
 
     private func focusAfterTyping(_ field: DurationInput.Field) {
@@ -329,33 +323,20 @@ final class StatusItemController {
 
     // MARK: Commit
 
-    /// Enter: start or extend with the typed value, or shake when invalid.
+    /// Enter: start or extend with the typed value. With nothing typed it
+    /// starts the default preset; while extending it shakes instead.
     func commit() {
         guard case let .entering(mode) = model.phase else { return }
-        guard let total = model.input.total else {
+        switch MenuBarModel.commitAction(mode: mode, typed: model.input.total, defaultPreset: manager.config.defaultPreset) {
+        case let .run(duration):
+            run(mode: mode, duration: duration)
+        case .reject:
             model.rejectBounce += 1
-            return
-        }
-        run(mode: mode, duration: total)
-    }
-
-    /// A preset chip: numbers animate into the pills, then the session starts.
-    private func pickPreset(_ seconds: TimeInterval) {
-        guard case let .entering(mode) = model.phase else { return }
-        withAnimation(Motion.base(reduceMotion: reduceMotion)) {
-            model.input = DurationInput.from(seconds: seconds)
-            model.focusVisible = false
-        }
-        let generation = stageGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0.15 : 0.32)) { [weak self] in
-            guard let self, self.stageGeneration == generation, self.model.phase == .entering(mode) else { return }
-            self.run(mode: mode, duration: seconds)
         }
     }
 
     private func run(mode: MenuBarModel.Mode, duration: TimeInterval) {
         removeMonitors()
-        closePresetPopover()
         stageGeneration += 1
         // Morph now; the manager catches up (pmset takes a moment). Project
         // the session so the placeholder already has the final shape.
@@ -381,10 +362,9 @@ final class StatusItemController {
             }
             model.pendingCountdown = nil
             if !manager.isActive {
-                // Start failed: bring the pills back with the value intact and the error visible.
+                // Start failed: bring the pills back with the value intact.
+                // The error itself shows up in the right-click menu.
                 reopenAfterFailure(mode: .start)
-            } else if mode == .extend, manager.lastError != nil {
-                showSessionPopover()
             }
         }
     }
@@ -392,145 +372,101 @@ final class StatusItemController {
     private func reopenAfterFailure(mode: MenuBarModel.Mode) {
         let keep = model.input
         previousApp = NSWorkspace.shared.frontmostApplication
-        NSApp.activate(ignoringOtherApps: true)
         withAnimation(Motion.base(reduceMotion: reduceMotion)) {
             model.phase = .entering(mode)
             model.input = keep
         }
         stagePills(to: DurationInput.Field.allCases.count)
         installMonitors()
-        showPresetPopover(mode: mode)
     }
 
-    // MARK: Session actions (popover)
-
-    private func extend(by seconds: TimeInterval) {
-        Task { @MainActor in
-            await manager.extend(by: seconds)
-            refreshSessionPopover()
-        }
-    }
+    // MARK: Session actions
 
     private func endNow() {
-        closeSessionPopover()
         Task { @MainActor in
             await manager.end(reason: .user)
         }
     }
 
-    /// The status item's hold-to-end ring completed. Same path as the
-    /// popover's "End now"; ignored while a start is still in flight.
+    /// The status item's hold-to-end ring completed. Ignored while a start is
+    /// still in flight.
     private func holdToEnd() {
         guard manager.isActive else { return }
         endNow()
     }
 
+    /// Clicking the cup or the countdown while a session runs: reopen the
+    /// pills, this time to extend. Ignored while a start is still in flight.
     private func customExtend() {
-        closeSessionPopover()
+        guard manager.isActive else { return }
         expand(mode: .extend)
     }
 
-    private func quit() {
+    // MARK: Right-click menu
+
+    /// Right-click (or ctrl-click) on the status item. Not assigned to
+    /// `statusItem.menu`, which would swallow the left click the pills need.
+    private func showMenu() {
+        guard let button else { return }
+        // The lid, the battery and the watts are read right here, so the menu
+        // opens on what the machine is doing now. The SSID and the throttled
+        // browser list are whatever the last scan found: both have to be
+        // awaited, and an open NSMenu blocks the main actor, so there is no
+        // moment at which they could be filled into a menu that is already up.
+        // Kick that scan off anyway, for the next opening.
+        status.refreshInstant()
+        status.refreshOnDemand()
+        let menu = StatusMenu.menu(
+            menuItems(),
+            target: self,
+            settings: #selector(menuOpenSettings),
+            quit: #selector(menuQuit),
+            relaunchBrowser: #selector(menuRelaunchBrowser(_:))
+        )
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    private func menuItems() -> [StatusMenu.Item] {
+        StatusMenu.items(
+            sessionActive: manager.isActive,
+            sleepHeld: manager.state.sleepDisabledByUs,
+            machine: StatusLines.machine(
+                lidClosed: status.lidClosed,
+                watts: status.instantWatts(),
+                wifiSSID: WiFiStatusName.display(
+                    ssid: status.wifiSSID,
+                    locationAuthorized: (status as? LiveStatusSource)?.locationPermission.isAuthorized ?? true
+                ),
+                batteryPercent: status.batteryPercent,
+                isCharging: status.isCharging
+            ),
+            actions: StatusLines.actions(
+                frozenCount: status.frozenCount,
+                dockerPaused: status.dockerPaused,
+                lastGap: status.lastGap
+            ),
+            throttledBrowsers: status.throttledBrowsers,
+            error: manager.lastError
+        )
+    }
+
+    @objc private func menuRelaunchBrowser(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        status.relaunchUnthrottled(name)
+    }
+
+    @objc private func menuQuit() {
         NSApplication.shared.terminate(nil)
     }
 
-    // MARK: Preset popover
-
-    private func showPresetPopover(mode: MenuBarModel.Mode) {
-        guard let button else { return }
-        let popover = presetPopover ?? {
-            let p = NSPopover()
-            p.behavior = .applicationDefined
-            p.animates = !reduceMotion
-            return p
-        }()
-        presetPopover = popover
-        let controller = NSHostingController(rootView: presetContent(mode: mode))
-        controller.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = controller
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
-    }
-
-    private func presetContent(mode: MenuBarModel.Mode) -> PresetPopoverView {
-        PresetPopoverView(
-            manager: manager,
-            mode: mode,
-            onPick: { [weak self] p in self?.pickPreset(p) },
-            onSettings: { [weak self] in self?.openSettings() },
-            onQuit: { [weak self] in self?.quit() }
-        )
-    }
-
-    /// The content observes the manager and model already; this only exists
-    /// so a mode change re-renders the header.
-    private func refreshPresetPopover() {
-        guard let popover = presetPopover, popover.isShown, let mode = model.mode,
-              let controller = popover.contentViewController as? NSHostingController<PresetPopoverView> else { return }
-        controller.rootView = presetContent(mode: mode)
-    }
-
-    private func closePresetPopover() {
-        guard let popover = presetPopover, popover.isShown else { return }
-        popover.performClose(nil)
-    }
-
-    // MARK: Session popover
-
-    private func toggleSessionPopover() {
-        if let p = sessionPopover, p.isShown {
-            closeSessionPopover()
-        } else {
-            showSessionPopover()
-        }
-    }
-
-    private func showSessionPopover() {
-        guard let button else { return }
-        status.refreshOnDemand()
-        let popover = sessionPopover ?? {
-            let p = NSPopover()
-            p.behavior = .transient
-            p.animates = !reduceMotion
-            return p
-        }()
-        sessionPopover = popover
-        let controller = NSHostingController(rootView: sessionContent())
-        controller.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = controller
-        NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-    }
-
-    private func sessionContent() -> SessionPopoverView {
-        SessionPopoverView(
-            manager: manager,
-            status: status,
-            watts: status.instantWatts(),
-            onExtend: { [weak self] s in self?.extend(by: s) },
-            onCustomExtend: { [weak self] in self?.customExtend() },
-            onEnd: { [weak self] in self?.endNow() },
-            onSettings: { [weak self] in self?.openSettings() },
-            onQuit: { [weak self] in self?.quit() }
-        )
-    }
-
-    private func refreshSessionPopover() {
-        guard let popover = sessionPopover, popover.isShown,
-              let controller = popover.contentViewController as? NSHostingController<SessionPopoverView> else { return }
-        controller.rootView = sessionContent()
-    }
-
-    private func closeSessionPopover() {
-        guard let popover = sessionPopover, popover.isShown else { return }
-        popover.performClose(nil)
+    @objc private func menuOpenSettings() {
+        openSettings()
+        showSettings()
     }
 
     // MARK: Settings
 
     private func openSettings() {
-        closePresetPopover()
-        closeSessionPopover()
         if model.phase.isEntering {
             removeMonitors()
             withAnimation(Motion.base(reduceMotion: reduceMotion)) {
@@ -549,6 +485,16 @@ final class StatusItemController {
 
     private func installMonitors() {
         removeMonitors()
+        // The key monitor below is local, so it only fires while this app
+        // holds keyboard focus, which an accessory app with no window never
+        // does. Put the catcher panel up first and activate onto it: ordering
+        // a window front in an inactive app only makes it key once the app
+        // activates, so the activation has to come second.
+        let panel = KeyCatcherPanel()
+        if let button { panel.move(toStatusButton: button) }
+        panel.makeKeyAndOrderFront(nil)
+        keyCatcher = panel
+        NSApp.activate(ignoringOtherApps: true)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             // Local monitors always run on the main thread.
             let consumed = MainActor.assumeIsolated { self?.handleKey(event) ?? false }
@@ -572,14 +518,17 @@ final class StatusItemController {
         keyMonitor = nil
         localMouseMonitor = nil
         globalMouseMonitor = nil
+        keyCatcher?.orderOut(nil)
+        keyCatcher = nil
     }
 
-    /// A click anywhere in this app that is not the status item or the
-    /// preset popover collapses the pills.
+    /// A click anywhere in this app that is not the status item collapses
+    /// the pills.
     private func handleLocalMouse(window: NSWindow?) {
         guard model.phase.isEntering else { return }
-        let ours: [NSWindow?] = [button?.window, presetPopover?.contentViewController?.view.window]
-        if let w = window, ours.contains(where: { $0 === w }) { return }
+        // The catcher panel ignores the mouse so it should never be reported
+        // here, but it is ours: it must not dismiss the pills either.
+        if let w = window, w === button?.window || w === keyCatcher { return }
         collapse()
     }
 
@@ -627,5 +576,24 @@ final class StatusItemController {
             // Swallow stray printable keys so nothing beeps while typing a time.
             return ch.isLetter || ch.isPunctuation || ch == " "
         }
+    }
+}
+
+/// The SwiftUI host covers the status bar button, so the right click has to
+/// be caught here rather than on the button. Ctrl-click is the same gesture
+/// on a one-button mouse.
+final class StatusHostingView: NSHostingView<StatusRootView> {
+    var onRightMouseDown: (() -> Void)?
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightMouseDown?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) {
+            onRightMouseDown?()
+            return
+        }
+        super.mouseDown(with: event)
     }
 }

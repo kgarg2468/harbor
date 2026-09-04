@@ -1,14 +1,8 @@
+import AppKit
 import XCTest
 @testable import Insomnia
 
 final class UIStatusTests: XCTestCase {
-    @MainActor
-    func testWidthSpringStartsAtRestOvershootsAndSettles() {
-        XCTAssertEqual(Motion.springProgress(elapsed: 0), 0, accuracy: 0.0001)
-        XCTAssertGreaterThan(Motion.springProgress(elapsed: Motion.baseResponse * 0.72), 1)
-        XCTAssertEqual(Motion.springProgress(elapsed: Motion.widthSettleDuration), 1, accuracy: 0.0001)
-    }
-
     @MainActor
     func testStatusHostUsesIntrinsicSizingAndHasAnIdleFittingSize() {
         let harness = Harness()
@@ -114,6 +108,7 @@ final class UIStatusTests: XCTestCase {
         XCTAssertFalse(s.dockerPaused)
         XCTAssertTrue(s.throttledBrowsers.isEmpty)
         XCTAssertNil(s.instantWatts())
+        s.refreshInstant()
         s.refreshOnDemand()
         s.relaunchUnthrottled("Chrome")
     }
@@ -145,5 +140,190 @@ final class UIStatusTests: XCTestCase {
         XCTAssertEqual(StatusLines.throttleWarning(["Chrome"]), "\u{26A0} Chrome is throttled")
         XCTAssertEqual(StatusLines.throttleWarning(["Chrome", "Arc"]), "\u{26A0} Chrome and Arc are throttled")
         XCTAssertEqual(StatusLines.throttleWarning(["Chrome", "Arc", "Chromium"]), "\u{26A0} Chrome, Arc, and Chromium are throttled")
+    }
+
+    func testMenuListsStatusThenSettingsAndQuit() {
+        let items = StatusMenu.items(
+            sessionActive: true,
+            sleepHeld: true,
+            machine: "Lid: closed \u{00B7} 82%",
+            actions: "3 apps frozen",
+            throttledBrowsers: ["Chrome"],
+            error: nil
+        )
+        XCTAssertEqual(items, [
+            StatusMenu.Item(title: "Sleep held \u{2014} safe to close the lid", kind: .info),
+            StatusMenu.Item(title: "Lid: closed \u{00B7} 82%", kind: .info),
+            StatusMenu.Item(title: "3 apps frozen", kind: .info),
+            StatusMenu.Item(title: "\u{26A0} Chrome is throttled", kind: .warning),
+            StatusMenu.Item(title: "Relaunch Chrome unthrottled", kind: .relaunchBrowser("Chrome")),
+            StatusMenu.Item(title: "", kind: .separator),
+            StatusMenu.Item(title: StatusMenu.settingsTitle, kind: .settings),
+            StatusMenu.Item(title: StatusMenu.quitTitle, kind: .quit),
+        ])
+    }
+
+    func testIdleMenuIsJustSettingsAndQuitWithNoLeadingSeparator() {
+        let items = StatusMenu.items(
+            sessionActive: false,
+            sleepHeld: false,
+            machine: nil,
+            actions: nil,
+            throttledBrowsers: [],
+            error: ""
+        )
+        XCTAssertEqual(items, [
+            StatusMenu.Item(title: StatusMenu.settingsTitle, kind: .settings),
+            StatusMenu.Item(title: StatusMenu.quitTitle, kind: .quit),
+        ])
+        XCTAssertFalse(items.contains { $0.kind == .separator })
+    }
+
+    func testMenuShowsTheLastErrorAsAWarning() {
+        let items = StatusMenu.items(
+            sessionActive: false,
+            sleepHeld: false,
+            machine: nil,
+            actions: nil,
+            throttledBrowsers: [],
+            error: "sudo: a password is required"
+        )
+        XCTAssertEqual(items.first, StatusMenu.Item(title: "\u{26A0} sudo: a password is required", kind: .warning))
+        XCTAssertEqual(items.map(\.kind), [.warning, .separator, .settings, .quit])
+    }
+
+    /// Greptile caught this as a regression: replacing the popover with a
+    /// menu left the throttle warning with no way to act on it.
+    func testEveryThrottledBrowserGetsItsOwnRelaunchItem() {
+        let items = StatusMenu.items(
+            sessionActive: true,
+            sleepHeld: true,
+            machine: nil,
+            actions: nil,
+            throttledBrowsers: ["Chrome", "Arc"],
+            error: nil
+        )
+        XCTAssertEqual(items.filter { $0.kind == .relaunchBrowser("Chrome") }.count, 1)
+        XCTAssertEqual(items.filter { $0.kind == .relaunchBrowser("Arc") }.count, 1)
+        XCTAssertEqual(
+            items.map(\.kind),
+            [.info, .warning, .relaunchBrowser("Chrome"), .relaunchBrowser("Arc"), .separator, .settings, .quit]
+        )
+    }
+
+    @MainActor
+    func testBareEnterStartsTheDefaultPresetButNeverExtends() {
+        let preset: TimeInterval = 4 * 3600
+        XCTAssertEqual(
+            MenuBarModel.commitAction(mode: .start, typed: nil, defaultPreset: preset),
+            .run(preset)
+        )
+        XCTAssertEqual(
+            MenuBarModel.commitAction(mode: .start, typed: 1800, defaultPreset: preset),
+            .run(1800)
+        )
+        XCTAssertEqual(
+            MenuBarModel.commitAction(mode: .extend, typed: nil, defaultPreset: preset),
+            .reject
+        )
+        XCTAssertEqual(
+            MenuBarModel.commitAction(mode: .start, typed: nil, defaultPreset: 0),
+            .reject
+        )
+    }
+
+    /// The pills can be in start mode over a live session: the user reopened
+    /// them while the start was still in flight. Collapsing then has to show
+    /// the countdown, not pretend the Mac is free to sleep.
+    @MainActor
+    func testCollapsingPillsLandsOnTheCountdownWheneverASessionIsActive() {
+        XCTAssertEqual(StatusItemController.collapseTarget(sessionActive: true), .running)
+        XCTAssertEqual(StatusItemController.collapseTarget(sessionActive: false), .idle)
+    }
+
+    @MainActor
+    func testAStartLandingUnderTheStartPillsTurnsThemIntoExtendPills() {
+        XCTAssertEqual(StatusItemController.phase(forActive: true, phase: .entering(.start)), .entering(.extend))
+        XCTAssertEqual(StatusItemController.phase(forActive: false, phase: .entering(.extend)), .entering(.start))
+        XCTAssertEqual(StatusItemController.phase(forActive: true, phase: .idle), .running)
+        XCTAssertEqual(StatusItemController.phase(forActive: false, phase: .running), .idle)
+        // Nothing to do when the phase already matches the manager.
+        XCTAssertNil(StatusItemController.phase(forActive: true, phase: .running))
+        XCTAssertNil(StatusItemController.phase(forActive: false, phase: .idle))
+    }
+
+    /// The pills take a stagger to retract, and the session can end inside
+    /// that window: the deadline fires between the Esc and the landing. The
+    /// target has to be read when the pills land, so the countdown does not
+    /// come back for a session that is already over.
+    @MainActor
+    func testCollapseReadsTheSessionWhenThePillsLandNotWhenTheyStartRetracting() async throws {
+        // Under Reduce Motion every stagger delay is zero, so the pills can
+        // land before the session ends and the sequence this pins never
+        // happens — the test would pass without exercising the fix. Skip
+        // rather than pretend.
+        try XCTSkipIf(Motion.reduceMotion, "needs a non-zero pill stagger")
+        _ = NSApplication.shared
+        let h = Harness()
+        defer { h.home.destroy() }
+        let manager = h.makeManager()
+        await manager.start(duration: 3600)
+        let controller = StatusItemController(manager: manager, status: PlaceholderStatus(), showSettings: {})
+        // Extend pills, fully open, over the live session.
+        controller.model.phase = .entering(.extend)
+        controller.model.visiblePills = DurationInput.Field.allCases.count
+
+        controller.collapse()
+        // The session ends while the pills are still on screen.
+        await manager.end(reason: .user)
+        try? await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertFalse(manager.isActive)
+        XCTAssertEqual(controller.model.phase, .idle)
+        XCTAssertEqual(controller.model.visiblePills, 0)
+    }
+
+    /// The digits are read by a local key monitor, which only sees events sent
+    /// to a window this app owns. The catcher panel is that window, and the
+    /// whole fix rests on it being able to take key without taking a click.
+    @MainActor
+    func testTheKeyCatcherPanelTakesKeyStatusWithoutTakingClicks() {
+        _ = NSApplication.shared
+        let panel = KeyCatcherPanel()
+
+        XCTAssertTrue(panel.canBecomeKey)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertEqual(panel.level, .statusBar)
+        XCTAssertTrue(panel.collectionBehavior.contains(.canJoinAllSpaces))
+        XCTAssertTrue(panel.collectionBehavior.contains(.ignoresCycle))
+        XCTAssertFalse(panel.isReleasedWhenClosed)
+        XCTAssertFalse(panel.hidesOnDeactivate)
+    }
+
+    /// Opening the pills has to put up the window that keyboard focus hangs
+    /// off, and closing them has to take it away again.
+    ///
+    /// Key status itself cannot be asserted here: the test binary runs as a
+    /// background-only process (`.prohibited`), which the window server never
+    /// activates, so `NSApp.keyWindow` stays nil no matter what the app does.
+    /// What is pinned instead is the panel's lifecycle, on top of the
+    /// `canBecomeKey` contract above.
+    @MainActor
+    func testOpeningThePillsPutsUpTheKeyCatcherAndCollapsingTakesItDown() {
+        _ = NSApplication.shared
+        let h = Harness()
+        defer { h.home.destroy() }
+        let controller = StatusItemController(manager: h.makeManager(), status: PlaceholderStatus(), showSettings: {})
+        XCTAssertFalse(NSApp.windows.contains { $0 is KeyCatcherPanel && $0.isVisible })
+
+        controller.expand(mode: .start)
+
+        let panel = NSApp.windows.compactMap { $0 as? KeyCatcherPanel }.first { $0.isVisible }
+        XCTAssertNotNil(panel)
+
+        controller.collapse()
+
+        XCTAssertFalse(panel?.isVisible ?? true)
+        XCTAssertFalse(NSApp.windows.contains { $0 is KeyCatcherPanel && $0.isVisible })
     }
 }

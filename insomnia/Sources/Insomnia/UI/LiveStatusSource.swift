@@ -27,6 +27,10 @@ final class LiveStatusSource: StatusSource {
         }
     }
 
+    func refreshInstant() {
+        services.refreshInstant()
+    }
+
     func instantWatts() -> Double? {
         services.instantWatts()
     }
