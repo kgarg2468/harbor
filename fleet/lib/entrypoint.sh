@@ -426,8 +426,16 @@ harbor_bootstrap_flags_bind() {
 # installed unaltered, and no operator can forge the proof. Naming the release is not
 # enough on its own: an entry records a directory path, and a file changed inside that
 # directory after the install leaves the path it names intact, so without the hash clause
-# a release altered after installation would still pass. A journal holding no entry,
-# holding one that a teardown's reverse walk has already marked reverted, or holding one
+# a release altered after installation would still pass. What the proof asks of the journal
+# is its newest word about that release, so the newest entry naming it decides and no older
+# one is consulted: an applied newest entry proves it subject to the hash, a reverted one
+# refuses, and any other phase refuses as no proof. A journal can hold both, because a
+# teardown reverts the install a bootstrap applied and a later bootstrap applies it again,
+# and reading them in any other order would let an older applied entry vouch for a release
+# the newest entry records as unwound, which is exactly the mid-teardown state the reverted
+# arm exists for and a state whose tree hash still matches, since the reverse walk marks the
+# entry before it removes anything. A journal holding no entry for the release, holding one
+# whose newest entry a teardown's reverse walk has already marked reverted, or holding one
 # whose recorded hash is no longer what the release observes as, exits 3 naming the
 # reinstall and, since that reinstall meets the release directory as an orphan under the
 # section 5.2 rule and removes nothing it cannot prove it created, what the administrator
@@ -454,7 +462,13 @@ harbor_entrypoint_install_proof() {
     [ "$(harbor_journal_string "${entry}" target)" = "${release}" ] || continue
     phase="$(harbor_journal_string "${entry}" phase)"
     newest="${phase}"
-    [ "${phase}" != "applied" ] || recorded="$(harbor_journal_raw "${entry}" post_state)"
+    # The recorded state is cleared before it is set, so it only ever holds the newest
+    # entry's, never an older one's: an entry that is not applied leaves nothing behind
+    # for a later arm to read as a proof.
+    recorded=""
+    if [ "${phase}" = "applied" ]; then
+      recorded="$(harbor_journal_raw "${entry}" post_state)"
+    fi
   done
   if [ -n "${recorded}" ]; then
     observed="$(harbor_journal_observe harbor-install "${release}")" || exit "$?"

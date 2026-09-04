@@ -652,6 +652,47 @@ proven_release() {
   assert_equal "$(journal_entries)" 0001-harbor-install.json
 }
 
+@test "the newest entry for the release is the journal's word about it, applied or reverted" {
+  release_observer
+  # The mid-teardown state of design section 5.7, and the one an older applied entry
+  # must not talk over: the reverse walk marks the harbor-install entry reverted
+  # before it removes anything, so the release still observes as exactly the tree hash
+  # the earlier applied entry recorded. The hash matching is not the question; what the
+  # journal last said about this release is, and it said unwound.
+  proven_release
+  fixture_entry "${FIX_STATE}" 0002 harbor-install "${RELEASE_DIR}" created reverted \
+    '"absent"' "$(release_state)"
+  assert_equal "$(entry_raw "${FIX_STATE}" 0001 post_state)" "$(release_state)"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_reverted'
+  assert_output --partial "${RELEASE_DIR}"
+  # A reinstall after a teardown is legitimate, so an applied entry newer than the
+  # reverted one is the newest word and proves the release again.
+  fixture_entry "${FIX_STATE}" 0003 harbor-install "${RELEASE_DIR}" created applied \
+    '"absent"' "$(release_state)"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+  # An entry for another release is never a word about this one, whichever phase it
+  # carries, so it neither proves nor takes away the proof above.
+  fixture_entry "${FIX_STATE}" 0004 harbor-install "${FIX_INSTALL}/${OTHER_TAG}" created reverted \
+    '"absent"' '{"tree_sha256":"aaaa"}'
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_success
+  # A newest entry that is neither applied nor reverted is a phase recovery would have
+  # settled, so it proves nothing and refuses through the no-proof arm.
+  fixture_entry "${FIX_STATE}" 0005 harbor-install "${RELEASE_DIR}" created prepared \
+    '"absent"' "$(release_state)"
+  run harbor_entrypoint_install_proof "${FIX_STATE}" "${RELEASE_DIR}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.install_proof'
+  # None of it wrote anything: the proof reads the journal and never edits it.
+  assert_equal "$(entry_phase "${FIX_STATE}" 0001)" applied
+  assert_equal "$(entry_phase "${FIX_STATE}" 0002)" reverted
+  assert_equal "$(entry_phase "${FIX_STATE}" 0003)" applied
+  assert_equal "$(entry_phase "${FIX_STATE}" 0005)" prepared
+}
+
 @test "a release whose tree hash equals its applied harbor-install entry passes" {
   release_observer
   proven_release

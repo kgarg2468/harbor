@@ -94,8 +94,12 @@ harbor_release_normalize_modes() {
   fi
 }
 # harbor_release_stage STATE_ROOT CHECKOUT TAG DEST: install the tag preflight has
-# already verified at DEST, from git archive of that tag rather than from the work
-# tree, so what lands is the tagged tree and nothing a work tree could carry. The
+# already verified at DEST, from git archive of the commit that tag resolves to rather
+# than from the work tree, so what lands is the tagged tree and nothing a work tree could
+# carry. The preflight proved the work tree clean and HEAD exactly at TAG, and a tag is a
+# mutable ref, so staging binds itself to the object rather than to the name: it resolves
+# HEAD and TAG here, exits 3 naming the tag and both commits when they no longer agree,
+# which is a tag moved between the two checks, and archives the resolved commit. The
 # archive is extracted into a temporary directory beside DEST, owned by the caller's
 # identity (root in production), normalized to the installed modes, and given a
 # RELEASE marker naming the tag and the commit, all before anything of it is in
@@ -107,7 +111,7 @@ harbor_release_normalize_modes() {
 # Harbor removes nothing it cannot prove it created.
 harbor_release_stage() {
   local root checkout tag dest
-  local observed recorded parent tmp work commit post entry
+  local observed recorded parent tmp work commit head post entry
   [ "$#" -eq 4 ] || harbor_die 3 usage "usage: harbor_release_stage <state-root> <checkout> <tag> <destination>"
   root="${1}"
   checkout="${2}"
@@ -136,9 +140,22 @@ harbor_release_stage() {
     rm -rf "${tmp}"
     harbor_die 3 release.commit "cannot resolve ${tag} to a commit in ${checkout}; nothing was staged"
   fi
-  if ! harbor_git "${checkout}" archive --format=tar "${tag}" >"${tmp}/release.tar"; then
+  if ! head="$(harbor_git "${checkout}" rev-parse "HEAD^{commit}")"; then
     rm -rf "${tmp}"
-    harbor_die 2 release.archive "git archive of ${tag} in ${checkout} failed; nothing was staged"
+    harbor_die 3 release.commit "cannot resolve HEAD to a commit in ${checkout}; nothing was staged"
+  fi
+  # A tag is a mutable ref, and what the preflight verified is an object: a clean work
+  # tree whose HEAD is exactly at TAG. Staging resolves both again and installs only what
+  # they still agree on, so a tag moved between the two checks cannot redirect this
+  # staging onto a tree nothing approved; and the archive below is of the resolved commit
+  # rather than of the name, so nothing can move underneath it afterwards either.
+  if [ "${head}" != "${commit}" ]; then
+    rm -rf "${tmp}"
+    harbor_die 3 release.tag_moved "${tag} now resolves to ${commit} in ${checkout} but HEAD is at ${head}, so the tag no longer names the commit the preflight verified this checkout to be exactly at and Harbor will not install a tree that was never approved; nothing was staged: check that no one moved the tag, check out an exact release tag, and rerun"
+  fi
+  if ! harbor_git "${checkout}" archive --format=tar "${commit}" >"${tmp}/release.tar"; then
+    rm -rf "${tmp}"
+    harbor_die 2 release.archive "git archive of ${tag} (${commit}) in ${checkout} failed; nothing was staged"
   fi
   if ! tar -xpf "${tmp}/release.tar" -C "${work}" --no-same-owner; then
     rm -rf "${tmp}"

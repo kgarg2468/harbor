@@ -174,9 +174,10 @@ inode_of() {
   assert [ -f "${DEST}/bin/harbor" ]
   assert [ -f "${DEST}/lib/log.sh" ]
   assert_equal "$(cat "${DEST}/lib/log.sh")" '# committed'
-  # Git was reached only through the seam, and the archive was of the tag.
-  assert_equal "$(grep -c . "${GIT_LOG}")" 2
-  assert_equal "$(grep -c "archive --format=tar ${TAG}\$" "${GIT_LOG}")" 1
+  # Git was reached only through the seam, and the archive was of the commit the tag
+  # and HEAD agree on rather than of the mutable tag name.
+  assert_equal "$(grep -c . "${GIT_LOG}")" 3
+  assert_equal "$(grep -c "^archive --format=tar ${commit}\$" "${GIT_LOG}")" 1
   # The RELEASE marker names the tag and the commit.
   assert_equal "$(sed -n 's/^tag=//p' "${DEST}/RELEASE")" "${TAG}"
   assert_equal "$(sed -n 's/^commit=//p' "${DEST}/RELEASE")" "${commit}"
@@ -191,6 +192,57 @@ inode_of() {
   harbor_journal_validate "${FIX_ROOT}/journal/0001-harbor-install.json"
   # No staging directory survives beside the release.
   assert_equal "$(ls -A "${LIBDIR}")" "${TAG}"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "staging archives the resolved commit, never the mutable tag name" {
+  # Design section 5.1: what root installs is the tree of the clean exact tag the
+  # preflight verified, and the preflight verified an object rather than a name. The
+  # argument vector the seam records is where that binding is visible: an archive of
+  # the resolved commit cannot be redirected by moving the tag after the check.
+  git_repo
+  commit="$(gitc rev-parse "${TAG}^{commit}")"
+  acquire
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}"
+  assert_success
+  assert_equal "$(grep -c "^archive --format=tar ${commit}\$" "${GIT_LOG}")" 1
+  assert_equal "$(grep -c "^archive --format=tar ${TAG}\$" "${GIT_LOG}")" 0
+  # Both objects were resolved before anything was staged, which is what the equality
+  # above the archive compares.
+  assert_equal "$(grep -c "^rev-parse ${TAG}\^{commit}\$" "${GIT_LOG}")" 1
+  assert_equal "$(grep -c '^rev-parse HEAD\^{commit}$' "${GIT_LOG}")" 1
+  # The RELEASE marker still names the tag and the commit, as design section 5.2 asks.
+  assert_equal "$(sed -n 's/^tag=//p' "${DEST}/RELEASE")" "${TAG}"
+  assert_equal "$(sed -n 's/^commit=//p' "${DEST}/RELEASE")" "${commit}"
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a tag that no longer names HEAD exits 3 naming both commits and stages nothing" {
+  # A tag is a mutable ref. The preflight proved the work tree clean and HEAD exactly
+  # at the tag, then handed staging the name; moving the tag between the two checks
+  # would otherwise install and journal a tree the preflight never approved.
+  git_repo
+  head="$(gitc rev-parse "${TAG}^{commit}")"
+  gitc commit -q --allow-empty -m 'a commit the preflight never approved'
+  moved="$(gitc rev-parse "HEAD^{commit}")"
+  gitc tag -f "${TAG}" >/dev/null 2>&1
+  # HEAD is back at the commit the preflight verified, and the tag names another.
+  gitc checkout -q "${head}"
+  assert_equal "$(gitc rev-parse "HEAD^{commit}")" "${head}"
+  refute [ "${moved}" = "${head}" ]
+  acquire
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}"
+  assert_equal "${status}" 3
+  assert_output --partial 'release.tag_moved'
+  assert_output --partial "${TAG}"
+  assert_output --partial "${head}"
+  assert_output --partial "${moved}"
+  # Nothing was archived, nothing was staged, nothing was journaled, and no staging
+  # directory survives beside the destination.
+  assert_equal "$(grep -c '^archive' "${GIT_LOG}")" 0
+  assert [ ! -e "${DEST}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(ls -A "${LIBDIR}")" ""
   harbor_lock_release "${FIX_ROOT}"
 }
 
