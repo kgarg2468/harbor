@@ -90,24 +90,57 @@ harbor_json_unquote() {
 harbor_journal_string() {
   harbor_json_unquote "$(harbor_journal_raw "${1}" "${2}")"
 }
+# harbor_observe_file PATH: the state of PATH in the pre_state and post_state form of
+# the file op. A symlink is the artifact itself, not what it points at, so it is
+# observed as {"symlink":"<target>"}, the shape and the escaping every symlink step
+# records; a dangling link is therefore still a link and never "absent". Without this
+# a crash after a link is renamed into place and before its applied write would leave
+# an entry recovery could never decide (design section 3.7). A directory or any other
+# non-regular file stays unobservable. A regular file is its sha256, mode, and owner.
 harbor_observe_file() {
   local path="${1}"
-  if [ ! -e "${path}" ] && [ ! -L "${path}" ]; then
+  if [ -L "${path}" ]; then
+    printf '{"symlink":"%s"}' "$(harbor_json_escape "$(readlink "${path}")")"
+    return 0
+  fi
+  if [ ! -e "${path}" ]; then
     printf '"absent"'
     return 0
   fi
-  if [ ! -f "${path}" ] || [ -L "${path}" ]; then
+  if [ ! -f "${path}" ]; then
     printf '"unobservable:not-a-regular-file"'
     return 0
   fi
   printf '{"sha256":"%s","mode":"%s","owner":"%s"}' \
     "$(harbor_sha256 "${path}")" "$(harbor_stat_mode "${path}")" "$(harbor_json_escape "$(harbor_stat_owner "${path}")")"
 }
+harbor_observe_op_file() {
+  harbor_observe_file "${1}"
+}
+# harbor_journal_observe OP TARGET: the current state of TARGET rendered in the
+# pre_state and post_state form of OP, for recovery to compare. The observer of an op
+# is the function harbor_observe_op_<op with every hyphen replaced by an underscore>,
+# defined by the library that owns that op, so this file needs no knowledge of, and no
+# dependency on, the libraries above it. An op with no observer defined in this process
+# is unobservable, as before. The op comes out of a journal file, so it is never
+# expanded into a command line: a name outside the [a-z0-9-] journal vocabulary is
+# refused as unobservable without any lookup, and the observer runs only when
+# command -v reports a shell function of exactly that name, never an executable of the
+# same name on PATH (a function's command -v output is the bare name, an executable's
+# is a path).
 harbor_journal_observe() {
-  case "${1}" in
-    file) harbor_observe_file "${2}" ;;
-    *) printf '"unobservable:%s"' "$(harbor_json_escape "${1}")" ;;
+  local op="${1}" fn
+  case "${op}" in
+    "" | *[!a-z0-9-]*) ;;
+    *)
+      fn="harbor_observe_op_$(printf '%s' "${op}" | tr '-' '_')"
+      if [ "$(command -v "${fn}" 2>/dev/null)" = "${fn}" ]; then
+        "${fn}" "${2}"
+        return 0
+      fi
+      ;;
   esac
+  printf '"unobservable:%s"' "$(harbor_json_escape "${op}")"
 }
 harbor_journal_print_entry() {
   {
@@ -262,7 +295,8 @@ harbor_journal_recover() {
     target="$(harbor_journal_string "${entry}" target)"
     pre="$(harbor_journal_raw "${entry}" pre_state)"
     post="$(harbor_journal_raw "${entry}" post_state)"
-    observed="$(harbor_journal_observe "${op}" "${target}")"
+    # An observer that cannot observe fails closed with its own exit code.
+    observed="$(harbor_journal_observe "${op}" "${target}")" || exit "$?"
     if [ "${observed}" = "${pre}" ]; then
       harbor_journal_set_phase "${entry}" reverted
       harbor_log recovery "${base} reverted (state equals pre_state)"
@@ -325,7 +359,7 @@ harbor_journal_resolve() {
   target="$(harbor_journal_string "${entry}" target)"
   pre="$(harbor_journal_raw "${entry}" pre_state)"
   post="$(harbor_journal_raw "${entry}" post_state)"
-  observed="$(harbor_journal_observe "${op}" "${target}")"
+  observed="$(harbor_journal_observe "${op}" "${target}")" || exit "$?"
   if [ "${observed}" = "${pre}" ] || [ "${observed}" = "${post}" ]; then
     harbor_die 3 journal.resolve_decidable "entry ${seq} is decidable (observed state equals a recorded state); rerun the ordinary command and recovery will mark it"
   fi

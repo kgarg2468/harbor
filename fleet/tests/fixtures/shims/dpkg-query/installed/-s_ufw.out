@@ -1,0 +1,6 @@
+Package: ufw
+Status: install ok installed
+Priority: optional
+Section: admin
+Architecture: all
+Version: 0.36.2-6

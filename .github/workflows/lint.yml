@@ -41,6 +41,8 @@ jobs:
           fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
       - name: Placeholder scan
         run: fleet/tests/lint/placeholder_scan.sh
+      - name: Engines check
+        run: fleet/tests/lint/engines_check.sh
       - name: gitleaks
         run: gitleaks detect --source . --config .gitleaks.toml --no-banner --redact
       - name: markdownlint

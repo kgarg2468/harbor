@@ -1,0 +1,6 @@
+Package: ca-certificates
+Status: install ok installed
+Priority: optional
+Section: misc
+Architecture: all
+Version: 20240203

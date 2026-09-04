@@ -1,0 +1,10 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  jq openssh-server ufw
+0 upgraded, 3 newly installed, 0 to remove and 0 not upgraded.
+Inst ufw (0.36.2-6 Ubuntu:24.04/noble [all])
+Inst jq (1.7.1-3build1 Ubuntu:24.04/noble [amd64])
+Inst openssh-server (1:9.6p1-3ubuntu13.5 Ubuntu:24.04/noble-updates [amd64])
+Conf ufw (0.36.2-6 Ubuntu:24.04/noble [all])

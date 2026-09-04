@@ -1,0 +1,6 @@
+Package: openssh-server
+Status: install ok installed
+Priority: optional
+Section: net
+Architecture: amd64
+Version: 1:9.6p1-3ubuntu13.5

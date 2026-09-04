@@ -34,12 +34,76 @@ teardown() {
   mkdir "${BATS_TEST_TMPDIR}/dir"
   assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/dir")" '"unobservable:not-a-regular-file"'
   ln -s "${BATS_TEST_TMPDIR}/nope" "${BATS_TEST_TMPDIR}/link"
-  assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/link")" '"unobservable:not-a-regular-file"'
+  assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/link")" "{\"symlink\":\"${BATS_TEST_TMPDIR}/nope\"}"
   printf 'hello\n' >"${BATS_TEST_TMPDIR}/f"
   chmod 0644 "${BATS_TEST_TMPDIR}/f"
   assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/f")" "{\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"mode\":\"0644\",\"owner\":\"$(id -un)\"}"
   assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/nope")" '"absent"'
   assert_equal "$(harbor_journal_observe package curl)" '"unobservable:package"'
+}
+
+@test "harbor_journal_observe dispatches to a per-op observer, falls back to unobservable, and leaves the file op unchanged" {
+  # No observer for these ops is defined in this process: the fallback stands.
+  assert_equal "$(harbor_journal_observe package curl)" '"unobservable:package"'
+  assert_equal "$(harbor_journal_observe runtime-install "${BATS_TEST_TMPDIR}/prefix")" '"unobservable:runtime-install"'
+  harbor_observe_op_package() { printf '{"version":"%s","method":"apt"}' "${1}"; }
+  assert_equal "$(harbor_journal_observe package curl)" '{"version":"curl","method":"apt"}'
+  # Every hyphen of the op becomes an underscore in the observer's name.
+  harbor_observe_op_runtime_install() { printf '"runtime at %s"' "${1}"; }
+  assert_equal "$(harbor_journal_observe runtime-install "${BATS_TEST_TMPDIR}/prefix")" "\"runtime at ${BATS_TEST_TMPDIR}/prefix\""
+  # The file op observes exactly what it always did, and recovery still decides it.
+  printf 'hello\n' >"${BATS_TEST_TMPDIR}/f"
+  chmod 0644 "${BATS_TEST_TMPDIR}/f"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/f")" "$(harbor_observe_file "${BATS_TEST_TMPDIR}/f")"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/f")" "{\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"mode\":\"0644\",\"owner\":\"$(id -un)\"}"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/nope")" '"absent"'
+  mkdir "${BATS_TEST_TMPDIR}/d"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/d")" '"unobservable:not-a-regular-file"'
+}
+
+@test "a symlink observes as its target in the shape the symlink steps record, and recovery decides a prepared symlink entry" {
+  acquire
+  # The link itself is the artifact, so the observation is its target and never the
+  # file it points at: a dangling link is a link, not "absent".
+  ln -s "${BATS_TEST_TMPDIR}/nope" "${BATS_TEST_TMPDIR}/dangling"
+  assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/dangling")" "{\"symlink\":\"${BATS_TEST_TMPDIR}/nope\"}"
+  printf 'hello\n' >"${BATS_TEST_TMPDIR}/f"
+  ln -s "${BATS_TEST_TMPDIR}/f" "${BATS_TEST_TMPDIR}/live"
+  assert_equal "$(harbor_journal_observe file "${BATS_TEST_TMPDIR}/live")" "{\"symlink\":\"${BATS_TEST_TMPDIR}/f\"}"
+  # A target carrying a quote and a backslash is escaped exactly as an entry records it.
+  odd="${BATS_TEST_TMPDIR}/a\"b\\c"
+  ln -s "${odd}" "${BATS_TEST_TMPDIR}/odd"
+  assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/odd")" "{\"symlink\":\"$(harbor_json_escape "${odd}")\"}"
+  # A directory stays unobservable, as it always was.
+  mkdir "${BATS_TEST_TMPDIR}/dir"
+  assert_equal "$(harbor_observe_file "${BATS_TEST_TMPDIR}/dir")" '"unobservable:not-a-regular-file"'
+  # The crash window of design section 3.7: the link was renamed into place and the
+  # applied write never happened, or the rename never landed. Both are decidable.
+  fixture_entry "${FIX_ROOT}" 0001 file "${BATS_TEST_TMPDIR}/live" created prepared '"absent"' "{\"symlink\":\"${BATS_TEST_TMPDIR}/f\"}"
+  fixture_entry "${FIX_ROOT}" 0002 file "${BATS_TEST_TMPDIR}/gone" created prepared '"absent"' "{\"symlink\":\"${BATS_TEST_TMPDIR}/f\"}"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  # Deciding an entry inspects only.
+  assert_equal "$(readlink "${BATS_TEST_TMPDIR}/live")" "${BATS_TEST_TMPDIR}/f"
+  assert [ ! -e "${BATS_TEST_TMPDIR}/gone" ]
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "an op name out of a journal file is data: never a command line, never an executable on PATH" {
+  # An executable named like an observer is not an observer: only a function is.
+  mkdir "${BATS_TEST_TMPDIR}/bin"
+  printf '#!/bin/sh\nprintf hijacked\n' >"${BATS_TEST_TMPDIR}/bin/harbor_observe_op_evil"
+  chmod 0755 "${BATS_TEST_TMPDIR}/bin/harbor_observe_op_evil"
+  PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  assert_equal "$(harbor_journal_observe evil /x)" '"unobservable:evil"'
+  # An op carrying shell metacharacters is neither expanded nor executed.
+  pwned="${BATS_TEST_TMPDIR}/pwned"
+  assert_equal "$(harbor_journal_observe "file;touch ${pwned}" /x)" "\"unobservable:file;touch ${pwned}\""
+  assert_equal "$(harbor_journal_observe "\$(touch ${pwned})" /x)" "\"unobservable:\$(touch ${pwned})\""
+  assert_equal "$(harbor_journal_observe '../../etc/passwd' /x)" '"unobservable:../../etc/passwd"'
+  assert [ ! -e "${pwned}" ]
 }
 
 @test "the sync helper uses per-file sync on Linux and whole-filesystem sync on Darwin" {

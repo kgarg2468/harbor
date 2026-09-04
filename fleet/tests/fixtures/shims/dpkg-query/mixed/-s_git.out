@@ -1,0 +1,6 @@
+Package: git
+Status: install ok installed
+Priority: optional
+Section: vcs
+Architecture: amd64
+Version: 1:2.43.0-1ubuntu7.1
