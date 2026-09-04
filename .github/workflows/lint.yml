@@ -45,5 +45,11 @@ jobs:
         run: fleet/tests/lint/engines_check.sh
       - name: gitleaks
         run: gitleaks detect --source . --config .gitleaks.toml --no-banner --redact
+      # Harbor's own Markdown only. This repository is shared with an unrelated
+      # project under insomnia/, and Harbor's style rules are not that project's to
+      # answer for. gitleaks above stays repository-wide, because a leaked secret is
+      # everyone's problem wherever it lands.
       - name: markdownlint
-        run: npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '**/*.md' --ignore fleet/tests/vendor
+        run: >
+          npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml
+          '*.md' 'docs/**/*.md' 'fleet/**/*.md' --ignore fleet/tests/vendor
