@@ -718,3 +718,27 @@ echo not harbor'
   assert_equal "${status}" 3
   assert_output --partial usage
 }
+
+@test "a RELEASE symlink in the archived tag is removed, not written through" {
+  # A redirection follows a symlink, so a tag carrying RELEASE as a link to a path
+  # outside the staging tree would have root truncate and chmod that path, before any
+  # entry exists to record it. Neither mode normalizer catches it: -type f does not
+  # match a symlink.
+  local outside
+  git_repo
+  outside="${BATS_TEST_TMPDIR}/outside"
+  printf 'do not truncate me\n' >"${outside}"
+  ln -s "${outside}" "${CHECKOUT}/RELEASE"
+  gitc add -A
+  gitc commit -q -m 'a tag carrying a RELEASE symlink'
+  gitc tag -f "${TAG}" >/dev/null 2>&1
+  acquire
+  run harbor_release_stage "${FIX_ROOT}" "${CHECKOUT}" "${TAG}" "${DEST}"
+  assert_success
+  # The file the link pointed at is untouched, in content and in mode.
+  assert_equal "$(cat "${outside}")" 'do not truncate me'
+  # What landed is Harbor's own marker, a regular file, not a link.
+  assert [ ! -L "${DEST}/RELEASE" ]
+  assert_equal "$(sed -n 's/^tag=//p' "${DEST}/RELEASE")" "${TAG}"
+  harbor_lock_release "${FIX_ROOT}"
+}

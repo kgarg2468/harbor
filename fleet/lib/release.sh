@@ -182,8 +182,20 @@ harbor_release_stage() {
   fi
   rm -f "${tmp}/release.tar"
   harbor_release_normalize_modes "${work}"
-  printf 'tag=%s\ncommit=%s\n' "${tag}" "${commit}" >"${work}/RELEASE"
-  chmod 0644 "${work}/RELEASE"
+  # The marker is written to a path the archive may already have put something at, and
+  # a redirection follows a symlink: a tag whose tree carries RELEASE as a link to
+  # /etc/shadow would have root truncate and chmod that file, outside the staging tree
+  # and before any entry exists to record it. Neither normalizer above catches it,
+  # because -type f does not match a symlink. So whatever the archive left here is
+  # removed first, and the marker is written to a path that is now nothing.
+  if [ -e "${work}/RELEASE" ] || [ -L "${work}/RELEASE" ]; then
+    rm -f "${work}/RELEASE" \
+      || harbor_die 2 release.marker "the ${tag} archive carries a RELEASE that cannot be removed from the staging tree; nothing was staged"
+  fi
+  printf 'tag=%s\ncommit=%s\n' "${tag}" "${commit}" >"${work}/RELEASE" \
+    || harbor_die 2 release.marker "cannot write the RELEASE marker in the staging tree; nothing was staged"
+  chmod 0644 "${work}/RELEASE" \
+    || harbor_die 2 release.marker "cannot give the RELEASE marker mode 0644; nothing was staged"
   post="{\"tree_sha256\":\"$(harbor_release_tree_hash "${work}")\"}"
   harbor_journal_create "${root}" harbor-install "${dest}" created prepared '"absent"' "${post}"
   entry="${HARBOR_JOURNAL_ENTRY}"
