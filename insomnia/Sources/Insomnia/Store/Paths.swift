@@ -57,6 +57,7 @@ struct Paths: Sendable, Equatable {
     }
 
     var sessionFile: URL { appSupport.appendingPathComponent("session.json") }
+    var recoveryLock: URL { appSupport.appendingPathComponent("recovery.lock") }
     var stateFile: URL { appSupport.appendingPathComponent("state.json") }
     var configFile: URL { appSupport.appendingPathComponent("config.json") }
     /// Installed copy of scripts/backstop.sh, placed there by install.sh.

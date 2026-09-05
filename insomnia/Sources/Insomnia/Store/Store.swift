@@ -31,7 +31,9 @@ struct Store: Sendable {
     /// undecodable content.
     func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let data = try Data(contentsOf: url)
+        let handle = try PrivateFiles.handle(url, flags: O_RDONLY)
+        defer { try? handle.close() }
+        let data = try handle.readToEnd() ?? Data()
         return try Store.makeDecoder().decode(T.self, from: data)
     }
 
@@ -39,9 +41,10 @@ struct Store: Sendable {
     func write<T: Encodable>(_ value: T, to url: URL) throws {
         let data = try Store.makeEncoder().encode(value)
         let dir = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try PrivateFiles.directory(dir)
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
-        try data.write(to: tmp, options: [])
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try PrivateFiles.write(data, to: tmp, exclusive: true)
         if rename(tmp.path, url.path) != 0 {
             let err = errno
             try? FileManager.default.removeItem(at: tmp)
