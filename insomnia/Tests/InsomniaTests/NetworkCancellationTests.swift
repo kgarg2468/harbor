@@ -23,9 +23,12 @@ final class NetworkCancellationTests: XCTestCase {
         clock.advance(130)
         let task = Task { await network.simulate(satisfied: true) }
         await gate.waitUntilStarted()
+        let recordedBeforeNudgeCompletes = try? String(contentsOf: home.paths.handoffsLog, encoding: .utf8)
+        XCTAssertTrue(recordedBeforeNudgeCompletes?.contains("gap=130s") == true)
         network.stop()
         await gate.open()
         await task.value
+        XCTAssertEqual(try? String(contentsOf: home.paths.handoffsLog, encoding: .utf8), recordedBeforeNudgeCompletes)
         XCTAssertEqual(calls.value, ["first"])
         XCTAssertTrue(notifier.posts.isEmpty)
         XCTAssertFalse(recovered)

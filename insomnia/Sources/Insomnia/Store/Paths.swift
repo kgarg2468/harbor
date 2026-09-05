@@ -57,6 +57,7 @@ struct Paths: Sendable, Equatable {
     }
 
     var sessionFile: URL { appSupport.appendingPathComponent("session.json") }
+    var recoveryLock: URL { appSupport.appendingPathComponent("recovery.lock") }
     var stateFile: URL { appSupport.appendingPathComponent("state.json") }
     var configFile: URL { appSupport.appendingPathComponent("config.json") }
     /// Installed copy of scripts/backstop.sh, placed there by install.sh.
@@ -69,8 +70,10 @@ struct Paths: Sendable, Equatable {
 
     /// Create every directory Insomnia writes into.
     func createDirectories() throws {
-        for dir in [appSupport, logs, launchAgents] {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+        // Validate relocation before creating anything inside an existing root.
+        try PrivateFiles.directory(appSupport)
+        try PrivateFiles.directory(logs)
+        // The default LaunchAgents directory belongs to every user agent.
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
     }
 }

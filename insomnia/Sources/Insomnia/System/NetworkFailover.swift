@@ -268,7 +268,7 @@ final class NetworkFailover {
             let r = try await Shell.run(Self.networksetup, ["-getairportnetwork", iface], timeout: 5)
             return HardwarePortsParser.ssid(fromGetAirportNetwork: r.stdout)
         } catch {
-            Log.error("getairportnetwork failed: \(error.localizedDescription)")
+            Log.error("network.ssid-query-failed")
             return nil
         }
     }
@@ -288,7 +288,7 @@ final class NetworkFailover {
                 Log.info("wifi interface \(wifiInterface!)")
             }
         } catch {
-            Log.error("listallhardwareports failed: \(error.localizedDescription)")
+            Log.error("network.interface-query-failed")
         }
     }
 
@@ -392,24 +392,24 @@ final class NetworkFailover {
         let password: String
         do {
             guard let p = try keychain.get(service: KeychainStore.service, account: ssid) else {
-                Log.error("hotspot join skipped: no Keychain item \(KeychainStore.service)/\(ssid)")
+                Log.error("hotspot.credentials-missing")
                 return
             }
             password = p
         } catch {
-            Log.error("hotspot join skipped: \(error.localizedDescription)")
+            Log.error("hotspot.credentials-unavailable")
             return
         }
-        Log.info("joining hotspot \(ssid) on \(iface) (attempt \(machine.joins))")
+        Log.info("hotspot.join-attempt")
         do {
             let joined = try await hotspotJoiner.join(ssid: ssid, password: password, interfaceName: iface)
             guard isCurrent(token) else { return }
             if !joined {
-                Log.error("CoreWLAN scan found no network for hotspot \(ssid); retrying with backoff")
+                Log.error("hotspot.no-compatible-network")
             }
         } catch {
             guard isCurrent(token) else { return }
-            Log.error("CoreWLAN hotspot join failed: \(error.localizedDescription)")
+            Log.error("hotspot.join-failed")
         }
     }
 
@@ -435,17 +435,12 @@ final class NetworkFailover {
 
     private func appendHandoff(_ line: String) {
         do {
-            try FileManager.default.createDirectory(at: paths.logs, withIntermediateDirectories: true)
-            let url = paths.handoffsLog
-            if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(atPath: url.path, contents: nil)
+            try PrivateFiles.directory(paths.appSupport)
+            try JournalLock.withLock(at: paths.recoveryLock) {
+                try PrivateFiles.appendRecord(line, to: paths.handoffsLog)
             }
-            let h = try FileHandle(forWritingTo: url)
-            defer { try? h.close() }
-            try h.seekToEnd()
-            try h.write(contentsOf: Data((line + "\n").utf8))
         } catch {
-            Log.error("handoffs.log append failed: \(error.localizedDescription)")
+            Log.error("network.handoff-record-unavailable")
         }
     }
 }
