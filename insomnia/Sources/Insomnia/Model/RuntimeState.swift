@@ -45,19 +45,19 @@ struct RuntimeState: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Missing legacy keys are supported; present null is unknown ownership,
         // not evidence that no restoration is needed.
-        func powerValue(_ key: CodingKeys) throws -> Bool? {
+        func value<T: Decodable>(_ type: T.Type, _ key: CodingKeys) throws -> T? {
             guard c.contains(key) else { return nil }
-            return try c.decode(Bool.self, forKey: key)
+            return try c.decode(type, forKey: key)
         }
-        sleepDisabledByUs = try powerValue(.sleepDisabledByUs) ?? false
-        lowPowerSetByUs = try powerValue(.lowPowerSetByUs) ?? false
-        originalSleepDisabled = try powerValue(.originalSleepDisabled)
-        originalBatteryLowPowerMode = try powerValue(.originalBatteryLowPowerMode)
-        frozenPids = try c.decodeIfPresent([Int32].self, forKey: .frozenPids) ?? []
-        frozenProcesses = try c.decodeIfPresent([ProcessIdentity].self, forKey: .frozenProcesses) ?? []
-        dockerFrozen = try c.decodeIfPresent(Bool.self, forKey: .dockerFrozen) ?? false
-        savedOutputVolume = try c.decodeIfPresent(Float.self, forKey: .savedOutputVolume)
-        savedMuted = try c.decodeIfPresent(Bool.self, forKey: .savedMuted)
-        savedOutputDeviceUID = try c.decodeIfPresent(String.self, forKey: .savedOutputDeviceUID)
+        sleepDisabledByUs = try value(Bool.self, .sleepDisabledByUs) ?? false
+        lowPowerSetByUs = try value(Bool.self, .lowPowerSetByUs) ?? false
+        originalSleepDisabled = try value(Bool.self, .originalSleepDisabled)
+        originalBatteryLowPowerMode = try value(Bool.self, .originalBatteryLowPowerMode)
+        frozenPids = try value([Int32].self, .frozenPids) ?? []
+        frozenProcesses = try value([ProcessIdentity].self, .frozenProcesses) ?? []
+        dockerFrozen = try value(Bool.self, .dockerFrozen) ?? false
+        savedOutputVolume = try value(Float.self, .savedOutputVolume)
+        savedMuted = try value(Bool.self, .savedMuted)
+        savedOutputDeviceUID = try value(String.self, .savedOutputDeviceUID)
     }
 }
