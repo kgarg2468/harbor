@@ -51,7 +51,9 @@ Keep Insomnia closed until installation finishes. The installer verifies app
 termination and serializes recovery and replacement. New GUI instances and
 session activation refuse work while installation is in progress. If recovery
 or agent loading fails, follow the reported error and retry; do not delete the
-recovery files to force installation through.
+recovery files to force installation through. Failed upgrades restore the prior
+command grant. If there was no prior grant and recovery is still incomplete,
+the new four-command grant is retained for cleanup and the installer reports it.
 
 For a downloadable app, Developer ID signing, Hardened Runtime and
 [notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
@@ -148,7 +150,8 @@ remove it yourself when no longer needed. Never attach raw legacy logs,
 config/state files, passwords or full tmux output to a public issue.
 
 `INSOMNIA_HOME` relocates application journals/logs and the test LaunchAgent
-path. It is useful for isolated development; install/uninstall explicitly
+path. Use a new directory or an existing private directory owned by your account;
+shared or symlink roots are refused. It is useful for isolated development; install/uninstall explicitly
 reject this override and operate on standard per-user paths.
 
 ## Uninstall

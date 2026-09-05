@@ -253,6 +253,8 @@ with lock.open('a') as held:
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.journal()['sleepDisabledByUs'])
         self.assertFalse(any(c[0] == 'launchctl' for c in self.calls()))
+        self.assertTrue((self.root/'sudoers').exists())
+        self.assertIn('grant retained for pending recovery', result.stderr)
 
     def test_verification_failure_keeps_existing_bundle(self):
         app = self.home/'Applications/Insomnia.app'

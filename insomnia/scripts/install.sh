@@ -156,9 +156,10 @@ if app_running; then
   echo "Insomnia reopened before commit; quit it and retry. Existing installation retained." >&2
   exit 1
 fi
-# Restore the exact prior privilege grant on every failed commit path, including
-# failures before app/helper replacement begins.
+# Restore the exact prior privilege grant on failed commit paths. A newly
+# supplied grant stays only when incomplete recovery still needs it.
 had_grant=0
+recovery_incomplete=0
 if /usr/bin/sudo /bin/test -e "$SUDOERS"; then
   /usr/bin/sudo /bin/cat "$SUDOERS" > "$stage/previous.sudoers"
   had_grant=1
@@ -166,6 +167,8 @@ fi
 restore_grant() {
   if (( had_grant == 1 )); then
     /usr/bin/sudo /usr/bin/install -m 0440 -o root -g wheel "$stage/previous.sudoers" "$SUDOERS"
+  elif (( recovery_incomplete == 1 )); then
+    echo "New narrow command grant retained for pending recovery; rerun install after cleanup succeeds." >&2
   else /usr/bin/sudo /bin/rm -f "$SUDOERS"; fi
 }
 rollback_grant() {
@@ -185,6 +188,7 @@ if ! /usr/bin/sudo -n -l /usr/bin/pmset -a disablesleep 0; then
   echo "Sudoers verification failed; existing installation retained." >&2; exit 1
 fi
 if ! /bin/bash "$ROOT/scripts/backstop.sh" --locked --force --helper "$stage/InsomniaRecovery"; then
+  recovery_incomplete=1
   echo "Restoration incomplete; existing app and recovery files retained. Retry after recovery." >&2; exit 1
 fi
 # Pair replacement is serialized by recovery.lock. Each file is atomically
