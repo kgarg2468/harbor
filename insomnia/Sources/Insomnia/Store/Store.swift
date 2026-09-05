@@ -67,6 +67,7 @@ struct Store: Sendable {
 
     private func removeUnlocked(at url: URL) throws {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try PrivateFiles.directory(url.deletingLastPathComponent())
         try FileManager.default.removeItem(at: url)
     }
 

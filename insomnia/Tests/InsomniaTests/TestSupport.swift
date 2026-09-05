@@ -38,7 +38,8 @@ final class TempHome {
     init() {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("insomnia-tests-\(UUID().uuidString)", isDirectory: true)
-        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
         setenv(Paths.environmentKey, root.path, 1)
         paths = Paths.fromEnvironment()
     }

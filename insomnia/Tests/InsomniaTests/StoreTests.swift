@@ -95,7 +95,6 @@ final class StoreTests: XCTestCase {
     }
 
     func testMetadataFilesAndOwnedDirectoryArePrivate() throws {
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: home.paths.appSupport.path)
         try store.saveConfig(Config())
         try store.saveState(.clean)
         try store.saveSession(Session(startedAt: Date(), endsAt: Date()))
@@ -105,6 +104,59 @@ final class StoreTests: XCTestCase {
         }
         let mode = try FileManager.default.attributesOfItem(atPath: home.paths.appSupport.path)[.posixPermissions] as? NSNumber
         XCTAssertEqual(mode?.intValue, 0o700)
+    }
+
+    func testSharedRelocationRootIsRefusedWithoutChangingItsContentsOrPermissions() throws {
+        let unrelated = home.root.appendingPathComponent("unrelated.txt")
+        try Data("shared content".utf8).write(to: unrelated)
+        try Store.makeEncoder().encode(Config()).write(to: home.paths.configFile)
+        try Data("session fixture".utf8).write(to: home.paths.sessionFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: home.root.path)
+        let before = try FileManager.default.contentsOfDirectory(atPath: home.root.path).sorted()
+        XCTAssertThrowsError(try home.paths.createDirectories())
+        XCTAssertThrowsError(try store.saveState(.clean))
+        XCTAssertThrowsError(try store.loadConfig())
+        XCTAssertThrowsError(try store.deleteSession())
+        Log.append(level: "info", "shared root must remain untouched", paths: home.paths)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: home.root.path).sorted(), before)
+        XCTAssertEqual(try String(contentsOf: unrelated, encoding: .utf8), "shared content")
+        let mode = try FileManager.default.attributesOfItem(atPath: home.root.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o755)
+    }
+
+    func testExistingPrivateRelocationRootIsAccepted() throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.root.path)
+        try home.paths.createDirectories()
+        try store.saveConfig(Config())
+        XCTAssertEqual(try store.loadConfig(), Config())
+    }
+
+    func testKnownOwnedDirectoryRepairDoesNotIncludePrefixSiblings() throws {
+        // Inject the owned-directory policy so the real Library is never touched.
+        let owned = home.root.appendingPathComponent("Insomnia")
+        let nested = owned.appendingPathComponent("legacy-diagnostics")
+        let sibling = home.root.appendingPathComponent("Insomnia-shared")
+        for directory in [owned, nested, sibling] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        }
+        try PrivateFiles.directory(owned, ownedDirectories: [owned])
+        try PrivateFiles.directory(nested, ownedDirectories: [owned])
+        XCTAssertThrowsError(try PrivateFiles.directory(sibling, ownedDirectories: [owned]))
+        for directory in [owned, nested] {
+            let mode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+            XCTAssertEqual(mode?.intValue, 0o700)
+        }
+        let mode = try FileManager.default.attributesOfItem(atPath: sibling.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o755)
+    }
+
+    func testDirectoryCreationLeavesSharedLaunchAgentsPermissionsAlone() throws {
+        try FileManager.default.createDirectory(at: home.paths.launchAgents, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: home.paths.launchAgents.path)
+        try home.paths.createDirectories()
+        let mode = try FileManager.default.attributesOfItem(atPath: home.paths.launchAgents.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o755)
     }
 
     func testReadingLegacyMetadataTightensModeAndRefusesSymlinkTargets() throws {

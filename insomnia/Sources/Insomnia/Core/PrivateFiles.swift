@@ -2,21 +2,31 @@ import Darwin
 import Foundation
 
 /// App-owned directories and files are private before their first content write.
-/// Existing owned paths are tightened as they are opened; symlinks are refused.
+/// Only the known default app directories may have shared permissions repaired.
+/// Existing relocation directories must already be private; symlinks are refused.
 enum PrivateFiles {
     static let maximumLogBytes = 256 * 1024
 
-    static func directory(_ url: URL) throws {
+    static func directory(_ url: URL, ownedDirectories: [URL] = [Paths.standard.appSupport, Paths.standard.logs]) throws {
         var info = stat()
         if lstat(url.path, &info) != 0 {
             guard errno == ENOENT else { throw failure() }
             let parent = url.deletingLastPathComponent()
-            if !FileManager.default.fileExists(atPath: parent.path) { try directory(parent) }
+            if !FileManager.default.fileExists(atPath: parent.path) { try directory(parent, ownedDirectories: ownedDirectories) }
             guard mkdir(url.path, 0o700) == 0 || errno == EEXIST else { throw failure() }
         }
         let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw failure() }
         defer { _ = close(fd) }
+        guard fstat(fd, &info) == 0 else { throw failure() }
+        let path = url.standardizedFileURL.path
+        let mayRepair = ownedDirectories.contains { owned in
+            let root = owned.standardizedFileURL.path
+            return path == root || path.hasPrefix(root + "/")
+        }
+        guard info.st_uid == geteuid(), mayRepair || info.st_mode & 0o077 == 0 else {
+            throw DirectoryPrivacyError(path: path)
+        }
         guard fchmod(fd, 0o700) == 0 else { throw failure() }
     }
 
@@ -80,4 +90,11 @@ enum PrivateFiles {
     }
 
     private static func failure() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+
+    private struct DirectoryPrivacyError: LocalizedError {
+        let path: String
+        var errorDescription: String? {
+            "Refusing non-private directory \(path). Use a dedicated directory owned by your account with mode 0700 for INSOMNIA_HOME."
+        }
+    }
 }
