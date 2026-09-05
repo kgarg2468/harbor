@@ -63,10 +63,11 @@ each row. “Not run” is not a pass.
 | Battery/thermal | Injected decision/failure tests | Verify safe real callbacks and original preferences; no deliberate critical-heat stress. |
 | UI/accessibility/login | Source hooks and model tests | Keyboard, Escape/outside click, multiple displays/Spaces, VoiceOver, reduced motion, login registration/revocation. |
 
-An active personal installation is separate from the source release. Its old
-100/0 battery settings require correction through the running app or after it
-is safely closed; source tests do not update that live manager. The new source
-loads invalid saved floors as 40/10 with a visible notice.
+An active personal installation is separate from the source release. Its saved
+100/0 battery settings were corrected to 40/10 after its session ended and
+recovery state was clean; a private backup was retained. The old running GUI
+requires a restart to load that edit. Source tests do not update its in-memory
+settings. The new source loads invalid saved floors as 40/10 with a visible notice.
 
 ## Before tagging a stable release
 
