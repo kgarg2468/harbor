@@ -31,11 +31,13 @@ same snapshots differently. The variants differ only by the identity patch.
     { "id": "desktop-runtime-common", "path": "patches/0002-desktop-runtime-common.patch", "sha256": "..." },
     { "id": "update-admission", "path": "patches/0003-update-admission.patch", "sha256": "..." },
     { "id": "queued-update", "path": "patches/0004-queued-update.patch", "sha256": "..." },
+    { "id": "update-activity", "path": "patches/0005-update-activity.patch", "sha256": "..." },
+    { "id": "thread-fork-backend", "path": "patches/0006-thread-fork-backend.patch", "sha256": "..." },
     { "id": "reasoning-identity", "path": "patches/0002-reasoning-identity.patch", "sha256": "..." }
   ],
   "variants": {
-    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update"],
-    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "reasoning-identity"]
+    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend"],
+    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "reasoning-identity"]
   }
 }
 ```
@@ -84,6 +86,8 @@ can pick up the first variant's bundles.
 | `desktop-runtime-common` | yes | yes | packaged backend `T3CODE_SKIP_LOGIN_SHELL` / `os-jank` PATH fix |
 | `update-admission` | yes | yes | maintenance admission primitive |
 | `queued-update` | yes | yes | durable queued update controller |
+| `update-activity` | yes | yes | activity ownership and required-consumer fanout helpers |
+| `thread-fork-backend` | yes | yes | durable conversation forks, checkpoint worktrees and first-turn context handoff |
 | `reasoning-identity` | no | yes | Reasoning bundle id, name, scheme, state home, artifact name, disabled official feed, manual macOS updater |
 
 The `managed-nightly` tree keeps upstream's packaged identity: bundle id
@@ -92,7 +96,7 @@ artifact template `T3-Code-${version}-${arch}.${ext}`, schemes `t3code` and
 `t3code-dev`, user-data name `t3code`, and the `~/.t3` profile. The
 `reasoning` tree is byte-identical to the previous flat lock's result.
 
-## Tree proof for the current pin
+## Tree proof before the activity helper patch
 
 Recorded on 2026-09-05 from throwaway checkouts of upstream
 `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, each patch applied with
@@ -102,8 +106,8 @@ Recorded on 2026-09-05 from throwaway checkouts of upstream
 | --- | --- |
 | `0001` + original `0002-desktop-identity` | `6e3be0cb047c695ffc7fdec4fd0fdb6ba8187bd2` |
 | `0001` + original `0002` + `0003` + `0004` (previous flat lock) | `b9af3c082cecc406bbf76724c9daa6d27ca7f44d` |
-| `reasoning` variant as locked (identity last) | `b9af3c082cecc406bbf76724c9daa6d27ca7f44d` |
-| `managed-nightly` variant as locked | `264c89e43995bf45b4194fac32fd2432c1c58349` |
+| `reasoning` variant before `0005` (identity last) | `b9af3c082cecc406bbf76724c9daa6d27ca7f44d` |
+| `managed-nightly` variant before `0005` | `264c89e43995bf45b4194fac32fd2432c1c58349` |
 
 So the split preserves the Reasoning tree exactly, and the
 two variants differ in exactly the eight files of `reasoning-identity`: the
@@ -113,6 +117,16 @@ common runtime files, has the same blob id in both trees. The opt-in test in
 `tests/prepare-source.test.mjs` re-checks this file-level claim against a
 local clone; the tree ids above are a one-time record because `0004` is
 expected to change under separate review.
+
+After applying the common `0005` activity helper patch, the managed Nightly tree
+is `4bf46b9a8d4e1685f6a10f3a83162310a7235e7f` and the Reasoning tree is
+`77a2d74f8fd3d76002ed2f41ca0e3069f716dbd5`. The real-variant materialization test
+continues to prove that only the eight identity files differ.
+
+After the common `0006` fork backend patch, the managed Nightly tree is
+`98b6a174f52b15d7944364d96a92c7a2fb227841` and the Reasoning tree is
+`393320bcae80b45d91eff3e4cc13ccf38a63d319`. Both variants materialize successfully;
+only the same eight identity files differ.
 
 ## Not ready for deployment
 
