@@ -12,8 +12,9 @@ races, failed recovery, stale journals, safe process/audio ownership, power
 preference preservation, browser arguments/scans, network cancellation,
 configuration, privacy and command timeouts.
 
-The integrated Insomnia source at `43b42c5` passed 332 Swift tests on macOS 26.2
-and 56 isolated script tests. Release builds and ad-hoc bundle verification pass.
+The integrated Insomnia source at `6f46980` passed 334 Swift tests on macOS 26.2
+and 56 isolated script tests. The shared Harbor CI timing fix also passed all
+276 lib/bin tests and 40 repeated contention cases. Release builds and ad-hoc bundle verification pass.
 A redacted secret scan covered 195 commits with no findings. Final-head CI and
 Greptile results are tracked in the integration PR before merge.
 Script tests use real temporary files/locks and command shims, with no live sudo,
