@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly. `source.lock.json` pins upstream commit
 `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, and three checksummed patches. Preparing the
+`v0.0.39-nightly.20260905.1284`, and four checksummed patches. Preparing the
 source yields a checkout you can install dependencies into and build the
 server from, using upstream's own scripts.
 
@@ -42,6 +42,9 @@ What this component does not do:
 - `patches/0003-update-admission.patch`: a tested command-admission primitive
   for maintenance. It is not yet wired into server requests or an updater;
   it does not by itself detect agent activity or enable automatic updates.
+- `patches/0004-queued-update.patch`: the durable queue controller, with injected
+  staging and activation operations. See `docs/queued-updates.md`; it is not
+  connected to the live updater yet.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
