@@ -23,7 +23,7 @@ final class SettingsWindow {
     func show() {
         let window = window ?? make()
         self.window = window
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         if !window.isVisible {
             window.center()
         }

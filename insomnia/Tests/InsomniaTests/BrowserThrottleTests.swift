@@ -68,7 +68,7 @@ final class BrowserLifecycleTests: XCTestCase {
         await gate.open()
         let oldResult = await old.value
         XCTAssertTrue(browser.statuses.first?.unthrottled == true)
-        XCTAssertEqual(oldResult, browser.statuses)
+        XCTAssertNil(oldResult, "a superseded caller must not publish another scan's shared state")
     }
 
     func testQuitWhileReadingDoesNotReappearInScan() async {

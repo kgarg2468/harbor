@@ -77,7 +77,10 @@ struct Store: Sendable {
     func saveState(_ s: RuntimeState) throws { try write(s, to: paths.stateFile) }
 
     func loadConfig() throws -> Config? { try readUnlocked(Config.self, from: paths.configFile) }
-    func saveConfig(_ c: Config) throws { try writeUnlocked(c, to: paths.configFile) }
+    func saveConfig(_ c: Config) throws {
+        try c.validateFloors()
+        try writeUnlocked(c, to: paths.configFile)
+    }
 }
 
 enum StoreError: Error, LocalizedError {
