@@ -55,6 +55,7 @@ struct Store: Sendable {
     /// Removes the file; a missing file is not an error.
     func remove(at url: URL) throws {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try PrivateFiles.directory(url.deletingLastPathComponent())
         try FileManager.default.removeItem(at: url)
     }
 

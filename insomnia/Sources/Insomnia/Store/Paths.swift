@@ -70,8 +70,10 @@ struct Paths: Sendable, Equatable {
 
     /// Create every directory Insomnia writes into.
     func createDirectories() throws {
-        for dir in [appSupport, logs, launchAgents] {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+        // Validate relocation before creating anything inside an existing root.
+        try PrivateFiles.directory(appSupport)
+        try PrivateFiles.directory(logs)
+        // The default LaunchAgents directory belongs to every user agent.
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
     }
 }
