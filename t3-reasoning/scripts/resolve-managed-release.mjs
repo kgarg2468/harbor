@@ -11,10 +11,10 @@
 //
 //   <upstream nightly>.managed.<counter>.p<12 hex of the release-input digest>
 //
-// The digest covers the upstream commit and version, the ordered patch hashes
-// of both variants, the builder revision, the fingerprint of the public
-// configuration, and the presentation variant each desktop build is compiled
-// with. The counter is deliberately outside the digest, so a rebuild of
+// The digest covers the upstream repository, commit, and version, the ordered
+// patch ids and hashes of both variants, the builder revision, the fingerprint
+// of the public configuration, and the presentation variant each desktop
+// build is compiled with. The counter is deliberately outside the digest, so a rebuild of
 // identical inputs under a new counter keeps the same `p` suffix. The
 // descriptor carries fingerprints, versions, and provenance only; no
 // configuration value is ever written or printed.
@@ -374,7 +374,15 @@ export function computePublicConfigFingerprint(config) {
   return sha256Hex(canonicalJson({ schema: PUBLIC_CONFIG_SCHEMA, values }));
 }
 
+// The digest binds every provenance claim the descriptor and manifest make:
+// the upstream repository, commit, and version; for each variant the ordered
+// patch sequence as `{ id, sha256 }` pairs (order and ids are significant, so
+// the same bytes under a renamed or reordered patch id digest differently;
+// paths are not, they are lock-local); the builder revision; the
+// public-config fingerprint; and the presentation variants. Object key order
+// never matters because the input is canonicalized.
 export function computeReleaseInputDigest({
+  upstreamRepository,
   upstreamCommit,
   upstreamVersion,
   variants,
@@ -384,10 +392,14 @@ export function computeReleaseInputDigest({
 }) {
   const input = {
     schema: RELEASE_INPUT_SCHEMA,
+    upstreamRepository,
     upstreamCommit,
     upstreamVersion,
     variants: Object.fromEntries(
-      Object.entries(variants).map(([name, patches]) => [name, patches.map((patch) => patch.sha256)]),
+      Object.entries(variants).map(([name, patches]) => [
+        name,
+        patches.map(({ id, sha256 }) => ({ id, sha256 })),
+      ]),
     ),
     builderRevision,
     publicConfigSha256,
@@ -454,6 +466,7 @@ export function resolveManagedRelease({
   validateBuilderRevision(builderRevision);
   const publicConfigSha256 = computePublicConfigFingerprint(publicConfig);
   const releaseInputSha256 = computeReleaseInputDigest({
+    upstreamRepository: lock.repository,
     upstreamCommit: lock.commit,
     upstreamVersion,
     variants,

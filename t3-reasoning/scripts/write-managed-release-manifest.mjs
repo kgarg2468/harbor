@@ -202,6 +202,7 @@ export function validateDescriptor(descriptor, label = "descriptor") {
     fail(`${label}: identityPatches must be exactly ${JSON.stringify(identityPatches)}`);
   }
   const digest = computeReleaseInputDigest({
+    upstreamRepository: descriptor.upstreamRepository,
     upstreamCommit: descriptor.upstreamCommit,
     upstreamVersion: descriptor.upstreamVersion,
     variants: Object.fromEntries(names.map((name) => [name, descriptor.variants[name].patches])),
