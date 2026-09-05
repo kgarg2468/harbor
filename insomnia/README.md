@@ -109,7 +109,8 @@ progress. Failed restoration keeps its journal entries for retry.
 
 The per-user LaunchAgent runs at load and around the scheduled deadline, and
 retries failed recovery. It invokes the installed recovery helper for process
-and audio restoration. It requires the login session, its installed files and
+and audio restoration. The app verifies the helper’s protocol and SHA-256
+pair before accepting a new session. It requires the login session, its installed files and
 the power-command grant to remain available. After a GUI crash, battery and
 thermal monitoring stop until the GUI restarts; independent recovery is driven
 by the deadline, not continuous battery or thermal observation.
@@ -131,6 +132,7 @@ remove the abandoned empty directory. The scripts never steal an occupied guard.
 ~/Applications/Insomnia.app
 ~/Library/Application Support/Insomnia/   config.json, session.json, state.json,
                                         backstop.sh, InsomniaRecovery,
+                                        InsomniaRecovery.protocol,
                                         recovery.lock, instance.lock
 ~/Library/Logs/Insomnia/                  insomnia.log, handoffs.log
 ~/Library/LaunchAgents/                  com.insomnia.backstop.plist

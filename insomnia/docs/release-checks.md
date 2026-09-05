@@ -12,9 +12,10 @@ races, failed recovery, stale journals, safe process/audio ownership, power
 preference preservation, browser arguments/scans, network cancellation,
 configuration, privacy and command timeouts.
 
-The first consolidated implementation passed 255 Swift tests on macOS 26.2.
-Additional ownership/privacy branches have their own passing tests; the final
-combined revision and full result must be recorded after those are integrated.
+The combined implementation at `d3a62d2` passed 317 Swift tests on macOS 26.2,
+41 isolated script tests, a release build, and ad-hoc bundle verification.
+A redacted secret scan covered 195 commits with no findings. Final review
+follow-ups require another combined check before merge.
 Script tests use real temporary files/locks and command shims, with no live sudo,
 pmset, app termination or launchd mutation. Passing fakes do not prove macOS
 permissions or hardware behavior.
@@ -25,6 +26,23 @@ The historical handoff-before-nudge finding was rejected because it records an
 already-observed recovery; the superseded-browser-scan finding was reproduced
 and fixed. A successful reviewer check alone does not mean every comment has
 been resolved.
+
+## Original audit items
+
+| Item | Result in the source preview |
+| --- | --- |
+| Hotspot never configured | Still opt-in; missing credentials are not a source defect. Added cancellation and WPA2/WPA3-only password association. Real Location/association checks remain open. |
+| Floors 100/0 | Invalid saved pairs load as 40/10 with a notice; Settings rejects unsafe pairs and applies changes immediately. The active old installation is separate. |
+| Preset chips deleted | Presets now appear in the menu for starting/extending sessions. |
+| Obsolete popover docs | README/spec now describe the current panel, status menu and Settings; file layout refreshed. |
+| Untested optional features | Browser/Docker default off, audio remains off, tmux targets empty. Hardware evidence is recorded below instead of assuming a pass. |
+| Docker denylist | The explicit Docker rule bypass was reachable; the real defect was selecting an unintended daemon. It now targets the local Desktop socket explicitly. |
+| Debug/deprecated UI calls | Removed launch frame logging and updated app activation. |
+| Incorrect sleep status and races | Confirmed power state, serialized lifecycle operations, coordinated journals, cancellation and latest-scan checks. |
+| Untracked mockup | Remains in the separate personal checkout; excluded from these release branches. |
+| CI missing | The repository already had CI. Added the missing macOS Insomnia build/test/script/bundle checks. |
+| Public distribution metadata | MIT already present; source version is 0.2.0, original icon included, build/install/security docs updated. |
+| Privileged install/uninstall | Explicit four-command grant, account ownership checks, guarded staged replacement, native recovery and verified maintenance. Clean-account acceptance remains open. |
 
 ## Hardware acceptance still required
 
