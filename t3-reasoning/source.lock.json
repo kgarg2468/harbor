@@ -39,6 +39,11 @@
       "sha256": "e90f119357806ed84190da318a8680631b531028de979965e358da46d059ae87"
     },
     {
+      "id": "shared-default",
+      "path": "patches/0008-shared-default.patch",
+      "sha256": "63c2ef75141dc3785034c8c5d11374bed76c4bf3b23a6250846c2d4634ec70fc"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -52,7 +57,8 @@
       "queued-update",
       "update-activity",
       "thread-fork-backend",
-      "thread-fork-ui"
+      "thread-fork-ui",
+      "shared-default"
     ],
     "reasoning": [
       "reasoning-full",
@@ -62,6 +68,7 @@
       "update-activity",
       "thread-fork-backend",
       "thread-fork-ui",
+      "shared-default",
       "reasoning-identity"
     ]
   }

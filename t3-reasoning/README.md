@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly, materialized as one of two build variants. `source.lock.json` pins
 upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, a catalog of eight checksummed patches, and
+`v0.0.39-nightly.20260905.1284`, a catalog of nine checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;
@@ -26,8 +26,8 @@ What this component does not do:
 - It does not install, update, launch, or synchronize anything, and it does
   not touch an existing T3 installation or its data. No shared live
   installation exists yet.
-- Shared-default selection and updater integration remain separate changes.
-  The conversation-fork backend and web/desktop dialog are present.
+- Updater integration and initial shared-service provisioning remain separate
+  changes. Shared-default selection and the fork dialog are present.
 
 ## Layout
 
@@ -177,3 +177,7 @@ primitive's focused check in a prepared checkout is
 The common `patches/0007-thread-fork-ui.patch` adds the completed-turn fork
 action, provider/model selection, same-workspace or new-worktree choice, and
 lineage navigation to the web/desktop client.
+
+The common `patches/0008-shared-default.patch` persists a preferred shared
+environment before selecting it, retains that choice when disconnected, and
+prevents new work from falling back to the local embedded server.

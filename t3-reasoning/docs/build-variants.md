@@ -34,11 +34,12 @@ same snapshots differently. The variants differ only by the identity patch.
     { "id": "update-activity", "path": "patches/0005-update-activity.patch", "sha256": "..." },
     { "id": "thread-fork-backend", "path": "patches/0006-thread-fork-backend.patch", "sha256": "..." },
     { "id": "thread-fork-ui", "path": "patches/0007-thread-fork-ui.patch", "sha256": "..." },
+    { "id": "shared-default", "path": "patches/0008-shared-default.patch", "sha256": "..." },
     { "id": "reasoning-identity", "path": "patches/0002-reasoning-identity.patch", "sha256": "..." }
   ],
   "variants": {
-    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui"],
-    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "reasoning-identity"]
+    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default"],
+    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "reasoning-identity"]
   }
 }
 ```
@@ -90,6 +91,7 @@ can pick up the first variant's bundles.
 | `update-activity` | yes | yes | activity ownership and required-consumer fanout helpers |
 | `thread-fork-backend` | yes | yes | durable conversation forks, checkpoint worktrees and first-turn context handoff |
 | `thread-fork-ui` | yes | yes | completed-turn fork dialog and lineage navigation in web/desktop |
+| `shared-default` | yes | yes | preferred environment persistence and protection against local work fallback |
 | `reasoning-identity` | no | yes | Reasoning bundle id, name, scheme, state home, artifact name, disabled official feed, manual macOS updater |
 
 The `managed-nightly` tree keeps upstream's packaged identity: bundle id
@@ -133,6 +135,10 @@ only the same eight identity files differ.
 After `0007`, the managed Nightly tree is
 `9d05f52c2b91e3cfed0bc5f6059570ad1a999016` and the Reasoning tree is
 `dcfa471fafc81fa9a5624205e5913ead7974079d`. The shared functional files remain identical.
+
+After `0008`, the managed Nightly tree is
+`be6e83b449909fdf6ef46139831234e21d9aac6a` and the Reasoning tree is
+`755cdd6d4cf2b3b904e3d71b81e4683d74680b75`. Both variants share the preferred-environment behavior.
 
 ## Not ready for deployment
 

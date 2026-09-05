@@ -1,0 +1,3209 @@
+diff --git a/apps/web/src/cloud/primaryCloudLinkState.ts b/apps/web/src/cloud/primaryCloudLinkState.ts
+index 34fdacd21..7db1481dd 100644
+--- a/apps/web/src/cloud/primaryCloudLinkState.ts
++++ b/apps/web/src/cloud/primaryCloudLinkState.ts
+@@ -9,7 +9,7 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
+ import { HttpClient } from "effect/unstable/http";
+ import { useCallback, useMemo } from "react";
+ 
+-import { usePrimaryEnvironment } from "../state/environments";
++import { usePlatformPrimaryEnvironment } from "../state/environments";
+ import { runtime } from "../lib/runtime";
+ import { appAtomRegistry } from "../rpc/atomRegistry";
+ import { readPrimaryCloudLinkState, type CloudLinkTarget } from "./linkEnvironment";
+@@ -48,8 +48,12 @@ export function refreshPrimaryCloudLinkState(target: CloudLinkTarget | null): vo
+   }
+ }
+ 
++/**
++ * T3 Connect linking acts on the local control host, so this follows the
++ * platform primary rather than the shared default.
++ */
+ export function usePrimaryCloudLinkState() {
+-  const primary = usePrimaryEnvironment();
++  const primary = usePlatformPrimaryEnvironment();
+   const target = useMemo(
+     () =>
+       primary?.entry.target._tag === "PrimaryConnectionTarget"
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 57606f43a..1c3563066 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -190,6 +190,7 @@ import {
+   CheckCircle2Icon,
+   ChevronDownIcon,
+   GitBranchIcon,
++  LockIcon,
+   Minimize2Icon,
+   PaperclipIcon,
+   WifiOffIcon,
+@@ -284,7 +285,13 @@ import {
+ } from "@t3tools/client-runtime/state/threads";
+ import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
+ import { vcsEnvironment } from "../state/vcs";
+-import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
++import { useEnvironments, useNewWorkPolicy, usePrimaryEnvironment } from "../state/environments";
++import { describeNewWorkDenial } from "../state/preferredEnvironment";
++import { readNewWorkPolicy } from "../state/primaryEnvironment";
++import {
++  resolveComposerSubmitRoute,
++  resolveNewWorkSendDisabledReason,
++} from "./chat/localWorkGuard";
+ import {
+   useProject,
+   useProjects,
+@@ -815,6 +822,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
+   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
+   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
++  // Existing terminals keep working and can be closed; opening or splitting
++  // one is new work and follows the shared-default policy at click time.
++  const newWorkPolicy = useNewWorkPolicy(threadRef.environmentId);
+   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
+   const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
+   const projectRef = serverThread
+@@ -973,7 +983,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+   );
+ 
+   const splitTerminal = useCallback(() => {
+-    if (!cwd) {
++    if (!cwd || !newWorkPolicy.allowed) {
+       return;
+     }
+     const terminalId = nextTerminalId(allocatableTerminalIds);
+@@ -994,6 +1004,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+     bumpFocusRequestId,
+     cwd,
+     effectiveWorktreePath,
++    newWorkPolicy.allowed,
+     runtimeEnv,
+     storeSplitTerminal,
+     threadId,
+@@ -1001,7 +1012,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+     openTerminal,
+   ]);
+   const splitTerminalVertical = useCallback(() => {
+-    if (!cwd) {
++    if (!cwd || !newWorkPolicy.allowed) {
+       return;
+     }
+     const terminalId = nextTerminalId(allocatableTerminalIds);
+@@ -1022,6 +1033,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+     bumpFocusRequestId,
+     cwd,
+     effectiveWorktreePath,
++    newWorkPolicy.allowed,
+     openTerminal,
+     runtimeEnv,
+     storeSplitTerminalVertical,
+@@ -1030,7 +1042,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+   ]);
+ 
+   const createNewTerminal = useCallback(() => {
+-    if (!cwd) {
++    if (!cwd || !newWorkPolicy.allowed) {
+       return;
+     }
+     const terminalId = nextTerminalId(allocatableTerminalIds);
+@@ -1051,6 +1063,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+     cwd,
+     effectiveWorktreePath,
+     allocatableTerminalIds,
++    newWorkPolicy.allowed,
+     runtimeEnv,
+     storeNewTerminal,
+     threadId,
+@@ -1422,6 +1435,14 @@ export default function ChatView(props: ChatViewProps) {
+   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
+   const { environments } = useEnvironments();
+   const primaryEnvironment = usePrimaryEnvironment();
++  // Managed shared default: this route (server thread or restored draft) may
++  // sit on the platform primary while new work there is refused. History,
++  // approval and user-input replies, interrupt/stop and close controls stay
++  // live; starting anything new is disabled and its callbacks are inert.
++  const newWorkPolicy = useNewWorkPolicy(environmentId);
++  const newWorkBlockedMessage = newWorkPolicy.allowed
++    ? null
++    : describeNewWorkDenial(newWorkPolicy.reason);
+   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
+   const environmentById = useMemo(
+     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
+@@ -3299,6 +3320,10 @@ export default function ChatView(props: ChatViewProps) {
+       if (!activeThreadId || !activeProject) {
+         return;
+       }
++      // The first terminal is new local work; existing terminals still toggle.
++      if (!readNewWorkPolicy(environmentId).allowed) {
++        return;
++      }
+       const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
+       if (!cwdForOpen) {
+         return;
+@@ -3340,6 +3365,11 @@ export default function ChatView(props: ChatViewProps) {
+       if (!activeThreadRef || hasReachedSplitLimit || !activeThreadId || !activeProject) {
+         return;
+       }
++      // Read the policy now: a callback created before the pin changed must
++      // not add a pane whose open the command guard then refuses.
++      if (!readNewWorkPolicy(environmentId).allowed) {
++        return;
++      }
+       const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
+       if (!cwdForOpen) {
+         return;
+@@ -3383,6 +3413,9 @@ export default function ChatView(props: ChatViewProps) {
+     if (!activeThreadRef || !activeThreadId || !activeProject) {
+       return;
+     }
++    if (!readNewWorkPolicy(environmentId).allowed) {
++      return;
++    }
+     const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
+     if (!cwdForOpen) {
+       return;
+@@ -3459,6 +3492,13 @@ export default function ChatView(props: ChatViewProps) {
+       },
+     ) => {
+       if (!activeThreadId || !activeProject || !activeThread) return;
++      // Both the open and the script write are new local work; refuse before
++      // remembering the script, opening the drawer or allocating a terminal.
++      const scriptPolicy = readNewWorkPolicy(environmentId);
++      if (!scriptPolicy.allowed) {
++        setThreadError(activeThreadId, describeNewWorkDenial(scriptPolicy.reason));
++        return;
++      }
+       if (options?.rememberAsLastInvoked !== false) {
+         setLastInvokedScriptByProjectId((current) => {
+           if (current[activeProject.id] === script.id) return current;
+@@ -3762,14 +3802,14 @@ export default function ChatView(props: ChatViewProps) {
+   );
+   const createBrowserSurface = useCallback(
+     (profileId?: string) => {
+-      if (!activeThreadRef) return;
++      if (!activeThreadRef || newWorkBlockedMessage !== null) return;
+       void addBrowserSurface({
+         threadRef: activeThreadRef,
+         openPreview,
+         ...(profileId === undefined ? {} : { profileId }),
+       });
+     },
+-    [activeThreadRef, openPreview],
++    [activeThreadRef, newWorkBlockedMessage, openPreview],
+   );
+   const addDiffSurface = useCallback(() => {
+     if (!activeThreadRef || !isServerThread || !isGitRepo) return;
+@@ -4077,7 +4117,9 @@ export default function ChatView(props: ChatViewProps) {
+     }
+   }, [activeThreadRef]);
+   const addTerminalSurface = useCallback(() => {
+-    if (!activeThreadRef || !activeThreadId || !activeProject) return;
++    if (!activeThreadRef || !activeThreadId || !activeProject || newWorkBlockedMessage !== null) {
++      return;
++    }
+     const cwd = gitCwd ?? activeProject.workspaceRoot;
+     const terminalId = nextTerminalId(allocatableActiveTerminalIds);
+     useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
+@@ -4102,6 +4144,7 @@ export default function ChatView(props: ChatViewProps) {
+     activeThreadWorktreePath,
+     allocatableActiveTerminalIds,
+     gitCwd,
++    newWorkBlockedMessage,
+     openTerminal,
+   ]);
+   const splitPanelTerminal = useCallback(
+@@ -4115,6 +4158,9 @@ export default function ChatView(props: ChatViewProps) {
+       ) {
+         return;
+       }
++      if (!readNewWorkPolicy(activeThreadRef.environmentId).allowed) {
++        return;
++      }
+       const terminalId = nextTerminalId(allocatableActiveTerminalIds);
+       const cwd = gitCwd ?? activeProject.workspaceRoot;
+       useRightPanelStore
+@@ -5638,13 +5684,34 @@ export default function ChatView(props: ChatViewProps) {
+     selectedProvider,
+   ]);
+   const handleRestoreThreadBranch = useCallback(() => {
++    if (newWorkBlockedMessage !== null) {
++      return;
++    }
+     if (gitStatusQuery.data?.hasWorkingTreeChanges) {
+       setBranchRestoreConfirmOpen(true);
+       return;
+     }
+     void handleSwitchCheckoutToThread();
+-  }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
++  }, [
++    gitStatusQuery.data?.hasWorkingTreeChanges,
++    handleSwitchCheckoutToThread,
++    newWorkBlockedMessage,
++  ]);
++  const newWorkBlockedBannerItem = useMemo<ComposerBannerStackItem | null>(
++    () =>
++      newWorkBlockedMessage === null
++        ? null
++        : {
++            id: `new-work-blocked:${environmentId}`,
++            variant: "info",
++            icon: <LockIcon />,
++            title: "New work is disabled in this environment",
++            description: newWorkBlockedMessage,
++          },
++    [environmentId, newWorkBlockedMessage],
++  );
+   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
++    const newWorkBlockedItems = newWorkBlockedBannerItem === null ? [] : [newWorkBlockedBannerItem];
+     const backgroundLivenessItems =
+       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+     const resumeCompactionItems =
+@@ -5653,6 +5720,7 @@ export default function ChatView(props: ChatViewProps) {
+     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
+       return [
++        ...newWorkBlockedItems,
+         ...systemComposerBannerItems,
+         ...backgroundLivenessItems,
+         ...resumeCompactionItems,
+@@ -5661,6 +5729,7 @@ export default function ChatView(props: ChatViewProps) {
+       ];
+     }
+     return [
++      ...newWorkBlockedItems,
+       ...systemComposerBannerItems,
+       ...backgroundLivenessItems,
+       ...resumeCompactionItems,
+@@ -5923,6 +5992,8 @@ export default function ChatView(props: ChatViewProps) {
+       if (command === "terminal.split") {
+         event.preventDefault();
+         event.stopPropagation();
++        // New panes are new local work; do not even open the drawer for them.
++        if (!readNewWorkPolicy(environmentId).allowed) return;
+         if (terminalFocusOwner === "right-panel") {
+           splitPanelTerminal();
+           return;
+@@ -5937,6 +6008,7 @@ export default function ChatView(props: ChatViewProps) {
+       if (command === "terminal.splitVertical") {
+         event.preventDefault();
+         event.stopPropagation();
++        if (!readNewWorkPolicy(environmentId).allowed) return;
+         if (terminalFocusOwner === "right-panel") {
+           splitPanelTerminal("vertical");
+           return;
+@@ -5963,6 +6035,7 @@ export default function ChatView(props: ChatViewProps) {
+       if (command === "terminal.new") {
+         event.preventDefault();
+         event.stopPropagation();
++        if (!readNewWorkPolicy(environmentId).allowed) return;
+         if (terminalFocusOwner === "right-panel") {
+           addTerminalSurface();
+           return;
+@@ -6012,6 +6085,7 @@ export default function ChatView(props: ChatViewProps) {
+     requestCloseTerminal,
+     requestClosePanelTerminal,
+     createNewTerminal,
++    environmentId,
+     setTerminalOpen,
+     runProjectScript,
+     splitTerminal,
+@@ -6149,6 +6223,22 @@ export default function ChatView(props: ChatViewProps) {
+       notifyDirectAnnotationAttached();
+       return;
+     }
++    // Answering a pending question continues existing work and stays allowed;
++    // only a new provider turn is refused here.
++    const submitRoute = resolveComposerSubmitRoute({
++      newWorkBlocked: newWorkBlockedMessage !== null,
++      hasPendingUserInput: activePendingProgress !== null,
++    });
++    if (submitRoute === "blocked") {
++      toastManager.add(
++        stackedThreadToast({
++          type: "warning",
++          title: "Message not sent",
++          description: newWorkBlockedMessage,
++        }),
++      );
++      return;
++    }
+     if (activeEnvironmentUnavailable) {
+       const toastSlot = environmentUnavailableSendToastSlotRef.current;
+       environmentUnavailableSendToastSlotRef.current =
+@@ -8000,11 +8090,15 @@ export default function ChatView(props: ChatViewProps) {
+                             isConnecting={isConnecting}
+                             isSendBusy={isSendBusy}
+                             sendDisabledReason={
+-                              feedbackUploading
++                              resolveNewWorkSendDisabledReason({
++                                newWorkBlocked: newWorkBlockedMessage !== null,
++                                hasPendingUserInput: activePendingProgress !== null,
++                              }) ??
++                              (feedbackUploading
+                                 ? "Sending feedback"
+                                 : threadDetailLoading
+                                   ? "Messages loading"
+-                                  : null
++                                  : null)
+                             }
+                             isPreparingWorktree={isPreparingWorktree}
+                             bannerItems={composerBannerItems}
+diff --git a/apps/web/src/components/CommandPalette.tsx b/apps/web/src/components/CommandPalette.tsx
+index b0dd3febe..420424a0d 100644
+--- a/apps/web/src/components/CommandPalette.tsx
++++ b/apps/web/src/components/CommandPalette.tsx
+@@ -84,8 +84,12 @@ import { sourceControlEnvironment } from "../state/sourceControl";
+ import { vcsEnvironment } from "../state/vcs";
+ import { useAtomCommand } from "../state/use-atom-command";
+ import { useAtomQueryRunner } from "../state/use-atom-query-runner";
+-import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+-import { useProject, useProjects, useThreadShells } from "../state/entities";
++import {
++  useEnvironments,
++  usePrimaryEnvironmentId,
++  useWorkEnvironments,
++} from "../state/environments";
++import { useProject, useProjects, useThreadShells, useWorkProjects } from "../state/entities";
+ import { useThreadSearch } from "../state/queries";
+ import * as ThreadPr from "./ThreadStatusIndicators";
+ import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
+@@ -599,12 +603,16 @@ function OpenCommandPaletteDialog(props: {
+     reportFailure: false,
+   });
+   const { environments } = useEnvironments();
++  // New-work choices (new thread pickers, add-project destinations) come from
++  // the work-only lists; search, labels and history keep the raw lists.
++  const { environments: workEnvironments } = useWorkEnvironments();
+   const desktopLocalBootstraps = useDesktopLocalBootstraps();
+   const primaryEnvironmentId = usePrimaryEnvironmentId();
+   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
+   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
+     useHandleNewThread();
+   const projects = useProjects();
++  const workProjects = useWorkProjects();
+   const changeRequestSnapshotByKey = useAtomValue(ThreadPr.threadChangeRequestSnapshotsAtom);
+   const activeThreadProject = useProject(
+     activeThread === null
+@@ -759,7 +767,7 @@ function OpenCommandPaletteDialog(props: {
+   const orderedProjects = useMemo(
+     () =>
+       orderItemsByPreferredIds({
+-        items: projects,
++        items: workProjects,
+         preferredIds: projectOrder,
+         getId: getProjectOrderKey,
+         getPreferenceIds: (project) => [
+@@ -767,12 +775,13 @@ function OpenCommandPaletteDialog(props: {
+           legacyProjectCwdPreferenceKey(project.workspaceRoot),
+         ],
+       }),
+-    [projectOrder, projects],
++    [projectOrder, workProjects],
+   );
+   const unsortedProjectGroups = useMemo(
+     () =>
+       buildSidebarProjectSnapshots({
+-        projects: clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
++        projects:
++          clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : workProjects,
+         settings: projectGroupingSettings,
+         primaryEnvironmentId,
+         resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
+@@ -783,7 +792,7 @@ function OpenCommandPaletteDialog(props: {
+       orderedProjects,
+       primaryEnvironmentId,
+       projectGroupingSettings,
+-      projects,
++      workProjects,
+     ],
+   );
+   const projectGroups = useMemo(
+@@ -833,7 +842,7 @@ function OpenCommandPaletteDialog(props: {
+   );
+ 
+   const addProjectEnvironmentOptions = useMemo(() => {
+-    const options = environments.map((environment): AddProjectEnvironmentOption => {
++    const options = workEnvironments.map((environment): AddProjectEnvironmentOption => {
+       const isPrimary = environment.entry.target._tag === "PrimaryConnectionTarget";
+       return {
+         environmentId: environment.environmentId,
+@@ -857,7 +866,7 @@ function OpenCommandPaletteDialog(props: {
+     });
+ 
+     return options;
+-  }, [environments]);
++  }, [workEnvironments]);
+   const defaultAddProjectEnvironmentId =
+     addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ?? null;
+   const wslAddProjectEnvironmentOption = useMemo(
+@@ -1587,7 +1596,7 @@ function OpenCommandPaletteDialog(props: {
+ 
+   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+ 
+-  if (projects.length > 0) {
++  if (workProjects.length > 0) {
+     const activeProjectTitle =
+       projectPickerEntries.find((entry) => entry.isPreferred)?.group.displayName ??
+       (currentProjectId ? (projectTitleById.get(currentProjectId) ?? null) : null);
+diff --git a/apps/web/src/components/SharedEnvironmentStatus.tsx b/apps/web/src/components/SharedEnvironmentStatus.tsx
+new file mode 100644
+index 000000000..6a087fb1a
+--- /dev/null
++++ b/apps/web/src/components/SharedEnvironmentStatus.tsx
+@@ -0,0 +1,76 @@
++import { useNavigate } from "@tanstack/react-router";
++import { useCallback } from "react";
++
++import { environmentCatalog } from "~/connection/catalog";
++import { retryClientSettingsHydration } from "~/hooks/useSettings";
++import { useAuthoritativeEnvironmentResolution, useEnvironment } from "~/state/environments";
++import {
++  isPinnedEnvironmentResolution,
++  resolveSharedEnvironmentIssue,
++} from "~/state/preferredEnvironment";
++import { useAtomCommand } from "~/state/use-atom-command";
++import { Button } from "./ui/button";
++
++/**
++ * Banner shown while the shared default cannot be used: its preference could
++ * not be read, it is unreachable, or it was removed from this client. It only
++ * describes where shared threads live; it never offers the local environment
++ * as a substitute. The fix is to retry or to pick a default in
++ * Settings → Connections.
++ */
++export function SharedEnvironmentStatus() {
++  const resolution = useAuthoritativeEnvironmentResolution();
++  const pinnedEnvironmentId = isPinnedEnvironmentResolution(resolution)
++    ? resolution.environmentId
++    : null;
++  const environment = useEnvironment(pinnedEnvironmentId);
++  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
++  const navigate = useNavigate();
++  const issue = resolveSharedEnvironmentIssue({
++    resolution,
++    connectionPhase: environment?.connection.phase ?? null,
++  });
++  const openConnections = useCallback(() => {
++    void navigate({ to: "/settings/connections" });
++  }, [navigate]);
++  const retry = useCallback(() => {
++    if (issue === "preference-unavailable") {
++      void retryClientSettingsHydration();
++      return;
++    }
++    if (pinnedEnvironmentId !== null) {
++      void retryEnvironment(pinnedEnvironmentId);
++    }
++  }, [issue, pinnedEnvironmentId, retryEnvironment]);
++
++  if (issue === null) {
++    return null;
++  }
++
++  const label = environment?.label ?? "Your shared environment";
++  const message =
++    issue === "preference-unavailable"
++      ? "Couldn't read which environment this device uses as its shared default. Retry, or choose one in Connections."
++      : issue === "missing"
++        ? "Your shared environment is no longer saved on this device. Its threads stay there; add it again or choose another in Connections."
++        : `${label} is unreachable right now. Its threads stay there until it reconnects.`;
++
++  return (
++    <div
++      role="status"
++      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-warning/30 bg-warning/8 px-4 py-2 text-xs text-foreground"
++    >
++      <p className="min-w-0 flex-1">{message}</p>
++      <div className="flex shrink-0 items-center gap-2">
++        {issue !== "missing" ? (
++          <Button size="xs" variant="outline" onClick={retry}>
++            Retry
++          </Button>
++        ) : null}
++        <Button size="xs" variant="outline" onClick={openConnections}>
++          Open Connections
++        </Button>
++      </div>
++    </div>
++  );
++}
+diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
+index 77b7b0abf..03f527a55 100644
+--- a/apps/web/src/components/Sidebar.tsx
++++ b/apps/web/src/components/Sidebar.tsx
+@@ -110,11 +110,16 @@ import { useClientSettings } from "../hooks/useSettings";
+ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+ import { useLocalStorage } from "../hooks/useLocalStorage";
+ import { useNowMinute } from "../hooks/useNowMinute";
+-import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
++import {
++  useEnvironments,
++  useNewWorkBlockedEnvironmentId,
++  usePrimaryEnvironmentId,
++} from "../state/environments";
+ import {
+   useAllEnvironmentProjectSnapshotsReady,
+   useProjects,
+   useThreadShells,
++  useWorkProjects,
+ } from "../state/entities";
+ import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
+ import { vcsEnvironment } from "../state/vcs";
+@@ -625,6 +630,9 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+   projectFaviconPathByKey: ReadonlyMap<string, string | null | undefined>;
+   projectIconByKey: ReadonlyMap<string, ProjectIconOverride | null | undefined>;
+   scopedProjectKeys: ReadonlySet<string> | null;
++  // Drafts on this environment are new work that can no longer start there
++  // (shared default pinned elsewhere); they stay stored but are not listed.
++  blockedEnvironmentId: string | null;
+   routeDraftId: string | null;
+   onNavigateToDraft: (draftId: DraftId) => void;
+ }) {
+@@ -664,6 +672,12 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+       if (session.promotedTo != null) {
+         continue;
+       }
++      if (
++        props.blockedEnvironmentId !== null &&
++        session.environmentId === props.blockedEnvironmentId
++      ) {
++        continue;
++      }
+       if (
+         props.scopedProjectKeys !== null &&
+         !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+@@ -691,6 +705,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+     draftThreadsByThreadKey,
+     draftsByThreadKey,
+     frozenActive,
++    props.blockedEnvironmentId,
+     props.routeDraftId,
+     props.scopedProjectKeys,
+   ]);
+@@ -1861,6 +1876,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
+ 
+ export default function Sidebar() {
+   const projects = useProjects();
++  // Project rows keep listing every environment for history; only the
++  // new-thread affordance is gated on projects that may receive new work.
++  const workProjects = useWorkProjects();
+   const projectOrder = useUiStateStore((store) => store.projectOrder);
+   const threads = useThreadShells();
+   const router = useRouter();
+@@ -1947,6 +1965,7 @@ export default function Sidebar() {
+   );
+   const { environments } = useEnvironments();
+   const primaryEnvironmentId = usePrimaryEnvironmentId();
++  const newWorkBlockedEnvironmentId = useNewWorkBlockedEnvironmentId();
+   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
+   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
+   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
+@@ -2195,6 +2214,12 @@ export default function Sidebar() {
+       if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
+         continue;
+       }
++      if (
++        newWorkBlockedEnvironmentId !== null &&
++        session.environmentId === newWorkBlockedEnvironmentId
++      ) {
++        continue;
++      }
+       if (
+         scopedProjectKeys !== null &&
+         !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+@@ -3687,7 +3712,7 @@ export default function Sidebar() {
+                         type="button"
+                         className="relative focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+                         onClick={handleNewThreadClick}
+-                        disabled={projects.length === 0}
++                        disabled={workProjects.length === 0}
+                         aria-label="New thread"
+                       />
+                     }
+@@ -4107,6 +4132,7 @@ export default function Sidebar() {
+                       projectFaviconPathByKey={projectFaviconPathByKey}
+                       projectIconByKey={projectIconByKey}
+                       scopedProjectKeys={scopedProjectKeys}
++                      blockedEnvironmentId={newWorkBlockedEnvironmentId}
+                       routeDraftId={routeDraftIdForRows}
+                       onNavigateToDraft={navigateToDraft}
+                     />,
+diff --git a/apps/web/src/components/chat/DraftHeroHeadline.tsx b/apps/web/src/components/chat/DraftHeroHeadline.tsx
+index 04bbeb6ce..4c13b402c 100644
+--- a/apps/web/src/components/chat/DraftHeroHeadline.tsx
++++ b/apps/web/src/components/chat/DraftHeroHeadline.tsx
+@@ -13,7 +13,7 @@ import {
+   buildSidebarProjectPickerEntries,
+   buildSidebarProjectSnapshots,
+ } from "~/sidebarProjectGrouping";
+-import { useProjects, useThreadShells } from "~/state/entities";
++import { useThreadShells, useWorkProjects } from "~/state/entities";
+ import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
+ import { sortLogicalProjectsForSidebar } from "../Sidebar.logic";
+ import {
+@@ -38,7 +38,9 @@ export function DraftHeroHeadline({
+   activeProjectRef,
+   activeProjectTitle,
+ }: DraftHeroHeadlineProps) {
+-  const projects = useProjects();
++  // The picker retargets a draft, which is new work: only work-eligible
++  // projects are offered. Labels still resolve from the raw environment list.
++  const projects = useWorkProjects();
+   const threads = useThreadShells();
+   const { environments } = useEnvironments();
+   const primaryEnvironmentId = usePrimaryEnvironmentId();
+diff --git a/apps/web/src/components/chat/localWorkGuard.test.ts b/apps/web/src/components/chat/localWorkGuard.test.ts
+new file mode 100644
+index 000000000..3f8bcebda
+--- /dev/null
++++ b/apps/web/src/components/chat/localWorkGuard.test.ts
+@@ -0,0 +1,41 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  NEW_WORK_SEND_DISABLED_REASON,
++  resolveComposerSubmitRoute,
++  resolveNewWorkSendDisabledReason,
++} from "./localWorkGuard";
++
++describe("resolveComposerSubmitRoute", () => {
++  it("routes a submit to the pending question even while local new work is refused", () => {
++    expect(resolveComposerSubmitRoute({ newWorkBlocked: true, hasPendingUserInput: true })).toBe(
++      "reply-to-pending-user-input",
++    );
++    expect(resolveComposerSubmitRoute({ newWorkBlocked: false, hasPendingUserInput: true })).toBe(
++      "reply-to-pending-user-input",
++    );
++  });
++
++  it("blocks a new provider turn only while local new work is refused", () => {
++    expect(resolveComposerSubmitRoute({ newWorkBlocked: true, hasPendingUserInput: false })).toBe(
++      "blocked",
++    );
++    expect(resolveComposerSubmitRoute({ newWorkBlocked: false, hasPendingUserInput: false })).toBe(
++      "start-turn",
++    );
++  });
++});
++
++describe("resolveNewWorkSendDisabledReason", () => {
++  it("withholds the disabled reason while a question is pending so its form still submits", () => {
++    expect(
++      resolveNewWorkSendDisabledReason({ newWorkBlocked: true, hasPendingUserInput: true }),
++    ).toBeNull();
++    expect(
++      resolveNewWorkSendDisabledReason({ newWorkBlocked: true, hasPendingUserInput: false }),
++    ).toBe(NEW_WORK_SEND_DISABLED_REASON);
++    expect(
++      resolveNewWorkSendDisabledReason({ newWorkBlocked: false, hasPendingUserInput: false }),
++    ).toBeNull();
++  });
++});
+diff --git a/apps/web/src/components/chat/localWorkGuard.ts b/apps/web/src/components/chat/localWorkGuard.ts
+new file mode 100644
+index 000000000..fb2a3e6ea
+--- /dev/null
++++ b/apps/web/src/components/chat/localWorkGuard.ts
+@@ -0,0 +1,31 @@
++/**
++ * How a composer submit resolves against the local new-work guard.
++ *
++ * Answering a question the agent already asked continues existing work, so
++ * it stays allowed while new work on this environment is refused. Only a new
++ * provider turn is blocked.
++ */
++export type ComposerSubmitRoute = "reply-to-pending-user-input" | "blocked" | "start-turn";
++
++export function resolveComposerSubmitRoute(input: {
++  readonly newWorkBlocked: boolean;
++  readonly hasPendingUserInput: boolean;
++}): ComposerSubmitRoute {
++  if (input.hasPendingUserInput) {
++    return "reply-to-pending-user-input";
++  }
++  return input.newWorkBlocked ? "blocked" : "start-turn";
++}
++
++export const NEW_WORK_SEND_DISABLED_REASON = "New work is disabled here";
++
++/**
++ * The disabled reason the composer shows for the guard, if any. Pending input
++ * must keep its Next/Submit form usable, so the reason is withheld then.
++ */
++export function resolveNewWorkSendDisabledReason(input: {
++  readonly newWorkBlocked: boolean;
++  readonly hasPendingUserInput: boolean;
++}): string | null {
++  return resolveComposerSubmitRoute(input) === "blocked" ? NEW_WORK_SEND_DISABLED_REASON : null;
++}
+diff --git a/apps/web/src/components/cloud/ConnectOnboardingDialog.tsx b/apps/web/src/components/cloud/ConnectOnboardingDialog.tsx
+index 6248fb00b..b257253d4 100644
+--- a/apps/web/src/components/cloud/ConnectOnboardingDialog.tsx
++++ b/apps/web/src/components/cloud/ConnectOnboardingDialog.tsx
+@@ -13,7 +13,7 @@ import { useCloudLinkController } from "~/cloud/useCloudLinkController";
+ import { usePrimarySessionState } from "~/environments/primary";
+ import { useLocalStorage } from "~/hooks/useLocalStorage";
+ import { cn } from "~/lib/utils";
+-import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
++import { useEnvironments, usePlatformPrimaryEnvironment } from "~/state/environments";
+ import { CloudEnvironmentConnectRows } from "./CloudEnvironmentConnectList";
+ import { Button } from "../ui/button";
+ import { Checkbox } from "../ui/checkbox";
+@@ -410,7 +410,9 @@ function OnboardingToggleRow({
+ 
+ function DevicesStep() {
+   const { environments } = useEnvironments();
+-  const primaryEnvironment = usePrimaryEnvironment();
++  // The device list hides this app's own host, not the shared default: a
++  // pinned remote environment must stay visible here with its live state.
++  const primaryEnvironment = usePlatformPrimaryEnvironment();
+   const savedEnvironments = environments.filter(
+     (environment) => environment.entry.target._tag !== "PrimaryConnectionTarget",
+   );
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.logic.test.ts b/apps/web/src/components/settings/ConnectionsSettings.logic.test.ts
+index 74283796a..e11375e54 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.logic.test.ts
++++ b/apps/web/src/components/settings/ConnectionsSettings.logic.test.ts
+@@ -1,7 +1,8 @@
+-import type { AdvertisedEndpoint, DesktopWslState } from "@t3tools/contracts";
++import { type AdvertisedEndpoint, type DesktopWslState, EnvironmentId } from "@t3tools/contracts";
+ import { describe, expect, it, vi } from "vite-plus/test";
+ import {
+   applyWslEnableSelection,
++  describeSharedDefault,
+   isQrShareableEndpoint,
+   isWslSettingsRowVisible,
+   selectQrEndpointOption,
+@@ -183,3 +184,51 @@ describe("selectQrEndpointOption", () => {
+     expect(selectQrEndpointOption([], "anything", "anything")).toBeNull();
+   });
+ });
++
++describe("describeSharedDefault", () => {
++  const sharedId = EnvironmentId.make("env-shared");
++
++  it("offers no automatic switch while loading or already automatic", () => {
++    expect(
++      describeSharedDefault({
++        resolution: { status: "unresolved", environmentId: null },
++        environmentLabel: null,
++      }).canUseAutomatic,
++    ).toBe(false);
++    const automatic = describeSharedDefault({
++      resolution: { status: "automatic", environmentId: null },
++      environmentLabel: null,
++    });
++    expect(automatic.canUseAutomatic).toBe(false);
++    expect(automatic.tone).toBe("neutral");
++  });
++
++  it("names the pinned environment and allows an explicit return to automatic", () => {
++    const pinned = describeSharedDefault({
++      resolution: { status: "pinned", environmentId: sharedId },
++      environmentLabel: "Studio Mac",
++    });
++    expect(pinned.description).toContain("Studio Mac");
++    expect(pinned.tone).toBe("neutral");
++    expect(pinned.canUseAutomatic).toBe(true);
++  });
++
++  it("warns about an unreadable preference without offering automatic", () => {
++    const unavailable = describeSharedDefault({
++      resolution: { status: "preference-unavailable", environmentId: null },
++      environmentLabel: null,
++    });
++    expect(unavailable.tone).toBe("warning");
++    expect(unavailable.canUseAutomatic).toBe(false);
++  });
++
++  it("warns about a removed target without clearing it", () => {
++    const missing = describeSharedDefault({
++      resolution: { status: "missing-preferred-target", environmentId: sharedId },
++      environmentLabel: null,
++    });
++    expect(missing.tone).toBe("warning");
++    expect(missing.canUseAutomatic).toBe(true);
++    expect(missing.description).toMatch(/removed/);
++  });
++});
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.logic.ts b/apps/web/src/components/settings/ConnectionsSettings.logic.ts
+index d683efab3..43de15d0d 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.logic.ts
++++ b/apps/web/src/components/settings/ConnectionsSettings.logic.ts
+@@ -1,7 +1,57 @@
+ import type { AdvertisedEndpoint, DesktopBridge, DesktopWslState } from "@t3tools/contracts";
+ 
++import type { AuthoritativeEnvironmentResolution } from "~/state/preferredEnvironment";
++
+ type WslEnableBridge = Pick<DesktopBridge, "setWslBackendEnabled" | "setWslDistro" | "setWslOnly">;
+ 
++export interface SharedDefaultPresentation {
++  readonly description: string;
++  readonly tone: "neutral" | "warning";
++  /** Whether an explicit "Use automatic" control makes sense right now. */
++  readonly canUseAutomatic: boolean;
++}
++
++/**
++ * Copy for the shared-default row in Connections. A removed target is never
++ * silently replaced: the row keeps pointing at the missing preference and asks
++ * for an explicit choice.
++ */
++export function describeSharedDefault(input: {
++  readonly resolution: AuthoritativeEnvironmentResolution;
++  readonly environmentLabel: string | null;
++}): SharedDefaultPresentation {
++  switch (input.resolution.status) {
++    case "unresolved":
++      return { description: "Loading…", tone: "neutral", canUseAutomatic: false };
++    case "preference-unavailable":
++      return {
++        description:
++          "Couldn't read this device's saved preference. Retry from the banner above, or pick an environment below.",
++        tone: "warning",
++        canUseAutomatic: false,
++      };
++    case "automatic":
++      return {
++        description: "Automatic. Threads and defaults follow the environment built into this app.",
++        tone: "neutral",
++        canUseAutomatic: false,
++      };
++    case "pinned":
++      return {
++        description: `${input.environmentLabel ?? "The saved environment"} is used on every launch, even while it is offline.`,
++        tone: "neutral",
++        canUseAutomatic: true,
++      };
++    case "missing-preferred-target":
++      return {
++        description:
++          "The shared default environment was removed from this device. Choose another environment below or switch to automatic.",
++        tone: "warning",
++        canUseAutomatic: true,
++      };
++  }
++}
++
+ /**
+  * A QR code encoding a loopback URL makes the scanning device dial itself, so
+  * loopback endpoints stay copyable from the endpoint menu but are never
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 5a6f3ebd7..3b9d6bdb3 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -48,6 +48,7 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
+ import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
+ import {
+   applyWslEnableSelection,
++  describeSharedDefault,
+   isQrShareableEndpoint,
+   isWslSettingsRowVisible,
+   selectQrEndpointOption,
+@@ -141,9 +142,14 @@ import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desk
+ import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
+ import {
+   type EnvironmentPresentation,
++  useAuthoritativeEnvironmentResolution,
++  useEnvironment,
+   useEnvironments,
+-  usePrimaryEnvironment,
++  usePlatformPrimaryEnvironment,
+ } from "~/state/environments";
++import { isPinnedEnvironmentResolution } from "~/state/preferredEnvironment";
++import { persistPreferredEnvironmentId } from "~/hooks/useSettings";
++import { Badge } from "../ui/badge";
+ import { useAtomCommand } from "../../state/use-atom-command";
+ import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
+ import { ConnectionStatusDot } from "../ConnectionStatusDot";
+@@ -1395,15 +1401,21 @@ function NetworkAccessDescription({
+ type SavedBackendListRowProps = {
+   environment: EnvironmentPresentation;
+   removingEnvironmentId: EnvironmentId | null;
++  isSharedDefault: boolean;
++  isSavingSharedDefault: boolean;
+   onConnect: (environmentId: EnvironmentId) => void;
+   onRemove: (environmentId: EnvironmentId) => void;
++  onUseAsSharedDefault: (environmentId: EnvironmentId, label: string) => Promise<void>;
+ };
+ 
+ function SavedBackendListRow({
+   environment,
+   removingEnvironmentId,
++  isSharedDefault,
++  isSavingSharedDefault,
+   onConnect,
+   onRemove,
++  onUseAsSharedDefault,
+ }: SavedBackendListRowProps) {
+   const environmentId = environment.environmentId;
+   const connectionState = environment.connection.phase;
+@@ -1487,6 +1499,11 @@ function SavedBackendListRow({
+             <h3 className="min-w-0 truncate text-sm font-medium text-foreground">
+               {environment.label}
+             </h3>
++            {isSharedDefault ? (
++              <Badge size="sm" variant="info">
++                Shared default
++              </Badge>
++            ) : null}
+           </div>
+           {metadataBits.length > 0 ? (
+             <p className="truncate text-xs text-muted-foreground">{metadataBits.join(" · ")}</p>
+@@ -1567,6 +1584,16 @@ function SavedBackendListRow({
+             </Tooltip>
+           ) : (
+             <>
++              {!isSharedDefault ? (
++                <Button
++                  size="xs"
++                  variant="ghost"
++                  disabled={isSavingSharedDefault || removingEnvironmentId === environmentId}
++                  onClick={() => void onUseAsSharedDefault(environmentId, environment.label)}
++                >
++                  Use as shared default
++                </Button>
++              ) : null}
+               {!isConnected ? (
+                 <Button
+                   size="xs"
+@@ -1771,7 +1798,58 @@ export function ConnectionsSettings() {
+   const desktopBridge = window.desktopBridge;
+   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+   const { environments } = useEnvironments();
+-  const primaryEnvironment = usePrimaryEnvironment();
++  // Everything "primary" on this page administers the local control host
++  // (exposure, WSL, pairing, T3 Connect link), so it follows the platform
++  // primary. The shared default that owns threads is handled separately below.
++  const primaryEnvironment = usePlatformPrimaryEnvironment();
++  const sharedDefaultResolution = useAuthoritativeEnvironmentResolution();
++  const sharedDefaultEnvironmentId = isPinnedEnvironmentResolution(sharedDefaultResolution)
++    ? sharedDefaultResolution.environmentId
++    : null;
++  const sharedDefaultEnvironment = useEnvironment(sharedDefaultEnvironmentId);
++  const sharedDefaultPresentation = describeSharedDefault({
++    resolution: sharedDefaultResolution,
++    environmentLabel: sharedDefaultEnvironment?.label ?? null,
++  });
++  const [isSavingSharedDefault, setIsSavingSharedDefault] = useState(false);
++  // Success is only announced after the preference reached disk, so "every
++  // launch" is a promise the next launch can keep.
++  const saveSharedDefault = useCallback(
++    async (environmentId: EnvironmentId | null, successDescription: string) => {
++      setIsSavingSharedDefault(true);
++      try {
++        await persistPreferredEnvironmentId(environmentId);
++        toastManager.add({
++          type: "success",
++          title: "Shared default updated",
++          description: successDescription,
++        });
++      } catch (error) {
++        toastManager.add(
++          stackedThreadToast({
++            type: "error",
++            title: "Could not save shared default",
++            description:
++              error instanceof Error && error.message.trim().length > 0
++                ? error.message
++                : "The preference was not saved. Try again.",
++          }),
++        );
++      } finally {
++        setIsSavingSharedDefault(false);
++      }
++    },
++    [],
++  );
++  const handleUseAsSharedDefault = useCallback(
++    (environmentId: EnvironmentId, label: string) =>
++      saveSharedDefault(environmentId, `${label} now opens on every launch.`),
++    [saveSharedDefault],
++  );
++  const handleUseAutomaticSharedDefault = useCallback(
++    () => saveSharedDefault(null, "This app's built-in environment is used again."),
++    [saveSharedDefault],
++  );
+   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
+   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
+     reportFailure: false,
+@@ -3577,13 +3655,40 @@ export function ConnectionsSettings() {
+           </Dialog>
+         }
+       >
++        <SettingsRow
++          title="Shared default"
++          description={
++            <span
++              className={
++                sharedDefaultPresentation.tone === "warning" ? "text-warning-foreground" : undefined
++              }
++            >
++              {sharedDefaultPresentation.description}
++            </span>
++          }
++          control={
++            sharedDefaultPresentation.canUseAutomatic ? (
++              <Button
++                size="xs"
++                variant="outline"
++                disabled={isSavingSharedDefault}
++                onClick={() => void handleUseAutomaticSharedDefault()}
++              >
++                {isSavingSharedDefault ? "Saving…" : "Use automatic"}
++              </Button>
++            ) : undefined
++          }
++        />
+         {savedEnvironments.map((environment) => (
+           <SavedBackendListRow
+             key={environment.environmentId}
+             environment={environment}
+             removingEnvironmentId={removingSavedEnvironmentId}
++            isSharedDefault={environment.environmentId === sharedDefaultEnvironmentId}
++            isSavingSharedDefault={isSavingSharedDefault}
+             onConnect={handleConnectSavedBackend}
+             onRemove={handleRemoveSavedBackend}
++            onUseAsSharedDefault={handleUseAsSharedDefault}
+           />
+         ))}
+         <CloudRemoteEnvironmentRows
+diff --git a/apps/web/src/hooks/useHandleNewThread.test.ts b/apps/web/src/hooks/useHandleNewThread.test.ts
+index 91b757f51..597d6b1be 100644
+--- a/apps/web/src/hooks/useHandleNewThread.test.ts
++++ b/apps/web/src/hooks/useHandleNewThread.test.ts
+@@ -29,16 +29,26 @@ const testState = vi.hoisted(() => {
+     setModelSelection: vi.fn(),
+   };
+ 
++  let newWorkAllowed = true;
++
+   return {
+     completeProjectFileRead: (value: null) => completeProjectFileRead(value),
+     draftStore,
+     get projectFileRead() {
+       return projectFileRead;
+     },
++    get newWorkAllowed() {
++      return newWorkAllowed;
++    },
++    setNewWorkAllowed(allowed: boolean) {
++      newWorkAllowed = allowed;
++    },
+     reset(nextStoredDraft: typeof storedDraft) {
+       storedDraft = nextStoredDraft;
++      newWorkAllowed = true;
+       router.state.location.href = "/";
+       router.navigate.mockClear();
++      draftStore.setDraftThreadContext.mockClear();
+       draftStore.setLogicalProjectDraftThreadId.mockClear();
+       projectFileRead = new Promise<null>((resolve) => {
+         completeProjectFileRead = resolve;
+@@ -110,8 +120,14 @@ vi.mock("../state/entities", () => ({
+     },
+   ],
+   readThreadShell: () => null,
+-  useProjects: () => [],
+   useThread: () => null,
++  useWorkProjects: () => [],
++}));
++vi.mock("../state/primaryEnvironment", () => ({
++  readNewWorkPolicy: () =>
++    testState.newWorkAllowed
++      ? { allowed: true, reason: null }
++      : { allowed: false, reason: "pinned-elsewhere" },
+ }));
+ vi.mock("../state/server", () => ({ primaryServerSettingsAtom: {} }));
+ vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => null }));
+@@ -151,4 +167,70 @@ describe("useNewThreadHandler", () => {
+     expect(testState.router.navigate).not.toHaveBeenCalled();
+     expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+   });
++
++  const reusableDraft = {
++    draftId: "draft-existing",
++    environmentId: "environment-ssh",
++    promotedTo: null,
++    threadId: "thread-existing",
++  };
++
++  it.each([
++    ["new", null],
++    ["reusable", reusableDraft],
++  ])(
++    "writes no %s draft and stays put when the project's environment refuses new work",
++    async (_, draft) => {
++      testState.reset(draft);
++      testState.setNewWorkAllowed(false);
++      const openThread = useNewThreadHandler();
++
++      const opened = await openThread(
++        { environmentId: "environment-ssh", projectId: "project-remote" } as never,
++        { replace: true },
++      );
++
++      expect(opened).toBeNull();
++      expect(testState.router.navigate).not.toHaveBeenCalled();
++      expect(testState.draftStore.setDraftThreadContext).not.toHaveBeenCalled();
++      expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each([
++    ["new", null],
++    ["reusable", reusableDraft],
++  ])("abandons a %s draft when the pin lands while preparation is deferred", async (_, draft) => {
++    testState.reset(draft);
++    const openThread = useNewThreadHandler();
++    const pendingOpen = openThread(
++      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
++      { replace: true },
++    );
++
++    testState.setNewWorkAllowed(false);
++    testState.completeProjectFileRead(null);
++    const opened = await pendingOpen;
++
++    expect(opened).toBeNull();
++    expect(testState.router.state.location.href).toBe("/");
++    expect(testState.router.navigate).not.toHaveBeenCalled();
++    expect(testState.draftStore.setDraftThreadContext).not.toHaveBeenCalled();
++    expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
++  });
++
++  it("still opens the draft when the environment accepts new work", async () => {
++    testState.reset(null);
++    const openThread = useNewThreadHandler();
++    const pendingOpen = openThread(
++      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
++      { replace: true },
++    );
++    testState.completeProjectFileRead(null);
++    const opened = await pendingOpen;
++
++    expect(opened).toEqual({ draftId: "draft-delayed", threadId: "thread-delayed" });
++    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledTimes(1);
++    expect(testState.router.navigate).toHaveBeenCalledTimes(1);
++  });
+ });
+diff --git a/apps/web/src/hooks/useHandleNewThread.ts b/apps/web/src/hooks/useHandleNewThread.ts
+index c26b25d13..6cc2ab523 100644
+--- a/apps/web/src/hooks/useHandleNewThread.ts
++++ b/apps/web/src/hooks/useHandleNewThread.ts
+@@ -23,7 +23,8 @@ import {
+   selectProjectGroupingSettings,
+ } from "../logicalProject";
+ import { resolveDefaultThreadEnvMode } from "@t3tools/shared/threadEnvMode";
+-import { readProjects, readThreadShell, useProjects, useThread } from "../state/entities";
++import { readProjects, readThreadShell, useThread, useWorkProjects } from "../state/entities";
++import { readNewWorkPolicy } from "../state/primaryEnvironment";
+ import {
+   hasExplicitComposerModelSelection,
+   resolveNewDraftStartFromOrigin,
+@@ -82,6 +83,13 @@ export function useNewThreadHandler() {
+       // prepared checkout, a task to write — addresses that one rather than looking the project
+       // up again and finding whichever draft it happens to hold.
+     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
++      // The explicit target is checked before any draft mutation: while new
++      // work on the platform primary is refused, nothing is written and the
++      // route does not change. Rechecked after every await below, since a pin
++      // can land while preparation is deferred.
++      if (!readNewWorkPolicy(projectRef.environmentId).allowed) {
++        return Promise.resolve(null);
++      }
+       const projects = readProjects();
+       const {
+         getComposerDraft,
+@@ -221,7 +229,10 @@ export function useNewThreadHandler() {
+             workspaceContext = pickExplicitWorkspaceOptions(options);
+           } else if (!isDraftAlreadyOpen) {
+             const defaultEnvMode = await resolveDefaultEnvMode();
+-            if (routeChangedSinceRequest()) {
++            if (
++              routeChangedSinceRequest() ||
++              !readNewWorkPolicy(projectRef.environmentId).allowed
++            ) {
+               return null;
+             }
+             // The await yields. If the draft was opened (a concurrent
+@@ -360,7 +371,7 @@ export function useNewThreadHandler() {
+       const createdAt = new Date().toISOString();
+       return (async () => {
+         const initialEnvMode = options?.envMode ?? (await resolveDefaultEnvMode());
+-        if (routeChangedSinceRequest()) {
++        if (routeChangedSinceRequest() || !readNewWorkPolicy(projectRef.environmentId).allowed) {
+           return null;
+         }
+         // The await yields, so a concurrent invocation may have registered a
+@@ -449,7 +460,9 @@ export function useHandleNewThread() {
+         : useComposerDraftStore.getState().getDraftSession(routeTarget.draftId)
+       : null,
+   );
+-  const projects = useProjects();
++  // Default project choices come from the work-only list so a refused local
++  // project never becomes the implicit "new thread" target.
++  const projects = useWorkProjects();
+   const orderedProjects = useMemo(() => {
+     return orderItemsByPreferredIds({
+       items: projects,
+diff --git a/apps/web/src/hooks/useSettings.test.ts b/apps/web/src/hooks/useSettings.test.ts
+index 200e14241..b81ddb6f4 100644
+--- a/apps/web/src/hooks/useSettings.test.ts
++++ b/apps/web/src/hooks/useSettings.test.ts
+@@ -1,23 +1,42 @@
+ import {
+   DEFAULT_SERVER_SETTINGS,
++  EnvironmentId,
+   ProviderDriverKind,
+   ProviderInstanceId,
+ } from "@t3tools/contracts";
+-import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
++import { type ClientSettings, DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
+ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+ 
++import {
++  readPreferredEnvironmentState,
++  resolveAuthoritativeEnvironment,
++} from "../state/preferredEnvironment";
+ import {
+   __resetClientSettingsPersistenceForTests,
+   __setClientSettingsForTests,
++  ensureClientSettingsHydrated,
+   getClientSettings,
+   mergeEnvironmentSettings,
+   persistClientSettingsPatch,
+   persistClientSettingsUpdate,
++  persistPreferredEnvironmentId,
+   resolveEnvironmentIdentificationMode,
++  retryClientSettingsHydration,
+ } from "./useSettings";
+ 
++const localPersistence = vi.hoisted(() => ({
++  getClientSettings: vi.fn<() => Promise<ClientSettings | null>>(),
++  setClientSettings: vi.fn<(settings: ClientSettings) => Promise<void>>(),
++}));
++
++vi.mock("~/localApi", () => ({
++  ensureLocalApi: () => ({ persistence: localPersistence }),
++}));
++
+ beforeEach(() => {
+   __resetClientSettingsPersistenceForTests();
++  localPersistence.getClientSettings.mockReset();
++  localPersistence.setClientSettings.mockReset();
+ });
+ 
+ describe("persistClientSettingsUpdate", () => {
+@@ -245,3 +264,280 @@ describe("mergeEnvironmentSettings", () => {
+     expect(settings.sidebarAutoSettleOnMerge).toBe(false);
+   });
+ });
++
++describe("preferred environment bridge", () => {
++  const sharedEnvironmentId = EnvironmentId.make("env-shared");
++  const platformEnvironmentId = EnvironmentId.make("env-platform");
++  const resolveAgainstPlatform = () =>
++    resolveAuthoritativeEnvironment({
++      preference: readPreferredEnvironmentState(),
++      catalogReady: true,
++      hasCatalogEntry: () => true,
++      platformPrimaryEnvironmentId: platformEnvironmentId,
++    });
++
++  it("reports loading with no preference until settings load", () => {
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loading",
++      preferredEnvironmentId: null,
++    });
++    expect(resolveAgainstPlatform()).toEqual({ status: "unresolved", environmentId: null });
++  });
++
++  it("publishes the persisted preference once hydrated, and null for older settings", () => {
++    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loaded",
++      preferredEnvironmentId: null,
++    });
++
++    __setClientSettingsForTests({
++      ...DEFAULT_CLIENT_SETTINGS,
++      preferredEnvironmentId: sharedEnvironmentId,
++    });
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loaded",
++      preferredEnvironmentId: sharedEnvironmentId,
++    });
++  });
++
++  it("treats a missing settings file as the legacy automatic choice", async () => {
++    localPersistence.getClientSettings.mockResolvedValueOnce(null);
++
++    await ensureClientSettingsHydrated();
++
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loaded",
++      preferredEnvironmentId: null,
++    });
++    expect(resolveAgainstPlatform()).toEqual({
++      status: "automatic",
++      environmentId: platformEnvironmentId,
++    });
++  });
++
++  it("never resolves the platform primary after a failed read, and retry restores the pin", async () => {
++    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
++    localPersistence.getClientSettings.mockRejectedValueOnce(new Error("settings unreadable"));
++
++    await ensureClientSettingsHydrated();
++
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "failed",
++      preferredEnvironmentId: null,
++    });
++    expect(resolveAgainstPlatform()).toEqual({
++      status: "preference-unavailable",
++      environmentId: null,
++    });
++    // Unrelated settings still hydrate to defaults so the rest of the UI renders.
++    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
++
++    localPersistence.getClientSettings.mockResolvedValueOnce({
++      ...DEFAULT_CLIENT_SETTINGS,
++      preferredEnvironmentId: sharedEnvironmentId,
++    });
++    await retryClientSettingsHydration();
++
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loaded",
++      preferredEnvironmentId: sharedEnvironmentId,
++    });
++    expect(resolveAgainstPlatform()).toEqual({
++      status: "pinned",
++      environmentId: sharedEnvironmentId,
++    });
++    expect(getClientSettings().preferredEnvironmentId).toBe(sharedEnvironmentId);
++    consoleError.mockRestore();
++  });
++
++  describe("choosing a shared default after a failed initial read", () => {
++    const existingSettings: ClientSettings = {
++      ...DEFAULT_CLIENT_SETTINGS,
++      wordWrap: false,
++      preferredEnvironmentId: null,
++    };
++
++    async function hydrateWithFailure() {
++      localPersistence.getClientSettings.mockRejectedValueOnce(new Error("settings unreadable"));
++      await ensureClientSettingsHydrated();
++      expect(resolveAgainstPlatform()).toEqual({
++        status: "preference-unavailable",
++        environmentId: null,
++      });
++    }
++
++    it("rereads first and saves the id on top of the existing settings", async () => {
++      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
++      await hydrateWithFailure();
++      localPersistence.getClientSettings.mockResolvedValueOnce(existingSettings);
++      localPersistence.setClientSettings.mockResolvedValueOnce(undefined);
++
++      await persistPreferredEnvironmentId(sharedEnvironmentId);
++
++      expect(localPersistence.setClientSettings).toHaveBeenCalledTimes(1);
++      expect(localPersistence.setClientSettings).toHaveBeenLastCalledWith({
++        ...existingSettings,
++        preferredEnvironmentId: sharedEnvironmentId,
++      });
++      expect(getClientSettings().wordWrap).toBe(false);
++      expect(readPreferredEnvironmentState()).toEqual({
++        status: "loaded",
++        preferredEnvironmentId: sharedEnvironmentId,
++      });
++      expect(resolveAgainstPlatform()).toEqual({
++        status: "pinned",
++        environmentId: sharedEnvironmentId,
++      });
++      consoleError.mockRestore();
++    });
++
++    it("writes and publishes nothing while the read keeps failing", async () => {
++      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
++      await hydrateWithFailure();
++      localPersistence.getClientSettings.mockRejectedValueOnce(new Error("still unreadable"));
++
++      await expect(persistPreferredEnvironmentId(sharedEnvironmentId)).rejects.toThrow(
++        /could not be read/,
++      );
++
++      expect(localPersistence.getClientSettings).toHaveBeenCalledTimes(2);
++      expect(localPersistence.setClientSettings).not.toHaveBeenCalled();
++      expect(readPreferredEnvironmentState()).toEqual({
++        status: "failed",
++        preferredEnvironmentId: null,
++      });
++      expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
++      consoleError.mockRestore();
++    });
++
++    it("keeps the reread preference when the write fails", async () => {
++      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
++      await hydrateWithFailure();
++      localPersistence.getClientSettings.mockResolvedValueOnce(existingSettings);
++      localPersistence.setClientSettings.mockRejectedValueOnce(new Error("disk full"));
++
++      await expect(persistPreferredEnvironmentId(sharedEnvironmentId)).rejects.toThrow("disk full");
++
++      expect(readPreferredEnvironmentState()).toEqual({
++        status: "loaded",
++        preferredEnvironmentId: null,
++      });
++      expect(getClientSettings()).toEqual(existingSettings);
++      expect(resolveAgainstPlatform()).toEqual({
++        status: "automatic",
++        environmentId: platformEnvironmentId,
++      });
++      consoleError.mockRestore();
++    });
++
++    it("restores automatic through an explicit null once the read succeeds", async () => {
++      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
++      await hydrateWithFailure();
++      localPersistence.getClientSettings.mockResolvedValueOnce({
++        ...existingSettings,
++        preferredEnvironmentId: sharedEnvironmentId,
++      });
++      localPersistence.setClientSettings.mockResolvedValueOnce(undefined);
++
++      await persistPreferredEnvironmentId(null);
++
++      expect(localPersistence.setClientSettings).toHaveBeenLastCalledWith({
++        ...existingSettings,
++        preferredEnvironmentId: null,
++      });
++      expect(readPreferredEnvironmentState()).toEqual({
++        status: "loaded",
++        preferredEnvironmentId: null,
++      });
++      expect(resolveAgainstPlatform()).toEqual({
++        status: "automatic",
++        environmentId: platformEnvironmentId,
++      });
++      consoleError.mockRestore();
++    });
++  });
++
++  it("applies and reports the preference only after the write reached disk", async () => {
++    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
++    localPersistence.setClientSettings.mockRejectedValueOnce(new Error("disk full"));
++
++    await expect(persistPreferredEnvironmentId(sharedEnvironmentId)).rejects.toThrow("disk full");
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loaded",
++      preferredEnvironmentId: null,
++    });
++    expect(getClientSettings().preferredEnvironmentId).toBeNull();
++
++    localPersistence.setClientSettings.mockResolvedValueOnce(undefined);
++    await persistPreferredEnvironmentId(sharedEnvironmentId);
++
++    expect(localPersistence.setClientSettings).toHaveBeenLastCalledWith(
++      expect.objectContaining({ preferredEnvironmentId: sharedEnvironmentId }),
++    );
++    expect(readPreferredEnvironmentState().preferredEnvironmentId).toBe(sharedEnvironmentId);
++
++    // A reload starts loading again and must not guess before the snapshot lands.
++    __resetClientSettingsPersistenceForTests();
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loading",
++      preferredEnvironmentId: null,
++    });
++    __setClientSettingsForTests(localPersistence.setClientSettings.mock.calls.at(-1)![0]);
++    expect(readPreferredEnvironmentState().preferredEnvironmentId).toBe(sharedEnvironmentId);
++  });
++
++  it("waits behind an older optimistic write and keeps both changes", async () => {
++    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
++    let finishOldWrite: (() => void) | undefined;
++    const durable: ClientSettings[] = [];
++    localPersistence.setClientSettings
++      .mockImplementationOnce(
++        (settings) =>
++          new Promise<void>((resolve) => {
++            finishOldWrite = () => {
++              durable.push(settings);
++              resolve();
++            };
++          }),
++      )
++      .mockImplementation(async (settings) => {
++        durable.push(settings);
++      });
++
++    persistClientSettingsPatch({ wordWrap: false });
++    const pending = persistPreferredEnvironmentId(sharedEnvironmentId);
++    await vi.waitFor(() => expect(finishOldWrite).toBeDefined());
++    expect(readPreferredEnvironmentState().preferredEnvironmentId).toBeNull();
++
++    finishOldWrite!();
++    await pending;
++
++    expect(durable.at(-1)).toMatchObject({
++      wordWrap: false,
++      preferredEnvironmentId: sharedEnvironmentId,
++    });
++    expect(readPreferredEnvironmentState().preferredEnvironmentId).toBe(sharedEnvironmentId);
++    expect(getClientSettings().wordWrap).toBe(false);
++  });
++
++  it("returns to automatic only through an explicit null", async () => {
++    __setClientSettingsForTests({
++      ...DEFAULT_CLIENT_SETTINGS,
++      preferredEnvironmentId: sharedEnvironmentId,
++    });
++    localPersistence.setClientSettings.mockResolvedValue(undefined);
++
++    persistClientSettingsPatch({ timestampFormat: "12-hour" });
++    expect(readPreferredEnvironmentState().preferredEnvironmentId).toBe(sharedEnvironmentId);
++
++    await persistPreferredEnvironmentId(null);
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loaded",
++      preferredEnvironmentId: null,
++    });
++    expect(localPersistence.setClientSettings).toHaveBeenLastCalledWith(
++      expect.objectContaining({ preferredEnvironmentId: null, timestampFormat: "12-hour" }),
++    );
++  });
++});
+diff --git a/apps/web/src/hooks/useSettings.ts b/apps/web/src/hooks/useSettings.ts
+index bed80616e..8a9bfe487 100644
+--- a/apps/web/src/hooks/useSettings.ts
++++ b/apps/web/src/hooks/useSettings.ts
+@@ -44,6 +44,7 @@ import { toastManager } from "~/components/ui/toast";
+ import { isHostedStaticApp } from "~/hostedPairing";
+ import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
+ import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
++import { publishPreferredEnvironmentState } from "~/state/preferredEnvironment";
+ import { useAtomCommand } from "~/state/use-atom-command";
+ import { useTheme } from "./useTheme";
+ 
+@@ -55,6 +56,10 @@ const clientSettingsListeners = new Set<() => void>();
+ const clientSettingsHydrationListeners = new Set<() => void>();
+ let clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+ let clientSettingsHydrated = false;
++// True when the last read of persisted settings threw. Everything else keeps
++// rendering with defaults, but the shared-default preference must not be
++// reported as "none saved" until a read actually succeeds.
++let clientSettingsHydrationFailed = false;
+ let clientSettingsHydrationPromise: Promise<void> | null = null;
+ let clientSettingsHydrationGeneration = 0;
+ let clientSettingsPersistenceQueue: Promise<void> = Promise.resolve();
+@@ -75,8 +80,22 @@ function getClientSettingsSnapshot(): ClientSettings {
+   return clientSettingsSnapshot;
+ }
+ 
++// The shared-default preference is read by atoms (primary environment
++// resolution), which cannot subscribe to this store directly.
++function publishPreferredEnvironment(): void {
++  publishPreferredEnvironmentState({
++    status: !clientSettingsHydrated
++      ? "loading"
++      : clientSettingsHydrationFailed
++        ? "failed"
++        : "loaded",
++    preferredEnvironmentId: clientSettingsSnapshot.preferredEnvironmentId,
++  });
++}
++
+ function replaceClientSettingsSnapshot(settings: ClientSettings): void {
+   clientSettingsSnapshot = settings;
++  publishPreferredEnvironment();
+   emitClientSettingsChange();
+ }
+ 
+@@ -85,6 +104,7 @@ function setClientSettingsHydrated(nextHydrated: boolean): void {
+     return;
+   }
+   clientSettingsHydrated = nextHydrated;
++  publishPreferredEnvironment();
+   emitClientSettingsHydrationChange();
+ }
+ 
+@@ -108,25 +128,32 @@ function subscribeClientSettingsHydration(listener: () => void): () => void {
+   };
+ }
+ 
+-async function hydrateClientSettings(): Promise<void> {
+-  if (clientSettingsHydrated) {
+-    return;
+-  }
++/**
++ * One read of persisted settings. Success replaces the snapshot (a missing
++ * file keeps the defaults, which for the shared default means the legacy
++ * automatic choice). Failure keeps the defaults so themes and fonts still
++ * render, but records that the preference could not be read.
++ */
++function readPersistedClientSettings(): Promise<void> {
+   if (clientSettingsHydrationPromise) {
+     return clientSettingsHydrationPromise;
+   }
+ 
+   const hydrationGeneration = clientSettingsHydrationGeneration;
+-  const nextHydration = (async () => {
++  const nextRead = (async () => {
+     try {
+       const persistedSettings = await ensureLocalApi().persistence.getClientSettings();
+       if (hydrationGeneration !== clientSettingsHydrationGeneration) {
+         return;
+       }
++      clientSettingsHydrationFailed = false;
+       if (persistedSettings) {
+         replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, ...persistedSettings });
+       }
+     } catch (error) {
++      if (hydrationGeneration === clientSettingsHydrationGeneration) {
++        clientSettingsHydrationFailed = true;
++      }
+       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} hydrate failed`, {
+         operation: "hydrate",
+         ...safeErrorLogAttributes(error),
+@@ -134,11 +161,12 @@ async function hydrateClientSettings(): Promise<void> {
+     } finally {
+       if (hydrationGeneration === clientSettingsHydrationGeneration) {
+         setClientSettingsHydrated(true);
++        publishPreferredEnvironment();
+       }
+     }
+   })();
+ 
+-  const hydrationPromise = nextHydration.finally(() => {
++  const hydrationPromise = nextRead.finally(() => {
+     if (clientSettingsHydrationPromise === hydrationPromise) {
+       clientSettingsHydrationPromise = null;
+     }
+@@ -148,6 +176,24 @@ async function hydrateClientSettings(): Promise<void> {
+   return clientSettingsHydrationPromise;
+ }
+ 
++async function hydrateClientSettings(): Promise<void> {
++  if (clientSettingsHydrated) {
++    return;
++  }
++  return readPersistedClientSettings();
++}
++
++/**
++ * Re-reads persisted settings after a failed read. A success replaces the
++ * whole snapshot, the same as first hydration. No-op once a read succeeded.
++ */
++export function retryClientSettingsHydration(): Promise<void> {
++  if (!clientSettingsHydrationFailed) {
++    return hydrateClientSettings();
++  }
++  return readPersistedClientSettings();
++}
++
+ const defaultClientSettingsPersistence = (settings: ClientSettings): Promise<void> =>
+   ensureLocalApi().persistence.setClientSettings(settings);
+ 
+@@ -512,19 +558,53 @@ export function useUpdateClientSettings() {
+   }, []);
+ }
+ 
++/**
++ * Saves which environment is this client's shared default. Only the id is
++ * stored; the connection itself stays in the environment catalog. `null`
++ * returns to the automatic (platform primary) behavior. Never called
++ * implicitly: adding or removing a connection does not touch this.
++ *
++ * Resolves only after the write reached disk, and the in-memory preference
++ * changes only then, so a caller can promise "next launch" truthfully. On
++ * failure the snapshot still matches what is persisted. Serialized behind
++ * earlier settings writes so an older queued write cannot clobber it.
++ *
++ * Settings are written as a whole object, so after a failed read the
++ * in-memory defaults would overwrite everything else in the unread file. The
++ * read is retried first; if it still fails nothing is written or published.
++ */
++export async function persistPreferredEnvironmentId(
++  environmentId: EnvironmentId | null,
++): Promise<void> {
++  await retryClientSettingsHydration();
++  if (clientSettingsHydrationFailed) {
++    throw new Error(
++      "Settings could not be read, so the shared default was not saved. Retry once settings are readable.",
++    );
++  }
++  await persistClientSettingsUpdate((current) => ({
++    ...current,
++    preferredEnvironmentId: environmentId,
++  }));
++}
++
+ export function __resetClientSettingsPersistenceForTests(): void {
+   clientSettingsHydrationGeneration += 1;
+   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+   clientSettingsHydrated = false;
++  clientSettingsHydrationFailed = false;
+   clientSettingsHydrationPromise = null;
+   clientSettingsPersistenceQueue = Promise.resolve();
+   clientSettingsListeners.clear();
+   clientSettingsHydrationListeners.clear();
++  publishPreferredEnvironment();
+ }
+ 
+ export function __setClientSettingsForTests(settings: ClientSettings): void {
+   clientSettingsHydrationGeneration += 1;
+   clientSettingsSnapshot = settings;
+   clientSettingsHydrated = true;
++  clientSettingsHydrationFailed = false;
+   clientSettingsHydrationPromise = null;
++  publishPreferredEnvironment();
+ }
+diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
+index 64e858d18..7036a6a8b 100644
+--- a/apps/web/src/routes/__root.tsx
++++ b/apps/web/src/routes/__root.tsx
+@@ -51,7 +51,12 @@ import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
+ import { shellEnvironment } from "../state/shell";
+ import { useAtomValue } from "@effect/atom-react";
+ import { useAtomCommand } from "../state/use-atom-command";
+-import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
++import {
++  useAuthoritativeEnvironmentResolution,
++  useEnvironments,
++  usePrimaryEnvironment,
++} from "../state/environments";
++import { SharedEnvironmentStatus } from "../components/SharedEnvironmentStatus";
+ import {
+   primaryServerConfigAtom,
+   primaryServerConfigEventAtom,
+@@ -152,6 +157,7 @@ function RootRouteView() {
+         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
+         {primaryEnvironmentAuthenticated ? <PlanAgentSelectionHeal /> : null}
+         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
++        <SharedEnvironmentStatus />
+         {appShell}
+         {/* Above the router: a theme draft is judged by walking the app, so the
+             editor has to survive navigation away from settings. */}
+@@ -242,8 +248,16 @@ function DocumentTitleSync() {
+ function HostedStaticEnvironmentBootstrap() {
+   const { environments } = useEnvironments();
+   const activeEnvironmentId = useActiveEnvironmentId();
++  const resolution = useAuthoritativeEnvironmentResolution();
++  // Only the legacy automatic mode guesses an environment. A saved shared
++  // default already answers, and a missing one must surface as missing.
++  const automaticPrimary = resolution.status === "automatic";
+ 
+   useEffect(() => {
++    if (!automaticPrimary) {
++      return;
++    }
++
+     if (
+       environments.some(
+         (environment) => environment.entry.target._tag === "PrimaryConnectionTarget",
+@@ -262,7 +276,7 @@ function HostedStaticEnvironmentBootstrap() {
+     }
+ 
+     setActiveEnvironmentId(firstSavedEnvironment.environmentId);
+-  }, [activeEnvironmentId, environments]);
++  }, [activeEnvironmentId, automaticPrimary, environments]);
+ 
+   return null;
+ }
+@@ -386,6 +400,11 @@ function EventRouter() {
+   const pathname = useLocation({ select: (loc) => loc.pathname });
+   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+   const primaryEnvironment = usePrimaryEnvironment();
++  // With a saved shared default the primary is that environment, so its
++  // welcome and config are the ones observed here. Startup must still stay on
++  // the user's explicit route rather than jump to a bootstrap thread, and the
++  // legacy active-environment marker is only written in automatic mode.
++  const automaticPrimary = useAuthoritativeEnvironmentResolution().status === "automatic";
+   const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
+     reportFailure: false,
+   });
+@@ -402,7 +421,9 @@ function EventRouter() {
+   const handleWelcome = useEffectEvent((payload: ServerLifecycleWelcomePayload | null) => {
+     if (!payload) return;
+ 
+-    setActiveEnvironmentId(payload.environment.environmentId);
++    if (automaticPrimary) {
++      setActiveEnvironmentId(payload.environment.environmentId);
++    }
+     void (async () => {
+       if (!payload.bootstrapProjectId || !payload.bootstrapThreadId) {
+         return;
+@@ -422,7 +443,7 @@ function EventRouter() {
+         );
+       useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
+ 
+-      if (readPathname() !== "/") {
++      if (!automaticPrimary || readPathname() !== "/") {
+         return;
+       }
+       if (handledBootstrapThreadIdRef.current === payload.bootstrapThreadId) {
+@@ -500,12 +521,12 @@ function EventRouter() {
+   });
+ 
+   useEffect(() => {
+-    if (!serverConfig) {
++    if (!serverConfig || !automaticPrimary) {
+       return;
+     }
+ 
+     setActiveEnvironmentId(serverConfig.environment.environmentId);
+-  }, [serverConfig]);
++  }, [automaticPrimary, serverConfig]);
+ 
+   useEffect(() => {
+     handleWelcome(serverWelcome);
+diff --git a/apps/web/src/routes/_chat.index.tsx b/apps/web/src/routes/_chat.index.tsx
+index ba96e8986..e47f8f84a 100644
+--- a/apps/web/src/routes/_chat.index.tsx
++++ b/apps/web/src/routes/_chat.index.tsx
+@@ -12,8 +12,8 @@ import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
+ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+ import {
+   useAllEnvironmentShellsBootstrapped,
+-  useProjects,
+   useThreadShells,
++  useWorkProjects,
+ } from "../state/entities";
+ import { useEnvironments } from "../state/environments";
+ import { APP_DISPLAY_NAME } from "~/branding";
+@@ -36,7 +36,9 @@ function ChatIndexRouteView() {
+  * end. Falls back to an add-project hero when no project exists yet.
+  */
+ function IndexDraftLanding() {
+-  const projects = useProjects();
++  // Work-only: a refused local project must not be auto-picked (and retried)
++  // as the landing draft while a shared default is pinned elsewhere.
++  const projects = useWorkProjects();
+   const threads = useThreadShells();
+   const bootstrapped = useAllEnvironmentShellsBootstrapped();
+   const handleNewThread = useNewThreadHandler();
+diff --git a/apps/web/src/state/entities.ts b/apps/web/src/state/entities.ts
+index c455da316..ddea686f0 100644
+--- a/apps/web/src/state/entities.ts
++++ b/apps/web/src/state/entities.ts
+@@ -13,6 +13,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
+ import { Atom } from "effect/unstable/reactivity";
+ import { useMemo } from "react";
+ import { appAtomRegistry } from "../rpc/atomRegistry";
++import { newWorkBlockedEnvironmentIdAtom } from "./primaryEnvironment";
+ import { environmentProjects } from "./projects";
+ import { environmentServerConfigsAtom } from "./server";
+ import {
+@@ -70,6 +71,23 @@ export function useProjects(): ReadonlyArray<EnvironmentProject> {
+   return useAtomValue(environmentProjects.projectsAtom);
+ }
+ 
++/**
++ * Projects that may receive NEW threads: every project except those on the
++ * platform primary while new work there is refused. `useProjects` keeps
++ * listing them for history and metadata.
++ */
++const workProjectsAtom = Atom.make((get): ReadonlyArray<EnvironmentProject> => {
++  const projects = get(environmentProjects.projectsAtom);
++  const blockedEnvironmentId = get(newWorkBlockedEnvironmentIdAtom);
++  return blockedEnvironmentId === null
++    ? projects
++    : projects.filter((project) => project.environmentId !== blockedEnvironmentId);
++}).pipe(Atom.withLabel("web-work-projects"));
++
++export function useWorkProjects(): ReadonlyArray<EnvironmentProject> {
++  return useAtomValue(workProjectsAtom);
++}
++
+ export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
+   return useAtomValue(environmentServerConfigsAtom);
+ }
+diff --git a/apps/web/src/state/environments.ts b/apps/web/src/state/environments.ts
+index 443e99b84..9fa55799d 100644
+--- a/apps/web/src/state/environments.ts
++++ b/apps/web/src/state/environments.ts
+@@ -10,7 +10,17 @@ import { useMemo } from "react";
+ 
+ import { environmentCatalog } from "../connection/catalog";
+ import { environmentPresentations, useEnvironmentPresentation } from "./presentation";
+-import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
++import {
++  resolveNewWorkPolicy,
++  type AuthoritativeEnvironmentResolution,
++  type NewWorkPolicy,
++} from "./preferredEnvironment";
++import {
++  authoritativeEnvironmentResolutionAtom,
++  newWorkBlockedEnvironmentIdAtom,
++  platformPrimaryEnvironmentIdAtom,
++  primaryEnvironmentIdAtom,
++} from "./primaryEnvironment";
+ import { useEnvironmentQuery } from "./query";
+ import { relayEnvironmentDiscovery } from "./relay";
+ import { usePreparedConnection } from "./session";
+@@ -56,10 +66,64 @@ export function useEnvironments() {
+   };
+ }
+ 
++/**
++ * Environments that may receive NEW work: every catalogued environment except
++ * the platform primary while it is refused (see
++ * `newWorkBlockedEnvironmentIdAtom`). Use `useEnvironments` for history,
++ * labels, connection status and local administration.
++ */
++export function useWorkEnvironments() {
++  const all = useEnvironments();
++  const blockedEnvironmentId = useAtomValue(newWorkBlockedEnvironmentIdAtom);
++  const environments = useMemo(
++    () =>
++      blockedEnvironmentId === null
++        ? all.environments
++        : all.environments.filter(
++            (environment) => environment.environmentId !== blockedEnvironmentId,
++          ),
++    [all.environments, blockedEnvironmentId],
++  );
++  return { ...all, environments };
++}
++
++export function useNewWorkBlockedEnvironmentId(): EnvironmentId | null {
++  return useAtomValue(newWorkBlockedEnvironmentIdAtom);
++}
++
++/** Whether new work may start in `targetEnvironmentId` right now. */
++export function useNewWorkPolicy(targetEnvironmentId: EnvironmentId | null): NewWorkPolicy {
++  const resolution = useAtomValue(authoritativeEnvironmentResolutionAtom);
++  const platformPrimaryEnvironmentId = useAtomValue(platformPrimaryEnvironmentIdAtom);
++  return useMemo(
++    () => resolveNewWorkPolicy({ resolution, platformPrimaryEnvironmentId, targetEnvironmentId }),
++    [platformPrimaryEnvironmentId, resolution, targetEnvironmentId],
++  );
++}
++
++/**
++ * The authoritative environment: the saved shared default when one exists,
++ * otherwise the platform primary. Null until client settings hydrate, and
++ * while a saved default is missing from the catalog (see
++ * `useAuthoritativeEnvironmentResolution` for the distinction).
++ */
+ export function usePrimaryEnvironmentId(): EnvironmentId | null {
+   return useAtomValue(primaryEnvironmentIdAtom);
+ }
+ 
++export function useAuthoritativeEnvironmentResolution(): AuthoritativeEnvironmentResolution {
++  return useAtomValue(authoritativeEnvironmentResolutionAtom);
++}
++
++/**
++ * The environment this client is served from or embeds, for local
++ * administration only. It is not where threads live once a shared default is
++ * saved; use `usePrimaryEnvironmentId` for that.
++ */
++export function usePlatformPrimaryEnvironmentId(): EnvironmentId | null {
++  return useAtomValue(platformPrimaryEnvironmentIdAtom);
++}
++
+ export function useEnvironment(
+   environmentId: EnvironmentId | null,
+ ): EnvironmentPresentation | null {
+@@ -77,6 +141,10 @@ export function usePrimaryEnvironment(): EnvironmentPresentation | null {
+   return useEnvironment(usePrimaryEnvironmentId());
+ }
+ 
++export function usePlatformPrimaryEnvironment(): EnvironmentPresentation | null {
++  return useEnvironment(usePlatformPrimaryEnvironmentId());
++}
++
+ export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): string | null {
+   const prepared = usePreparedConnection(environmentId);
+   return Option.isSome(prepared) ? prepared.value.httpBaseUrl : null;
+diff --git a/apps/web/src/state/preferredEnvironment.test.ts b/apps/web/src/state/preferredEnvironment.test.ts
+new file mode 100644
+index 000000000..aea8b2d9d
+--- /dev/null
++++ b/apps/web/src/state/preferredEnvironment.test.ts
+@@ -0,0 +1,262 @@
++import { EnvironmentId } from "@t3tools/contracts";
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  describeNewWorkDenial,
++  isNewWorkCommandLabel,
++  isPinnedEnvironmentResolution,
++  NewLocalWorkBlockedError,
++  publishPreferredEnvironmentState,
++  readPreferredEnvironmentState,
++  resolveAuthoritativeEnvironment,
++  resolveNewWorkPolicy,
++  resolveSharedEnvironmentIssue,
++  type AuthoritativeEnvironmentResolution,
++  type PreferredEnvironmentLoadStatus,
++} from "./preferredEnvironment";
++
++const platformId = EnvironmentId.make("env-platform");
++const sharedId = EnvironmentId.make("env-shared");
++
++function resolve(input: {
++  status?: PreferredEnvironmentLoadStatus;
++  preferredEnvironmentId?: EnvironmentId | null;
++  catalogReady?: boolean;
++  catalogIds?: ReadonlyArray<EnvironmentId>;
++  platformPrimaryEnvironmentId?: EnvironmentId | null;
++}) {
++  const catalogIds = new Set(input.catalogIds ?? [platformId, sharedId]);
++  return resolveAuthoritativeEnvironment({
++    preference: {
++      status: input.status ?? "loaded",
++      preferredEnvironmentId: input.preferredEnvironmentId ?? null,
++    },
++    catalogReady: input.catalogReady ?? true,
++    hasCatalogEntry: (environmentId) => catalogIds.has(environmentId),
++    platformPrimaryEnvironmentId:
++      input.platformPrimaryEnvironmentId === undefined
++        ? platformId
++        : input.platformPrimaryEnvironmentId,
++  });
++}
++
++describe("resolveAuthoritativeEnvironment", () => {
++  it("resolves nothing before client settings hydrate, even with a platform primary", () => {
++    expect(resolve({ status: "loading" })).toEqual({ status: "unresolved", environmentId: null });
++    expect(resolve({ status: "loading", preferredEnvironmentId: sharedId })).toEqual({
++      status: "unresolved",
++      environmentId: null,
++    });
++  });
++
++  it("never treats a failed settings read as an automatic choice", () => {
++    expect(resolve({ status: "failed" })).toEqual({
++      status: "preference-unavailable",
++      environmentId: null,
++    });
++  });
++
++  it("keeps the legacy automatic behavior when no preference is saved", () => {
++    expect(resolve({})).toEqual({ status: "automatic", environmentId: platformId });
++    expect(resolve({ platformPrimaryEnvironmentId: null })).toEqual({
++      status: "automatic",
++      environmentId: null,
++    });
++  });
++
++  it("pins the saved environment when the catalog has it", () => {
++    expect(resolve({ preferredEnvironmentId: sharedId })).toEqual({
++      status: "pinned",
++      environmentId: sharedId,
++    });
++  });
++
++  it("stays on the pinned id while the catalog is still loading", () => {
++    expect(
++      resolve({ preferredEnvironmentId: sharedId, catalogReady: false, catalogIds: [] }),
++    ).toEqual({ status: "pinned", environmentId: sharedId });
++  });
++
++  it("reports a missing target instead of falling back to the platform primary", () => {
++    expect(resolve({ preferredEnvironmentId: sharedId, catalogIds: [platformId] })).toEqual({
++      status: "missing-preferred-target",
++      environmentId: sharedId,
++    });
++  });
++
++  it("treats pinned and missing as the explicit preference", () => {
++    const cases: ReadonlyArray<[AuthoritativeEnvironmentResolution, boolean]> = [
++      [{ status: "unresolved", environmentId: null }, false],
++      [{ status: "preference-unavailable", environmentId: null }, false],
++      [{ status: "automatic", environmentId: platformId }, false],
++      [{ status: "pinned", environmentId: sharedId }, true],
++      [{ status: "missing-preferred-target", environmentId: sharedId }, true],
++    ];
++    for (const [resolution, expected] of cases) {
++      expect(isPinnedEnvironmentResolution(resolution)).toBe(expected);
++    }
++  });
++});
++
++describe("resolveSharedEnvironmentIssue", () => {
++  const pinned: AuthoritativeEnvironmentResolution = { status: "pinned", environmentId: sharedId };
++
++  it("never raises an issue in automatic or unresolved mode", () => {
++    expect(
++      resolveSharedEnvironmentIssue({
++        resolution: { status: "automatic", environmentId: platformId },
++        connectionPhase: "error",
++      }),
++    ).toBeNull();
++    expect(
++      resolveSharedEnvironmentIssue({
++        resolution: { status: "unresolved", environmentId: null },
++        connectionPhase: null,
++      }),
++    ).toBeNull();
++  });
++
++  it("flags an unreadable preference and a missing target regardless of connection state", () => {
++    expect(
++      resolveSharedEnvironmentIssue({
++        resolution: { status: "preference-unavailable", environmentId: null },
++        connectionPhase: null,
++      }),
++    ).toBe("preference-unavailable");
++    expect(
++      resolveSharedEnvironmentIssue({
++        resolution: { status: "missing-preferred-target", environmentId: sharedId },
++        connectionPhase: null,
++      }),
++    ).toBe("missing");
++  });
++
++  it("stays quiet while the pinned environment is connected or attempting", () => {
++    for (const connectionPhase of ["connected", "connecting", "reconnecting", null] as const) {
++      expect(resolveSharedEnvironmentIssue({ resolution: pinned, connectionPhase })).toBeNull();
++    }
++  });
++
++  it("reports an unreachable pinned environment", () => {
++    for (const connectionPhase of ["available", "offline", "error"] as const) {
++      expect(resolveSharedEnvironmentIssue({ resolution: pinned, connectionPhase })).toBe(
++        "unreachable",
++      );
++    }
++  });
++});
++
++describe("resolveNewWorkPolicy", () => {
++  const otherRemoteId = EnvironmentId.make("env-remote-b");
++  const policy = (
++    resolution: AuthoritativeEnvironmentResolution,
++    targetEnvironmentId: EnvironmentId | null,
++    platformPrimaryEnvironmentId: EnvironmentId | null = platformId,
++  ) => resolveNewWorkPolicy({ resolution, platformPrimaryEnvironmentId, targetEnvironmentId });
++
++  it("refuses the platform primary while a shared default is pinned elsewhere", () => {
++    expect(policy({ status: "pinned", environmentId: sharedId }, platformId)).toEqual({
++      allowed: false,
++      reason: "pinned-elsewhere",
++    });
++    expect(
++      policy({ status: "missing-preferred-target", environmentId: sharedId }, platformId),
++    ).toEqual({ allowed: false, reason: "pinned-elsewhere" });
++  });
++
++  it("keeps the pinned and every other explicit remote available", () => {
++    const pinned: AuthoritativeEnvironmentResolution = {
++      status: "pinned",
++      environmentId: sharedId,
++    };
++    expect(policy(pinned, sharedId).allowed).toBe(true);
++    expect(policy(pinned, otherRemoteId).allowed).toBe(true);
++  });
++
++  it("does not treat an unread or unreadable preference as permission", () => {
++    expect(policy({ status: "unresolved", environmentId: null }, platformId)).toEqual({
++      allowed: false,
++      reason: "unresolved",
++    });
++    expect(policy({ status: "preference-unavailable", environmentId: null }, platformId)).toEqual({
++      allowed: false,
++      reason: "preference-unavailable",
++    });
++    expect(policy({ status: "unresolved", environmentId: null }, otherRemoteId).allowed).toBe(true);
++  });
++
++  it("allows local work in automatic mode and when there is no platform primary", () => {
++    expect(policy({ status: "automatic", environmentId: platformId }, platformId).allowed).toBe(
++      true,
++    );
++    expect(policy({ status: "pinned", environmentId: sharedId }, platformId, null).allowed).toBe(
++      true,
++    );
++    expect(policy({ status: "pinned", environmentId: sharedId }, null).allowed).toBe(true);
++  });
++
++  it("explains each denial in the thrown error", () => {
++    for (const reason of ["unresolved", "preference-unavailable", "pinned-elsewhere"] as const) {
++      const error = new NewLocalWorkBlockedError(reason);
++      expect(error.message).toBe(describeNewWorkDenial(reason));
++      expect(error.reason).toBe(reason);
++    }
++  });
++});
++
++describe("isNewWorkCommandLabel", () => {
++  it("classifies commands that start new work, including closure-scoped stacked actions", () => {
++    for (const label of [
++      "environment-data:commands:thread:create",
++      "environment-data:commands:thread:fork",
++      "environment-data:commands:thread:start-turn",
++      "environment-data:commands:project:create",
++      "environment-data:projects:write-file",
++      "environment-data:vcs:switch-ref",
++      "environment-data:source-control:clone-repository",
++      "environment-data:git:prepare-pull-request-thread",
++      "environment-data:terminal:open",
++      "environment-data:terminal:write",
++      "environment-data:terminal:restart",
++      "environment-data:preview:open",
++      "vcs-action:run-stacked:any-key",
++    ]) {
++      expect(isNewWorkCommandLabel(label), label).toBe(true);
++    }
++  });
++
++  it("leaves replies, stop, close, metadata, history and administration alone", () => {
++    for (const label of [
++      "environment-data:commands:thread:respond-to-approval",
++      "environment-data:commands:thread:respond-to-user-input",
++      "environment-data:commands:thread:interrupt-turn",
++      "environment-data:commands:thread:stop-session",
++      "environment-data:commands:thread:update-metadata",
++      "environment-data:commands:thread:delete",
++      "environment-data:commands:project:update",
++      "environment-data:terminal:close",
++      "environment-data:preview:close",
++      "environment-data:vcs:status",
++      "environment-data:vcs:refresh-status",
++      "environment-data:provider:auth-start",
++      "terminal open",
++    ]) {
++      expect(isNewWorkCommandLabel(label), label).toBe(false);
++    }
++  });
++});
++
++describe("preferred environment bridge", () => {
++  it("starts loading and publishes only on change", () => {
++    expect(readPreferredEnvironmentState()).toEqual({
++      status: "loading",
++      preferredEnvironmentId: null,
++    });
++    publishPreferredEnvironmentState({ status: "loaded", preferredEnvironmentId: sharedId });
++    const published = readPreferredEnvironmentState();
++    expect(published).toEqual({ status: "loaded", preferredEnvironmentId: sharedId });
++    publishPreferredEnvironmentState({ status: "loaded", preferredEnvironmentId: sharedId });
++    expect(readPreferredEnvironmentState()).toBe(published);
++    publishPreferredEnvironmentState({ status: "loading", preferredEnvironmentId: null });
++  });
++});
+diff --git a/apps/web/src/state/preferredEnvironment.ts b/apps/web/src/state/preferredEnvironment.ts
+new file mode 100644
+index 000000000..76b5f97ee
+--- /dev/null
++++ b/apps/web/src/state/preferredEnvironment.ts
+@@ -0,0 +1,247 @@
++import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
++import type { EnvironmentId } from "@t3tools/contracts";
++import { Atom } from "effect/unstable/reactivity";
++
++import { appAtomRegistry } from "../rpc/atomRegistry";
++
++/**
++ * Whether the persisted shared-default preference has been read.
++ * `loading` until the first read settles; `failed` when the read threw, which
++ * is different from a file that simply predates the preference (`loaded`
++ * with a null id).
++ */
++export type PreferredEnvironmentLoadStatus = "loading" | "loaded" | "failed";
++
++/**
++ * The persisted shared-default preference as the state layer sees it. Nothing
++ * downstream resolves a primary environment until the status is `loaded`, so
++ * schema defaults are never mistaken for an explicit "automatic" choice.
++ */
++export interface PreferredEnvironmentState {
++  readonly status: PreferredEnvironmentLoadStatus;
++  readonly preferredEnvironmentId: EnvironmentId | null;
++}
++
++const INITIAL_PREFERRED_ENVIRONMENT_STATE: PreferredEnvironmentState = {
++  status: "loading",
++  preferredEnvironmentId: null,
++};
++
++/**
++ * Bridge from the client-settings store into atoms. `useSettings` publishes
++ * here on every snapshot and hydration change; the primary-environment atoms
++ * read it. This module deliberately imports nothing from `useSettings` or
++ * `server`, which keeps the preference readable from the state layer without
++ * an import cycle.
++ */
++export const preferredEnvironmentStateAtom = Atom.make(INITIAL_PREFERRED_ENVIRONMENT_STATE).pipe(
++  Atom.keepAlive,
++  Atom.withLabel("web-preferred-environment-state"),
++);
++
++export function publishPreferredEnvironmentState(next: PreferredEnvironmentState): void {
++  const current = appAtomRegistry.get(preferredEnvironmentStateAtom);
++  if (
++    current.status === next.status &&
++    current.preferredEnvironmentId === next.preferredEnvironmentId
++  ) {
++    return;
++  }
++  appAtomRegistry.set(preferredEnvironmentStateAtom, next);
++}
++
++export function readPreferredEnvironmentState(): PreferredEnvironmentState {
++  return appAtomRegistry.get(preferredEnvironmentStateAtom);
++}
++
++/**
++ * Which environment owns threads, drafts and defaults for this client.
++ *
++ * - `unresolved`: the preference has not been read yet; nothing is primary.
++ * - `preference-unavailable`: reading the preference failed. Nothing is
++ *   primary until a retry succeeds; a failed read is not an automatic choice.
++ * - `automatic`: no preference saved; the platform primary (the environment
++ *   this app is served from or embeds) is used, as it always was.
++ * - `pinned`: the saved environment exists in the catalog. It stays
++ *   authoritative while offline or blocked; this never falls back to local.
++ * - `missing-preferred-target`: the saved environment is gone from the
++ *   catalog. The id is kept so the user can repair or replace it explicitly.
++ */
++export type AuthoritativeEnvironmentResolution =
++  | { readonly status: "unresolved"; readonly environmentId: null }
++  | { readonly status: "preference-unavailable"; readonly environmentId: null }
++  | { readonly status: "automatic"; readonly environmentId: EnvironmentId | null }
++  | { readonly status: "pinned"; readonly environmentId: EnvironmentId }
++  | { readonly status: "missing-preferred-target"; readonly environmentId: EnvironmentId };
++
++export function resolveAuthoritativeEnvironment(input: {
++  readonly preference: PreferredEnvironmentState;
++  readonly catalogReady: boolean;
++  readonly hasCatalogEntry: (environmentId: EnvironmentId) => boolean;
++  readonly platformPrimaryEnvironmentId: EnvironmentId | null;
++}): AuthoritativeEnvironmentResolution {
++  switch (input.preference.status) {
++    case "loading":
++      return { status: "unresolved", environmentId: null };
++    case "failed":
++      return { status: "preference-unavailable", environmentId: null };
++    case "loaded":
++      break;
++  }
++  const preferredEnvironmentId = input.preference.preferredEnvironmentId;
++  if (preferredEnvironmentId === null) {
++    return { status: "automatic", environmentId: input.platformPrimaryEnvironmentId };
++  }
++  // Before the catalog loads the entry cannot be judged missing; the pinned id
++  // is still the only acceptable answer, so it is reported as pinned.
++  if (input.catalogReady && !input.hasCatalogEntry(preferredEnvironmentId)) {
++    return { status: "missing-preferred-target", environmentId: preferredEnvironmentId };
++  }
++  return { status: "pinned", environmentId: preferredEnvironmentId };
++}
++
++export function isPinnedEnvironmentResolution(
++  resolution: AuthoritativeEnvironmentResolution,
++): resolution is Extract<
++  AuthoritativeEnvironmentResolution,
++  { status: "pinned" | "missing-preferred-target" }
++> {
++  return resolution.status === "pinned" || resolution.status === "missing-preferred-target";
++}
++
++/**
++ * Why new work on the platform primary is refused. Only the platform
++ * environment is ever refused: an explicitly chosen remote environment stays
++ * usable even while the pinned one is offline.
++ */
++export type NewWorkDenialReason = "unresolved" | "preference-unavailable" | "pinned-elsewhere";
++
++export type NewWorkPolicy =
++  | { readonly allowed: true; readonly reason: null }
++  | { readonly allowed: false; readonly reason: NewWorkDenialReason };
++
++const NEW_WORK_ALLOWED: NewWorkPolicy = { allowed: true, reason: null };
++
++/**
++ * Whether NEW work may start in `targetEnvironmentId`. Existing local threads
++ * keep their history, approvals, input replies and stop controls; this only
++ * decides whether another thread, turn, terminal, preview, project or
++ * checkout mutation may begin there. An unread or unreadable preference is
++ * not permission: until it resolves the platform primary is refused.
++ */
++export function resolveNewWorkPolicy(input: {
++  readonly resolution: AuthoritativeEnvironmentResolution;
++  readonly platformPrimaryEnvironmentId: EnvironmentId | null;
++  readonly targetEnvironmentId: EnvironmentId | null;
++}): NewWorkPolicy {
++  if (
++    input.targetEnvironmentId === null ||
++    input.platformPrimaryEnvironmentId === null ||
++    input.targetEnvironmentId !== input.platformPrimaryEnvironmentId
++  ) {
++    return NEW_WORK_ALLOWED;
++  }
++  switch (input.resolution.status) {
++    case "automatic":
++      return NEW_WORK_ALLOWED;
++    case "unresolved":
++      return { allowed: false, reason: "unresolved" };
++    case "preference-unavailable":
++      return { allowed: false, reason: "preference-unavailable" };
++    case "pinned":
++    case "missing-preferred-target":
++      return input.resolution.environmentId === input.targetEnvironmentId
++        ? NEW_WORK_ALLOWED
++        : { allowed: false, reason: "pinned-elsewhere" };
++  }
++}
++
++export function describeNewWorkDenial(reason: NewWorkDenialReason): string {
++  switch (reason) {
++    case "unresolved":
++      return "Waiting for this device's shared environment before starting work here.";
++    case "preference-unavailable":
++      return "Couldn't read which environment this device uses. Retry from the banner or choose one in Connections before starting work here.";
++    case "pinned-elsewhere":
++      return "New work goes to your shared environment. This app's built-in environment only keeps its existing threads.";
++  }
++}
++
++export class NewLocalWorkBlockedError extends Error {
++  readonly _tag = "NewLocalWorkBlockedError";
++  constructor(readonly reason: NewWorkDenialReason) {
++    super(describeNewWorkDenial(reason));
++    this.name = "NewLocalWorkBlockedError";
++  }
++}
++
++/**
++ * Commands that start new work in an environment. Everything else (approval
++ * and user-input replies, interrupt/stop, terminal close, preview close,
++ * metadata, history, connection retry, exposure and pairing administration)
++ * stays available so pre-existing local work can finish and be inspected.
++ */
++const NEW_WORK_COMMAND_LABELS: ReadonlySet<string> = new Set([
++  "environment-data:commands:thread:create",
++  "environment-data:commands:thread:fork",
++  "environment-data:commands:thread:start-turn",
++  "environment-data:commands:thread:revert-checkpoint",
++  "environment-data:commands:project:create",
++  "environment-data:projects:write-file",
++  "environment-data:vcs:pull",
++  "environment-data:vcs:create-worktree",
++  "environment-data:vcs:remove-worktree",
++  "environment-data:vcs:create-ref",
++  "environment-data:vcs:switch-ref",
++  "environment-data:vcs:init",
++  "environment-data:source-control:clone-repository",
++  "environment-data:source-control:publish-repository",
++  "environment-data:git:prepare-pull-request-thread",
++  "environment-data:terminal:open",
++  "environment-data:terminal:write",
++  "environment-data:terminal:restart",
++  "environment-data:preview:open",
++]);
++
++const NEW_WORK_COMMAND_LABEL_PREFIXES: ReadonlyArray<string> = ["vcs-action:run-stacked:"];
++
++/** Matches the command's own stable label, never a caller's presentation label. */
++export function isNewWorkCommandLabel(label: string): boolean {
++  return (
++    NEW_WORK_COMMAND_LABELS.has(label) ||
++    NEW_WORK_COMMAND_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
++  );
++}
++
++export type SharedEnvironmentIssue = "preference-unavailable" | "missing" | "unreachable";
++
++/**
++ * Whether the shared default needs the user's attention. Connection attempts
++ * in flight are not an issue; the catalog is already retrying.
++ */
++export function resolveSharedEnvironmentIssue(input: {
++  readonly resolution: AuthoritativeEnvironmentResolution;
++  readonly connectionPhase: EnvironmentConnectionPhase | null;
++}): SharedEnvironmentIssue | null {
++  switch (input.resolution.status) {
++    case "unresolved":
++    case "automatic":
++      return null;
++    case "preference-unavailable":
++      return "preference-unavailable";
++    case "missing-preferred-target":
++      return "missing";
++    case "pinned":
++      switch (input.connectionPhase) {
++        case null:
++        case "connected":
++        case "connecting":
++        case "reconnecting":
++          return null;
++        case "available":
++        case "offline":
++        case "error":
++          return "unreachable";
++      }
++  }
++}
+diff --git a/apps/web/src/state/primaryEnvironment.ts b/apps/web/src/state/primaryEnvironment.ts
+index e37931f74..dcbc5a8e5 100644
+--- a/apps/web/src/state/primaryEnvironment.ts
++++ b/apps/web/src/state/primaryEnvironment.ts
+@@ -1,12 +1,82 @@
++import type { EnvironmentId } from "@t3tools/contracts";
+ import { Atom } from "effect/unstable/reactivity";
+ 
+ import { environmentCatalog } from "../connection/catalog";
++import { appAtomRegistry } from "../rpc/atomRegistry";
++import {
++  preferredEnvironmentStateAtom,
++  resolveAuthoritativeEnvironment,
++  resolveNewWorkPolicy,
++  type AuthoritativeEnvironmentResolution,
++  type NewWorkPolicy,
++} from "./preferredEnvironment";
+ 
+-export const primaryEnvironmentIdAtom = Atom.make((get) => {
++/**
++ * The environment this client is served from or embeds: the desktop's bundled
++ * server, or the server hosting the web app. It is the only place local
++ * administration (network exposure, WSL, pairing links, T3 Connect linking)
++ * can act on. Null in the hosted static app, which has no such host.
++ */
++export const platformPrimaryEnvironmentIdAtom = Atom.make((get) => {
+   for (const [environmentId, entry] of get(environmentCatalog.catalogValueAtom).entries) {
+     if (entry.target._tag === "PrimaryConnectionTarget") {
+       return environmentId;
+     }
+   }
+   return null;
+-}).pipe(Atom.withLabel("web-primary-environment-id"));
++}).pipe(Atom.withLabel("web-platform-primary-environment-id"));
++
++/**
++ * The environment that owns this client's threads, drafts and defaults. With
++ * no saved preference this is the platform primary; with one it is the saved
++ * environment even while it is offline, blocked or missing from the catalog.
++ */
++export const authoritativeEnvironmentResolutionAtom = Atom.make(
++  (get): AuthoritativeEnvironmentResolution => {
++    const catalog = get(environmentCatalog.catalogValueAtom);
++    return resolveAuthoritativeEnvironment({
++      preference: get(preferredEnvironmentStateAtom),
++      catalogReady: catalog.isReady,
++      hasCatalogEntry: (environmentId) => catalog.entries.has(environmentId),
++      platformPrimaryEnvironmentId: get(platformPrimaryEnvironmentIdAtom),
++    });
++  },
++).pipe(Atom.withLabel("web-authoritative-environment-resolution"));
++
++export const authoritativeEnvironmentIdAtom = Atom.make(
++  (get) => get(authoritativeEnvironmentResolutionAtom).environmentId,
++).pipe(Atom.withLabel("web-authoritative-environment-id"));
++
++/**
++ * "Primary" throughout the app means the authoritative environment. Code that
++ * needs the local control host must read `platformPrimaryEnvironmentIdAtom`.
++ */
++export const primaryEnvironmentIdAtom = authoritativeEnvironmentIdAtom;
++
++/**
++ * The platform primary while new work there is refused (a shared default is
++ * saved elsewhere, or the preference is unread/unreadable); null otherwise.
++ * Work-only selectors drop this environment from new-work choices while raw
++ * catalog, project and thread access stays intact for existing work.
++ */
++export const newWorkBlockedEnvironmentIdAtom = Atom.make((get): EnvironmentId | null => {
++  const platformPrimaryEnvironmentId = get(platformPrimaryEnvironmentIdAtom);
++  if (platformPrimaryEnvironmentId === null) {
++    return null;
++  }
++  const policy = resolveNewWorkPolicy({
++    resolution: get(authoritativeEnvironmentResolutionAtom),
++    platformPrimaryEnvironmentId,
++    targetEnvironmentId: platformPrimaryEnvironmentId,
++  });
++  return policy.allowed ? null : platformPrimaryEnvironmentId;
++}).pipe(Atom.withLabel("web-new-work-blocked-environment-id"));
++
++/** Current policy at call time, for handlers that run outside React. */
++export function readNewWorkPolicy(targetEnvironmentId: EnvironmentId | null): NewWorkPolicy {
++  return resolveNewWorkPolicy({
++    resolution: appAtomRegistry.get(authoritativeEnvironmentResolutionAtom),
++    platformPrimaryEnvironmentId: appAtomRegistry.get(platformPrimaryEnvironmentIdAtom),
++    targetEnvironmentId,
++  });
++}
+diff --git a/apps/web/src/state/sourceControlActions.test.ts b/apps/web/src/state/sourceControlActions.test.ts
+new file mode 100644
+index 000000000..dceefb7d6
+--- /dev/null
++++ b/apps/web/src/state/sourceControlActions.test.ts
+@@ -0,0 +1,161 @@
++import { EnvironmentId } from "@t3tools/contracts";
++import { AsyncResult, type Atom, AtomRegistry } from "effect/unstable/reactivity";
++import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
++
++import type { AuthoritativeEnvironmentResolution } from "./preferredEnvironment";
++
++const harness = vi.hoisted(() => ({
++  registry: null as unknown as AtomRegistry.AtomRegistry,
++  stackedRun: vi.fn(),
++  pullRun: vi.fn(),
++}));
++
++vi.mock("react", () => ({
++  useCallback: <T>(callback: T) => callback,
++  useContext: () => harness.registry,
++}));
++vi.mock("@effect/atom-react", () => ({
++  RegistryContext: {},
++  useAtomValue: (atom: Atom.Atom<unknown>) => harness.registry.get(atom),
++}));
++vi.mock("./primaryEnvironment", async () => {
++  const { Atom } = await import("effect/unstable/reactivity");
++  return {
++    authoritativeEnvironmentResolutionAtom: Atom.make<AuthoritativeEnvironmentResolution>({
++      status: "unresolved",
++      environmentId: null,
++    }).pipe(Atom.keepAlive),
++    platformPrimaryEnvironmentIdAtom: Atom.make<EnvironmentId | null>(null).pipe(Atom.keepAlive),
++  };
++});
++vi.mock("../rpc/atomRegistry", () => ({
++  get appAtomRegistry() {
++    return harness.registry;
++  },
++}));
++vi.mock("./query", () => ({
++  useEnvironmentQuery: () => ({ data: null, refresh: vi.fn() }),
++}));
++vi.mock("./git", () => ({
++  gitEnvironment: {
++    preparePullRequestThread: {
++      label: "environment-data:git:prepare-pull-request-thread",
++      run: vi.fn(),
++    },
++    pullRequestResolution: () => null,
++  },
++}));
++vi.mock("./sourceControl", () => ({
++  sourceControlEnvironment: {
++    publishRepository: {
++      label: "environment-data:source-control:publish-repository",
++      run: vi.fn(),
++    },
++  },
++}));
++vi.mock("./vcs", async () => {
++  const { Atom } = await import("effect/unstable/reactivity");
++  const idleState = Atom.make({ operation: null, isRunning: false, error: null, actionId: null });
++  return {
++    vcsActionManager: {
++      // Mirrors the client-runtime factory: the command captures its target
++      // and its invocation input carries no environmentId.
++      runStackedAction: (scope: { environmentId: string | null; cwd: string | null }) => ({
++        label: `vcs-action:run-stacked:${scope.environmentId}:${scope.cwd}`,
++        run: harness.stackedRun,
++      }),
++      stateAtom: () => idleState,
++      track: (
++        _registry: unknown,
++        _scope: unknown,
++        _meta: unknown,
++        execute: () => Promise<unknown>,
++      ) => execute(),
++      resetError: vi.fn(),
++    },
++    vcsEnvironment: {
++      status: () => null,
++      init: { label: "environment-data:vcs:init", run: vi.fn() },
++      pull: { label: "environment-data:vcs:pull", run: harness.pullRun },
++    },
++  };
++});
++
++import {
++  authoritativeEnvironmentResolutionAtom,
++  platformPrimaryEnvironmentIdAtom,
++} from "./primaryEnvironment";
++import { useGitStackedAction, useVcsPullAction } from "./sourceControlActions";
++
++const local = EnvironmentId.make("env-local");
++const pinnedRemote = EnvironmentId.make("env-remote-a");
++const otherRemote = EnvironmentId.make("env-remote-b");
++
++function setResolution(resolution: AuthoritativeEnvironmentResolution) {
++  harness.registry.set(
++    authoritativeEnvironmentResolutionAtom as unknown as Atom.Writable<AuthoritativeEnvironmentResolution>,
++    resolution,
++  );
++}
++
++beforeEach(() => {
++  harness.registry = AtomRegistry.make();
++  harness.registry.set(
++    platformPrimaryEnvironmentIdAtom as unknown as Atom.Writable<EnvironmentId | null>,
++    local,
++  );
++  setResolution({ status: "pinned", environmentId: pinnedRemote });
++  harness.stackedRun.mockReset();
++  harness.stackedRun.mockResolvedValue(AsyncResult.success({ ok: true }));
++  harness.pullRun.mockReset();
++  harness.pullRun.mockResolvedValue(AsyncResult.success({ ok: true }));
++});
++
++describe("useGitStackedAction new-work guard", () => {
++  const stackedInput = { actionId: "action-1", action: "commit" } as const;
++
++  it("refuses a closure-scoped stacked action on the platform primary without running it", async () => {
++    const action = useGitStackedAction({ environmentId: local, cwd: "/local/repo" });
++    const result = await action.run(stackedInput as never);
++    expect(result._tag).toBe("Failure");
++    expect(harness.stackedRun).not.toHaveBeenCalled();
++  });
++
++  it("runs the stacked action on the pinned and on another explicit remote", async () => {
++    for (const environmentId of [pinnedRemote, otherRemote]) {
++      const action = useGitStackedAction({ environmentId, cwd: "/remote/repo" });
++      const result = await action.run(stackedInput as never);
++      expect(result._tag, environmentId).toBe("Success");
++    }
++    expect(harness.stackedRun).toHaveBeenCalledTimes(2);
++  });
++
++  it("runs locally again once the preference is automatic", async () => {
++    setResolution({ status: "automatic", environmentId: local });
++    const action = useGitStackedAction({ environmentId: local, cwd: "/local/repo" });
++    const result = await action.run(stackedInput as never);
++    expect(result._tag).toBe("Success");
++    expect(harness.stackedRun).toHaveBeenCalledTimes(1);
++  });
++
++  it("blocks an action created before the pin when it is invoked after", async () => {
++    setResolution({ status: "automatic", environmentId: local });
++    const action = useGitStackedAction({ environmentId: local, cwd: "/local/repo" });
++    setResolution({ status: "pinned", environmentId: pinnedRemote });
++    const result = await action.run(stackedInput as never);
++    expect(result._tag).toBe("Failure");
++    expect(harness.stackedRun).not.toHaveBeenCalled();
++  });
++});
++
++describe("useVcsPullAction new-work guard", () => {
++  it("refuses a local pull and allows a remote one", async () => {
++    const localPull = useVcsPullAction({ environmentId: local, cwd: "/local/repo" });
++    expect((await localPull.run())._tag).toBe("Failure");
++    expect(harness.pullRun).not.toHaveBeenCalled();
++
++    const remotePull = useVcsPullAction({ environmentId: otherRemote, cwd: "/remote/repo" });
++    expect((await remotePull.run())._tag).toBe("Success");
++    expect(harness.pullRun).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/apps/web/src/state/sourceControlActions.ts b/apps/web/src/state/sourceControlActions.ts
+index 297ae5717..4b400f90e 100644
+--- a/apps/web/src/state/sourceControlActions.ts
++++ b/apps/web/src/state/sourceControlActions.ts
+@@ -199,8 +199,11 @@ export function useVcsPullAction(scope: SourceControlActionScope) {
+ }
+ 
+ export function useGitStackedAction(scope: SourceControlActionScope) {
++  // The command captures its target in `scope`; the invocation input carries
++  // no environmentId, so the new-work guard is told where it acts explicitly.
+   const runStackedAction = useAtomCommand(vcsActionManager.runStackedAction(scope), {
+     reportFailure: false,
++    resolveTargetEnvironmentId: () => scope.environmentId,
+   });
+   const status = useEnvironmentQuery(
+     scope.environmentId !== null && scope.cwd !== null
+diff --git a/apps/web/src/state/use-atom-command.test.ts b/apps/web/src/state/use-atom-command.test.ts
+new file mode 100644
+index 000000000..c43e0a384
+--- /dev/null
++++ b/apps/web/src/state/use-atom-command.test.ts
+@@ -0,0 +1,208 @@
++import type { AtomCommand } from "@t3tools/client-runtime/state/runtime";
++import { EnvironmentId } from "@t3tools/contracts";
++import * as Cause from "effect/Cause";
++import { AsyncResult, type Atom, AtomRegistry } from "effect/unstable/reactivity";
++import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
++
++import type { AuthoritativeEnvironmentResolution } from "./preferredEnvironment";
++
++vi.mock("./primaryEnvironment", async () => {
++  const { Atom } = await import("effect/unstable/reactivity");
++  return {
++    authoritativeEnvironmentResolutionAtom: Atom.make<AuthoritativeEnvironmentResolution>({
++      status: "unresolved",
++      environmentId: null,
++    }).pipe(Atom.keepAlive),
++    platformPrimaryEnvironmentIdAtom: Atom.make<EnvironmentId | null>(null).pipe(Atom.keepAlive),
++  };
++});
++
++import {
++  authoritativeEnvironmentResolutionAtom,
++  platformPrimaryEnvironmentIdAtom,
++} from "./primaryEnvironment";
++import { runGuardedAtomCommand } from "./use-atom-command";
++
++const local = EnvironmentId.make("env-local");
++const pinnedRemote = EnvironmentId.make("env-remote-a");
++const otherRemote = EnvironmentId.make("env-remote-b");
++
++const registry = AtomRegistry.make();
++const resolutionAtom =
++  authoritativeEnvironmentResolutionAtom as unknown as Atom.Writable<AuthoritativeEnvironmentResolution>;
++const platformAtom =
++  platformPrimaryEnvironmentIdAtom as unknown as Atom.Writable<EnvironmentId | null>;
++
++function setResolution(resolution: AuthoritativeEnvironmentResolution) {
++  registry.set(resolutionAtom, resolution);
++}
++
++function makeCommand(label: string) {
++  const run = vi.fn(async () => AsyncResult.success<string, never>("ran"));
++  const command: AtomCommand<unknown, string, never> = { label, run };
++  return { command, run };
++}
++
++function environmentInput(environmentId: EnvironmentId) {
++  return { environmentId, input: {} };
++}
++
++const NEW_WORK_LABELS = [
++  "environment-data:commands:thread:create",
++  "environment-data:commands:thread:fork",
++  "environment-data:commands:thread:start-turn",
++  "environment-data:commands:thread:revert-checkpoint",
++  "environment-data:commands:project:create",
++  "environment-data:projects:write-file",
++  "environment-data:vcs:pull",
++  "environment-data:vcs:create-worktree",
++  "environment-data:vcs:switch-ref",
++  "environment-data:git:prepare-pull-request-thread",
++  "environment-data:terminal:open",
++  "environment-data:terminal:write",
++  "environment-data:terminal:restart",
++  "environment-data:preview:open",
++];
++
++const PRESERVED_LABELS = [
++  "environment-data:commands:thread:respond-to-approval",
++  "environment-data:commands:thread:respond-to-user-input",
++  "environment-data:commands:thread:interrupt-turn",
++  "environment-data:commands:thread:stop-session",
++  "environment-data:commands:thread:update-metadata",
++  "environment-data:commands:thread:archive",
++  "environment-data:terminal:close",
++  "environment-data:preview:close",
++  "environment-data:vcs:refresh-status",
++];
++
++beforeEach(() => {
++  registry.set(platformAtom, local);
++  setResolution({ status: "pinned", environmentId: pinnedRemote });
++});
++
++describe("runGuardedAtomCommand", () => {
++  it("refuses every new-work command on the platform primary without calling run", async () => {
++    for (const label of NEW_WORK_LABELS) {
++      const { command, run } = makeCommand(label);
++      const result = await runGuardedAtomCommand(registry, command, environmentInput(local), {
++        reportFailure: false,
++      });
++      expect(result._tag, label).toBe("Failure");
++      expect(run, label).not.toHaveBeenCalled();
++      if (result._tag === "Failure") {
++        const error = Cause.squash(result.cause);
++        expect(error).toBeInstanceOf(Error);
++        expect((error as Error).message).toMatch(/shared environment/);
++      }
++    }
++  });
++
++  it("still runs the same commands on the pinned and on any other explicit remote", async () => {
++    for (const label of NEW_WORK_LABELS) {
++      for (const environmentId of [pinnedRemote, otherRemote]) {
++        const { command, run } = makeCommand(label);
++        const result = await runGuardedAtomCommand(
++          registry,
++          command,
++          environmentInput(environmentId),
++        );
++        expect(result._tag, label).toBe("Success");
++        expect(run, label).toHaveBeenCalledTimes(1);
++      }
++    }
++  });
++
++  it("keeps approvals, input replies, stop, close and metadata working on old local work", async () => {
++    for (const label of PRESERVED_LABELS) {
++      const { command, run } = makeCommand(label);
++      const result = await runGuardedAtomCommand(registry, command, environmentInput(local));
++      expect(result._tag, label).toBe("Success");
++      expect(run, label).toHaveBeenCalledTimes(1);
++    }
++  });
++
++  it("restores local work in automatic mode", async () => {
++    setResolution({ status: "automatic", environmentId: local });
++    const { command, run } = makeCommand("environment-data:commands:thread:start-turn");
++    const result = await runGuardedAtomCommand(registry, command, environmentInput(local));
++    expect(result._tag).toBe("Success");
++    expect(run).toHaveBeenCalledTimes(1);
++  });
++
++  it("does not let an unread or unreadable preference permit local work", async () => {
++    for (const resolution of [
++      { status: "unresolved", environmentId: null },
++      { status: "preference-unavailable", environmentId: null },
++    ] as const) {
++      setResolution(resolution);
++      const localCommand = makeCommand("environment-data:terminal:open");
++      const localResult = await runGuardedAtomCommand(
++        registry,
++        localCommand.command,
++        environmentInput(local),
++        { reportFailure: false },
++      );
++      expect(localResult._tag, resolution.status).toBe("Failure");
++      expect(localCommand.run).not.toHaveBeenCalled();
++
++      const remoteCommand = makeCommand("environment-data:terminal:open");
++      await runGuardedAtomCommand(registry, remoteCommand.command, environmentInput(otherRemote));
++      expect(remoteCommand.run, resolution.status).toHaveBeenCalledTimes(1);
++    }
++  });
++
++  it("checks the policy at invocation so an old callback is blocked after a pin change", async () => {
++    setResolution({ status: "automatic", environmentId: local });
++    const { command, run } = makeCommand("environment-data:commands:thread:create");
++    const invoke = () =>
++      runGuardedAtomCommand(registry, command, environmentInput(local), { reportFailure: false });
++
++    expect((await invoke())._tag).toBe("Success");
++    setResolution({ status: "pinned", environmentId: pinnedRemote });
++    expect((await invoke())._tag).toBe("Failure");
++    expect(run).toHaveBeenCalledTimes(1);
++
++    setResolution({ status: "automatic", environmentId: local });
++    expect((await invoke())._tag).toBe("Success");
++    expect(run).toHaveBeenCalledTimes(2);
++  });
++
++  it("uses the explicit target resolver for closure-scoped commands", async () => {
++    const blocked = makeCommand("vcs-action:run-stacked:some-key");
++    const blockedResult = await runGuardedAtomCommand(
++      registry,
++      blocked.command,
++      { actionId: "a", action: "commit" },
++      { reportFailure: false, resolveTargetEnvironmentId: () => local },
++    );
++    expect(blockedResult._tag).toBe("Failure");
++    expect(blocked.run).not.toHaveBeenCalled();
++
++    const remote = makeCommand("vcs-action:run-stacked:other-key");
++    await runGuardedAtomCommand(
++      registry,
++      remote.command,
++      { actionId: "a", action: "commit" },
++      { resolveTargetEnvironmentId: () => otherRemote },
++    );
++    expect(remote.run).toHaveBeenCalledTimes(1);
++  });
++
++  it("prefers the resolver over an environmentId in the input", async () => {
++    const { command, run } = makeCommand("environment-data:terminal:write");
++    const result = await runGuardedAtomCommand(registry, command, environmentInput(otherRemote), {
++      reportFailure: false,
++      resolveTargetEnvironmentId: () => local,
++    });
++    expect(result._tag).toBe("Failure");
++    expect(run).not.toHaveBeenCalled();
++  });
++
++  it("does nothing special in the hosted app with no platform primary", async () => {
++    registry.set(platformAtom, null);
++    const { command, run } = makeCommand("environment-data:commands:thread:start-turn");
++    await runGuardedAtomCommand(registry, command, environmentInput(local));
++    expect(run).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/apps/web/src/state/use-atom-command.ts b/apps/web/src/state/use-atom-command.ts
+index 37ce280e9..b7564bf62 100644
+--- a/apps/web/src/state/use-atom-command.ts
++++ b/apps/web/src/state/use-atom-command.ts
+@@ -5,19 +5,90 @@ import {
+   type AtomCommandResult,
+   runAtomCommand,
+ } from "@t3tools/client-runtime/state/runtime";
++import type { EnvironmentId } from "@t3tools/contracts";
++import * as Cause from "effect/Cause";
++import { AsyncResult, type AtomRegistry } from "effect/unstable/reactivity";
+ import { useCallback, useContext } from "react";
+ 
++import {
++  isNewWorkCommandLabel,
++  NewLocalWorkBlockedError,
++  resolveNewWorkPolicy,
++} from "./preferredEnvironment";
++import {
++  authoritativeEnvironmentResolutionAtom,
++  platformPrimaryEnvironmentIdAtom,
++} from "./primaryEnvironment";
++
++export interface WebAtomCommandOptions<W> extends AtomCommandOptions {
++  /**
++   * Where the command acts when its input carries no `environmentId`, such as
++   * a command created against a closure-scoped target. Environment commands
++   * (`{ environmentId, input }`) need no resolver.
++   */
++  readonly resolveTargetEnvironmentId?: (input: W) => EnvironmentId | null;
++}
++
++function readInputEnvironmentId(input: unknown): EnvironmentId | null {
++  if (typeof input !== "object" || input === null || !("environmentId" in input)) {
++    return null;
++  }
++  const environmentId = input.environmentId;
++  return typeof environmentId === "string" ? (environmentId as EnvironmentId) : null;
++}
++
++/**
++ * Web boundary for the managed shared default: a command that would start new
++ * work on the platform primary is refused at invocation time, against the
++ * policy in force right then, so a stale callback is blocked after a pin
++ * change. Denials settle as the ordinary Failure result so callers keep their
++ * existing error handling; nothing reaches the environment. Everything else
++ * runs untouched.
++ */
++export function runGuardedAtomCommand<W, A, E>(
++  registry: AtomRegistry.AtomRegistry,
++  command: AtomCommand<W, A, E>,
++  input: W,
++  options: WebAtomCommandOptions<W> = {},
++): Promise<AtomCommandResult<A, E>> {
++  if (isNewWorkCommandLabel(command.label)) {
++    const targetEnvironmentId = options.resolveTargetEnvironmentId
++      ? options.resolveTargetEnvironmentId(input)
++      : readInputEnvironmentId(input);
++    const policy = resolveNewWorkPolicy({
++      resolution: registry.get(authoritativeEnvironmentResolutionAtom),
++      platformPrimaryEnvironmentId: registry.get(platformPrimaryEnvironmentIdAtom),
++      targetEnvironmentId,
++    });
++    if (!policy.allowed) {
++      return Promise.resolve(
++        AsyncResult.failure<A, E>(Cause.die(new NewLocalWorkBlockedError(policy.reason))),
++      );
++    }
++  }
++  const { resolveTargetEnvironmentId: _resolveTargetEnvironmentId, ...runOptions } = options;
++  return runAtomCommand(registry, command, input, runOptions);
++}
++
+ export function useAtomCommand<A, E, W>(
+   command: AtomCommand<W, A, E>,
+-  options?: string | AtomCommandOptions,
++  options?: string | WebAtomCommandOptions<W>,
+ ): (value: W) => Promise<AtomCommandResult<A, E>> {
+   const registry = useContext(RegistryContext);
+   const label = typeof options === "string" ? options : (options?.label ?? command.label);
+   const reportFailure = typeof options === "string" ? true : (options?.reportFailure ?? true);
+   const reportDefect = typeof options === "string" ? true : (options?.reportDefect ?? true);
++  const resolveTargetEnvironmentId =
++    typeof options === "string" ? undefined : options?.resolveTargetEnvironmentId;
+ 
+   return useCallback(
+-    (value: W) => runAtomCommand(registry, command, value, { label, reportFailure, reportDefect }),
+-    [command, label, registry, reportDefect, reportFailure],
++    (value: W) =>
++      runGuardedAtomCommand(registry, command, value, {
++        label,
++        reportFailure,
++        reportDefect,
++        ...(resolveTargetEnvironmentId === undefined ? {} : { resolveTargetEnvironmentId }),
++      }),
++    [command, label, registry, reportDefect, reportFailure, resolveTargetEnvironmentId],
+   );
+ }
+diff --git a/packages/contracts/src/settings.test.ts b/packages/contracts/src/settings.test.ts
+index c5d9c52a7..6d25b2fa3 100644
+--- a/packages/contracts/src/settings.test.ts
++++ b/packages/contracts/src/settings.test.ts
+@@ -21,6 +21,37 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+ const encodeServerSettings = Schema.encodeSync(ServerSettings);
+ const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+ 
++describe("ClientSettings preferred environment", () => {
++  it("defaults to null for settings saved before the preference existed", () => {
++    expect(decodeClientSettings({}).preferredEnvironmentId).toBeNull();
++    expect(decodeClientSettings({ wordWrap: false }).preferredEnvironmentId).toBeNull();
++  });
++
++  it("round-trips an environment id and an explicit null", () => {
++    const pinned = decodeClientSettings({ preferredEnvironmentId: "env-shared" });
++    expect(pinned.preferredEnvironmentId).toBe("env-shared");
++    expect(encodeClientSettings(pinned).preferredEnvironmentId).toBe("env-shared");
++
++    const cleared = decodeClientSettings({ preferredEnvironmentId: null });
++    expect(cleared.preferredEnvironmentId).toBeNull();
++  });
++
++  it("accepts a patch that pins or clears the preference", () => {
++    expect(decodeClientSettingsPatch({ preferredEnvironmentId: "env-shared" })).toEqual({
++      preferredEnvironmentId: "env-shared",
++    });
++    expect(decodeClientSettingsPatch({ preferredEnvironmentId: null })).toEqual({
++      preferredEnvironmentId: null,
++    });
++    expect(decodeClientSettingsPatch({})).toEqual({});
++  });
++
++  it("rejects a non-string id", () => {
++    expect(() => decodeClientSettings({ preferredEnvironmentId: 42 })).toThrow();
++    expect(() => decodeClientSettingsPatch({ preferredEnvironmentId: "" })).toThrow();
++  });
++});
++
+ describe("ServerSettings usage price overrides", () => {
+   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
+ 
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index cf68dcf62..0f1275c8e 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -2,7 +2,12 @@ import * as Effect from "effect/Effect";
+ import * as Duration from "effect/Duration";
+ import * as Schema from "effect/Schema";
+ import * as SchemaTransformation from "effect/SchemaTransformation";
+-import { ForwardCompatibleNullable, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
++import {
++  EnvironmentId,
++  ForwardCompatibleNullable,
++  TrimmedNonEmptyString,
++  TrimmedString,
++} from "./baseSchemas.ts";
+ import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+ import { EnvironmentMachineKind, ThreadEnvMode } from "./environment.ts";
+ import {
+@@ -264,6 +269,15 @@ export const ClientSettingsSchema = Schema.Struct({
+   environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
+     Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE)),
+   ),
++  /**
++   * The environment this client treats as its shared default on every launch
++   * and reconnect: the id only, never credentials (those stay in the
++   * connection catalog). `null` keeps the historical behavior of following the
++   * environment the app is served from or embeds.
++   */
++  preferredEnvironmentId: Schema.NullOr(EnvironmentId).pipe(
++    Schema.withDecodingDefault(Effect.succeed(null)),
++  ),
+   glassOpacity: GlassOpacity.pipe(
+     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
+   ),
+@@ -1187,6 +1201,7 @@ export const ClientSettingsPatch = Schema.Struct({
+   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
+   diffLayout: Schema.optionalKey(DiffLayout),
+   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
++  preferredEnvironmentId: Schema.optionalKey(Schema.NullOr(EnvironmentId)),
+   glassOpacity: Schema.optionalKey(GlassOpacity),
+   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
+   fontSizePrompt: Schema.optionalKey(PromptFontSize),
