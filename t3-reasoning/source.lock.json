@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "repository": "https://github.com/pingdotgg/t3code.git",
+  "commit": "9cb40178a53cca279c67a9079afab3cddf6b6ddb",
+  "patches": [
+    {
+      "path": "patches/0001-reasoning.patch",
+      "sha256": "02d105d58e50bf906cb00e7687230363be8bf2d39c3833642edf1af8ab60a52c"
+    },
+    {
+      "path": "patches/0002-desktop-identity.patch",
+      "sha256": "cc839a3d8682e71340e848a10116e7ab1dd530f3e10c3c424d711eb889bcbd09"
+    },
+    {
+      "path": "patches/0003-update-admission.patch",
+      "sha256": "663f8d54b6c79b5eaaebac0fd7e25c4cb84c3fc7ffba0cc2dd7566911cbf712a"
+    }
+  ]
+}

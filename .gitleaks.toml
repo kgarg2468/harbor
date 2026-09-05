@@ -24,13 +24,15 @@ regex = '''tskey[-][A-Za-z0-9-]+'''
 id = "harbor-email"
 description = "Email address outside example.com"
 regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'''
-# @openssh.com is not an address. OpenSSH names its certificate and security-key
-# algorithms with it, ssh-ed25519-cert-v01@openssh.com and sk-ssh-ed25519@openssh.com
-# among them, and those names are protocol constants that must be written exactly. This
-# rule exists to keep a real person's address out of a public repository, and no spelling
-# of an algorithm name is that.
 [rules.allowlist]
-regexes = ['''@example\.com$''', '''@openssh\.com$''']
+# OpenSSH names its certificate and security-key algorithms with @openssh.com.
+# These are protocol constants, not addresses; only the exact identifiers pass.
+regexes = [
+  '''@example\.com$''',
+  '''^ssh-ed25519-cert-v01@openssh\.com$''',
+  '''^sk-ssh-ed25519@openssh\.com$''',
+  '''^-cert-v01@openssh\.com$''',
+]
 
 [[rules]]
 id = "harbor-clerk-user-id"

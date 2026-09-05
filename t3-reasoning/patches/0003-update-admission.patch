@@ -1,0 +1,340 @@
+diff --git a/apps/server/src/updateAdmission.ts b/apps/server/src/updateAdmission.ts
+new file mode 100644
+index 000000000..0995e87c8
+--- /dev/null
++++ b/apps/server/src/updateAdmission.ts
+@@ -0,0 +1,116 @@
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Schema from "effect/Schema";
++import * as Semaphore from "effect/Semaphore";
++
++/**
++ * Raised for a client command that arrives while the server is closed for
++ * maintenance (self-update). Retryable: the gate reopens once maintenance ends.
++ */
++export class UpdateAdmissionClosedError extends Schema.TaggedErrorClass<UpdateAdmissionClosedError>()(
++  "UpdateAdmissionClosedError",
++  {},
++) {
++  readonly retryable = true;
++
++  override get message(): string {
++    return "Server is closed for maintenance; retry the command shortly";
++  }
++}
++
++export interface UpdateAdmissionState {
++  readonly phase: "open" | "maintenance";
++  readonly inFlight: number;
++}
++
++export interface UpdateAdmissionShape {
++  /**
++   * Counts `effect` as an in-flight client command for its whole lifetime.
++   * Fails with `UpdateAdmissionClosedError` if maintenance has begun closing.
++   */
++  readonly withAdmission: <A, E, R>(
++    effect: Effect.Effect<A, E, R>,
++  ) => Effect.Effect<A, E | UpdateAdmissionClosedError, R>;
++  /**
++   * Closes admissions, waits for every already-admitted command to finish,
++   * then runs `callback` with the gate still closed. Reopens on every exit.
++   */
++  readonly withMaintenance: <A, E, R>(callback: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
++  readonly state: Effect.Effect<UpdateAdmissionState>;
++}
++
++export class UpdateAdmission extends Context.Service<UpdateAdmission, UpdateAdmissionShape>()(
++  "t3/updateAdmission",
++) {}
++
++export const make = Effect.fn("updateAdmission.make")(function* () {
++  const ownership = yield* Semaphore.make(1);
++  // Mutated only inside synchronous blocks, so a fiber can never observe a
++  // half-applied transition between the gate flag and the counter.
++  let closed = false;
++  let inFlight = 0;
++  let drained: Deferred.Deferred<void> | undefined;
++
++  const release = Effect.sync(() => {
++    inFlight -= 1;
++    if (inFlight === 0 && drained !== undefined) {
++      Deferred.doneUnsafe(drained, Effect.void);
++    }
++  });
++
++  const withAdmission: UpdateAdmissionShape["withAdmission"] = <A, E, R>(
++    effect: Effect.Effect<A, E, R>,
++  ) =>
++    Effect.uninterruptibleMask((restore) =>
++      Effect.suspend((): Effect.Effect<A, E | UpdateAdmissionClosedError, R> => {
++        if (closed) {
++          return Effect.fail(new UpdateAdmissionClosedError());
++        }
++        inFlight += 1;
++        return restore(effect).pipe(Effect.ensuring(release));
++      }),
++    );
++
++  // Closing and registering the drain waiter happen in one synchronous step,
++  // so the last command's release cannot slip between them.
++  const closeAndAwaitDrain = Effect.suspend(() => {
++    closed = true;
++    if (inFlight === 0) {
++      return Effect.void;
++    }
++    const waiter = Deferred.makeUnsafe<void>();
++    drained = waiter;
++    return Deferred.await(waiter);
++  });
++
++  const reopen = Effect.sync(() => {
++    closed = false;
++    drained = undefined;
++  });
++
++  const withMaintenance: UpdateAdmissionShape["withMaintenance"] = (callback) =>
++    ownership.withPermits(1)(
++      Effect.uninterruptibleMask((restore) =>
++        restore(closeAndAwaitDrain).pipe(
++          Effect.andThen(restore(callback)),
++          Effect.ensuring(reopen),
++        ),
++      ),
++    );
++
++  const state = Effect.sync((): UpdateAdmissionState => ({
++    phase: closed ? "maintenance" : "open",
++    inFlight,
++  }));
++
++  // A maintenance waiting for the drain must not outlive the owning scope.
++  yield* Effect.addFinalizer(() =>
++    Effect.suspend(() => (drained === undefined ? Effect.void : Deferred.interrupt(drained))),
++  );
++
++  return UpdateAdmission.of({ withAdmission, withMaintenance, state });
++});
++
++export const layer = Layer.effect(UpdateAdmission, make());
+diff --git a/apps/server/src/updateAdmission.test.ts b/apps/server/src/updateAdmission.test.ts
+new file mode 100644
+index 000000000..1d92716f7
+--- /dev/null
++++ b/apps/server/src/updateAdmission.test.ts
+@@ -0,0 +1,212 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as Cause from "effect/Cause";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as Scope from "effect/Scope";
++
++import { make, UpdateAdmissionClosedError, type UpdateAdmissionShape } from "./updateAdmission.ts";
++
++/**
++ * Forks a command that stays admitted until `release` completes, then waits
++ * until the gate actually counted it so the test never races the fork.
++ */
++const holdCommand = Effect.fn("holdCommand")(function* (admission: UpdateAdmissionShape) {
++  const release = yield* Deferred.make<void>();
++  const fiber = yield* admission.withAdmission(Deferred.await(release)).pipe(Effect.forkChild);
++  yield* Effect.yieldNow;
++  assert.equal((yield* admission.state).inFlight, 1);
++  return { fiber, release };
++});
++
++/** Forks a maintenance whose callback signals `started` and blocks until `finish`. */
++const forkMaintenance = Effect.fn("forkMaintenance")(function* (admission: UpdateAdmissionShape) {
++  const started = yield* Deferred.make<void>();
++  const finish = yield* Deferred.make<void>();
++  const fiber = yield* admission
++    .withMaintenance(
++      Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(finish))),
++    )
++    .pipe(Effect.forkChild);
++  yield* Effect.yieldNow;
++  return { fiber, started, finish };
++});
++
++describe("updateAdmission", () => {
++  it.effect("starts open with nothing in flight and runs admitted commands", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++
++      const result = yield* admission.withAdmission(Effect.succeed("ok"));
++      assert.equal(result, "ok");
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("an admitted command blocks the maintenance callback until it completes", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const command = yield* holdCommand(admission);
++      const maintenance = yield* forkMaintenance(admission);
++
++      assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 1 });
++      assert.isFalse(yield* Deferred.isDone(maintenance.started));
++
++      yield* Deferred.succeed(command.release, undefined);
++      yield* Fiber.join(command.fiber);
++      yield* Deferred.await(maintenance.started);
++      assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++      yield* Deferred.succeed(maintenance.finish, undefined);
++      yield* Fiber.join(maintenance.fiber);
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("rejects new commands as soon as closing begins, without counting them", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const command = yield* holdCommand(admission);
++      const maintenance = yield* forkMaintenance(admission);
++
++      const error = yield* admission.withAdmission(Effect.succeed("late")).pipe(Effect.flip);
++      assert.instanceOf(error, UpdateAdmissionClosedError);
++      assert.isTrue(error.retryable);
++      assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 1 });
++
++      yield* Deferred.succeed(command.release, undefined);
++      yield* Deferred.succeed(maintenance.finish, undefined);
++      yield* Fiber.join(maintenance.fiber);
++
++      const result = yield* admission.withAdmission(Effect.succeed("after"));
++      assert.equal(result, "after");
++    }),
++  );
++
++  it.effect("a failing command releases its count", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const error = yield* admission.withAdmission(Effect.fail("boom")).pipe(Effect.flip);
++      assert.equal(error, "boom");
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("an interrupted command releases its count and wakes a waiting maintenance", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const command = yield* holdCommand(admission);
++      const maintenance = yield* forkMaintenance(admission);
++
++      yield* Fiber.interrupt(command.fiber);
++      yield* Deferred.await(maintenance.started);
++      assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++      yield* Deferred.succeed(maintenance.finish, undefined);
++      yield* Fiber.join(maintenance.fiber);
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("serializes concurrent maintenance and keeps the gate closed between them", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const first = yield* forkMaintenance(admission);
++      const second = yield* forkMaintenance(admission);
++
++      yield* Deferred.await(first.started);
++      assert.isFalse(yield* Deferred.isDone(second.started));
++
++      yield* Deferred.succeed(first.finish, undefined);
++      yield* Fiber.join(first.fiber);
++      yield* Deferred.await(second.started);
++      assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++      yield* Deferred.succeed(second.finish, undefined);
++      yield* Fiber.join(second.fiber);
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("cancelling maintenance while it waits for the drain reopens the gate", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const command = yield* holdCommand(admission);
++      const maintenance = yield* forkMaintenance(admission);
++
++      yield* Fiber.interrupt(maintenance.fiber);
++      assert.isFalse(yield* Deferred.isDone(maintenance.started));
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 1 });
++
++      const result = yield* admission.withAdmission(Effect.succeed("admitted"));
++      assert.equal(result, "admitted");
++
++      yield* Deferred.succeed(command.release, undefined);
++      yield* Fiber.join(command.fiber);
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("a failing maintenance callback reopens the gate and propagates the error", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const error = yield* admission
++        .withMaintenance(Effect.fail("update failed"))
++        .pipe(Effect.flip);
++      assert.equal(error, "update failed");
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("an interrupted maintenance callback reopens the gate", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const maintenance = yield* forkMaintenance(admission);
++      yield* Deferred.await(maintenance.started);
++      assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++      yield* Fiber.interrupt(maintenance.fiber);
++      const exit = yield* Fiber.await(maintenance.fiber);
++      assert.isTrue(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause));
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("does not lose the wakeup when the last command finishes at the close boundary", () =>
++    Effect.gen(function* () {
++      const admission = yield* make();
++      const command = yield* holdCommand(admission);
++
++      // Close and finish the last command in the same scheduler pass: the
++      // maintenance fiber must observe the drain either way.
++      const maintenance = yield* admission
++        .withMaintenance(Effect.succeed("ran"))
++        .pipe(Effect.forkChild);
++      yield* Deferred.succeed(command.release, undefined);
++
++      assert.equal(yield* Fiber.join(maintenance), "ran");
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++
++  it.effect("closing the owning scope wakes a maintenance stuck waiting for the drain", () =>
++    Effect.gen(function* () {
++      const scope = yield* Scope.make();
++      const admission = yield* make().pipe(Scope.provide(scope));
++      const command = yield* holdCommand(admission);
++      const maintenance = yield* forkMaintenance(admission);
++
++      yield* Scope.close(scope, Exit.void);
++      const exit = yield* Fiber.await(maintenance.fiber);
++      assert.isTrue(Exit.isFailure(exit));
++      assert.isFalse(yield* Deferred.isDone(maintenance.started));
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 1 });
++
++      yield* Deferred.succeed(command.release, undefined);
++      yield* Fiber.join(command.fiber);
++      assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++    }),
++  );
++});
