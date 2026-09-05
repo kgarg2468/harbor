@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Insomnia
 
@@ -81,4 +82,16 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(std.sessionFile.path.hasSuffix("/Library/Application Support/Insomnia/session.json"))
         XCTAssertTrue(std.backstopPlist.path.hasSuffix("/Library/LaunchAgents/com.insomnia.backstop.plist"))
     }
+    func testEveryJournalAccessHonorsExternalFlock() throws {
+        let fd = open(home.paths.recoveryLock.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = flock(fd, LOCK_UN); _ = close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        XCTAssertThrowsError(try store.loadSession())
+        XCTAssertThrowsError(try store.loadState())
+        XCTAssertThrowsError(try store.saveState(.clean))
+        XCTAssertThrowsError(try store.saveSession(Session(startedAt: Date(), endsAt: Date())))
+        XCTAssertThrowsError(try store.deleteSession())
+    }
+
 }

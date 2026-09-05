@@ -149,7 +149,10 @@ final class SessionLifecycleTests: XCTestCase {
         XCTAssertFalse(m.isActive)
         XCTAssertFalse(m.sleepHeld)
         XCTAssertFalse(h.guardFake.sleepDisabled)
-        XCTAssertEqual(try h.store.loadState()?.sleepDisabledByUs, true)
+        // Deliberately inspect bytes while the owner is suspended; Store access
+        // from this independent task must refuse the held transaction lease.
+        let bytes = try Data(contentsOf: h.home.paths.stateFile)
+        XCTAssertTrue(try Store.makeDecoder().decode(RuntimeState.self, from: bytes).sleepDisabledByUs)
         await gate.open(); await reconcile.value
         XCTAssertTrue(m.sleepHeld)
         XCTAssertTrue(h.guardFake.sleepDisabled)
@@ -276,6 +279,181 @@ final class SessionLifecycleTests: XCTestCase {
         try FileManager.default.removeItem(at: stateFile)
         await m.end(reason: .user)
         try assertEnded(m, h)
+    }
+
+    func testExternalRecoveryCannotBeResurrectedByExtensionOrLowPower() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        try h.store.deleteSession(); try h.store.saveState(.clean)
+        h.guardFake.sleepDisabled = false
+        let scheduled = h.backstop.scheduled.count
+        await m.extend(by: 3600)
+        let changed = await m.setLowPower(true)
+        XCTAssertFalse(changed)
+        XCTAssertFalse(m.isActive)
+        XCTAssertNil(try h.store.loadSession())
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertEqual(h.backstop.scheduled.count, scheduled)
+        XCTAssertFalse(h.guardFake.lowPower)
+    }
+
+    func testStaleEndDoesNotDeleteReplacementOrRestoreItsChanges() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        let replacement = Session(startedAt: h.clock.now.addingTimeInterval(1), endsAt: h.clock.now.addingTimeInterval(7200))
+        try h.store.saveSession(replacement)
+        var replacementState = RuntimeState.clean; replacementState.lowPowerSetByUs = true
+        try h.store.saveState(replacementState)
+        let calls = h.guardFake.calls
+        await m.end(reason: .user)
+        XCTAssertFalse(m.isActive)
+        XCTAssertEqual(try h.store.loadSession(), replacement)
+        XCTAssertEqual(try h.store.loadState(), replacementState)
+        XCTAssertEqual(h.guardFake.calls, calls)
+        XCTAssertEqual(h.backstop.clears, 0)
+    }
+
+    func testSecondManagerStartDoesNotOverwriteValidSession() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let first = h.makeManager(); await first.start(duration: 3600)
+        let original = try h.store.loadSession()
+        let second = h.makeManager(); await second.start(duration: 7200)
+        XCTAssertFalse(second.isActive)
+        XCTAssertEqual(try h.store.loadSession(), original)
+        XCTAssertEqual(h.backstop.scheduled.count, 1)
+        await first.end(reason: .user)
+    }
+
+    func testFractionalClockSessionRetainsDurableOwnership() async throws {
+        let h = Harness(now: Date(timeIntervalSince1970: 1_800_000_000.123)); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        await m.extend(by: 600)
+        XCTAssertTrue(m.isActive)
+        XCTAssertEqual(m.session?.extensions, [600])
+        let changed = await m.setLowPower(true)
+        XCTAssertTrue(changed)
+        await m.end(reason: .user)
+        try assertEnded(m, h)
+    }
+
+    func testBackstopWaitsForWholeStartThenExtensionRereadsRecovery() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager()
+        let gate = AsyncGate(); h.guardFake.sleepGate = gate
+        let start = Task { await m.start(duration: 3600) }
+        await gate.waitUntilStarted()
+        let peer = try JournalLockPeer(paths: h.home.paths, recovery: true); defer { peer.release() }
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertFalse(peer.hasLease, "backstop must wait even after journal writes finish")
+        await gate.open(); await start.value
+        try await peer.waitForLease()
+        let extending = Task { await m.extend(by: 600) }
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(h.backstop.scheduled.count, 1)
+        peer.release(); await extending.value
+        XCTAssertFalse(m.isActive)
+        XCTAssertNil(try h.store.loadSession())
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertEqual(h.backstop.scheduled.count, 1)
+    }
+
+    func testNewStartWaitsForRecoveryBeforeReadingOwnership() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager()
+        var old = RuntimeState.clean; old.lowPowerSetByUs = true
+        try h.store.saveState(old)
+        let peer = try JournalLockPeer(paths: h.home.paths, recovery: true); defer { peer.release() }
+        try await peer.waitForLease()
+        let start = Task { await m.start(duration: 3600) }
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertFalse(m.isActive)
+        XCTAssertEqual(h.guardFake.calls, [])
+        peer.release(); await start.value
+        XCTAssertTrue(m.isActive)
+        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1"])
+        XCTAssertFalse(m.state.lowPowerSetByUs)
+        await m.end(reason: .user)
+    }
+
+    func testBackstopWaitsForLowPowerSideEffect() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        let gate = AsyncGate(); h.guardFake.lowPowerGate = gate
+        let power = Task { await m.setLowPower(true) }
+        await gate.waitUntilStarted()
+        let peer = try JournalLockPeer(paths: h.home.paths); defer { peer.release() }
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertFalse(peer.hasLease)
+        await gate.open()
+        let changed = await power.value
+        XCTAssertTrue(changed)
+        try await peer.waitForLease()
+        peer.release()
+        await m.end(reason: .user)
+        try assertEnded(m, h)
+    }
+
+    func testLowPowerRereadsRecoveryWithoutAnEarlierMutation() async throws {
+        for turnOn in [true, false] {
+            let h = Harness(); defer { h.home.destroy() }
+            let m = h.makeManager(); await m.start(duration: 3600)
+            if !turnOn { _ = await m.setLowPower(true) }
+            try h.store.deleteSession(); try h.store.saveState(.clean)
+            let calls = h.guardFake.calls
+            let changed = await m.setLowPower(turnOn)
+            XCTAssertFalse(changed)
+            XCTAssertFalse(m.isActive)
+            XCTAssertEqual(h.guardFake.calls, calls)
+            XCTAssertEqual(try h.store.loadState(), .clean)
+        }
+    }
+
+    func testIdenticalTimesReplacementCannotBeExtendedOrEndedByStaleManager() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        let original = try XCTUnwrap(try h.store.loadSession())
+        let replacement = Session(startedAt: original.startedAt, endsAt: original.endsAt, extensions: original.extensions)
+        try h.store.saveSession(replacement)
+        let calls = h.guardFake.calls
+        await m.extend(by: 600)
+        await m.end(reason: .user)
+        XCTAssertFalse(m.isActive)
+        XCTAssertEqual(try h.store.loadSession(), replacement)
+        XCTAssertEqual(h.backstop.scheduled.count, 1)
+        XCTAssertEqual(h.backstop.clears, 0)
+        XCTAssertEqual(h.guardFake.calls, calls)
+    }
+
+    func testQueuedStartAndReconcileRefuseInstallerGuardAfterLeaseAcquisition() async throws {
+        for reconciling in [false, true] {
+            let h = Harness(); defer { h.home.destroy() }
+            if reconciling {
+                try h.store.saveSession(Session(startedAt: h.clock.now, endsAt: h.clock.now.addingTimeInterval(3600)))
+            }
+            var oldState = RuntimeState.clean; oldState.lowPowerSetByUs = true
+            try h.store.saveState(oldState)
+            let originalSession = try h.store.loadSession()
+            let installing = Locked(false)
+            let clock = h.clock
+            let m = SessionManager(paths: h.home.paths, sleepGuard: h.guardFake,
+                                   processControl: h.procs, backstop: h.backstop,
+                                   clock: { clock.now }, installerGuardActive: { installing.value })
+            let peer = try JournalLockPeer(paths: h.home.paths); defer { peer.release() }
+            try await peer.waitForLease()
+            let request = Task {
+                if reconciling { await m.reconcile() } else { await m.start(duration: 3600) }
+            }
+            try await Task.sleep(for: .milliseconds(60))
+            installing.value = true
+            peer.release(); await request.value
+            XCTAssertFalse(m.isActive)
+            XCTAssertEqual(h.guardFake.calls, [])
+            XCTAssertEqual(h.backstop.scheduled, [])
+            XCTAssertEqual(h.backstop.clears, 0)
+            XCTAssertEqual(try h.store.loadState(), oldState)
+            XCTAssertEqual(try h.store.loadSession(), originalSession)
+            XCTAssertTrue(m.lastError?.contains("installation") == true)
+        }
     }
 
 }

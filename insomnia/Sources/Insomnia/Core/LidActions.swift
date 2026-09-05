@@ -26,6 +26,7 @@ final class LidActions {
             Log.info("lid closed: no session, nothing to do")
             return
         }
+        let requestedSession = manager.session
         let config = manager.config
 
         if config.muteOnLidClose {
@@ -38,7 +39,7 @@ final class LidActions {
         }
 
         let dockerGroup = await docker.idleDockerGroup(config: config)
-        guard manager.isActive, !Task.isCancelled else { return }
+        guard manager.isActive, manager.session == requestedSession, !Task.isCancelled else { return }
         if let dockerGroup {
             freeze(dockerGroup, docker: true, manager: manager)
         }
@@ -60,33 +61,36 @@ final class LidActions {
 
     private func muteSavingCurrent(_ manager: SessionManager) {
         do {
-            let current = try audio.read()
-            try manager.journal { s in
-                // Keep an earlier save if a previous close was never undone.
-                if s.savedOutputVolume == nil { s.savedOutputVolume = current.volume }
-                if s.savedMuted == nil { s.savedMuted = current.muted }
+            try manager.withLidTransaction {
+                let current = try audio.read()
+                try manager.journal { s in
+                    // Keep an earlier save if a previous close was never undone.
+                    if s.savedOutputVolume == nil { s.savedOutputVolume = current.volume }
+                    if s.savedMuted == nil { s.savedMuted = current.muted }
+                }
+                try audio.mute()
+                Log.info("muted (was volume \(current.volume), muted \(current.muted))")
             }
-            try audio.mute()
-            Log.info("muted (was volume \(current.volume), muted \(current.muted))")
         } catch {
             Log.error("mute on lid close failed: \(error.localizedDescription)")
         }
     }
 
     private func freeze(_ group: FreezeGroup, docker: Bool, manager: SessionManager) {
-        let already = Set(manager.state.frozenPids)
-        let pids = group.pids.filter { !already.contains($0) }
-        guard !pids.isEmpty else { return }
         do {
-            try manager.journal { s in
-                s.frozenPids.append(contentsOf: pids)
-                if docker { s.dockerFrozen = true }
+            try manager.withLidTransaction {
+                let already = Set(manager.state.frozenPids)
+                let pids = group.pids.filter { !already.contains($0) }
+                guard !pids.isEmpty else { return }
+                try manager.journal { s in
+                    s.frozenPids.append(contentsOf: pids)
+                    if docker { s.dockerFrozen = true }
+                }
+                freezer.suspend(pids: pids, expectedParents: group.expectedParents)
+                Log.info("froze \(group.name) (\(pids.count) pid(s))")
             }
         } catch {
             Log.error("could not journal freeze of \(group.bundleId): \(error.localizedDescription); left running")
-            return
         }
-        freezer.suspend(pids: pids, expectedParents: group.expectedParents)
-        Log.info("froze \(group.name) (\(pids.count) pid(s))")
     }
 }
