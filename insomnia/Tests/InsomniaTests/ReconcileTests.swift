@@ -272,7 +272,12 @@ final class ReconcileTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
         XCTAssertFalse(m.isActive)
-        XCTAssertNil(try real.store.loadSession())
-        XCTAssertEqual(real.guardFake.calls.last, "disablesleep 0")
+        // End clears the published session before its async restoration finishes.
+        // Wait for that transaction to release its lease before reading the journal.
+        try await JournalLock.withLease(at: real.home.paths.recoveryLock, timeout: .seconds(8)) {
+            XCTAssertFalse(m.cleanupPending)
+            XCTAssertNil(try real.store.loadSession())
+            XCTAssertEqual(real.guardFake.calls.last, "disablesleep 0")
+        }
     }
 }
