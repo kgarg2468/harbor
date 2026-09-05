@@ -122,12 +122,26 @@ final class SessionManager {
         await operationGate.acquire()
         defer { operationGate.release() }
         guard requestedGeneration == generation, !Task.isCancelled else { return }
-        await startUnlocked(duration: duration)
+        await withRecoveryLease {
+            guard requestedGeneration == generation, !Task.isCancelled else { return }
+            await startUnlocked(duration: duration)
+        }
     }
 
     private func startUnlocked(duration: TimeInterval) async {
-        guard session == nil else {
-            Log.info("start ignored: session already active")
+        do {
+            if let recorded = try store.loadSession(), !recorded.isExpired(at: clock()) {
+                if session != nil, try validateOwnership() {
+                    Log.info("start ignored: session already active")
+                    return
+                }
+                fail("could not start: a session already exists on disk")
+                return
+            }
+            if session != nil { invalidateLocalSession() }
+            state = try store.loadState() ?? .clean
+        } catch {
+            fail("could not read journal before start: \(error.localizedDescription)")
             return
         }
         // A previous failed cleanup still owns those changes. Restore before
@@ -200,11 +214,15 @@ final class SessionManager {
         await operationGate.acquire()
         defer { operationGate.release() }
         guard requestedGeneration == generation, !Task.isCancelled else { return }
-        await extendUnlocked(by: extra)
+        await withRecoveryLease {
+            guard requestedGeneration == generation, !Task.isCancelled else { return }
+            await extendUnlocked(by: extra)
+        }
     }
 
     private func extendUnlocked(by extra: TimeInterval) async {
-        guard let current = session else { return }
+        guard (try? validateOwnership(requireActive: true)) == true,
+              let current = session else { return }
         let updated = SessionMath.extended(current, by: extra, now: clock(), maxDuration: config.maxDuration)
         // A failed replacement may also have lost its previous recovery job.
         do {
@@ -241,7 +259,10 @@ final class SessionManager {
             pendingEnds -= 1
             operationGate.release()
         }
-        await endUnlocked(reason: reason)
+        await withRecoveryLease {
+            guard try validateOwnership() else { return }
+            await endUnlocked(reason: reason)
+        }
     }
 
     private func endUnlocked(reason: EndReason) async {
@@ -285,9 +306,20 @@ final class SessionManager {
     /// in sync. Throws if state.json cannot be written; callers must then
     /// skip the side effect.
     func journal(_ mutate: (inout RuntimeState) -> Void) throws {
-        var s = state
-        mutate(&s)
-        try persistState(s)
+        try JournalLock.withLock(at: paths.recoveryLock) {
+            var s = try store.loadState() ?? .clean
+            mutate(&s)
+            try persistState(s)
+        }
+    }
+
+    /// Short, non-suspending lid transaction: validity, journal, and effect are
+    /// all protected. Contention skips this close action instead of blocking UI.
+    func withLidTransaction(_ operation: () throws -> Void) throws {
+        try JournalLock.withLock(at: paths.recoveryLock) {
+            guard isActive, try validateOwnership(requireActive: true) else { return }
+            try operation()
+        }
     }
 
     /// Low Power Mode with journaling: the flag is written before `pmset -b
@@ -301,7 +333,14 @@ final class SessionManager {
         defer { operationGate.release() }
         guard requestedGeneration == generation, !Task.isCancelled,
               !on || (isActive && session?.startedAt == requestedSession) else { return false }
-        let changed = await setLowPowerUnlocked(on)
+        var changed = false
+        await withRecoveryLease {
+            guard requestedGeneration == generation, !Task.isCancelled,
+                  try validateOwnership(requireActive: on),
+                  !on || isActive else { return }
+            state = try store.loadState() ?? .clean
+            changed = await setLowPowerUnlocked(on)
+        }
         return changed && requestedGeneration == generation && pendingEnds == 0
     }
 
@@ -347,7 +386,10 @@ final class SessionManager {
         await operationGate.acquire()
         defer { operationGate.release() }
         guard requestedGeneration == generation else { return }
-        undoLidActionsUnlocked()
+        await withRecoveryLease {
+            guard requestedGeneration == generation, try validateOwnership() else { return }
+            undoLidActionsUnlocked()
+        }
     }
 
     private func undoLidActionsUnlocked() {
@@ -371,13 +413,16 @@ final class SessionManager {
     func restoreAll() async {
         await operationGate.acquire()
         defer { operationGate.release() }
-        await restoreAllUnlocked()
+        await withRecoveryLease {
+            guard try validateOwnership() else { return }
+            await restoreAllUnlocked()
+        }
     }
 
     private func restoreAllUnlocked() async {
         var s: RuntimeState
         do {
-            s = try store.loadState() ?? state
+            s = try store.loadState() ?? .clean
         } catch {
             Log.error("state.json unreadable (\(error.localizedDescription)); assuming in-memory state")
             s = state
@@ -450,11 +495,17 @@ final class SessionManager {
         await operationGate.acquire()
         defer { operationGate.release() }
         guard requestedGeneration == generation, !Task.isCancelled else { return }
-        await reconcileUnlocked()
+        await withRecoveryLease {
+            guard requestedGeneration == generation, !Task.isCancelled else { return }
+            await reconcileUnlocked()
+        }
     }
 
     private func reconcileUnlocked() async {
         let now = clock()
+        // Another process may have recovered since this manager was created.
+        state = (try? store.loadState()) ?? .clean
+        if session != nil, (try? validateOwnership()) != true { return }
         var onDisk: Session?
         do {
             onDisk = try store.loadSession()
@@ -566,6 +617,46 @@ final class SessionManager {
     }
 
     // MARK: Private
+
+    private func withRecoveryLease(_ operation: () async throws -> Void) async {
+        do {
+            try await JournalLock.withLease(at: paths.recoveryLock, operation)
+        } catch {
+            fail("could not coordinate recovery: \(error.localizedDescription)")
+        }
+    }
+
+    /// Compare serialized identity because ISO8601 persistence drops fractional
+    /// seconds. A stale manager must never delete or resurrect another journal.
+    private func validateOwnership(requireActive: Bool = false) throws -> Bool {
+        let recorded = try store.loadSession()
+        if let session {
+            guard let recorded,
+                  try Store.makeEncoder().encode(session) == Store.makeEncoder().encode(recorded) else {
+                invalidateLocalSession()
+                state = try store.loadState() ?? .clean
+                return false
+            }
+        } else if requireActive || (recorded.map { !$0.isExpired(at: clock()) } ?? false) {
+            return false
+        }
+        // Recovery itself handles unreadable state conservatively; mutations
+        // require a successful fresh read before writing any ownership.
+        if requireActive { state = try store.loadState() ?? .clean }
+        return true
+    }
+
+    private func invalidateLocalSession() {
+        generation &+= 1
+        services?.stop()
+        stopTimers()
+        session = nil
+        sleepHeld = false
+        scheduledDeadline = nil
+        remainingText = ""
+        countdownText = ""
+        countdownPaused = false
+    }
 
     /// Undo the journal written at the top of `start`.
     private func rollBackStart() {

@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Insomnia
 
@@ -186,6 +187,56 @@ final class LidActionsTests: XCTestCase {
 
         XCTAssertEqual(h.procs.suspended, [[100, 101, 102]])
         XCTAssertEqual(try h.store.loadState(), RuntimeState.clean)
+    }
+
+    func testExternalRecoveryPreventsStaleLidSideEffects() async throws {
+        let (m, actions) = await make()
+        await m.start(duration: 3600)
+        try h.store.deleteSession(); try h.store.saveState(.clean)
+        await actions.onClose()
+        XCTAssertEqual(h.audio.mutes, 0)
+        XCTAssertEqual(h.procs.suspended, [])
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertFalse(m.isActive)
+    }
+
+    func testMuteAndFreezeHoldLeaseThroughSideEffects() async throws {
+        let (m, actions) = await make()
+        await m.start(duration: 3600)
+        let lockPath = h.home.paths.recoveryLock.path
+        let excluded = Locked(true)
+        let probe: @Sendable () -> Void = {
+            let fd = open(lockPath, O_RDWR | O_CLOEXEC)
+            defer { _ = close(fd) }
+            if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+                excluded.value = false
+                _ = flock(fd, LOCK_UN)
+            }
+        }
+        h.audio.onMute = probe
+        h.procs.onSuspend = { _ in probe() }
+        await actions.onClose()
+        XCTAssertEqual(h.audio.mutes, 1)
+        XCTAssertEqual(h.procs.suspended.count, 2)
+        XCTAssertTrue(excluded.value)
+        await m.end(reason: .user)
+    }
+
+    func testBackstopCanRecoverDuringDockerProbeAndPreventsLaterFreeze() async throws {
+        let gate = AsyncGate()
+        let (m, actions) = await make(dockerIdle: { await gate.wait(); return true })
+        await m.start(duration: 3600)
+        let close = Task { await actions.onClose() }
+        await gate.waitUntilStarted()
+        let peer = try JournalLockPeer(paths: h.home.paths, recovery: true); defer { peer.release() }
+        try await peer.waitForLease()
+        peer.release()
+        // Wait for peer release before exercising the stale-session check.
+        try await JournalLock.withLease(at: h.home.paths.recoveryLock) {}
+        await gate.open(); await close.value
+        XCTAssertEqual(h.procs.suspended, [[100, 101, 102]])
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertFalse(m.isActive)
     }
 
     func testAudioReadFailureSkipsMuteButStillFreezes() async throws {
