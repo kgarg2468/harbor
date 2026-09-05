@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly, materialized as one of two build variants. `source.lock.json` pins
 upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, a catalog of nine checksummed patches, and
+`v0.0.39-nightly.20260905.1284`, a catalog of ten checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;
@@ -181,3 +181,7 @@ lineage navigation to the web/desktop client.
 The common `patches/0008-shared-default.patch` persists a preferred shared
 environment before selecting it, retains that choice when disconnected, and
 prevents new work from falling back to the local embedded server.
+
+The common `patches/0009-activity-wiring.patch` tracks queued commands, required
+event delivery, reactor work and detached children, including fork handoff.
+Native provider lifecycle and updater activation remain separate changes.

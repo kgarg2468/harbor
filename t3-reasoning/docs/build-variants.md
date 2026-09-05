@@ -35,11 +35,12 @@ same snapshots differently. The variants differ only by the identity patch.
     { "id": "thread-fork-backend", "path": "patches/0006-thread-fork-backend.patch", "sha256": "..." },
     { "id": "thread-fork-ui", "path": "patches/0007-thread-fork-ui.patch", "sha256": "..." },
     { "id": "shared-default", "path": "patches/0008-shared-default.patch", "sha256": "..." },
+    { "id": "activity-wiring", "path": "patches/0009-activity-wiring.patch", "sha256": "..." },
     { "id": "reasoning-identity", "path": "patches/0002-reasoning-identity.patch", "sha256": "..." }
   ],
   "variants": {
-    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default"],
-    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "reasoning-identity"]
+    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "activity-wiring"],
+    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "activity-wiring", "reasoning-identity"]
   }
 }
 ```
@@ -92,6 +93,7 @@ can pick up the first variant's bundles.
 | `thread-fork-backend` | yes | yes | durable conversation forks, checkpoint worktrees and first-turn context handoff |
 | `thread-fork-ui` | yes | yes | completed-turn fork dialog and lineage navigation in web/desktop |
 | `shared-default` | yes | yes | preferred environment persistence and protection against local work fallback |
+| `activity-wiring` | yes | yes | tracked command/event queues, reactor descendants and private provider delivery receipts |
 | `reasoning-identity` | no | yes | Reasoning bundle id, name, scheme, state home, artifact name, disabled official feed, manual macOS updater |
 
 The `managed-nightly` tree keeps upstream's packaged identity: bundle id
@@ -139,6 +141,11 @@ After `0007`, the managed Nightly tree is
 After `0008`, the managed Nightly tree is
 `be6e83b449909fdf6ef46139831234e21d9aac6a` and the Reasoning tree is
 `755cdd6d4cf2b3b904e3d71b81e4683d74680b75`. Both variants share the preferred-environment behavior.
+
+After `0009`, the managed Nightly tree is
+`b14efcec4e2cd55694c55204e982683214522a58` and the Reasoning tree is
+`c711da6a16966c36187d4f20b5b21f44c10039f7`. The Reasoning tree matches the independently tested
+combined fork/activity source exactly.
 
 ## Not ready for deployment
 
