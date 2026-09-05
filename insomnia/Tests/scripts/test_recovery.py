@@ -1,5 +1,6 @@
 """Hermetic script copies: every machine-changing command is replaced by a shim."""
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ if name == 'sudo':
     if '-l' in args: sys.exit(int(os.environ.get('VERIFY_FAIL', '0')))
     args = [a for a in args if a != '-n']
     os.execvp(args[0], args)
+if name == 'mv': os.execv('/bin/mv', ['/bin/mv']+args)
 if name == 'lockf':
     (root/'lock-entered').touch()
     os.execv('/usr/bin/lockf', ['/usr/bin/lockf']+args)
@@ -41,6 +43,41 @@ if name == 'plutil':
     os.execv('/usr/bin/plutil', ['/usr/bin/plutil']+args)
 '''
 
+# Executed only in fixture paths; simulates the native contract without signals,
+# CoreAudio, ServiceManagement or Keychain. Real implementations have Swift tests.
+HELPER = '''#!/usr/bin/python3
+import fcntl, json, os, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(os.environ['FIXTURE'])
+with (root/'calls').open('a') as f: f.write(json.dumps(['native', sys.argv[0]]+args)+'\\n')
+if args == ['--maintenance-protocol']:
+    print('insomnia-maintenance-v1'); sys.exit(0)
+support = pathlib.Path(os.environ.get('INSOMNIA_HOME') or pathlib.Path(os.environ['HOME'])/'Library/Application Support/Insomnia')
+with (support/'recovery.lock').open('a') as held:
+    try: fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError: pass
+    else: sys.exit(91)
+if args[0] == '--maintenance-uninstall': sys.exit(int(os.environ.get('MAINTENANCE_FAIL', '0')))
+p = pathlib.Path(args[1]); state = json.loads(p.read_text())
+if args[0] == '--validate-recovery-state':
+    if not isinstance(state, dict): sys.exit(1)
+    for key in ['sleepDisabledByUs', 'lowPowerSetByUs', 'originalSleepDisabled', 'originalBatteryLowPowerMode']:
+        if key in state and type(state[key]) != bool: sys.exit(1)
+    pids = state.get('frozenPids', [])
+    sys.exit(0 if isinstance(pids, list) and all(type(p) == int and 0 < p <= 2147483647 for p in pids) else 1)
+if args[0] != '--recover-owned': sys.exit(2)
+owned = state.get('frozenProcesses', [])
+legacy = set(state.get('frozenPids', [])) - {p['pid'] for p in owned}
+remaining = [p for p in owned if str(p['pid']) == os.environ.get('FAIL_PID') and str(p['pid']) != os.environ.get('EXITED_PID')]
+state['frozenProcesses'] = remaining
+state['frozenPids'] = sorted(legacy | {p['pid'] for p in remaining})
+if not state['frozenPids']: state['dockerFrozen'] = False
+if state.get('savedOutputDeviceUID') and not os.environ.get('AUDIO_FAIL'):
+    for key in ['savedOutputDeviceUID', 'savedMuted', 'savedOutputVolume']: state.pop(key, None)
+p.write_text(json.dumps(state))
+sys.exit(int(bool(state['frozenPids'] or any(k in state for k in ['savedMuted', 'savedOutputVolume', 'savedOutputDeviceUID']))))
+'''
+
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -52,7 +89,7 @@ class Fixture(unittest.TestCase):
         self.shims = self.root/'shims'
         self.shims.mkdir()
         names = ['sudo', 'pmset', 'kill', 'ps', 'pgrep', 'pkill', 'osascript', 'sleep',
-                 'launchctl', 'codesign', 'swift', 'id', 'visudo', 'install', 'plutil', 'lockf']
+                 'launchctl', 'codesign', 'swift', 'id', 'visudo', 'install', 'plutil', 'lockf', 'mv']
         for name in names:
             p = self.shims/name
             p.write_text(SHIM)
@@ -63,7 +100,7 @@ class Fixture(unittest.TestCase):
         (self.repo/'Resources/Info.plist').write_text('<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
         (self.root/'bin').mkdir()
         binary = self.root/'bin/Insomnia'
-        binary.write_text('#!/bin/bash\nexit 0\n')
+        binary.write_text(HELPER)
         binary.chmod(0o700)
         for source in SCRIPTS.glob('*.sh'):
             code = source.read_text()
@@ -76,6 +113,14 @@ class Fixture(unittest.TestCase):
             (self.repo/'scripts'/source.name).write_text(code)
         self.env = dict(os.environ, HOME=str(self.home), INSOMNIA_HOME=str(self.support),
                         FIXTURE=str(self.root), PATH=str(self.shims)+':/usr/bin:/bin', USER='forged')
+        self.install_helper()
+
+    def install_helper(self):
+        helper = self.support/'InsomniaRecovery'
+        helper.write_text(HELPER)
+        helper.chmod(0o700)
+        (self.support/'InsomniaRecovery.protocol').write_text(
+            'insomnia-maintenance-v1 ' + hashlib.sha256(helper.read_bytes()).hexdigest() + '\n')
 
     def run_script(self, name, *args, **env):
         return subprocess.run(['/bin/bash', str(self.repo/'scripts'/name), *args],
@@ -84,6 +129,9 @@ class Fixture(unittest.TestCase):
     def state(self, **values):
         value = dict(sleepDisabledByUs=True, lowPowerSetByUs=True, frozenPids=[42], dockerFrozen=True)
         value.update(values)
+        if 'frozenProcesses' not in values and isinstance(value['frozenPids'], list):
+            value['frozenProcesses'] = [dict(pid=pid, startTimeMicroseconds=123, bootID='fixture')
+                                        for pid in value['frozenPids'] if type(pid) == int and pid > 0]
         (self.support/'state.json').write_text(json.dumps(value))
         (self.support/'session.json').write_text('{"endsAt":"2000-01-01T00:00:00Z"}')
 
@@ -95,6 +143,106 @@ class Fixture(unittest.TestCase):
         return [json.loads(s) for s in p.read_text().splitlines()] if p.exists() else []
 
 class RecoveryTests(Fixture):
+    def test_untrusted_helper_is_never_executed_but_power_progress_is_saved(self):
+        self.state()
+        (self.support/'InsomniaRecovery').write_text('#!/bin/bash\nexit 0\n')
+        self.assertNotEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        self.assertFalse(self.journal()['sleepDisabledByUs'])
+        self.assertEqual(self.journal()['frozenPids'], [42])
+        self.assertFalse(any(c[0] == 'native' for c in self.calls()))
+
+    def test_missing_helper_allows_power_only_restore_and_blocks_corrupt_power(self):
+        (self.support/'InsomniaRecovery').unlink()
+        self.state(frozenPids=[], dockerFrozen=False, originalSleepDisabled=True)
+        self.assertEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        self.assertNotIn('originalSleepDisabled', self.journal())
+        self.assertIn(['pmset', '-a', 'disablesleep', '1'], self.calls())
+        self.state(originalSleepDisabled='unknown')
+        before = (self.support/'state.json').read_bytes()
+        count = sum(c[0] == 'pmset' for c in self.calls())
+        self.assertNotEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        self.assertEqual((self.support/'state.json').read_bytes(), before)
+        self.assertEqual(sum(c[0] == 'pmset' for c in self.calls()), count)
+
+    def test_legacy_pids_are_retained_without_any_shell_signal(self):
+        self.state(frozenPids=[42], frozenProcesses=[])
+        self.assertNotEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        self.assertEqual(self.journal()['frozenPids'], [42])
+        self.assertFalse(any(c[0] in ['kill', 'ps'] for c in self.calls()))
+        self.assertNotIn('/bin/kill', (SCRIPTS/'backstop.sh').read_text())
+
+    def test_helper_partial_progress_survives_failure_and_original_off_restores(self):
+        self.state(frozenPids=[42, 43], originalSleepDisabled=False, originalBatteryLowPowerMode=False,
+                   savedOutputDeviceUID='device', savedOutputVolume=0.6, savedMuted=False)
+        result = self.run_script('backstop.sh', '--force', FAIL_PID='43', AUDIO_FAIL='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.journal()['frozenPids'], [43])
+        self.assertEqual(self.journal()['savedOutputDeviceUID'], 'device')
+        self.assertNotIn('originalSleepDisabled', self.journal())
+        self.assertIn(['pmset', '-a', 'disablesleep', '0'], self.calls())
+        self.assertIn(['pmset', '-b', 'lowpowermode', '0'], self.calls())
+
+    def test_failed_power_preserves_both_original_and_owned_flag(self):
+        self.state(originalSleepDisabled=True, originalBatteryLowPowerMode=False)
+        self.assertNotEqual(self.run_script('backstop.sh', '--force', PMSET_FAIL='1').returncode, 0)
+        self.assertTrue(self.journal()['sleepDisabledByUs'])
+        self.assertTrue(self.journal()['originalSleepDisabled'])
+        self.assertFalse(self.journal()['originalBatteryLowPowerMode'])
+
+    def test_log_rotation_keeps_bounded_whole_lines_and_private_modes(self):
+        self.state()
+        log = self.support/'Logs/insomnia.log'
+        log.parent.mkdir()
+        log.write_text(('legacy line\n' * 30000))
+        log.chmod(0o644)
+        self.assertEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        for file in [log, log.with_name('insomnia.log.1')]:
+            self.assertLessEqual(file.stat().st_size, 262144)
+            self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(log.with_name('insomnia.log.1').read_text().startswith('legacy line\n'))
+        self.assertEqual(log.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_legacy_oversized_archive_is_bounded_without_active_rotation(self):
+        self.state()
+        log = self.support/'Logs/insomnia.log'
+        log.parent.mkdir()
+        log.write_text('recent line\n')
+        backup = log.with_name('insomnia.log.1')
+        backup.write_text('older line\n' * 30000)
+        backup.chmod(0o644)
+        self.assertEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        self.assertTrue(log.read_text().startswith('recent line\n'))
+        self.assertLessEqual(backup.stat().st_size, 262144)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(backup.read_text().startswith('older line\n'))
+
+    def test_power_missing_and_clean_journals_do_not_call_pmset(self):
+        result = self.run_script('backstop.sh', '--force')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(c[0] == 'pmset' for c in self.calls()))
+        self.state(sleepDisabledByUs=False, lowPowerSetByUs=False, frozenPids=[], dockerFrozen=False)
+        self.assertEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+        self.assertFalse(any(c[0] == 'pmset' for c in self.calls()))
+
+    def test_power_original_preferences_are_restored_and_cleared(self):
+        self.state(sleepDisabledByUs=False, lowPowerSetByUs=False, originalSleepDisabled=True,
+                   originalBatteryLowPowerMode=True, frozenPids=[], dockerFrozen=False)
+        result = self.run_script('backstop.sh', '--force')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['pmset', '-a', 'disablesleep', '1'], self.calls())
+        self.assertIn(['pmset', '-b', 'lowpowermode', '1'], self.calls())
+        self.assertNotIn('originalSleepDisabled', self.journal())
+        self.assertNotIn('originalBatteryLowPowerMode', self.journal())
+
+    def test_power_unknown_schema_types_preserve_journal_without_side_effects(self):
+        for key, value in [('sleepDisabledByUs', 'true'), ('originalSleepDisabled', 1),
+                           ('originalBatteryLowPowerMode', []), ('lowPowerSetByUs', None)]:
+            self.state(**{key: value})
+            before = (self.support/'state.json').read_bytes()
+            self.assertNotEqual(self.run_script('backstop.sh', '--force').returncode, 0)
+            self.assertEqual((self.support/'state.json').read_bytes(), before)
+        self.assertFalse(any(c[0] == 'pmset' for c in self.calls()))
+
     def test_broken_log_does_not_block_restore(self):
         self.state()
         (self.support/'Logs/insomnia.log').mkdir(parents=True)

@@ -13,6 +13,20 @@ enum InsomniaEntryPoint {
         if arguments.first == "--recover-owned" {
             exit(RecoveryCommand.run(arguments: arguments))
         }
+        if arguments == ["--maintenance-protocol"] {
+            print(RecoveryCommand.protocolVersion)
+            exit(0)
+        }
+        if arguments.first == "--validate-recovery-state", arguments.count == 2, arguments[1].hasPrefix("/") {
+            exit(RecoveryCommand.validate(stateFile: URL(fileURLWithPath: arguments[1])) ? 0 : 1)
+        }
+        if arguments.first == "--maintenance-uninstall" {
+            exit(MaintenanceCommand.run(arguments: arguments))
+        }
+        guard arguments.isEmpty || arguments.allSatisfy({ $0.hasPrefix("-psn_") }) else {
+            FileHandle.standardError.write(Data("Unknown Insomnia command; no GUI or maintenance action started.\n".utf8))
+            exit(2)
+        }
         InsomniaApp.main()
     }
 }
