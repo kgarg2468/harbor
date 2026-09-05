@@ -2,15 +2,28 @@
 
 Harbor's component for the Reasoning variant of T3 Code: the exact upstream
 source revision plus a maintained, reviewable feature patch set. The design is
-in `docs/design.md`.
+in `docs/design.md`; the provenance and maintenance record for the current
+pin is in `docs/nightly-port.md`.
 
 ## Status
 
-Initial bootstrap: reproducible source preparation only. This directory pins an
-upstream revision and can materialize it locally with the patch set applied.
-Nothing here builds, installs, updates, or synchronizes anything, and nothing
-here touches an existing T3 installation or its data. The pinned revision is a
-reproducibility baseline, not a claim that it is the current Nightly.
+Reproducible port of the existing Reasoning feature set onto the latest
+Nightly. `source.lock.json` pins upstream commit
+`9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
+`v0.0.39-nightly.20260905.1284`, and two checksummed patches. Preparing the
+source yields a checkout you can install dependencies into and build the
+server from, using upstream's own scripts.
+
+What this component does not do:
+
+- It does not update automatically or discover new Nightlies. Moving to a
+  newer Nightly is a change to `source.lock.json`, and possibly to the
+  patches, made and reviewed by hand. See `docs/nightly-port.md`.
+- It does not install, update, launch, or synchronize anything, and it does
+  not touch an existing T3 installation or its data. No shared live
+  installation exists yet.
+- It does not implement the shared environments, queued updates, or
+  conversation forks from `docs/design.md`. Those start from this pin.
 
 ## Layout
 
@@ -19,11 +32,19 @@ reproducibility baseline, not a claim that it is the current Nightly.
   `{ "path", "sha256" }` entries. Each path is relative to the lock file and
   must stay inside the lock file's directory: absolute paths, `..` escapes,
   and symlinks whose real target lies elsewhere are rejected even when the
-  checksum matches. Subdirectories are fine. The patch list is empty until the
-  feature import lands.
+  checksum matches. Subdirectories are fine.
+- `patches/0001-reasoning.patch`: streaming provider reasoning into the
+  thread timeline, with its server, contracts, client runtime, web, mobile,
+  and docs changes.
+- `patches/0002-desktop-identity.patch`: the separate Reasoning desktop
+  identity, the disabled updater feed, the packaged backend PATH fix, and the
+  manual macOS updater script.
+- `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
   temporary fixture repository with real `git` processes.
+- `docs/design.md`: the product contract. `docs/nightly-port.md`: where the
+  patches came from, what they change, and how to re-port them.
 - `.build/`: ignored build output, including the default checkout.
 
 ## Preparing the source
@@ -77,6 +98,25 @@ whole feature delta. The provenance record, including the lock used, the
 repository actually fetched from, the commit, and the patch checksums, is
 written to `.git/harbor-source.json` inside the checkout.
 
+## Installing dependencies and building the server
+
+The prepared checkout is a normal upstream monorepo. Its `package.json`
+declares `pnpm@11.10.0` and Node `^24.13.1`; use those versions, for example
+through `corepack`. From inside the checkout:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter @t3tools/web build
+pnpm --filter t3 build:bundle
+pnpm --filter t3 start
+```
+
+The web build produces the static client the server serves; the server
+bundle lands in `apps/server/dist`. Focused checks in the checkout are
+`pnpm --filter t3 test` for the server and `pnpm typecheck` for the
+workspace. These are upstream's scripts, run by hand; Harbor's CI does not
+run them, and none of them install or start a desktop app.
+
 ## Running the checks
 
 ```sh
@@ -86,3 +126,7 @@ npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml 't3-reasoning/**/*.
 
 These are the commands `.github/workflows/t3-reasoning.yml` runs on Linux and
 macOS whenever this directory changes.
+
+To confirm the pin reproduces the port commit, prepare the source, stage every
+file in the checkout, and compare `git write-tree` against the port commit's
+tree id recorded in `docs/nightly-port.md`.

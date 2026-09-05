@@ -1,0 +1,1354 @@
+diff --git a/apps/desktop/src/app/DesktopClerk.test.ts b/apps/desktop/src/app/DesktopClerk.test.ts
+index 2f61ca909aef7f78270539cd73bc1978a7924754..a099dac037619301b13819879659054cb840c997 100644
+--- a/apps/desktop/src/app/DesktopClerk.test.ts
++++ b/apps/desktop/src/app/DesktopClerk.test.ts
+@@ -211,7 +211,7 @@ describe("DesktopClerk", () => {
+ 
+   it.each([
+     { isDevelopment: true, scheme: "t3code-dev" },
+-    { isDevelopment: false, scheme: "t3code" },
++    { isDevelopment: false, scheme: "t3code-reasoning" },
+   ])("configures the SDK with the $scheme renderer origin", ({ isDevelopment, scheme }) => {
+     const bridge = { cleanup: vi.fn(), isPrimaryInstance: true };
+     storageMock.mockReturnValue(storageAdapter);
+diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
+index 89cc592831a7bc67626cc964267239210cec504f..555673dfa431b93a8d03f5783d3cf6d134092f7c 100644
+--- a/apps/desktop/src/app/DesktopEnvironment.test.ts
++++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
+@@ -131,7 +131,56 @@ describe("DesktopEnvironment", () => {
+       const production = yield* makeEnvironment();
+ 
+       assert.equal(development.stateDir, "/Users/alice/.t3/dev");
+-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
++      assert.equal(production.stateDir, "/Users/alice/.t3-reasoning/userdata");
++    }),
++  );
++
++  it.effect("defaults packaged production state to the Reasoning base root", () =>
++    Effect.gen(function* () {
++      const environment = yield* makeEnvironment({ isPackaged: true });
++
++      assert.equal(environment.isDevelopment, false);
++      assert.equal(environment.baseDir, "/Users/alice/.t3-reasoning");
++      assert.equal(environment.stateDir, "/Users/alice/.t3-reasoning/userdata");
++      assert.equal(
++        environment.desktopSettingsPath,
++        "/Users/alice/.t3-reasoning/userdata/desktop-settings.json",
++      );
++    }),
++  );
++
++  it.effect("ignores a blank T3CODE_HOME and keeps the Reasoning base root", () =>
++    Effect.gen(function* () {
++      const environment = yield* makeEnvironment({}, { T3CODE_HOME: "   " });
++
++      assert.equal(environment.baseDir, "/Users/alice/.t3-reasoning");
++      assert.equal(environment.stateDir, "/Users/alice/.t3-reasoning/userdata");
++    }),
++  );
++
++  it.effect("presents the packaged Reasoning identity without stock fallbacks", () =>
++    Effect.gen(function* () {
++      const production = yield* makeEnvironment({ isPackaged: true });
++      const development = yield* makeEnvironment(
++        {},
++        { VITE_DEV_SERVER_URL: "http://localhost:5173" },
++      );
++
++      assert.equal(production.displayName, "T3 Code (Reasoning)");
++      assert.equal(production.branding.baseName, "T3 Code (Reasoning)");
++      assert.equal(production.appUserModelId, "com.t3tools.t3code.reasoning");
++      assert.equal(production.userDataDirName, "t3code-reasoning");
++      // The legacy probe adopts its directory whenever it exists, so in
++      // production it must never name a stock T3 Code user-data path.
++      assert.equal(production.legacyUserDataDirName, "t3code-reasoning");
++      assert.equal(production.linuxDesktopEntryName, "t3code-reasoning.desktop");
++      assert.equal(production.linuxWmClass, "t3code-reasoning");
++
++      assert.equal(development.displayName, "T3 Code (Dev)");
++      assert.equal(development.branding.baseName, "T3 Code");
++      assert.equal(development.branding.stageLabel, "Dev");
++      assert.equal(development.userDataDirName, "t3code-dev");
++      assert.equal(development.legacyUserDataDirName, "T3 Code (Dev)");
+     }),
+   );
+ 
+diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
+index 4583e51240918d0440040f30dadde203de80573d..1b0331f18767e931751acaafd6310b4eddeaa16d 100644
+--- a/apps/desktop/src/app/DesktopEnvironment.ts
++++ b/apps/desktop/src/app/DesktopEnvironment.ts
+@@ -86,6 +86,9 @@ export class DesktopEnvironment extends Context.Service<
+ >()("@t3tools/desktop/app/DesktopEnvironment") {}
+ 
+ const APP_BASE_NAME = "T3 Code";
++// The private Reasoning build owns every packaged (non-development) identity
++// surface so it can be installed beside official T3 Code without colliding.
++const REASONING_APP_NAME = "T3 Code (Reasoning)";
+ 
+ function resolveDesktopAppStageLabel(input: {
+   readonly isDevelopment: boolean;
+@@ -103,10 +106,21 @@ function resolveDesktopAppBranding(input: {
+   readonly appVersion: string;
+ }): DesktopAppBranding {
+   const stageLabel = resolveDesktopAppStageLabel(input);
++  if (input.isDevelopment) {
++    return {
++      baseName: APP_BASE_NAME,
++      stageLabel,
++      displayName: `${APP_BASE_NAME} (${stageLabel})`,
++    };
++  }
++
++  // Packaged builds always present as the Reasoning app. The contracts stage
++  // label stays within its Alpha/Nightly vocabulary, so the base name carries
++  // the Reasoning identity to clients that compose their own display string.
+   return {
+-    baseName: APP_BASE_NAME,
++    baseName: REASONING_APP_NAME,
+     stageLabel,
+-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
++    displayName: REASONING_APP_NAME,
+   };
+ }
+ 
+@@ -156,11 +170,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
+       : input.platform === "darwin"
+         ? path.join(homeDirectory, "Library", "Application Support")
+         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
+-  const baseDir = resolveDesktopBaseDir({
+-    homeDirectory,
+-    joinPath: path.join,
+-    t3Home: config.t3Home,
++  const hasConfiguredT3Home = Option.match(config.t3Home, {
++    onNone: () => false,
++    onSome: (value) => value.trim().length > 0,
+   });
++  // The Reasoning build defaults its state to ~/.t3-reasoning so it never
++  // shares ~/.t3 with the stock app. An explicit non-empty T3CODE_HOME still
++  // wins, and development keeps the shared ~/.t3/dev workflow.
++  const baseDir =
++    isDevelopment || hasConfiguredT3Home
++      ? resolveDesktopBaseDir({
++          homeDirectory,
++          joinPath: path.join,
++          t3Home: config.t3Home,
++        })
++      : path.join(homeDirectory, ".t3-reasoning");
+   const rootDir = path.resolve(input.dirname, "../../..");
+   const appRoot = input.isPackaged ? input.appPath : rootDir;
+   const serverRoot =
+@@ -178,8 +202,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
+     joinPath: path.join,
+     t3Home: config.t3Home,
+   });
+-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
+-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
++  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code-reasoning";
++  // The Reasoning build has no legacy install to migrate from; pointing the
++  // legacy probe at its own directory keeps the fallback from ever adopting
++  // the stock app's Electron user data.
++  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : userDataDirName;
+   const linuxApplicationsDir = path.join(
+     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
+     "applications",
+@@ -224,10 +251,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
+     branding,
+     displayName,
+     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
+-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
++      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code.reasoning",
+     ),
+-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
+-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
++    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code-reasoning.desktop",
++    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code-reasoning",
+     linuxApplicationsDir,
+     appImagePath: config.appImagePath,
+     userDataDirName,
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+index accfdf70b3a3fa11cf0b07cb0799c8c4c46da9fb..c2e5dad5d1671d2251f42a686ce20956046d8541 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+@@ -303,6 +303,53 @@ describe("DesktopBackendConfiguration", () => {
+     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+   );
+ 
++  it.effect("resolvePrimary tells a packaged backend to skip login-shell hydration", () =>
++    withHarness(
++      Effect.gen(function* () {
++        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
++        const config = yield* configuration.resolvePrimary;
++
++        // The Electron parent already carries a usable PATH; the packaged
++        // child must not re-run the user's login shell before binding its port.
++        assert.equal(config.env.T3CODE_SKIP_LOGIN_SHELL, "1");
++      }),
++    ),
++  );
++
++  it.effect("resolvePrimary keeps stock login-shell hydration in development", () =>
++    Effect.gen(function* () {
++      const fileSystem = yield* FileSystem.FileSystem;
++      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
++        prefix: "t3-desktop-backend-config-test-",
++      });
++
++      yield* Effect.gen(function* () {
++        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
++        const config = yield* configuration.resolvePrimary;
++
++        // The key is present-but-undefined so an ambient value from the dev
++        // runner's own environment is cleared rather than inherited.
++        assert.property(config.env, "T3CODE_SKIP_LOGIN_SHELL");
++        assert.isUndefined(config.env.T3CODE_SKIP_LOGIN_SHELL);
++      }).pipe(
++        Effect.provide(
++          DesktopBackendConfiguration.layer.pipe(
++            Layer.provideMerge(serverExposureLayer),
++            Layer.provideMerge(DesktopAppSettings.layerTest()),
++            Layer.provideMerge(DesktopWslServerTree.layerTest()),
++            Layer.provideMerge(DesktopWslEnvironment.layerTest()),
++            Layer.provideMerge(
++              makeEnvironmentLayer(baseDir, {
++                isPackaged: false,
++                devServerUrl: "http://127.0.0.1:5733",
++              }),
++            ),
++          ),
++        ),
++      );
++    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
++  );
++
+   it.effect("resolveWsl reuses the primary's bootstrap token", () =>
+     withHarness(
+       Effect.gen(function* () {
+@@ -897,6 +944,9 @@ describe("DesktopBackendConfiguration", () => {
+           assert.equal(config.httpBaseUrl.href, "http://172.27.0.99:5050/");
+           assert.equal(config.env.OPENAI_API_KEY, "openai-key");
+           assert.equal(config.env.ANTHROPIC_API_KEY, "anthropic-key");
++          // The prepared-env signal is a packaged-primary-only contract; the
++          // WSL backend must hydrate its own Linux-side environment.
++          assert.isUndefined(config.env.T3CODE_SKIP_LOGIN_SHELL);
+           // The existing WSLENV is preserved byte-for-byte (note the empty
+           // "::" segment survives — WSL ignores it, so we don't normalize
+           // it away) and ANTHROPIC_API_KEY is appended. OPENAI_API_KEY is
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 4c43070b5f97be8b59f797847cc19061b22afb4a..6d81999d1aa05afb4fe3d323cc88fe2538c9c022 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -85,6 +85,7 @@ const DESKTOP_BACKEND_ENV_NAMES = [
+   "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
+   "T3CODE_TAILSCALE_SERVE",
+   "T3CODE_TAILSCALE_SERVE_PORT",
++  "T3CODE_SKIP_LOGIN_SHELL",
+ ] as const;
+ 
+ // Sensitive env vars that the WSL backend needs but Windows process.env won't
+@@ -507,6 +508,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+       env: {
+         ...backendChildEnvPatch(),
+         ELECTRON_RUN_AS_NODE: "1",
++        // The packaged parent already inherited a usable PATH; the child must
++        // not re-run the user's login shell (whose rc files can block) before
++        // binding its port. Dev keeps stock hydration (see os-jank.ts).
++        ...(environment.isPackaged ? { T3CODE_SKIP_LOGIN_SHELL: "1" } : {}),
+       },
+       // Primary wants process.env (PATH, dev-runner's T3CODE_HOME, etc.).
+       extendEnv: true,
+diff --git a/apps/desktop/src/electron/ElectronProtocol.test.ts b/apps/desktop/src/electron/ElectronProtocol.test.ts
+index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b77bdb80b6 100644
+--- a/apps/desktop/src/electron/ElectronProtocol.test.ts
++++ b/apps/desktop/src/electron/ElectronProtocol.test.ts
+@@ -23,6 +23,15 @@ describe("ElectronProtocol", () => {
+     unhandleMock.mockReset();
+   });
+ 
++  it("keeps the packaged Reasoning scheme apart from stock and dev schemes", () => {
++    assert.equal(ElectronProtocol.DESKTOP_PRODUCTION_SCHEME, "t3code-reasoning");
++    assert.equal(ElectronProtocol.DESKTOP_DEVELOPMENT_SCHEME, "t3code-dev");
++    assert.equal(ElectronProtocol.getDesktopScheme(false), "t3code-reasoning");
++    assert.equal(ElectronProtocol.getDesktopScheme(true), "t3code-dev");
++    assert.equal(ElectronProtocol.getDesktopOrigin(false), "t3code-reasoning://app");
++    assert.equal(ElectronProtocol.getDesktopUrl(false), "t3code-reasoning://app/");
++  });
++
+   it.effect("proxies the stable renderer origin to the current app server", () =>
+     Effect.gen(function* () {
+       let handler: ((request: Request) => Promise<Response>) | undefined;
+@@ -99,12 +108,12 @@ describe("ElectronProtocol", () => {
+         Effect.gen(function* () {
+           const protocol = yield* ElectronProtocol.ElectronProtocol;
+           yield* protocol.registerDesktopProtocol({
+-            scheme: "t3code",
++            scheme: "t3code-reasoning",
+             targetOrigin: new URL("http://127.0.0.1:3773/"),
+             backendOrigin: new URL("http://127.0.0.1:3773/"),
+             clerkFrontendApiHostname: undefined,
+           });
+-          return yield* Effect.promise(() => handler!(new Request("t3code://other/")));
++          return yield* Effect.promise(() => handler!(new Request("t3code-reasoning://other/")));
+         }),
+       );
+ 
+@@ -176,7 +185,7 @@ describe("ElectronProtocol", () => {
+       const exit = yield* Effect.exit(
+         Effect.scoped(
+           protocol.registerDesktopProtocol({
+-            scheme: "t3code",
++            scheme: "t3code-reasoning",
+             targetOrigin: new URL("http://127.0.0.1:3773/"),
+             backendOrigin: new URL("http://127.0.0.1:3773/"),
+             clerkFrontendApiHostname: undefined,
+@@ -188,16 +197,19 @@ describe("ElectronProtocol", () => {
+       if (exit._tag === "Failure") {
+         const error = Cause.squash(exit.cause);
+         assert.instanceOf(error, ElectronProtocol.ElectronProtocolUnregistrationError);
+-        assert.equal(error.scheme, "t3code");
++        assert.equal(error.scheme, "t3code-reasoning");
+         assert.strictEqual(error.cause, cause);
+-        assert.equal(error.message, 'Failed to unregister Electron protocol scheme "t3code".');
++        assert.equal(
++          error.message,
++          'Failed to unregister Electron protocol scheme "t3code-reasoning".',
++        );
+       }
+     }).pipe(Effect.provide(ElectronProtocol.layer)),
+   );
+ 
+   it("keeps executable sources host-restricted while allowing runtime network resources", () => {
+     const policy = ElectronProtocol.makeDesktopContentSecurityPolicy({
+-      scheme: "t3code",
++      scheme: "t3code-reasoning",
+       targetOrigin: new URL("http://127.0.0.1:3773/"),
+       backendOrigin: new URL("http://127.0.0.1:3773/"),
+       clerkFrontendApiHostname: "clerk.t3.codes",
+@@ -219,13 +231,19 @@ describe("ElectronProtocol", () => {
+     assert.deepEqual(directives["connect-src"], ["'self'", "http:", "https:", "ws:", "wss:"]);
+     assert.deepEqual(directives["img-src"], [
+       "'self'",
+-      "t3code:",
++      "t3code-reasoning:",
+       "blob:",
+       "data:",
+       "http:",
+       "https:",
+     ]);
+-    assert.deepEqual(directives["media-src"], ["'self'", "t3code:", "blob:", "http:", "https:"]);
+-    assert.deepEqual(directives["font-src"], ["'self'", "t3code:", "data:"]);
++    assert.deepEqual(directives["media-src"], [
++      "'self'",
++      "t3code-reasoning:",
++      "blob:",
++      "http:",
++      "https:",
++    ]);
++    assert.deepEqual(directives["font-src"], ["'self'", "t3code-reasoning:", "data:"]);
+   });
+ });
+diff --git a/apps/desktop/src/electron/ElectronProtocol.ts b/apps/desktop/src/electron/ElectronProtocol.ts
+index fabd598d7ffab125afd5e73c70d71996564d0646..91b9204888dfa8704d836c63d6b3e56c40c63e31 100644
+--- a/apps/desktop/src/electron/ElectronProtocol.ts
++++ b/apps/desktop/src/electron/ElectronProtocol.ts
+@@ -9,7 +9,9 @@ import * as Scope from "effect/Scope";
+ import * as Electron from "electron";
+ 
+ export const DESKTOP_HOST = "app";
+-export const DESKTOP_PRODUCTION_SCHEME = "t3code";
++// The private Reasoning build claims its own production scheme so packaged
++// installs never contend with official T3 Code for t3code:// callbacks.
++export const DESKTOP_PRODUCTION_SCHEME = "t3code-reasoning";
+ export const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+ 
+ export function getDesktopScheme(isDevelopment: boolean): string {
+diff --git a/apps/server/src/os-jank.test.ts b/apps/server/src/os-jank.test.ts
+index a157efb665fa17791f25e2fe91da38a418625dbc..94756fc367c2c0d5c891c82e4cbfe277066e14dd 100644
+--- a/apps/server/src/os-jank.test.ts
++++ b/apps/server/src/os-jank.test.ts
+@@ -1,7 +1,72 @@
+ import * as NodeOS from "node:os";
+ import { assert, it } from "vite-plus/test";
+ 
+-import { hydratePosixHome } from "./os-jank.ts";
++import { hydratePosixHome, hydratePosixPath } from "./os-jank.ts";
++
++const forbiddenReaders = {
++  readPathFromLoginShell: (): string | undefined => {
++    throw new Error("login shell must not run");
++  },
++  readPathFromLaunchctl: (): string | undefined => {
++    throw new Error("launchctl must not run");
++  },
++};
++
++it("skips the login shell and keeps the inherited PATH when the desktop prepared the env", () => {
++  const env: NodeJS.ProcessEnv = {
++    T3CODE_SKIP_LOGIN_SHELL: "1",
++    PATH: "/electron/bin:/usr/bin",
++  };
++
++  hydratePosixPath(env, "darwin", {
++    ...forbiddenReaders,
++    readPathFromLaunchctl: () => "/launchctl/bin:/usr/bin",
++  });
++
++  // Inherited entries stay first; launchctl only appends what is missing.
++  assert.equal(env.PATH, "/electron/bin:/usr/bin:/launchctl/bin");
++});
++
++it("skips both the login shell and launchctl on linux when the desktop prepared the env", () => {
++  const env: NodeJS.ProcessEnv = {
++    T3CODE_SKIP_LOGIN_SHELL: "1",
++    PATH: "/inherited/bin:/usr/bin",
++  };
++
++  hydratePosixPath(env, "linux", forbiddenReaders);
++
++  assert.equal(env.PATH, "/inherited/bin:/usr/bin");
++});
++
++it("keeps the inherited PATH when the desktop prepared the env and launchctl has nothing", () => {
++  const env: NodeJS.ProcessEnv = {
++    T3CODE_SKIP_LOGIN_SHELL: "1",
++    PATH: "/electron/bin:/usr/bin",
++  };
++
++  hydratePosixPath(env, "darwin", {
++    ...forbiddenReaders,
++    readPathFromLaunchctl: () => undefined,
++  });
++
++  assert.equal(env.PATH, "/electron/bin:/usr/bin");
++});
++
++it("still reads the login shell when the desktop signal is absent", () => {
++  const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
++  const observedShells: string[] = [];
++
++  hydratePosixPath(env, "darwin", {
++    ...forbiddenReaders,
++    readPathFromLoginShell: (shell) => {
++      observedShells.push(shell);
++      return "/login/bin";
++    },
++  });
++
++  assert.deepEqual(observedShells, ["/bin/zsh"]);
++  assert.equal(env.PATH, "/login/bin:/usr/bin");
++});
+ 
+ it("hydrates HOME for minimal service environments from the user account", () => {
+   const env: NodeJS.ProcessEnv = {};
+diff --git a/apps/server/src/os-jank.ts b/apps/server/src/os-jank.ts
+index 18ddbc66c0c852652c96a4def292b0f6b727c54f..1c19411e9e619f8c8b81f29b964628b976118171 100644
+--- a/apps/server/src/os-jank.ts
++++ b/apps/server/src/os-jank.ts
+@@ -17,11 +17,41 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
+   );
+ }
+ 
+-function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
++// Injectable so tests can prove the login shell is never spawned; production
++// callers use the real readers.
++interface PosixPathReaders {
++  readonly readPathFromLoginShell: (shell: string) => string | undefined;
++  readonly readPathFromLaunchctl: () => string | undefined;
++}
++
++const defaultPosixPathReaders: PosixPathReaders = {
++  readPathFromLoginShell,
++  readPathFromLaunchctl,
++};
++
++export function hydratePosixPath(
++  env: NodeJS.ProcessEnv,
++  platform: NodeJS.Platform,
++  readers: PosixPathReaders = defaultPosixPathReaders,
++): void {
++  // The packaged desktop app sets T3CODE_SKIP_LOGIN_SHELL=1 on its primary
++  // backend child: the Electron parent already inherited a usable PATH, and
++  // the synchronous login-shell read below can hang on user rc files before
++  // the backend binds its port. Keep the inherited PATH authoritative and
++  // only append launchctl entries on macOS (no shell involved).
++  if (env.T3CODE_SKIP_LOGIN_SHELL === "1") {
++    const launchctlPath = platform === "darwin" ? readers.readPathFromLaunchctl() : undefined;
++    const mergedPath = mergePathEntries(env.PATH, launchctlPath, platform);
++    if (mergedPath) {
++      env.PATH = mergedPath;
++    }
++    return;
++  }
++
+   let shellPath: string | undefined;
+   for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
+     try {
+-      shellPath = readPathFromLoginShell(shell);
++      shellPath = readers.readPathFromLoginShell(shell);
+     } catch (error) {
+       logPathHydrationWarning(`Failed to read PATH from login shell ${shell}.`, error);
+     }
+@@ -29,7 +59,8 @@ function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): vo
+     if (shellPath) break;
+   }
+ 
+-  const launchctlPath = platform === "darwin" && !shellPath ? readPathFromLaunchctl() : undefined;
++  const launchctlPath =
++    platform === "darwin" && !shellPath ? readers.readPathFromLaunchctl() : undefined;
+   const mergedPath = mergePathEntries(shellPath ?? launchctlPath, env.PATH, platform);
+   if (mergedPath) {
+     env.PATH = mergedPath;
+diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
+index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f667234a1 100644
+--- a/scripts/build-desktop-artifact.test.ts
++++ b/scripts/build-desktop-artifact.test.ts
+@@ -54,7 +54,6 @@ import {
+   resolveResourceMonitorRustTargets,
+   resolveWindowsServerAsarIgnoreGlobs,
+   resourceMonitorExecutableName,
+-  resolveGitHubPublishConfig,
+   resolveMockUpdateServerPort,
+   resolveMockUpdateServerUrl,
+   resolvePackageManagerUserAgent,
+@@ -259,9 +258,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
+   });
+ 
+-  it("switches desktop packaging product names to nightly for nightly builds", () => {
+-    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
+-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
++  it("keeps the Reasoning product name on every update channel", () => {
++    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Reasoning)");
++    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Reasoning)");
+   });
+ 
+   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
+@@ -283,86 +282,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
+   });
+ 
+-  it.effect("resolves GitHub desktop publish config from Effect config", () =>
++  it.effect("never wires an official update feed into the package", () =>
+     Effect.gen(function* () {
+-      const latestConfig = yield* resolveGitHubPublishConfig("latest").pipe(
+-        Effect.provide(
+-          ConfigProvider.layer(
+-            ConfigProvider.fromEnv({
+-              env: {
+-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+-              },
+-            }),
+-          ),
+-        ),
+-      );
+-      const nightlyConfig = yield* resolveGitHubPublishConfig("nightly").pipe(
+-        Effect.provide(
+-          ConfigProvider.layer(
+-            ConfigProvider.fromEnv({
+-              env: {
+-                GITHUB_REPOSITORY: "pingdotgg/t3code",
+-              },
+-            }),
+-          ),
+-        ),
+-      );
+-
+-      assert.deepStrictEqual(latestConfig, {
+-        provider: "github",
+-        owner: "pingdotgg",
+-        repo: "t3code",
+-        releaseType: "release",
+-      });
+-      assert.deepStrictEqual(nightlyConfig, {
+-        provider: "github",
+-        owner: "pingdotgg",
+-        repo: "t3code",
+-        releaseType: "prerelease",
+-        channel: "nightly",
+-      });
+-    }),
+-  );
+-
+-  it.effect("omits update feeds for pull request preview builds", () =>
+-    Effect.gen(function* () {
+-      const preview = yield* createBuildConfig(
++      const release = yield* createBuildConfig(
+         "mac",
+         "dmg",
+-        "0.0.33-pr.8182.1",
++        "0.0.33",
+         false,
+         false,
+         undefined,
+         undefined,
+       );
+-      const release = yield* createBuildConfig(
++      const nightly = yield* createBuildConfig(
+         "mac",
+         "dmg",
+-        "0.0.33",
++        "0.0.33-nightly.20260413.42",
+         false,
+         false,
+         undefined,
+         undefined,
+       );
+ 
+-      assert.notProperty(preview, "publish");
+-      assert.deepStrictEqual(release.publish, [
+-        {
+-          provider: "github",
+-          owner: "pingdotgg",
+-          repo: "t3code",
+-          releaseType: "release",
+-        },
+-      ]);
++      assert.notProperty(release, "publish");
++      assert.notProperty(nightly, "publish");
+     }).pipe(
++      // CI-style env that used to select the official GitHub feed must not
++      // reintroduce it for the private Reasoning build.
+       Effect.provide(
+         ConfigProvider.layer(
+-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
++          ConfigProvider.fromEnv({
++            env: {
++              GITHUB_REPOSITORY: "pingdotgg/t3code",
++              T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
++            },
++          }),
+         ),
+       ),
+     ),
+   );
+ 
++  it.effect("keeps mock updates opt-in and away from preview builds", () =>
++    Effect.gen(function* () {
++      const mockUpdates = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        "0.0.33",
++        false,
++        true,
++        4100,
++        undefined,
++      );
++      const preview = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        "0.0.33-pr.8182.1",
++        false,
++        true,
++        4100,
++        undefined,
++      );
++
++      assert.deepStrictEqual(mockUpdates.publish, [
++        {
++          provider: "generic",
++          url: "http://localhost:4100",
++        },
++      ]);
++      assert.notProperty(preview, "publish");
++    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
++  );
++
+   it("omits bundled workspace packages from staged desktop dependencies", () => {
+     assert.deepStrictEqual(
+       resolveDesktopRuntimeDependencies(
+@@ -658,7 +647,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+         "**/node_modules/.bin/**",
+       ]);
+       assert.deepStrictEqual(mac.dmg, {
+-        title: "T3 Code (Alpha) 1.2.3 Installer",
++        title: "T3 Code (Reasoning) 1.2.3 Installer",
+         background: "dmg/dmg-background-latest.png",
+         window: { width: 540, height: 412 },
+         contents: [
+@@ -668,11 +657,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+         iconSize: 80,
+         iconTextSize: 12,
+       });
+-      // Linux must register the renderer schemes so the generated .desktop
+-      // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
++      // Packaged metadata claims only the Reasoning identity: the stock
++      // t3code/t3code-dev schemes and names stay with the official installs.
++      for (const config of [mac, linux, win]) {
++        assert.equal(config.appId, "com.t3tools.t3code.reasoning");
++        assert.equal(config.productName, "T3 Code (Reasoning)");
++        assert.equal(config.artifactName, "T3-Code-Reasoning-${version}-${arch}.${ext}");
++      }
++      assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
++        { name: "T3 Code (Reasoning)", schemes: ["t3code-reasoning"] },
++      ]);
++      // Linux must register the renderer scheme so the generated .desktop
++      // entry advertises MimeType=x-scheme-handler/t3code-reasoning; for OAuth
++      // deep links.
+       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
+-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
++        { name: "T3 Code (Reasoning)", schemes: ["t3code-reasoning"] },
+       ]);
++      assert.equal((linux.linux as Record<string, unknown>).executableName, "t3code-reasoning");
++      assert.deepStrictEqual((linux.linux as Record<string, unknown>).desktop, {
++        entry: { StartupWMClass: "t3code-reasoning" },
++      });
+       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
+       assert.notProperty(mac.mac as Record<string, unknown>, "sign");
+       for (const config of [linux, win]) {
+@@ -1587,7 +1591,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     });
+ 
+     assert.deepStrictEqual(configuration, {
+-      appId: "com.t3tools.t3code",
++      appId: "com.t3tools.t3code.reasoning",
+       teamId: "ABC1234567",
+       rpDomains: ["example.clerk.accounts.dev"],
+       provisioningProfilePath: "/tmp/t3code.provisionprofile",
+@@ -1607,7 +1611,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+       "clerk.example.com",
+       "example.clerk.accounts.dev",
+     ]);
+-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
++    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code.reasoning</string>");
+     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
+     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
+     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+@@ -1694,7 +1698,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     assert.notInclude(error.message, secret);
+   });
+ 
+-  it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
++  it.effect("adds passkey entitlements and the Reasoning protocol to signed macOS builds", () =>
+     Effect.gen(function* () {
+       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
+         entitlementsPath: "/tmp/entitlements.mac.plist",
+@@ -1702,12 +1706,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+       });
+ 
+       const mac = config.mac as Record<string, unknown>;
+-      assert.equal(config.appId, "com.t3tools.t3code");
++      assert.equal(config.appId, "com.t3tools.t3code.reasoning");
+       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
+       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
+       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+       assert.deepStrictEqual(mac.protocols, [
+-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
++        { name: "T3 Code (Reasoning)", schemes: ["t3code-reasoning"] },
+       ]);
+     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+   );
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f48097d23883a 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -52,7 +52,9 @@ import { Command, Flag } from "effect/unstable/cli";
+ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+ 
+ const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
+-const DESKTOP_APP_ID = "com.t3tools.t3code";
++// Private Reasoning build: a distinct bundle id lets it install and run
++// beside the official T3 Code apps.
++const DESKTOP_APP_ID = "com.t3tools.t3code.reasoning";
+ const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
+ 
+ const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
+@@ -2485,32 +2487,6 @@ export function resolveDesktopRuntimeDependencies(
+   return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
+ }
+ 
+-export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
+-  updateChannel: "latest" | "nightly",
+-) {
+-  const env = yield* Config.all({
+-    updateRepository: Config.string("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
+-    githubRepository: Config.string("GITHUB_REPOSITORY").pipe(Config.option),
+-  });
+-  const rawRepo = (
+-    Option.getOrUndefined(env.updateRepository)?.trim() ||
+-    Option.getOrUndefined(env.githubRepository)?.trim() ||
+-    ""
+-  ).trim();
+-  if (!rawRepo) return undefined;
+-
+-  const [owner, repo, ...rest] = rawRepo.split("/");
+-  if (!owner || !repo || rest.length > 0) return undefined;
+-
+-  return {
+-    provider: "github",
+-    owner,
+-    repo,
+-    releaseType: updateChannel === "nightly" ? "prerelease" : "release",
+-    ...(updateChannel === "nightly" ? { channel: "nightly" as const } : {}),
+-  };
+-});
+-
+ export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
+   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
+ }
+@@ -2556,10 +2532,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
+   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
+ }
+ 
+-export function resolveDesktopProductName(version: string): string {
+-  return resolveDesktopUpdateChannel(version) === "nightly"
+-    ? "T3 Code (Nightly)"
+-    : (desktopPackageJson.productName ?? "T3 Code");
++export function resolveDesktopProductName(_version: string): string {
++  // Every packaged Reasoning artifact keeps one Finder/product name,
++  // regardless of the version's update channel, so it never masquerades as
++  // an official T3 Code install.
++  return "T3 Code (Reasoning)";
+ }
+ 
+ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2584,7 +2561,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+   const buildConfig: Record<string, unknown> = {
+     appId: DESKTOP_APP_ID,
+     productName: resolveDesktopProductName(version),
+-    artifactName: "T3-Code-${version}-${arch}.${ext}",
++    artifactName: "T3-Code-Reasoning-${version}-${arch}.${ext}",
+     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
+     files: [
+       ...DESKTOP_FILE_EXCLUSIONS,
+@@ -2605,18 +2582,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+     ],
+   };
+   const updateChannel = resolveDesktopUpdateChannel(version);
+-  if (!isDesktopPreviewVersion(version)) {
+-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
+-    if (publishConfig) {
+-      buildConfig.publish = [publishConfig];
+-    } else if (mockUpdates) {
+-      buildConfig.publish = [
+-        {
+-          provider: "generic",
+-          url: resolveMockUpdateServerUrl(mockUpdateServerPort),
+-        },
+-      ];
+-    }
++  // The Reasoning build is private: no official update feed ever lands in
++  // the package, even when CI-style env (GITHUB_REPOSITORY) is present. The
++  // opt-in mock update server remains for local update testing.
++  if (!isDesktopPreviewVersion(version) && mockUpdates) {
++    buildConfig.publish = [
++      {
++        provider: "generic",
++        url: resolveMockUpdateServerUrl(mockUpdateServerPort),
++      },
++    ];
+   }
+ 
+   if (platform === "mac") {
+@@ -2626,10 +2601,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+       target: target === "dmg" ? [target, "zip"] : [target],
+       icon: "icon.icns",
+       category: "public.app-category.developer-tools",
++      // Only the Reasoning scheme: claiming t3code or t3code-dev would let
++      // this private build capture the official apps' OAuth callbacks.
+       protocols: [
+         {
+-          name: "T3 Code",
+-          schemes: ["t3code", "t3code-dev"],
++          name: "T3 Code (Reasoning)",
++          schemes: ["t3code-reasoning"],
+         },
+       ],
+       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+@@ -2668,21 +2645,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+   if (platform === "linux") {
+     buildConfig.linux = {
+       target: [target],
+-      executableName: "t3code",
++      executableName: "t3code-reasoning",
+       icon: "icons",
+       category: "Development",
+       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
+       // in the .desktop entry (Exec already gets %U), so browsers can hand
+-      // t3code:// OAuth callbacks to the app.
++      // t3code-reasoning:// OAuth callbacks to the app. The stock schemes stay
++      // with the official install.
+       protocols: [
+         {
+-          name: "T3 Code",
+-          schemes: ["t3code", "t3code-dev"],
++          name: "T3 Code (Reasoning)",
++          schemes: ["t3code-reasoning"],
+         },
+       ],
+       desktop: {
+         entry: {
+-          StartupWMClass: "t3code",
++          StartupWMClass: "t3code-reasoning",
+         },
+       },
+     };
+@@ -3657,13 +3635,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
+       : undefined;
+   const stagePackageJson: StagePackageJson = {
+-    name: "t3code",
++    name: "t3code-reasoning",
+     version: appVersion,
+     buildVersion: appVersion,
+     t3codeCommitHash: commitHash,
+     private: true,
+     packageManager: rootPackageJson.packageManager,
+-    description: "T3 Code desktop build",
++    description: "T3 Code (Reasoning) desktop build",
+     author: "T3 Tools",
+     main: "apps/desktop/dist-electron/main.cjs",
+     build: yield* createBuildConfig(
+diff --git a/scripts/update-reasoning-mac-app.sh b/scripts/update-reasoning-mac-app.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..ea583477ba333d0bfa528a446f4807d66bfdc73c
+--- /dev/null
++++ b/scripts/update-reasoning-mac-app.sh
+@@ -0,0 +1,449 @@
++#!/usr/bin/env bash
++# Manual update/rebuild/install for the private macOS "T3 Code (Reasoning)" app.
++#
++# Syncs the local customization branch by merging in the reasoning PR ref and
++# current upstream main (history-preserving merges),
++# rebuilds the unsigned arm64 ZIP with scripts/build-desktop-artifact.ts,
++# verifies the produced bundle, and swaps it into
++# "/Applications/T3 Code (Reasoning).app" with rollback. The official
++# "T3 Code (Nightly).app" install is never touched.
++set -euo pipefail
++
++readonly REASONING_BUNDLE_ID="com.t3tools.t3code.reasoning"
++readonly OFFICIAL_BUNDLE_ID="com.t3tools.t3code"
++readonly REASONING_DISPLAY_NAME="T3 Code (Reasoning)"
++readonly REASONING_URL_SCHEME="t3code-reasoning"
++readonly TARGET_APP="/Applications/T3 Code (Reasoning).app"
++readonly OFFICIAL_APP="/Applications/T3 Code (Nightly).app"
++readonly DEFAULT_UPSTREAM_REF="origin/t3code/streaming-reasoning-transcript"
++readonly DEFAULT_MAIN_REF="upstream/main"
++readonly DEFAULT_LOCAL_BRANCH="local/reasoning-mac-app"
++readonly REQUIRED_NODE_VERSION="24.13.1"
++readonly REQUIRED_PNPM_VERSION="11.10.0"
++
++readonly PLUTIL=/usr/bin/plutil
++readonly DITTO=/usr/bin/ditto
++readonly CODESIGN=/usr/bin/codesign
++readonly OPEN=/usr/bin/open
++
++SKIP_SYNC=0
++NO_LAUNCH=0
++
++usage() {
++  cat <<'EOF'
++Usage: scripts/update-reasoning-mac-app.sh [options]
++
++Rebuilds and reinstalls the private "T3 Code (Reasoning)" macOS app from this
++repository. By default it verifies that the private Reasoning branch
++(local/reasoning-mac-app) is checked out, fetches and merges the reasoning PR
++ref and then current upstream main into it (history-preserving merges), then
++builds an unsigned arm64 ZIP and swaps it into /Applications with
++verification and rollback.
++
++Options:
++  --skip-sync    Build the currently checked-out source; skip fetch + merges.
++  --no-launch    Do not launch the app after installing.
++  -h, --help     Show this help.
++
++Environment:
++  T3CODE_REASONING_UPSTREAM  Reasoning PR ref to merge in
++                             (default: origin/t3code/streaming-reasoning-transcript).
++  T3CODE_REASONING_MAIN      Main ref to merge in after the reasoning PR ref
++                             (default: upstream/main).
++  T3CODE_REASONING_BRANCH    Local branch the sync expects to be checked out
++                             (default: local/reasoning-mac-app). Set this only
++                             if you intentionally renamed the Reasoning branch.
++  T3CODE_REASONING_NODE      Path to a Node >= 24.13.1 (major 24) executable to
++                             use when the system Node does not satisfy engines.
++                             Without it, if no installed Node qualifies, the
++                             script bootstraps one via 'npx -y node@24.13.1'
++                             (one-time download; needs network on first use).
++
++Safety:
++  - Runs only on macOS arm64.
++  - Refuses to sync unless the expected Reasoning branch is checked out
++    (see T3CODE_REASONING_BRANCH); --skip-sync builds any checkout as-is.
++  - Refuses to run with a dirty tracked worktree (unless --skip-sync).
++  - Never resets or discards local changes; a conflicting merge is aborted,
++    though an earlier successful merge from the same sync, if any, remains.
++  - Only ever replaces "/Applications/T3 Code (Reasoning).app", and only after
++    verifying the new bundle's identity. The prior app goes to the Trash with a
++    timestamped name; nothing is rm'd.
++  - "/Applications/T3 Code (Nightly).app" is verified untouched, never modified.
++EOF
++}
++
++log() { printf '[update-reasoning] %s\n' "$*"; }
++die() { printf '[update-reasoning] ERROR: %s\n' "$*" >&2; exit 1; }
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --skip-sync) SKIP_SYNC=1 ;;
++    --no-launch) NO_LAUNCH=1 ;;
++    -h|--help) usage; exit 0 ;;
++    *) usage >&2; die "Unknown argument: $1" ;;
++  esac
++  shift
++done
++
++# --- Host + repo checks -----------------------------------------------------
++
++[[ "$(uname -s)" == "Darwin" ]] || die "This script only runs on macOS."
++[[ "$(uname -m)" == "arm64" ]] || die "This script only runs on Apple Silicon (arm64)."
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
++REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)"
++[[ -f "$REPO_ROOT/pnpm-workspace.yaml" && -f "$REPO_ROOT/scripts/build-desktop-artifact.ts" ]] \
++  || die "Could not locate the t3code repo root from $SCRIPT_DIR."
++
++UPSTREAM_REF="${T3CODE_REASONING_UPSTREAM:-$DEFAULT_UPSTREAM_REF}"
++MAIN_REF="${T3CODE_REASONING_MAIN:-$DEFAULT_MAIN_REF}"
++EXPECTED_LOCAL_BRANCH="${T3CODE_REASONING_BRANCH:-$DEFAULT_LOCAL_BRANCH}"
++
++# --- Temp dir + cleanup trap ------------------------------------------------
++
++TMP_ROOT=""
++STAGED_APP=""
++
++cleanup() {
++  # Only remove paths this run provably created: the mktemp dir with our
++  # template in its name, and the uniquely named hidden staging bundle.
++  if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" && "$TMP_ROOT" == *"t3code-reasoning-update."* ]]; then
++    rm -rf -- "$TMP_ROOT"
++  fi
++  if [[ -n "$STAGED_APP" && -d "$STAGED_APP" \
++        && "$STAGED_APP" == "/Applications/.t3code-reasoning-staged-"* ]]; then
++    rm -rf -- "$STAGED_APP"
++  fi
++}
++trap cleanup EXIT
++
++TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/t3code-reasoning-update.XXXXXX")"
++[[ -d "$TMP_ROOT" ]] || die "mktemp failed."
++
++# --- Plist helpers ----------------------------------------------------------
++
++plist_value() {
++  # plist_value <app path> <key> — prints the raw value, empty on absence.
++  "$PLUTIL" -extract "$2" raw -o - -- "$1/Contents/Info.plist" 2>/dev/null || true
++}
++
++bundle_id_of() { plist_value "$1" CFBundleIdentifier; }
++
++collect_url_schemes() {
++  # Prints every CFBundleURLSchemes entry of the app, one per line.
++  local plist="$1/Contents/Info.plist" t=0 s=0 value
++  while "$PLUTIL" -extract "CFBundleURLTypes.$t" raw -o - -- "$plist" >/dev/null 2>&1; do
++    s=0
++    while value="$("$PLUTIL" -extract "CFBundleURLTypes.$t.CFBundleURLSchemes.$s" raw -o - -- "$plist" 2>/dev/null)"; do
++      printf '%s\n' "$value"
++      s=$((s + 1))
++    done
++    t=$((t + 1))
++  done
++}
++
++verify_reasoning_bundle() {
++  # Full identity check of a candidate Reasoning app bundle before install.
++  local app="$1" id display schemes
++  [[ -d "$app" ]] || die "App bundle not found at: $app"
++
++  id="$(bundle_id_of "$app")"
++  [[ "$id" == "$REASONING_BUNDLE_ID" ]] \
++    || die "Bundle at '$app' has CFBundleIdentifier '$id', expected '$REASONING_BUNDLE_ID'."
++
++  display="$(plist_value "$app" CFBundleDisplayName)"
++  [[ "$display" == "$REASONING_DISPLAY_NAME" ]] \
++    || die "Bundle at '$app' has CFBundleDisplayName '$display', expected '$REASONING_DISPLAY_NAME'."
++
++  schemes="$(collect_url_schemes "$app")"
++  [[ "$schemes" == "$REASONING_URL_SCHEME" ]] \
++    || die "Bundle at '$app' must claim exactly the '$REASONING_URL_SCHEME' URL scheme; found: ${schemes:-<none>}"
++  while IFS= read -r scheme; do
++    case "$scheme" in
++      t3code|t3code-dev) die "Bundle at '$app' claims official scheme '$scheme'; refusing." ;;
++    esac
++  done <<< "$schemes"
++
++  [[ ! -e "$app/Contents/Resources/app-update.yml" ]] \
++    || die "Bundle at '$app' contains app-update.yml (auto-update feed); refusing to install it."
++}
++
++# --- Guard the official install --------------------------------------------
++
++if [[ -d "$OFFICIAL_APP" ]]; then
++  official_id="$(bundle_id_of "$OFFICIAL_APP")"
++  [[ "$official_id" == "$OFFICIAL_BUNDLE_ID" ]] \
++    || die "Official app at '$OFFICIAL_APP' has unexpected bundle id '$official_id'. Refusing to continue; investigate before updating."
++  log "Official app check OK: $OFFICIAL_APP is $official_id (will not be touched)."
++fi
++
++if [[ -e "$TARGET_APP" ]]; then
++  [[ -d "$TARGET_APP" ]] || die "'$TARGET_APP' exists but is not an app bundle directory."
++  target_id="$(bundle_id_of "$TARGET_APP")"
++  [[ "$target_id" == "$REASONING_BUNDLE_ID" ]] \
++    || die "'$TARGET_APP' has bundle id '${target_id:-<none>}', not '$REASONING_BUNDLE_ID'. Refusing to replace something that is not the Reasoning app."
++fi
++
++# --- Sync with upstream (unless --skip-sync) --------------------------------
++
++git_r() { git -C "$REPO_ROOT" "$@"; }
++
++fetched_remotes=" "
++fetch_remote_of_ref() {
++  # Fetches the remote a "<remote>/<branch>" ref points at, once per remote.
++  # Refs without a configured-remote prefix (tags, local branches) fetch
++  # nothing and are just verified to exist afterwards.
++  local ref="$1" remote="${1%%/*}"
++  [[ "$remote" != "$ref" ]] || return 0
++  git_r remote get-url "$remote" >/dev/null 2>&1 || return 0
++  [[ "$fetched_remotes" != *" $remote "* ]] || return 0
++  git_r fetch "$remote" || die "git fetch $remote failed."
++  fetched_remotes="$fetched_remotes$remote "
++}
++
++merge_ref() {
++  # merge_ref <ref> <env var that overrides it>
++  local ref="$1" env_name="$2"
++  git_r rev-parse --verify --quiet "${ref}^{commit}" >/dev/null \
++    || die "Ref '$ref' does not exist after fetch. Set $env_name to a valid ref."
++  if git_r merge-base --is-ancestor "$ref" HEAD; then
++    log "'$branch' already contains '$ref'."
++    return 0
++  fi
++  log "Merging '$ref' into '$branch'..."
++  if ! git_r merge --no-edit "$ref"; then
++    git_r merge --abort >/dev/null 2>&1 || true
++    die "Merge of '$ref' into '$branch' hit conflicts. The conflicting merge was aborted; earlier successful merges from this sync, if any, remain on your branch. Resolve manually (git merge $ref), then rerun with --skip-sync."
++  fi
++}
++
++if [[ "$SKIP_SYNC" -eq 0 ]]; then
++  log "Syncing '$EXPECTED_LOCAL_BRANCH' with '$UPSTREAM_REF' and '$MAIN_REF'..."
++
++  git_dir="$(git_r rev-parse --absolute-git-dir)" || die "Not a git repository: $REPO_ROOT"
++  [[ ! -d "$git_dir/rebase-merge" && ! -d "$git_dir/rebase-apply" ]] \
++    || die "A rebase is already in progress in this worktree. Resolve it first."
++  [[ ! -f "$git_dir/MERGE_HEAD" ]] \
++    || die "A merge is already in progress in this worktree. Resolve it first."
++
++  branch="$(git_r symbolic-ref --quiet --short HEAD || true)"
++  [[ -n "$branch" ]] || die "HEAD is detached. Check out the local Reasoning branch first."
++
++  [[ "$branch" == "$EXPECTED_LOCAL_BRANCH" ]] \
++    || die "Checked-out branch is '$branch', expected '$EXPECTED_LOCAL_BRANCH'. Check out the Reasoning branch, set T3CODE_REASONING_BRANCH if you renamed it, or use --skip-sync to build this checkout as-is."
++
++  if [[ -n "$(git_r status --porcelain --untracked-files=no)" ]]; then
++    die "Tracked worktree is dirty. Commit or set aside your changes, or rerun with --skip-sync to build the current source as-is."
++  fi
++
++  fetch_remote_of_ref "$UPSTREAM_REF"
++  fetch_remote_of_ref "$MAIN_REF"
++
++  merge_ref "$UPSTREAM_REF" T3CODE_REASONING_UPSTREAM
++  merge_ref "$MAIN_REF" T3CODE_REASONING_MAIN
++else
++  log "Skipping upstream sync (--skip-sync); building current checkout."
++fi
++
++# --- Toolchain: Node ${REQUIRED_NODE_VERSION} + pnpm ${REQUIRED_PNPM_VERSION}
++
++node_satisfies() {
++  # Accepts ^24.13.1: major 24, and (minor, patch) >= (13, 1).
++  local v major minor patch
++  v="$("$1" --version 2>/dev/null)" || return 1
++  v="${v#v}"
++  IFS=. read -r major minor patch <<< "$v"
++  [[ "$major" == "24" ]] || return 1
++  [[ "$minor" =~ ^[0-9]+$ && "$patch" =~ ^[0-9]+$ ]] || return 1
++  (( minor > 13 || (minor == 13 && patch >= 1) ))
++}
++
++resolve_node() {
++  local candidate
++  if [[ -n "${T3CODE_REASONING_NODE:-}" ]]; then
++    node_satisfies "$T3CODE_REASONING_NODE" \
++      || die "T3CODE_REASONING_NODE ('$T3CODE_REASONING_NODE') is not a Node ^${REQUIRED_NODE_VERSION} executable."
++    printf '%s\n' "$T3CODE_REASONING_NODE"
++    return
++  fi
++  for candidate in \
++    "$HOME/.nvm/versions/node/v$REQUIRED_NODE_VERSION/bin/node" \
++    "$HOME/Library/Application Support/fnm/node-versions/v$REQUIRED_NODE_VERSION/installation/bin/node" \
++    "$HOME/.local/share/fnm/node-versions/v$REQUIRED_NODE_VERSION/installation/bin/node" \
++    "$HOME/.local/share/mise/installs/node/$REQUIRED_NODE_VERSION/bin/node" \
++    "$HOME/.asdf/installs/nodejs/$REQUIRED_NODE_VERSION/bin/node" \
++    "$HOME/.volta/tools/image/node/$REQUIRED_NODE_VERSION/bin/node"; do
++    if [[ -x "$candidate" ]] && node_satisfies "$candidate"; then
++      printf '%s\n' "$candidate"
++      return
++    fi
++  done
++  if candidate="$(command -v node)" && node_satisfies "$candidate"; then
++    printf '%s\n' "$candidate"
++    return
++  fi
++  # Last resort: let npx fetch the exact Node into its cache (one-time
++  # download; needs network on first use). Logs go to stderr so the caller's
++  # command substitution captures only the final path.
++  if command -v npx >/dev/null 2>&1; then
++    log "No local Node ^${REQUIRED_NODE_VERSION} found; bootstrapping via 'npx -y node@${REQUIRED_NODE_VERSION}' (one-time download, may need network)..." >&2
++    if candidate="$(npx -y "node@$REQUIRED_NODE_VERSION" -p 'process.execPath' 2>/dev/null)"; then
++      candidate="${candidate##*$'\n'}"
++      if [[ -x "$candidate" ]] && node_satisfies "$candidate"; then
++        printf '%s\n' "$candidate"
++        return
++      fi
++    fi
++  fi
++  die "No Node ^${REQUIRED_NODE_VERSION} found (and the npx bootstrap did not yield one). Install it (e.g. 'nvm install ${REQUIRED_NODE_VERSION}' or 'fnm install ${REQUIRED_NODE_VERSION}') or set T3CODE_REASONING_NODE to a suitable node binary."
++}
++
++NODE_BIN="$(resolve_node)"
++NODE_BIN_DIR="$(cd -- "$(dirname -- "$NODE_BIN")" >/dev/null 2>&1 && pwd -P)"
++export PATH="$REPO_ROOT/node_modules/.bin:$NODE_BIN_DIR:$PATH"
++log "Using Node $("$NODE_BIN" --version) at $NODE_BIN"
++
++# pnpm: prefer an on-PATH exact match, then corepack (pinned by the repo's
++# packageManager field), then a one-off npx fetch of the pinned version.
++PNPM_CMD=()
++if command -v pnpm >/dev/null 2>&1 \
++   && [[ "$(pnpm --version 2>/dev/null)" == "$REQUIRED_PNPM_VERSION" ]]; then
++  PNPM_CMD=(pnpm)
++elif command -v corepack >/dev/null 2>&1; then
++  export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
++  PNPM_CMD=(corepack pnpm)
++elif command -v npx >/dev/null 2>&1; then
++  PNPM_CMD=(npx -y "pnpm@$REQUIRED_PNPM_VERSION")
++else
++  die "Could not find pnpm $REQUIRED_PNPM_VERSION, corepack, or npx next to the resolved Node."
++fi
++
++pnpm_version="$(cd "$REPO_ROOT" && "${PNPM_CMD[@]}" --version 2>/dev/null)" || true
++[[ "$pnpm_version" == "$REQUIRED_PNPM_VERSION" ]] \
++  || die "Resolved pnpm reports version '${pnpm_version:-<none>}', expected $REQUIRED_PNPM_VERSION."
++log "Using pnpm $pnpm_version (${PNPM_CMD[*]})"
++
++# --- Install + build --------------------------------------------------------
++
++log "Installing frozen dependency graph..."
++(cd "$REPO_ROOT" && "${PNPM_CMD[@]}" install --frozen-lockfile) \
++  || die "pnpm install --frozen-lockfile failed. The installed app was not touched."
++
++BUILD_OUT="$TMP_ROOT/artifacts"
++mkdir -p "$BUILD_OUT"
++
++# Explicit flags below outrank env, but clear the toggles that have no flag
++# so an ambient dev environment cannot skew this build.
++unset T3CODE_DESKTOP_SIGNED T3CODE_DESKTOP_SKIP_BUILD T3CODE_DESKTOP_KEEP_STAGE \
++      T3CODE_DESKTOP_MOCK_UPDATES T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT \
++      T3CODE_DESKTOP_OUTPUT_DIR T3CODE_DESKTOP_VERSION 2>/dev/null || true
++
++log "Building unsigned macOS arm64 ZIP (this runs the full desktop build)..."
++(cd "$REPO_ROOT" && "$NODE_BIN" scripts/build-desktop-artifact.ts \
++    --platform mac --target zip --arch arm64 --output-dir "$BUILD_OUT") \
++  || die "Desktop artifact build failed. The installed app was not touched."
++
++# --- Locate + extract + verify the built app --------------------------------
++
++zips=()
++while IFS= read -r -d '' zip; do
++  zips+=("$zip")
++done < <(find "$BUILD_OUT" -maxdepth 1 -type f -name 'T3-Code-Reasoning-*.zip' -print0)
++[[ ${#zips[@]} -eq 1 ]] \
++  || die "Expected exactly one Reasoning ZIP in $BUILD_OUT, found ${#zips[@]}."
++ZIP_PATH="${zips[0]}"
++log "Built artifact: $(basename "$ZIP_PATH")"
++
++EXTRACT_DIR="$TMP_ROOT/extracted"
++mkdir -p "$EXTRACT_DIR"
++"$DITTO" -x -k "$ZIP_PATH" "$EXTRACT_DIR" || die "ditto extraction failed."
++
++apps=()
++while IFS= read -r -d '' app; do
++  apps+=("$app")
++done < <(find "$EXTRACT_DIR" -maxdepth 1 -type d -name '*.app' -print0)
++[[ ${#apps[@]} -eq 1 ]] \
++  || die "Expected exactly one .app in the extracted ZIP, found ${#apps[@]}."
++NEW_APP="${apps[0]}"
++
++log "Verifying built bundle identity..."
++verify_reasoning_bundle "$NEW_APP"
++NEW_VERSION="$(plist_value "$NEW_APP" CFBundleShortVersionString)"
++log "Built bundle OK: $REASONING_BUNDLE_ID ${NEW_VERSION:-<unknown version>}"
++
++# --- Refuse to replace a running app ----------------------------------------
++
++if [[ -d "$TARGET_APP" ]] \
++   && ps -axo comm= | grep -F -q "$TARGET_APP/Contents/MacOS/"; then
++  die "'$REASONING_DISPLAY_NAME' is currently running. Quit it, then rerun (with --skip-sync to reuse this build's source state). Note the built artifact lives in a temp dir and is discarded on exit."
++fi
++
++# --- Stage, ad-hoc sign, swap ------------------------------------------------
++
++STAMP="$(date +%Y%m%d-%H%M%S)"
++STAGED_APP="/Applications/.t3code-reasoning-staged-$STAMP-$$.app"
++[[ ! -e "$STAGED_APP" ]] || die "Staging path already exists: $STAGED_APP"
++
++log "Staging new app at $STAGED_APP"
++"$DITTO" "$NEW_APP" "$STAGED_APP" || die "Failed to stage the new app under /Applications."
++
++if ! "$CODESIGN" --verify --deep --strict "$STAGED_APP" >/dev/null 2>&1; then
++  log "Ad-hoc signing staged app so it can launch locally..."
++  "$CODESIGN" --force --deep --sign - "$STAGED_APP" \
++    || die "Ad-hoc signing failed; the installed app was not touched."
++fi
++"$CODESIGN" --verify --deep --strict "$STAGED_APP" \
++  || die "codesign verification of the staged app failed; the installed app was not touched."
++
++# BSD mv -n exits 0 even when it declines to move over an existing
++# destination, so every move is re-checked by looking at the filesystem.
++TRASHED_APP=""
++if [[ -d "$TARGET_APP" ]]; then
++  TRASHED_APP="$HOME/.Trash/T3 Code (Reasoning) $STAMP-$$.app"
++  log "Moving previous app to Trash: $TRASHED_APP"
++  mv -n "$TARGET_APP" "$TRASHED_APP" || true
++  if [[ -e "$TARGET_APP" || ! -d "$TRASHED_APP" ]]; then
++    die "Could not move the previous app to the Trash (grant this terminal Full Disk Access, or move it aside manually). The installed app was not touched."
++  fi
++fi
++
++mv -n "$STAGED_APP" "$TARGET_APP" || true
++if [[ -e "$STAGED_APP" || ! -d "$TARGET_APP" ]]; then
++  if [[ -n "$TRASHED_APP" && -d "$TRASHED_APP" && ! -e "$TARGET_APP" ]]; then
++    mv -n "$TRASHED_APP" "$TARGET_APP" || true
++    if [[ -d "$TARGET_APP" && ! -e "$TRASHED_APP" ]]; then
++      log "Rolled back: previous app restored from Trash."
++    else
++      log "ROLLBACK FAILED: previous app is still at '$TRASHED_APP'. Restore it manually."
++    fi
++  fi
++  die "Failed to move the staged app into place."
++fi
++STAGED_APP=""  # installed; nothing left for the trap to clean
++
++# --- Post-install verification ----------------------------------------------
++
++installed_id="$(bundle_id_of "$TARGET_APP")"
++[[ "$installed_id" == "$REASONING_BUNDLE_ID" ]] \
++  || die "Post-install check failed: '$TARGET_APP' reports bundle id '$installed_id'."
++
++if [[ -d "$OFFICIAL_APP" ]]; then
++  official_id="$(bundle_id_of "$OFFICIAL_APP")"
++  [[ "$official_id" == "$OFFICIAL_BUNDLE_ID" ]] \
++    || die "Post-install check failed: official app bundle id changed to '$official_id'. Investigate immediately."
++fi
++
++if [[ "$NO_LAUNCH" -eq 0 ]]; then
++  log "Launching $REASONING_DISPLAY_NAME..."
++  # Strip ELECTRON_RUN_AS_NODE from the launch environment: when this script
++  # runs from a backend child that variable is set, and if it reaches the app
++  # it starts as a headless node process instead of the GUI.
++  /usr/bin/env -u ELECTRON_RUN_AS_NODE "$OPEN" "$TARGET_APP" \
++    || log "WARNING: launch failed; open '$TARGET_APP' manually."
++fi
++
++log "Success."
++log "  Installed: $TARGET_APP ($REASONING_BUNDLE_ID, version ${NEW_VERSION:-unknown})"
++[[ -z "$TRASHED_APP" ]] || log "  Previous:  $TRASHED_APP (recoverable from Trash)"
++[[ ! -d "$OFFICIAL_APP" ]] || log "  Official:  $OFFICIAL_APP untouched ($OFFICIAL_BUNDLE_ID)"
