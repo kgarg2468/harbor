@@ -1,0 +1,48 @@
+name: t3-reasoning
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "t3-reasoning/**"
+      - ".github/workflows/t3-reasoning.yml"
+  pull_request:
+    paths:
+      - "t3-reasoning/**"
+      - ".github/workflows/t3-reasoning.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Show toolchain
+        run: node --version && git --version
+      - name: Unit tests
+        run: node --test t3-reasoning/tests/*.test.mjs
+
+  markdown:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: markdownlint
+        run: >
+          npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml
+          't3-reasoning/**/*.md'
