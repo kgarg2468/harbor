@@ -34,6 +34,11 @@
       "sha256": "a2a81bfcb5712ff623602b9ac8fc48a1238b1422db2a31d59a6b789739ac3c54"
     },
     {
+      "id": "thread-fork-ui",
+      "path": "patches/0007-thread-fork-ui.patch",
+      "sha256": "e90f119357806ed84190da318a8680631b531028de979965e358da46d059ae87"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -46,7 +51,8 @@
       "update-admission",
       "queued-update",
       "update-activity",
-      "thread-fork-backend"
+      "thread-fork-backend",
+      "thread-fork-ui"
     ],
     "reasoning": [
       "reasoning-full",
@@ -55,6 +61,7 @@
       "queued-update",
       "update-activity",
       "thread-fork-backend",
+      "thread-fork-ui",
       "reasoning-identity"
     ]
   }

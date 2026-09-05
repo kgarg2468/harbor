@@ -1,0 +1,1246 @@
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index a6ae0e773..57606f43a 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -291,12 +291,14 @@ import {
+   useThread,
+   useThreadRefs,
+   useThreadShell,
++  waitForThreadShell,
+ } from "../state/entities";
+ import { environmentShell } from "../state/shell";
+ import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+ import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
+ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
+ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
++import { ForkThreadDialog, ForkThreadLineage } from "./chat/ForkThreadDialog";
+ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
+ import { MessagesTimeline } from "./chat/MessagesTimeline";
+ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
+@@ -1613,6 +1615,12 @@ export default function ChatView(props: ChatViewProps) {
+   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
+   const [pullRequestDialogState, setPullRequestDialogState] =
+     useState<PullRequestDialogState | null>(null);
++  // Keyed per open so the dialog's form state and idempotent operation ids
++  // reset between forks but survive retries within one attempt.
++  const [forkDialogState, setForkDialogState] = useState<{
++    turnId: TurnId;
++    key: number;
++  } | null>(null);
+   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
+     useState<TerminalLaunchContext | null>(null);
+   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
+@@ -2166,6 +2174,48 @@ export default function ChatView(props: ChatViewProps) {
+     setPullRequestDialogState(null);
+   }, []);
+ 
++  const openForkDialog = useCallback((turnId: TurnId) => {
++    setForkDialogState({ turnId, key: Date.now() });
++  }, []);
++  const closeForkDialog = useCallback(() => {
++    setForkDialogState(null);
++  }, []);
++  const forkParentRef = useMemo(
++    () =>
++      activeThread?.forkedFrom
++        ? scopeThreadRef(activeThread.environmentId, activeThread.forkedFrom.threadId)
++        : null,
++    [activeThread?.environmentId, activeThread?.forkedFrom],
++  );
++  const forkParentShell = useThreadShell(forkParentRef);
++  const handleThreadForked = useCallback(
++    async (result: { threadId: ThreadId; warnings: ReadonlyArray<string> }) => {
++      const forkEnvironmentId = activeThread?.environmentId;
++      if (!forkEnvironmentId) {
++        return;
++      }
++      if (result.warnings.length > 0) {
++        toastManager.add(
++          stackedThreadToast({
++            type: "warning",
++            title: "Thread forked with limits",
++            description: <div className="whitespace-pre-line">{result.warnings.join("\n")}</div>,
++          }),
++        );
++      }
++      // The fork is durable once the RPC returns; only wait for the shell so
++      // the route does not flash "missing" before the event stream catches up.
++      await waitForThreadShell(scopeThreadRef(forkEnvironmentId, result.threadId)).catch(
++        () => null,
++      );
++      await navigate({
++        to: "/$environmentId/$threadId",
++        params: { environmentId: forkEnvironmentId, threadId: result.threadId },
++      });
++    },
++    [activeThread?.environmentId, navigate],
++  );
++
+   const openOrReuseProjectDraftThread = useCallback(
+     async (input: { branch: string; worktreePath: string | null; envMode: DraftThreadEnvMode }) => {
+       if (!activeProject) {
+@@ -2271,6 +2321,8 @@ export default function ChatView(props: ChatViewProps) {
+     : (primaryEnvironment?.serverConfig ?? null);
+   const pullRequestsCapabilityKnown = serverConfig !== null;
+   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
++  // Absent on pre-fork servers, which hides the action instead of failing it.
++  const supportsThreadFork = serverConfig?.environment.capabilities.threadFork === true;
+   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
+   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
+   const supportsAttachmentUploads =
+@@ -7800,6 +7852,14 @@ export default function ChatView(props: ChatViewProps) {
+             </div>
+             {/* Messages Wrapper */}
+             <div className="relative flex min-h-0 flex-1 flex-col">
++              {activeThread.forkedFrom ? (
++                <ForkThreadLineage
++                  environmentId={activeThread.environmentId}
++                  forkedFrom={activeThread.forkedFrom}
++                  parentTitle={forkParentShell?.title ?? null}
++                  contextTruncated={activeThread.forkContext?.truncated === true}
++                />
++              ) : null}
+               {/* Messages — LegendList handles virtualization and scrolling internally */}
+               <MessagesTimeline
+                 citationRequest={citationRequest}
+@@ -7822,6 +7882,7 @@ export default function ChatView(props: ChatViewProps) {
+                 onOpenTurnDiff={onOpenTurnDiff}
+                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
+                 onRevertUserMessage={onRevertUserMessage}
++                {...(supportsThreadFork && isServerThread ? { onForkTurn: openForkDialog } : {})}
+                 onUseArtifactTemplate={useArtifactTemplate}
+                 isRevertingCheckpoint={isRevertingCheckpoint}
+                 onImageExpand={onExpandTimelineImage}
+@@ -8128,6 +8189,40 @@ export default function ChatView(props: ChatViewProps) {
+                 onPrepared={handlePreparedPullRequestThread}
+               />
+             ) : null}
++
++            {forkDialogState && serverThread ? (
++              <ForkThreadDialog
++                key={forkDialogState.key}
++                open
++                environmentId={serverThread.environmentId}
++                source={{
++                  threadId: serverThread.id,
++                  title: serverThread.title,
++                  modelSelection: serverThread.modelSelection,
++                  runtimeMode: serverThread.runtimeMode,
++                  interactionMode: serverThread.interactionMode,
++                }}
++                sourceTurnId={forkDialogState.turnId}
++                sourceTurnNumber={
++                  turnDiffSummaries.find((summary) => summary.turnId === forkDialogState.turnId)
++                    ?.checkpointTurnCount ?? null
++                }
++                checkpointStatus={
++                  turnDiffSummaries.find((summary) => summary.turnId === forkDialogState.turnId)
++                    ?.status ?? null
++                }
++                providers={providerStatuses}
++                settings={settings}
++                instanceEntries={providerInstanceEntries}
++                onOpenProviderSetup={openProviderSetup}
++                onOpenChange={(open) => {
++                  if (!open) {
++                    closeForkDialog();
++                  }
++                }}
++                onForked={handleThreadForked}
++              />
++            ) : null}
+           </div>
+           {/* end chat column */}
+         </div>
+diff --git a/apps/web/src/components/chat/ForkThreadDialog.logic.test.ts b/apps/web/src/components/chat/ForkThreadDialog.logic.test.ts
+new file mode 100644
+index 000000000..b4b196d1c
+--- /dev/null
++++ b/apps/web/src/components/chat/ForkThreadDialog.logic.test.ts
+@@ -0,0 +1,201 @@
++import { describe, expect, it } from "vite-plus/test";
++import {
++  ProviderDriverKind,
++  ProviderInstanceId,
++  ThreadId,
++  TurnId,
++  type ModelSelection,
++  type ServerProvider,
++} from "@t3tools/contracts";
++import {
++  buildForkThreadInput,
++  createForkThreadOperation,
++  describeForkThreadFailure,
++  resolveForkDefaultModelSelection,
++  resolveForkThreadDefaultTitle,
++  resolveForkWorkspaceAvailability,
++} from "./ForkThreadDialog.logic";
++
++function provider(input: {
++  driver: string;
++  instanceId: string;
++  enabled?: boolean;
++  status?: ServerProvider["status"];
++  availability?: ServerProvider["availability"];
++  models?: ServerProvider["models"];
++}): ServerProvider {
++  return {
++    instanceId: ProviderInstanceId.make(input.instanceId),
++    driver: ProviderDriverKind.make(input.driver),
++    enabled: input.enabled ?? true,
++    installed: true,
++    version: null,
++    status: input.status ?? "ready",
++    ...(input.availability ? { availability: input.availability } : {}),
++    auth: { status: "authenticated" },
++    checkedAt: "2026-09-05T00:00:00.000Z",
++    models: input.models ?? [],
++    slashCommands: [],
++    skills: [],
++  };
++}
++
++const model = (slug: string, isDefault = false) => ({
++  slug,
++  name: slug,
++  isCustom: false,
++  ...(isDefault ? { isDefault: true } : {}),
++  capabilities: {},
++});
++
++describe("resolveForkThreadDefaultTitle", () => {
++  it("suffixes the trimmed source title", () => {
++    expect(resolveForkThreadDefaultTitle("  Fix login  ")).toBe("Fix login (fork)");
++  });
++
++  it("falls back when the source title is blank", () => {
++    expect(resolveForkThreadDefaultTitle("   ")).toBe("Forked thread");
++  });
++});
++
++describe("resolveForkWorkspaceAvailability", () => {
++  it("defaults to a new worktree when the checkpoint is ready", () => {
++    expect(resolveForkWorkspaceAvailability("ready")).toEqual({
++      newWorktreeEnabled: true,
++      newWorktreeDisabledReason: null,
++      defaultMode: "new-worktree",
++    });
++  });
++
++  it.each(["missing", "error", null] as const)(
++    "keeps sharing available and explains why a worktree is not (%s)",
++    (status) => {
++      const availability = resolveForkWorkspaceAvailability(status);
++      expect(availability.newWorktreeEnabled).toBe(false);
++      expect(availability.defaultMode).toBe("shared");
++      expect(availability.newWorktreeDisabledReason).toEqual(expect.any(String));
++    },
++  );
++});
++
++describe("resolveForkDefaultModelSelection", () => {
++  const codex = provider({
++    driver: "codex",
++    instanceId: "codex",
++    models: [model("gpt-5-codex", true), model("gpt-5")],
++  });
++  const claude = provider({
++    driver: "claudeAgent",
++    instanceId: "claudeAgent",
++    models: [model("claude-opus", true)],
++  });
++
++  it("keeps the source selection, including options, when its instance can start", () => {
++    const source: ModelSelection = {
++      instanceId: ProviderInstanceId.make("claudeAgent"),
++      model: "claude-opus",
++      options: [{ id: "effort", value: "high" }],
++    };
++    expect(resolveForkDefaultModelSelection([codex, claude], source)).toBe(source);
++  });
++
++  it("falls back to the first ready instance and its default model", () => {
++    const source: ModelSelection = {
++      instanceId: ProviderInstanceId.make("claudeAgent"),
++      model: "claude-opus",
++    };
++    const unavailableClaude = provider({
++      driver: "claudeAgent",
++      instanceId: "claudeAgent",
++      availability: "unavailable",
++      models: [model("claude-opus", true)],
++    });
++    expect(resolveForkDefaultModelSelection([codex, unavailableClaude], source)).toEqual({
++      instanceId: ProviderInstanceId.make("codex"),
++      model: "gpt-5-codex",
++    });
++  });
++
++  it("returns null when no provider can start", () => {
++    const disabled = provider({ driver: "codex", instanceId: "codex", enabled: false });
++    expect(resolveForkDefaultModelSelection([disabled], null)).toBeNull();
++  });
++});
++
++describe("buildForkThreadInput", () => {
++  const operation = createForkThreadOperation(
++    (() => {
++      let counter = 0;
++      return () => `id-${++counter}`;
++    })(),
++  );
++  const base = {
++    operation,
++    sourceThreadId: ThreadId.make("source-thread"),
++    sourceTurnId: TurnId.make("turn-3"),
++    title: "  Fix login (fork)  ",
++    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
++    runtimeMode: "approval-required" as const,
++    interactionMode: "default" as const,
++    workspaceMode: "new-worktree" as const,
++    newWorktreeEnabled: true,
++  };
++
++  it("mints distinct command and thread ids once per operation", () => {
++    expect(operation.commandId).not.toBe(operation.threadId);
++  });
++
++  it("builds the request with trimmed title and the stable operation ids on retry", () => {
++    const first = buildForkThreadInput(base);
++    const retry = buildForkThreadInput({ ...base, title: "Fix login (fork)" });
++    expect(first).toEqual({
++      ok: true,
++      input: {
++        commandId: operation.commandId,
++        threadId: operation.threadId,
++        sourceThreadId: base.sourceThreadId,
++        sourceTurnId: base.sourceTurnId,
++        title: "Fix login (fork)",
++        modelSelection: base.modelSelection,
++        runtimeMode: "approval-required",
++        interactionMode: "default",
++        workspaceMode: "new-worktree",
++      },
++    });
++    expect(retry).toEqual(first);
++  });
++
++  it("rejects a blank title", () => {
++    expect(buildForkThreadInput({ ...base, title: "  " })).toMatchObject({ ok: false });
++  });
++
++  it("rejects a missing model selection", () => {
++    expect(buildForkThreadInput({ ...base, modelSelection: null })).toMatchObject({ ok: false });
++  });
++
++  it("rejects a new worktree when the checkpoint cannot back it", () => {
++    expect(buildForkThreadInput({ ...base, newWorktreeEnabled: false })).toMatchObject({
++      ok: false,
++    });
++    expect(
++      buildForkThreadInput({ ...base, newWorktreeEnabled: false, workspaceMode: "shared" }),
++    ).toMatchObject({ ok: true, input: { workspaceMode: "shared" } });
++  });
++});
++
++describe("describeForkThreadFailure", () => {
++  it("uses the server message when present", () => {
++    expect(
++      describeForkThreadFailure({
++        _tag: "OrchestrationDispatchCommandError",
++        message: "Source turn is not completed.",
++      }),
++    ).toBe("Source turn is not completed.");
++    expect(describeForkThreadFailure(new Error("boom"))).toBe("boom");
++  });
++
++  it("falls back to a generic message for unknown failures", () => {
++    expect(describeForkThreadFailure(undefined)).toBe("Could not fork the thread.");
++    expect(describeForkThreadFailure({ message: "" })).toBe("Could not fork the thread.");
++  });
++});
+diff --git a/apps/web/src/components/chat/ForkThreadDialog.logic.ts b/apps/web/src/components/chat/ForkThreadDialog.logic.ts
+new file mode 100644
+index 000000000..b9cca8dfa
+--- /dev/null
++++ b/apps/web/src/components/chat/ForkThreadDialog.logic.ts
+@@ -0,0 +1,151 @@
++import {
++  CommandId,
++  ThreadId,
++  type ModelSelection,
++  type OrchestrationCheckpointStatus,
++  type ProviderInteractionMode,
++  type RuntimeMode,
++  type ServerProvider,
++  type ThreadForkWorkspaceMode,
++  type TurnId,
++} from "@t3tools/contracts";
++import type { ForkThreadInput } from "@t3tools/client-runtime/state/threads";
++import { resolveDefaultProviderModelSelection } from "../../providerInstances";
++
++const FORK_TITLE_SUFFIX = " (fork)";
++const FALLBACK_FORK_TITLE = "Forked thread";
++
++export function resolveForkThreadDefaultTitle(sourceTitle: string): string {
++  const trimmed = sourceTitle.trim();
++  return trimmed.length === 0 ? FALLBACK_FORK_TITLE : `${trimmed}${FORK_TITLE_SUFFIX}`;
++}
++
++export interface ForkWorkspaceAvailability {
++  readonly newWorktreeEnabled: boolean;
++  /** Why "new worktree" cannot be chosen; null when it can. */
++  readonly newWorktreeDisabledReason: string | null;
++  readonly defaultMode: ThreadForkWorkspaceMode;
++}
++
++/**
++ * A new worktree restores the selected turn's checkpoint, so it needs a
++ * ready checkpoint. Sharing the current workspace copies nothing and stays
++ * available even when checkpointing never ran (no git repository) or failed.
++ */
++export function resolveForkWorkspaceAvailability(
++  checkpointStatus: OrchestrationCheckpointStatus | null,
++): ForkWorkspaceAvailability {
++  switch (checkpointStatus) {
++    case "ready":
++      return {
++        newWorktreeEnabled: true,
++        newWorktreeDisabledReason: null,
++        defaultMode: "new-worktree",
++      };
++    case "missing":
++      return {
++        newWorktreeEnabled: false,
++        newWorktreeDisabledReason:
++          "The checkpoint for this turn is missing, so a new worktree cannot restore its files.",
++        defaultMode: "shared",
++      };
++    case "error":
++      return {
++        newWorktreeEnabled: false,
++        newWorktreeDisabledReason:
++          "The checkpoint for this turn failed to record, so a new worktree cannot restore its files.",
++        defaultMode: "shared",
++      };
++    case null:
++      return {
++        newWorktreeEnabled: false,
++        newWorktreeDisabledReason:
++          "This turn has no checkpoint. New worktrees need a git repository with checkpointing.",
++        defaultMode: "shared",
++      };
++  }
++}
++
++/**
++ * Destination defaults to the source thread's harness and model when that
++ * instance can still start; otherwise the first instance that can, with its
++ * own default model. Null when no configured provider is usable.
++ */
++export function resolveForkDefaultModelSelection(
++  providers: ReadonlyArray<ServerProvider>,
++  sourceSelection: ModelSelection | null,
++): ModelSelection | null {
++  return resolveDefaultProviderModelSelection(providers, sourceSelection);
++}
++
++/**
++ * Identifiers minted once per dialog and reused across every retry, so a
++ * repeated submit after a transient failure is idempotent on the server
++ * instead of creating a second fork.
++ */
++export interface ForkThreadOperation {
++  readonly commandId: CommandId;
++  readonly threadId: ThreadId;
++}
++
++export function createForkThreadOperation(generateId: () => string): ForkThreadOperation {
++  return {
++    commandId: CommandId.make(generateId()),
++    threadId: ThreadId.make(generateId()),
++  };
++}
++
++export interface ForkThreadFormInput {
++  readonly operation: ForkThreadOperation;
++  readonly sourceThreadId: ThreadId;
++  readonly sourceTurnId: TurnId;
++  readonly title: string;
++  readonly modelSelection: ModelSelection | null;
++  readonly runtimeMode: RuntimeMode;
++  readonly interactionMode: ProviderInteractionMode;
++  readonly workspaceMode: ThreadForkWorkspaceMode;
++  readonly newWorktreeEnabled: boolean;
++}
++
++export type ForkThreadFormResult =
++  | { readonly ok: true; readonly input: ForkThreadInput }
++  | { readonly ok: false; readonly reason: string };
++
++export function buildForkThreadInput(form: ForkThreadFormInput): ForkThreadFormResult {
++  const title = form.title.trim();
++  if (title.length === 0) {
++    return { ok: false, reason: "Give the forked thread a title." };
++  }
++  if (form.modelSelection === null) {
++    return { ok: false, reason: "Choose a harness and model for the forked thread." };
++  }
++  if (form.workspaceMode === "new-worktree" && !form.newWorktreeEnabled) {
++    return { ok: false, reason: "A new worktree needs a ready checkpoint for this turn." };
++  }
++  return {
++    ok: true,
++    input: {
++      commandId: form.operation.commandId,
++      threadId: form.operation.threadId,
++      sourceThreadId: form.sourceThreadId,
++      sourceTurnId: form.sourceTurnId,
++      title,
++      modelSelection: form.modelSelection,
++      runtimeMode: form.runtimeMode,
++      interactionMode: form.interactionMode,
++      workspaceMode: form.workspaceMode,
++    },
++  };
++}
++
++const GENERIC_FORK_FAILURE = "Could not fork the thread.";
++
++/** Human-readable text for a squashed command failure. */
++export function describeForkThreadFailure(error: unknown): string {
++  if (typeof error === "string" && error.trim().length > 0) return error;
++  if (error !== null && typeof error === "object" && "message" in error) {
++    const message = (error as { message?: unknown }).message;
++    if (typeof message === "string" && message.trim().length > 0) return message;
++  }
++  return GENERIC_FORK_FAILURE;
++}
+diff --git a/apps/web/src/components/chat/ForkThreadDialog.tsx b/apps/web/src/components/chat/ForkThreadDialog.tsx
+new file mode 100644
+index 000000000..3c2fc6e8a
+--- /dev/null
++++ b/apps/web/src/components/chat/ForkThreadDialog.tsx
+@@ -0,0 +1,411 @@
++import type {
++  EnvironmentId,
++  ModelSelection,
++  OrchestrationCheckpointStatus,
++  ProviderInstanceId,
++  ProviderInteractionMode,
++  RuntimeMode,
++  ServerProvider,
++  ThreadForkOrigin,
++  ThreadForkWorkspaceMode,
++  ThreadId,
++  TurnId,
++} from "@t3tools/contracts";
++import type { UnifiedSettings } from "@t3tools/contracts/settings";
++import { createModelSelection } from "@t3tools/shared/model";
++import {
++  isAtomCommandInterrupted,
++  squashAtomCommandFailure,
++} from "@t3tools/client-runtime/state/runtime";
++import { Link } from "@tanstack/react-router";
++import { GitForkIcon, TriangleAlertIcon } from "lucide-react";
++import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
++
++import { getCustomModelOptionsByInstance } from "~/modelSelection";
++import type { ProviderInstanceEntry } from "~/providerInstances";
++import { threadEnvironment } from "~/state/threads";
++import { useAtomCommand } from "~/state/use-atom-command";
++import { cn, randomUUID } from "~/lib/utils";
++import { Button } from "../ui/button";
++import {
++  Dialog,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogPanel,
++  DialogPopup,
++  DialogTitle,
++} from "../ui/dialog";
++import { Input } from "../ui/input";
++import { Radio, RadioGroup } from "../ui/radio-group";
++import { ProviderModelPicker } from "./ProviderModelPicker";
++import { TraitsPicker } from "./TraitsPicker";
++import {
++  buildForkThreadInput,
++  createForkThreadOperation,
++  describeForkThreadFailure,
++  resolveForkDefaultModelSelection,
++  resolveForkThreadDefaultTitle,
++  resolveForkWorkspaceAvailability,
++} from "./ForkThreadDialog.logic";
++
++export interface ForkThreadDialogSource {
++  readonly threadId: ThreadId;
++  readonly title: string;
++  readonly modelSelection: ModelSelection;
++  readonly runtimeMode: RuntimeMode;
++  readonly interactionMode: ProviderInteractionMode;
++}
++
++export interface ForkThreadDialogProps {
++  open: boolean;
++  onOpenChange: (open: boolean) => void;
++  environmentId: EnvironmentId;
++  source: ForkThreadDialogSource;
++  sourceTurnId: TurnId;
++  /** 1-based position of the source turn when known from its checkpoint. */
++  sourceTurnNumber: number | null;
++  checkpointStatus: OrchestrationCheckpointStatus | null;
++  providers: ReadonlyArray<ServerProvider>;
++  settings: UnifiedSettings;
++  instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
++  onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
++  /** Called once the fork is durable on the server, before the dialog closes. */
++  onForked: (result: {
++    threadId: ThreadId;
++    warnings: ReadonlyArray<string>;
++  }) => Promise<void> | void;
++}
++
++const PICKER_TRIGGER_CLASSNAME =
++  "h-8 min-h-8 min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground sm:h-7 sm:min-h-7";
++
++/**
++ * Forks a thread at a completed assistant turn. Mount with a fresh `key` per
++ * open so the form state and the idempotent operation ids start clean; the
++ * ids then stay fixed for every retry inside this instance.
++ */
++export function ForkThreadDialog({
++  open,
++  onOpenChange,
++  environmentId,
++  source,
++  sourceTurnId,
++  sourceTurnNumber,
++  checkpointStatus,
++  providers,
++  settings,
++  instanceEntries,
++  onOpenProviderSetup,
++  onForked,
++}: ForkThreadDialogProps) {
++  const titleInputRef = useRef<HTMLInputElement>(null);
++  const titleId = useId();
++  const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
++  const [operation] = useState(() => createForkThreadOperation(randomUUID));
++  const workspace = useMemo(
++    () => resolveForkWorkspaceAvailability(checkpointStatus),
++    [checkpointStatus],
++  );
++  const [title, setTitle] = useState(() => resolveForkThreadDefaultTitle(source.title));
++  const [modelSelection, setModelSelection] = useState<ModelSelection | null>(() =>
++    resolveForkDefaultModelSelection(providers, source.modelSelection),
++  );
++  const [workspaceMode, setWorkspaceMode] = useState<ThreadForkWorkspaceMode>(
++    workspace.defaultMode,
++  );
++  const [pending, setPending] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [attempted, setAttempted] = useState(false);
++
++  useEffect(() => {
++    if (!open) return;
++    const frame = window.requestAnimationFrame(() => {
++      titleInputRef.current?.focus();
++      titleInputRef.current?.select();
++    });
++    return () => {
++      window.cancelAnimationFrame(frame);
++    };
++  }, [open]);
++
++  const modelOptionsByInstance = useMemo(
++    () =>
++      getCustomModelOptionsByInstance(
++        settings,
++        providers,
++        modelSelection?.instanceId ?? null,
++        modelSelection?.model ?? null,
++      ),
++    [modelSelection?.instanceId, modelSelection?.model, providers, settings],
++  );
++  const activeEntry = useMemo(
++    () =>
++      modelSelection
++        ? (instanceEntries.find((entry) => entry.instanceId === modelSelection.instanceId) ?? null)
++        : null,
++    [instanceEntries, modelSelection],
++  );
++
++  const handleSubmit = useCallback(async () => {
++    if (pending) return;
++    const form = buildForkThreadInput({
++      operation,
++      sourceThreadId: source.threadId,
++      sourceTurnId,
++      title,
++      modelSelection,
++      runtimeMode: source.runtimeMode,
++      interactionMode: source.interactionMode,
++      workspaceMode,
++      newWorktreeEnabled: workspace.newWorktreeEnabled,
++    });
++    if (!form.ok) {
++      setAttempted(true);
++      setError(form.reason);
++      return;
++    }
++    setAttempted(true);
++    setPending(true);
++    setError(null);
++    const result = await forkThread({ environmentId, input: form.input });
++    if (result._tag === "Failure") {
++      setPending(false);
++      if (!isAtomCommandInterrupted(result)) {
++        setError(describeForkThreadFailure(squashAtomCommandFailure(result)));
++      }
++      return;
++    }
++    await onForked({ threadId: result.value.threadId, warnings: result.value.warnings });
++    setPending(false);
++    onOpenChange(false);
++  }, [
++    environmentId,
++    forkThread,
++    modelSelection,
++    onForked,
++    onOpenChange,
++    operation,
++    pending,
++    source.interactionMode,
++    source.runtimeMode,
++    source.threadId,
++    sourceTurnId,
++    title,
++    workspace.newWorktreeEnabled,
++    workspaceMode,
++  ]);
++
++  const boundaryLabel =
++    sourceTurnNumber === null ? "the selected reply" : `turn ${sourceTurnNumber}`;
++  const submitLabel = pending ? "Forking…" : attempted && error ? "Retry" : "Fork thread";
++
++  return (
++    <Dialog
++      open={open}
++      onOpenChange={(nextOpen) => {
++        if (!pending) {
++          onOpenChange(nextOpen);
++        }
++      }}
++    >
++      <DialogPopup className="max-w-lg">
++        <DialogHeader>
++          <DialogTitle className="flex items-center gap-2">
++            <GitForkIcon className="size-4" />
++            Fork thread
++          </DialogTitle>
++          <DialogDescription>
++            Starts a new thread from this point. The conversation through {boundaryLabel} is handed
++            to the new agent as history, and it only begins working when you send the next prompt.
++          </DialogDescription>
++        </DialogHeader>
++        <DialogPanel className="space-y-4">
++          <label className="grid gap-1.5" htmlFor={titleId}>
++            <span className="text-xs font-medium text-foreground">Title</span>
++            <Input
++              ref={titleInputRef}
++              id={titleId}
++              value={title}
++              disabled={pending}
++              onChange={(event) => setTitle(event.target.value)}
++              onKeyDown={(event) => {
++                if (event.key !== "Enter") return;
++                event.preventDefault();
++                void handleSubmit();
++              }}
++            />
++          </label>
++
++          <div className="grid gap-1.5">
++            <span className="text-xs font-medium text-foreground">Harness and model</span>
++            {modelSelection && activeEntry ? (
++              <div className="flex flex-wrap items-center gap-1.5">
++                <ProviderModelPicker
++                  activeInstanceId={modelSelection.instanceId}
++                  model={modelSelection.model}
++                  lockedProvider={null}
++                  instanceEntries={instanceEntries}
++                  modelOptionsByInstance={modelOptionsByInstance}
++                  triggerVariant="outline"
++                  triggerClassName={PICKER_TRIGGER_CLASSNAME}
++                  disabled={pending}
++                  {...(onOpenProviderSetup ? { onOpenProviderSetup } : {})}
++                  onInstanceModelChange={(instanceId, model) => {
++                    setModelSelection(createModelSelection(instanceId, model));
++                  }}
++                />
++                <TraitsPicker
++                  provider={activeEntry.driverKind}
++                  instanceId={activeEntry.instanceId}
++                  models={activeEntry.models}
++                  model={modelSelection.model}
++                  prompt=""
++                  onPromptChange={() => {}}
++                  modelOptions={modelSelection.options ?? []}
++                  allowPromptInjectedEffort={false}
++                  planModeEnabled={settings.planModeEnabled}
++                  triggerVariant="outline"
++                  triggerClassName={PICKER_TRIGGER_CLASSNAME}
++                  onModelOptionsChange={(nextOptions) => {
++                    setModelSelection((current) =>
++                      current
++                        ? createModelSelection(current.instanceId, current.model, nextOptions)
++                        : current,
++                    );
++                  }}
++                />
++              </div>
++            ) : (
++              <p className="text-sm text-muted-foreground">No providers available</p>
++            )}
++          </div>
++
++          <div className="grid gap-1.5">
++            <span className="text-xs font-medium text-foreground">Workspace</span>
++            <RadioGroup
++              className="gap-2"
++              value={workspaceMode}
++              disabled={pending}
++              onValueChange={(value) => {
++                if (value === "shared" || value === "new-worktree") {
++                  setWorkspaceMode(value);
++                }
++              }}
++            >
++              <ForkWorkspaceOption
++                value="new-worktree"
++                label="Create a new worktree"
++                description={
++                  workspace.newWorktreeDisabledReason ??
++                  "Restores this turn's files into a fresh worktree on its own branch."
++                }
++                disabled={!workspace.newWorktreeEnabled}
++              />
++              <ForkWorkspaceOption
++                value="shared"
++                label="Share the current workspace"
++                description="Both threads edit the same files."
++              />
++            </RadioGroup>
++          </div>
++
++          {error ? <p className="text-destructive text-xs">{error}</p> : null}
++        </DialogPanel>
++        <DialogFooter>
++          <Button
++            type="button"
++            variant="outline"
++            size="sm"
++            onClick={() => onOpenChange(false)}
++            disabled={pending}
++          >
++            Cancel
++          </Button>
++          <Button
++            type="button"
++            size="sm"
++            onClick={() => {
++              void handleSubmit();
++            }}
++            disabled={pending}
++          >
++            {submitLabel}
++          </Button>
++        </DialogFooter>
++      </DialogPopup>
++    </Dialog>
++  );
++}
++
++function ForkWorkspaceOption({
++  value,
++  label,
++  description,
++  disabled = false,
++}: {
++  value: ThreadForkWorkspaceMode;
++  label: string;
++  description: string;
++  disabled?: boolean;
++}) {
++  return (
++    <label
++      className={cn(
++        "flex items-start gap-2.5 rounded-lg border border-border/70 px-3 py-2.5",
++        disabled ? "opacity-64" : "cursor-pointer hover:bg-muted/40",
++      )}
++    >
++      <Radio value={value} disabled={disabled} className="mt-0.5" />
++      <span className="grid min-w-0 gap-0.5">
++        <span className="text-sm font-medium text-foreground">{label}</span>
++        <span className="text-xs text-muted-foreground">{description}</span>
++      </span>
++    </label>
++  );
++}
++
++/**
++ * Lineage line shown at the top of a forked thread. Links back to the source
++ * thread and notes when the provider received less history than the thread
++ * displays. Provider-side session state is never surfaced here.
++ */
++export function ForkThreadLineage({
++  environmentId,
++  forkedFrom,
++  parentTitle,
++  contextTruncated,
++}: {
++  environmentId: EnvironmentId;
++  forkedFrom: ThreadForkOrigin;
++  /** Null when the source thread is no longer available in this client. */
++  parentTitle: string | null;
++  contextTruncated: boolean;
++}) {
++  return (
++    <div className="mx-auto flex w-full max-w-3xl flex-col gap-0.5 px-4 pt-3 text-xs text-muted-foreground sm:px-5">
++      <span className="flex min-w-0 items-center gap-1.5">
++        <GitForkIcon aria-hidden="true" className="size-3.5 shrink-0" />
++        <span className="shrink-0">Forked from</span>
++        {parentTitle === null ? (
++          <span className="truncate">a thread that is no longer available</span>
++        ) : (
++          <Link
++            to="/$environmentId/$threadId"
++            params={{ environmentId, threadId: forkedFrom.threadId }}
++            className="truncate text-foreground underline-offset-2 hover:underline"
++          >
++            {parentTitle}
++          </Link>
++        )}
++      </span>
++      {contextTruncated ? (
++        <span className="flex items-center gap-1.5">
++          <TriangleAlertIcon aria-hidden="true" className="size-3.5 shrink-0" />
++          Older history was trimmed from what the agent received; the full conversation is still
++          shown here.
++        </span>
++      ) : null}
++    </div>
++  );
++}
+diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
+index 692b0e5ef..988aa4d3b 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
++++ b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
+@@ -8,6 +8,7 @@ import {
+   liveWorkEntryLabel,
+   normalizeCompactToolLabel,
+   resolveReasoningDisclosureExpanded,
++  resolveAssistantForkTurnId,
+   resolveAssistantMessageCopyState,
+   resolveWorkGroupScrollIndex,
+   shouldFollowWorkGroupAppend,
+@@ -3323,3 +3324,67 @@ describe("computeStableMessagesTimelineRows", () => {
+     expect(reordered.result).toEqual([initial.result[1], initial.result[0]]);
+   });
+ });
++
++describe("resolveAssistantForkTurnId", () => {
++  const turnId = TurnId.make("turn-2");
++  const settledReply = {
++    role: "assistant" as const,
++    turnId,
++    streaming: false,
++  };
++  const eligible = {
++    message: settledReply,
++    responseInProgress: false,
++    runningTurnId: null,
++    latestTurn: { turnId, state: "completed" as const },
++    forkEnabled: true,
++  };
++
++  it("offers the fork at a completed canonical assistant reply", () => {
++    expect(resolveAssistantForkTurnId(eligible)).toBe(turnId);
++  });
++
++  it("offers the fork for older turns the client no longer tracks as latest", () => {
++    expect(
++      resolveAssistantForkTurnId({
++        ...eligible,
++        latestTurn: { turnId: TurnId.make("turn-9"), state: "running" },
++        runningTurnId: TurnId.make("turn-9"),
++      }),
++    ).toBe(turnId);
++  });
++
++  it("hides the fork when the environment lacks the capability", () => {
++    expect(resolveAssistantForkTurnId({ ...eligible, forkEnabled: false })).toBeNull();
++  });
++
++  it("hides the fork while the reply is streaming or its turn is still in progress", () => {
++    expect(
++      resolveAssistantForkTurnId({ ...eligible, message: { ...settledReply, streaming: true } }),
++    ).toBeNull();
++    expect(resolveAssistantForkTurnId({ ...eligible, responseInProgress: true })).toBeNull();
++    expect(resolveAssistantForkTurnId({ ...eligible, runningTurnId: turnId })).toBeNull();
++  });
++
++  it("hides the fork on reasoning, user, and turn-less messages", () => {
++    expect(
++      resolveAssistantForkTurnId({
++        ...eligible,
++        message: { ...settledReply, channel: "reasoning" },
++      }),
++    ).toBeNull();
++    expect(
++      resolveAssistantForkTurnId({ ...eligible, message: { ...settledReply, role: "user" } }),
++    ).toBeNull();
++    expect(
++      resolveAssistantForkTurnId({ ...eligible, message: { ...settledReply, turnId: null } }),
++    ).toBeNull();
++  });
++
++  it.each(["interrupted", "error"] as const)(
++    "hides the fork when the latest turn ended as %s",
++    (state) => {
++      expect(resolveAssistantForkTurnId({ ...eligible, latestTurn: { turnId, state } })).toBeNull();
++    },
++  );
++});
+diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.ts b/apps/web/src/components/chat/MessagesTimeline.logic.ts
+index 5717c2cde..28d58de7f 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.logic.ts
++++ b/apps/web/src/components/chat/MessagesTimeline.logic.ts
+@@ -454,6 +454,34 @@ export function resolveAssistantMessageCopyState({
+   };
+ }
+ 
++/**
++ * The turn a "fork from here" action would branch from, or null when the
++ * assistant message is not a valid fork boundary. Only the settled canonical
++ * reply of a completed turn qualifies: the server seeds history through that
++ * turn, so a running, interrupted, or failed turn has nothing stable to copy.
++ * `forkEnabled` carries the environment capability so older servers hide the
++ * action entirely instead of failing the request.
++ */
++export function resolveAssistantForkTurnId(input: {
++  message: Pick<ChatMessage, "role" | "turnId" | "streaming" | "channel">;
++  /** True while the turn that produced this message is still visually in progress. */
++  responseInProgress: boolean;
++  runningTurnId: TurnId | null;
++  latestTurn: Pick<TimelineLatestTurn, "turnId" | "state"> | null;
++  forkEnabled: boolean;
++}): TurnId | null {
++  if (!input.forkEnabled) return null;
++  const { message } = input;
++  if (message.role !== "assistant" || isReasoningMessage(message)) return null;
++  if (message.streaming || input.responseInProgress) return null;
++  const turnId = message.turnId ?? null;
++  if (turnId === null || turnId === input.runningTurnId) return null;
++  if (input.latestTurn?.turnId === turnId && input.latestTurn.state !== "completed") {
++    return null;
++  }
++  return turnId;
++}
++
+ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<TimelineEntry>) {
+   const lastAssistantMessageIdByResponseKey = new Map<string, string>();
+   let nullTurnResponseIndex = 0;
+diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
+index 7d7ec5de0..378d1b641 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.tsx
++++ b/apps/web/src/components/chat/MessagesTimeline.tsx
+@@ -89,6 +89,7 @@ import {
+   CircleAlertIcon,
+   DownloadIcon,
+   EyeIcon,
++  GitForkIcon,
+   GlobeIcon,
+   HammerIcon,
+   MessageCircleIcon,
+@@ -130,6 +131,7 @@ import {
+   deriveMessagesTimelineRowsWithState,
+   type MessagesTimelineRowsProjection,
+   liveWorkEntryLabel,
++  resolveAssistantForkTurnId,
+   resolveAssistantMessageCopyState,
+   resolveReasoningDisclosureExpanded,
+   resolveTimelineIsAtEnd,
+@@ -204,6 +206,8 @@ interface TimelineRowSharedState {
+   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+   activeThreadEnvironmentId: EnvironmentId;
+   onRevertUserMessage: (messageId: MessageId) => void;
++  /** Null when the environment cannot fork threads; hides the action. */
++  onForkTurn: ((turnId: TurnId) => void) | null;
+   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
+   onImageExpand: (preview: ExpandedImagePreview) => void;
+   onFileOpen: (attachment: ChatFileAttachment) => void;
+@@ -229,6 +233,8 @@ interface TimelineRowActivityState {
+   isCompacting: boolean;
+   isRevertingCheckpoint: boolean;
+   latestTurnId: TurnId | null;
++  latestTurnState: TimelineLatestTurn["state"] | null;
++  runningTurnId: TurnId | null;
+ }
+ 
+ const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
+@@ -322,6 +328,8 @@ interface MessagesTimelineProps {
+   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+   revertTurnCountByUserMessageId: Map<MessageId, number>;
+   onRevertUserMessage: (messageId: MessageId) => void;
++  /** Omit when the active environment lacks the threadFork capability. */
++  onForkTurn?: (turnId: TurnId) => void;
+   onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
+   isRevertingCheckpoint: boolean;
+   onImageExpand: (preview: ExpandedImagePreview) => void;
+@@ -375,6 +383,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+   onOpenTurnDiff,
+   revertTurnCountByUserMessageId,
+   onRevertUserMessage,
++  onForkTurn,
+   onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
+   isRevertingCheckpoint,
+   onImageExpand,
+@@ -697,6 +706,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+       skills,
+       activeThreadEnvironmentId,
+       onRevertUserMessage,
++      onForkTurn: onForkTurn ?? null,
+       onUseArtifactTemplate,
+       onImageExpand,
+       onFileOpen,
+@@ -723,6 +733,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+       skills,
+       activeThreadEnvironmentId,
+       onRevertUserMessage,
++      onForkTurn,
+       onUseArtifactTemplate,
+       onImageExpand,
+       onFileOpen,
+@@ -745,8 +756,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+       isCompacting,
+       isRevertingCheckpoint,
+       latestTurnId: latestTurn?.turnId ?? null,
++      latestTurnState: latestTurn?.state ?? null,
++      runningTurnId,
+     }),
+-    [isCompacting, isRevertingCheckpoint, isWorking, isPreparingWorktree, latestTurn?.turnId],
++    [
++      isCompacting,
++      isRevertingCheckpoint,
++      isWorking,
++      isPreparingWorktree,
++      latestTurn?.turnId,
++      latestTurn?.state,
++      runningTurnId,
++    ],
+   );
+ 
+   // Stable renderItem — no closure deps. Row components read shared state
+@@ -1644,6 +1665,17 @@ function AssistantMessageMeta({
+   alwaysVisible?: boolean;
+ }) {
+   const ctx = use(TimelineRowCtx);
++  const activity = use(TimelineRowActivityCtx);
++  const forkTurnId = resolveAssistantForkTurnId({
++    message,
++    responseInProgress: copyStreaming,
++    runningTurnId: activity.runningTurnId,
++    latestTurn:
++      activity.latestTurnId !== null && activity.latestTurnState !== null
++        ? { turnId: activity.latestTurnId, state: activity.latestTurnState }
++        : null,
++    forkEnabled: ctx.onForkTurn !== null,
++  });
+ 
+   return (
+     <div
+@@ -1660,6 +1692,9 @@ function AssistantMessageMeta({
+         showCopyButton={showCopyButton}
+         streaming={copyStreaming}
+       />
++      {forkTurnId !== null && ctx.onForkTurn !== null ? (
++        <AssistantForkButton turnId={forkTurnId} onFork={ctx.onForkTurn} />
++      ) : null}
+       {!message.streaming && (
+         <Tooltip>
+           <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
+@@ -1696,6 +1731,36 @@ function AssistantCopyButton({
+   return <MessageCopyButton text={assistantCopyState.text ?? ""} variant="ghost" />;
+ }
+ 
++function AssistantForkButton({
++  turnId,
++  onFork,
++}: {
++  turnId: TurnId;
++  onFork: (turnId: TurnId) => void;
++}) {
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <Button
++            aria-label="Fork thread from here"
++            type="button"
++            size="xs"
++            variant="ghost"
++            className="text-muted-foreground hover:text-foreground"
++            onClick={() => onFork(turnId)}
++          />
++        }
++      >
++        <GitForkIcon className="size-3" />
++      </TooltipTrigger>
++      <TooltipPopup>
++        <p>Fork thread from here</p>
++      </TooltipPopup>
++    </Tooltip>
++  );
++}
++
+ function ProposedPlanTimelineRow({
+   row,
+ }: {
+diff --git a/apps/web/src/state/entities.ts b/apps/web/src/state/entities.ts
+index c44c5b437..c455da316 100644
+--- a/apps/web/src/state/entities.ts
++++ b/apps/web/src/state/entities.ts
+@@ -183,6 +183,31 @@ export function readThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell |
+   return appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref));
+ }
+ 
++/** Resolves when the thread shell reaches the live client store. */
++export function waitForThreadShell(
++  ref: ScopedThreadRef,
++  timeoutMs = 5_000,
++): Promise<EnvironmentThreadShell> {
++  const current = readThreadShell(ref);
++  if (current !== null) return Promise.resolve(current);
++
++  return new Promise((resolve, reject) => {
++    let unsubscribe: (() => void) | null = null;
++    const timeout = setTimeout(() => {
++      unsubscribe?.();
++      reject(new Error("The thread did not appear in the client store."));
++    }, timeoutMs);
++    const finish = (shell: EnvironmentThreadShell | null) => {
++      if (shell === null) return;
++      clearTimeout(timeout);
++      unsubscribe?.();
++      resolve(shell);
++    };
++    unsubscribe = appAtomRegistry.subscribe(environmentThreadShells.threadShellAtom(ref), finish);
++    finish(readThreadShell(ref));
++  });
++}
++
+ /** Whether the environment's server understands thread.settle/unsettle.
+     False for pre-settlement servers (capability defaults false on decode),
+     so clients under version skew fall back instead of erroring. */
