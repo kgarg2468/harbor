@@ -16,13 +16,13 @@ import { randomUUID } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 const READY_TIMEOUT_MS = 90_000;
 const STEP_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+const CLIENT_CLOSE_TIMEOUT_MS = 5_000;
 const TOKEN_SCOPE =
   "orchestration:read orchestration:operate terminal:operate review:write relay:read";
 
@@ -79,9 +79,11 @@ export function pickFreePort() {
 
 /**
  * Starts `t3 serve` on the given port and resolves once it prints its headless
- * ready line. Resolves with the child so the caller can stop it by pid.
+ * ready line. Resolves with the child so the caller can stop it by pid;
+ * `onSpawn` hands the child over as soon as it exists so a caller's cleanup
+ * can reach it even if the ready wait is cut short.
  */
-export async function startServer({ nodeBin, serverBin, baseDir, workspace, port }) {
+export async function startServer({ nodeBin, serverBin, baseDir, workspace, port, onSpawn }) {
   const child = spawn(
     nodeBin,
     [
@@ -102,6 +104,7 @@ export async function startServer({ nodeBin, serverBin, baseDir, workspace, port
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  onSpawn?.(child);
   let output = "";
   const ready = new Promise((resolve, reject) => {
     const onData = (chunk) => {
@@ -313,19 +316,27 @@ export async function connectClient({ origin, accessToken, label }) {
     failAll(new Error(`${label}: websocket closed (${event.code})`)),
   );
 
-  await withTimeout(
-    new Promise((resolve, reject) => {
-      socket.addEventListener("open", resolve, { once: true });
-      socket.addEventListener("error", () => reject(new Error("websocket upgrade failed")), {
-        once: true,
-      });
-      socket.addEventListener("close", (event) => reject(new Error(`websocket closed (${event.code}) before open`)), {
-        once: true,
-      });
-    }),
-    STEP_TIMEOUT_MS,
-    `${label} websocket open`,
-  );
+  try {
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        socket.addEventListener("open", resolve, { once: true });
+        socket.addEventListener("error", () => reject(new Error("websocket upgrade failed")), {
+          once: true,
+        });
+        socket.addEventListener("close", (event) => reject(new Error(`websocket closed (${event.code}) before open`)), {
+          once: true,
+        });
+      }),
+      STEP_TIMEOUT_MS,
+      `${label} websocket open`,
+    );
+  } catch (error) {
+    // A socket that never opened is not returned to anyone, so close it here
+    // rather than leave a connecting handle behind.
+    closingIntentionally = true;
+    socket.close();
+    throw error;
+  }
 
   const request = (tag, payload) =>
     withTimeout(
@@ -391,6 +402,8 @@ export async function connectClient({ origin, accessToken, label }) {
     applyShellItem,
     waitForShell,
     shell,
+    // Bounded so a peer that never completes the close handshake cannot stall
+    // teardown before the server is stopped.
     close: () => {
       closingIntentionally = true;
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
@@ -398,7 +411,7 @@ export async function connectClient({ origin, accessToken, label }) {
       } else if (socket.readyState === WebSocket.CLOSED) {
         return Promise.resolve();
       }
-      return closed;
+      return withTimeout(closed, CLIENT_CLOSE_TIMEOUT_MS, `${label} close`).catch(() => {});
     },
   };
 }
@@ -467,10 +480,14 @@ export async function runSharedSmoke({ serverBin, nodeBin = process.execPath }) 
   let client1;
   let client2;
   let client1Again;
-  // If the process dies mid-run (uncaught error, signal), the async finally
-  // below never runs; this synchronous guard still stops our server by pid
-  // and removes our temp root so nothing is left behind.
-  const exitGuard = () => {
+  // If the process dies mid-run (uncaught error, SIGINT, SIGTERM), the async
+  // finally below never runs. This synchronous, idempotent guard stops only
+  // the server we spawned, by the pid we captured, and removes only our temp
+  // root. A signal then exits with the conventional 128 + signal number.
+  let cleanedUp = false;
+  const cleanupSync = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     try {
       server?.kill("SIGKILL");
     } catch {
@@ -478,7 +495,13 @@ export async function runSharedSmoke({ serverBin, nodeBin = process.execPath }) 
     }
     rmSync(root, { recursive: true, force: true });
   };
-  process.once("exit", exitGuard);
+  const onSignal = (signal) => {
+    cleanupSync();
+    process.exit(128 + osConstants.signals[signal]);
+  };
+  process.once("exit", cleanupSync);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   try {
     await mkdir(baseDir, { recursive: true });
     await mkdir(workspace, { recursive: true });
@@ -494,7 +517,16 @@ export async function runSharedSmoke({ serverBin, nodeBin = process.execPath }) 
     const origin = `http://127.0.0.1:${port}`;
 
     const serverOk = await attempt("server ready on its own port", async () => {
-      server = await startServer({ nodeBin, serverBin, baseDir, workspace, port });
+      await startServer({
+        nodeBin,
+        serverBin,
+        baseDir,
+        workspace,
+        port,
+        onSpawn: (child) => {
+          server = child;
+        },
+      });
       const descriptor = await fetch(`${origin}/.well-known/t3/environment`);
       if (!descriptor.ok) {
         throw new Error(`descriptor probe returned HTTP ${descriptor.status}`);
@@ -502,6 +534,12 @@ export async function runSharedSmoke({ serverBin, nodeBin = process.execPath }) 
     });
     if (!serverOk) {
       return summarize(checks);
+    }
+    // When a parent spawned us with an IPC channel (the regression tests do),
+    // tell it which server and temp root we own, then release the channel so
+    // it cannot keep this process alive.
+    if (typeof process.send === "function") {
+      process.send({ type: "owned", serverPid: server.pid, root }, () => process.disconnect());
     }
 
     await attempt("runtime state belongs to our server process", async () => {
@@ -717,7 +755,10 @@ export async function runSharedSmoke({ serverBin, nodeBin = process.execPath }) 
     }
     await stopServer(server);
     await rm(root, { recursive: true, force: true });
-    process.off("exit", exitGuard);
+    cleanedUp = true;
+    process.off("exit", cleanupSync);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
   }
 }
 
@@ -772,7 +813,10 @@ async function main() {
   return result.failed === 0 ? 0 : 1;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// import.meta.main (Node 24) is true only for the process entry module, however
+// it was reached: a symlink, an aliased directory such as /tmp on macOS, or the
+// canonical path. Comparing argv against the module URL missed the first two.
+if (import.meta.main) {
   main().then(
     (code) => {
       process.exitCode = code;

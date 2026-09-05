@@ -76,16 +76,34 @@ T3_REASONING_SERVER_BIN=/absolute/path/to/apps/server/dist/bin.mjs \
   node --test t3-reasoning/tests/smoke-shared.test.mjs
 ```
 
-Without `T3_REASONING_SERVER_BIN` the two integration cases are skipped and
+Without `T3_REASONING_SERVER_BIN` the four integration cases are skipped and
 only the argument-handling cases run, which is what the component workflow does
 today. Once the workflow materializes and builds the pinned source, it can set
 the variable to that build's `apps/server/dist/bin.mjs` and the same test
 becomes a CI gate.
 
+Besides the green run, the integration cases cover interruption: the test
+spawns the CLI as a real child process with an IPC channel, waits until the
+child reports the server pid and temporary root it owns, then sends `SIGINT`
+or `SIGTERM` and asserts that the owned server exits, the root is removed, and
+the CLI exits with 130 or 143 respectively.
+
 ## Cleanup guarantees
 
-The run owns exactly one server process and one temporary root. It stops the
-server by the process id it captured at spawn and removes the temporary root in
-a `finally` block. A synchronous exit guard repeats both steps if the process
-dies before that block runs. Nothing else on the machine is signalled or
-deleted.
+The run owns exactly one server process and one temporary root. It captures
+the server child at spawn, before waiting for readiness, so cleanup can reach
+it even if the ready wait is cut short. On the normal path it stops the server
+by that captured pid and removes the temporary root in a `finally` block.
+
+If the process is interrupted first, a synchronous and idempotent guard runs
+instead: on `exit`, `SIGINT`, and `SIGTERM` it kills the captured server and
+removes the root, and for a signal it then exits with the conventional
+128 + signal number (130 for `SIGINT`, 143 for `SIGTERM`). The guard only ever
+signals the pid it spawned; it never matches processes by name or pattern.
+Nothing else on the machine is signalled or deleted.
+
+A WebSocket that fails to open, whether by error or by timeout, is closed
+before the failure propagates, and each client close is bounded so a peer that
+never completes the close handshake cannot stall teardown before the server is
+stopped. `SIGKILL` cannot be handled by any process, so a killed run leaves
+its server and root behind; that is the only uncovered case.
