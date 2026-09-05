@@ -12,10 +12,10 @@ races, failed recovery, stale journals, safe process/audio ownership, power
 preference preservation, browser arguments/scans, network cancellation,
 configuration, privacy and command timeouts.
 
-The combined implementation at `d3a62d2` passed 317 Swift tests on macOS 26.2,
-41 isolated script tests, a release build, and ad-hoc bundle verification.
-A redacted secret scan covered 195 commits with no findings. Final review
-follow-ups require another combined check before merge.
+The integrated Insomnia source at `43b42c5` passed 332 Swift tests on macOS 26.2
+and 56 isolated script tests. Release builds and ad-hoc bundle verification pass.
+A redacted secret scan covered 195 commits with no findings. Final-head CI and
+Greptile results are tracked in the integration PR before merge.
 Script tests use real temporary files/locks and command shims, with no live sudo,
 pmset, app termination or launchd mutation. Passing fakes do not prove macOS
 permissions or hardware behavior.
@@ -25,7 +25,9 @@ all dependency branches. Greptile findings are checked against source and tests.
 The historical handoff-before-nudge finding was rejected because it records an
 already-observed recovery; the superseded-browser-scan finding was reproduced
 and fixed. A successful reviewer check alone does not mean every comment has
-been resolved.
+been resolved. The shell power-edit warning and installer EXIT-trap warning
+were also rejected after direct regressions confirmed nonzero failure and
+parent-shell cleanup. Accepted findings received fixes and permanent tests.
 
 ## Original audit items
 
