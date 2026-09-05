@@ -79,6 +79,9 @@ sshd_config_lines() {
   printf 'pubkeyauthentication yes\n'
   printf 'passwordauthentication yes\n'
   printf 'kbdinteractiveauthentication yes\n'
+  # sshd's own default, and the one Harbor asserts rather than sets: it is what makes an
+  # authorized_keys owned by neither root nor the account logging in be ignored.
+  printf 'strictmodes yes\n'
   printf 'usepam yes\n'
   printf 'x11forwarding yes\n'
   printf 'clientaliveinterval 0\n'
@@ -138,6 +141,11 @@ operator_config() {
   # yes never takes effect and sshd reports all three keywords as no.
   [ "${OPERATOR_PUBKEY:-yes}" = yes ] \
     || lines="$(printf '%s\n' "${lines}" | sed -e 's/^pubkeyauthentication .*/pubkeyauthentication no/')"
+  # OPERATOR_STRICTMODES=no models an administrator who turned StrictModes off. Harbor
+  # never writes that directive, so the only honest answer to finding it off is a refusal:
+  # the placement of an authorized key stops being self-guarding without it.
+  [ "${OPERATOR_STRICTMODES:-yes}" = yes ] \
+    || lines="$(printf '%s\n' "${lines}" | sed -e 's/^strictmodes .*/strictmodes no/')"
   printf '%s\n' "${lines}"
 }
 
@@ -717,6 +725,131 @@ authorize() {
   assert_equal "$(inode_of "${TARGET}")" "${before_inode}"
   assert_equal "$(journal_names)" 0001-authorized-key.json
   assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" '"observed"'
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+paused_authorize() {
+  # paused_authorize STEP: harbor_ssh_authorize in a child paused at STEP, so the window
+  # between two steps can be interposed on the way an operator with a process on the node
+  # would interpose on it. env execs bash, so PAUSED_PID is the process whose $$ becomes
+  # HARBOR_PID: the pid in the pause sentinel's name and in the staged file's name both.
+  PAUSE_LOG="${BATS_TEST_TMPDIR}/steps.log"
+  : >"${PAUSE_LOG}"
+  env HARBOR_TEST_HOOKS=1 HARBOR_PAUSE_AFTER="${1}" SUDO_USER=alice HARBOR_LOG_FILE="${PAUSE_LOG}" \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/ssh.sh"; HARBOR_PID=$$; harbor_lock_acquire "${1}" operator; harbor_ssh_authorize "${1}" "${2}" "${3}"' \
+    _ "${FIX_ROOT}" "${OPERATOR}" "${OP_HOME}" >"${BATS_TEST_TMPDIR}/child.out" 2>&1 &
+  PAUSED_PID=$!
+  # harbor_step logs its step before harbor_test_hook pauses on it, so this line appearing
+  # is the child having reached the boundary, not merely being on its way to it.
+  local i=0
+  until grep -q "step ${1}\$" "${PAUSE_LOG}" 2>/dev/null; do
+    i=$((i + 1))
+    [ "${i}" -le 100 ] || fail "the child never reached ${1}"
+    sleep 0.1
+  done
+}
+
+resume_paused() {
+  # resume_paused STEP: release the child paused at STEP and return its exit status.
+  touch "$(pause_sentinel "${PAUSED_PID}" "${1}")"
+  PAUSED_STATUS=0
+  wait "${PAUSED_PID}" || PAUSED_STATUS="$?"
+  # The child held its own lock and died holding it; production reclaims a lock like that,
+  # and these tests remove it so a later acquire in the same test is not refused.
+  rm -rf "${FIX_ROOT}/lock.d" "${FIX_ROOT}/reclaim.d"
+}
+
+@test "a .ssh swapped for a symlink between the check and the rename does not redirect the key, and is refused by name" {
+  # rename(2) resolves the directories above its destination at the instant it runs, and ~
+  # is the operator's, so proving ~/.ssh is a 0700 directory owned by the operator proves
+  # nothing about what ~/.ssh will be by the time the key is renamed into it. An operator
+  # with a process on the node replaces it in that window and root writes the key through
+  # the link. The rename is pinned to the directory that was proved, so it must not follow.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  decoy="${BATS_TEST_TMPDIR}/decoy"
+  mkdir -p "${decoy}"
+  paused_authorize ssh-key-prepared
+  rmdir "${SSH_DIR}"
+  ln -s "${decoy}" "${SSH_DIR}"
+  resume_paused ssh-key-prepared
+  # First, and on its own: the key is not in the directory the operator aimed the link at.
+  # An unpinned rename fails this line and only then reports, having already written the
+  # key through the link, which is the difference between refusing and noticing too late.
+  assert [ ! -e "${decoy}/authorized_keys" ]
+  assert_equal "${PAUSED_STATUS}" 2
+  run cat "${BATS_TEST_TMPDIR}/child.out"
+  assert_output --partial 'ssh.ssh_dir_swapped'
+  # And nothing was left staged in the state root for a later run to pick up.
+  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  # The transaction is unfinished, not silently abandoned: recovery still owns it.
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
+}
+
+@test "a staged key rewritten while it carries the operator's ownership is refused rather than journaled as the key" {
+  # The chown is the moment the staged file becomes the operator's, and the state root is
+  # 0755, so from then until it is read the operator can both see the name and write
+  # through it. Reading the content only afterwards would record what the operator wrote
+  # as post_state, and the check after the rename compares against that same post_state,
+  # so the two would agree on it and the journal would vouch for the operator's own key.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  paused_authorize ssh-key-staged
+  printf '%s\n' 'ssh-ed25519 FIXTUREKEYMALLORY mallory@example.com' >"${FIX_ROOT}/.tmp.authorized_keys.${PAUSED_PID}"
+  resume_paused ssh-key-staged
+  assert_equal "${PAUSED_STATUS}" 2
+  run cat "${BATS_TEST_TMPDIR}/child.out"
+  assert_output --partial 'ssh.stage_changed'
+  assert [ ! -e "${TARGET}" ]
+  refute_output --partial FIXTUREKEYMALLORY
+}
+
+@test "a file of prose is not a key: the predicate takes options and certificates and refuses text" {
+  # Every caller of this predicate stands between a flag and an account with no way in, so
+  # it is wrong in both directions: refusing a real key denies the administrator a flag,
+  # and accepting text disables password authentication for an account that cannot log in.
+  local f="${BATS_TEST_TMPDIR}/k"
+  # Keys, including the option-prefixed and certificate forms an anchored test would miss.
+  for line in \
+    'ssh-ed25519 AAAAC3NzaC1lZDI1 alice@example.com' \
+    'restrict,from="10.0.0.0/8" ssh-ed25519 AAAAC3NzaC1lZDI1 alice' \
+    'command="ls -l",no-pty ssh-rsa AAAAB3NzaC1yc2E bob' \
+    'ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1 cert' \
+    'sk-ssh-ed25519@openssh.com AAAAGnNrLXNz token' \
+    'ecdsa-sha2-nistp256 AAAAE2VjZHNh e'; do
+    printf '%s\n' "${line}" >"${f}"
+    harbor_ssh_has_usable_key "${f}" || fail "refused a key: ${line}"
+  done
+  # A key among comments is still a key.
+  printf '# mine\n\nssh-rsa AAAAB3NzaC1yc2E bob\n' >"${f}"
+  assert harbor_ssh_has_usable_key "${f}"
+  # Not keys. The commented-out key is why comments are stripped before the type token is
+  # looked for rather than after: one pass over the whole file would match it.
+  for line in \
+    'my key is on the other laptop' \
+    'hello world' \
+    '# ssh-ed25519 AAAAC3NzaC1lZDI1 alice@example.com' \
+    'ssh-ed25519'; do
+    printf '%s\n' "${line}" >"${f}"
+    ! harbor_ssh_has_usable_key "${f}" || fail "accepted text as a key: ${line}"
+  done
+}
+
+@test "an sshd with StrictModes off is refused: without it a key file reaching the wrong path is a key file that works there" {
+  # The one asserted directive Harbor does not write. sshd ignores an authorized_keys
+  # owned by neither root nor the account logging in, and that is the backstop behind the
+  # directory the key is renamed into. Harbor asserts it rather than turning it back on.
+  # The drop-in takes effect for all three directives it writes, so this node differs from
+  # a good one in StrictModes alone and nothing else can be what the refusal is about.
+  OPERATOR_STRICTMODES=no
+  acquire
+  run configure
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.operator_not_hardened'
+  assert_output --partial 'strictmodes yes'
+  assert_output --partial "it reports 'strictmodes no'"
+  # Refused before anything is reloaded, as the other assertions on this row are.
+  assert_equal "$(shim_calls "reload")" 0
   harbor_lock_release "${FIX_ROOT}"
 }
 

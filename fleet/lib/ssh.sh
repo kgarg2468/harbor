@@ -131,23 +131,56 @@ harbor_ssh_assert_one_filesystem() {
 # no key, and each of those three sites then went on to take password authentication
 # away from the account whose file it had just approved.
 #
-# The rule is sshd's own and no more: sshd skips leading blanks and then ignores a line
-# that is empty or whose first non-blank character is '#' (auth2-pubkey.c), so a file of
-# nothing but blank lines and comments carries no key however many bytes it has. Anything
-# else counts. That is deliberately generous rather than clever: an authorized_keys line
-# may carry options before the key type, so a line like
-# restrict,from="10.0.0.0/8" ssh-ed25519 AAAA... is a key and a test anchored on a key
-# type token at the start of the line would reject it. Refusing a real key is a lockout
-# of its own kind, the administrator denied a flag they should have had, so this rejects
-# only what cannot be a key and never guesses at what can.
+# The rule is sshd's shape, one step tighter than sshd's own parser. sshd skips leading
+# blanks and then ignores a line that is empty or whose first non-blank character is '#'
+# (auth2-pubkey.c), so comments and blank lines are dropped first and exactly as sshd
+# drops them. What is left must then look like a key rather than merely be text: a key
+# type token, then whitespace, then a non-empty field. Treating whatever was not a comment
+# as a key is what this asked before, and it approved a file reading 'my key is on the
+# other laptop' and went on to take password authentication away from that account.
+#
+# The token is matched anywhere on the line and never anchored to its start. An
+# authorized_keys line may carry options ahead of the type, so
+# restrict,from="10.0.0.0/8" ssh-ed25519 AAAA... is a key and an anchored test would
+# reject it: refusing a real key is a lockout of its own kind, the administrator denied a
+# flag they should have had. The certificate types are named beside the plain ones for the
+# same reason, a -cert-v01@openssh.com line being a key sshd reads.
+#
+# Comments are stripped before the token is looked for rather than after, because
+# '# ssh-ed25519 AAAA...' is a commented-out key and carries a token a single pass over
+# the whole file would match.
+#
+# One residual is accepted knowingly: prose that happens to carry a type token followed by
+# another word, 'prefer ssh-ed25519 over ssh-rsa', still counts as a key. Closing it means
+# demanding the base64 body of the key, and the paragraph below is why that is not asked.
 #
 # Text rather than ssh-keygen -l -f, which would be OpenSSH's own answer: the unit lane's
 # fixture keys are the deliberately unreal placeholder strings of design section 3.8, so
 # ssh-keygen would refuse every one of them, and answering it instead would mean a shim
 # under tests/shims/. Inspection only, and stderr is discarded because an unreadable file
 # is a separate refusal each caller makes before this one.
+#
+# A here-string rather than a second pipeline stage: bin/harbor sets pipefail, and grep -q
+# stops at its first match, which hands the upstream grep a SIGPIPE and would fail the
+# pipeline on exactly the files that do hold a key.
 harbor_ssh_has_usable_key() {
-  grep -q -v -e '^[[:space:]]*$' -e '^[[:space:]]*#' -- "${1}" 2>/dev/null
+  local body
+  body="$(grep -v -e '^[[:space:]]*#' -- "${1}" 2>/dev/null || true)"
+  [ -n "${body}" ] || return 1
+  grep -Eq -e '(^|[[:space:]])(ssh-(rsa|dss|ed25519)(-cert-v01@openssh\.com)?|ecdsa-sha2-nistp(256|384|521)(-cert-v01@openssh\.com)?|sk-(ssh-ed25519|ecdsa-sha2-nistp256)(-cert-v01)?@openssh\.com)[[:space:]]+[^[:space:]]+' <<<"${body}"
+}
+# harbor_ssh_path_id PATH: the filesystem identity of PATH, its device and inode, printed
+# as device:inode. Two names print the same value exactly when they name the same file,
+# which a path by itself never settles: a check written as a path is re-resolved through
+# whatever the directories above it are at the instant it runs, so a check and the thing
+# it was meant to be about can be two different files. Inspection only. A path that cannot
+# be stat'ed prints nothing rather than failing, so a caller comparing two of these reads
+# a mismatch, which is the answer it wanted, instead of an error it would have to handle.
+harbor_ssh_path_id() {
+  case "$(harbor_os)" in
+    Linux) stat -c '%d:%i' "${1}" 2>/dev/null || true ;;
+    Darwin) stat -f '%d:%i' "${1}" 2>/dev/null || true ;;
+  esac
 }
 # harbor_ssh_prepared_entry_for STATE_ROOT PATH: the newest journal entry that is still
 # prepared, targets PATH, and records as its post_state exactly what PATH observes as
@@ -194,17 +227,33 @@ harbor_ssh_prepared_entry_for() {
 # the operator owns and may empty at will, chown alone would hand the operator any file
 # on this node it could name. Run inside STATE_ROOT there is nothing to name.
 #
-# The one step that touches a path the operator controls is the rename, and rename(2)
-# resolves neither final component: a symlink planted at the destination is unlinked by
-# the rename rather than written through, so the operator can destroy their own planted
-# link and nothing else. That holds only for a true rename, which is why both renames are
-# gated on harbor_ssh_assert_one_filesystem: mv degrades to copy-and-unlink across
-# filesystems and a copy does follow the destination symlink. The directory is created
-# the same way and for the same reason, staged and renamed rather than mkdir'd and then
-# chowned in place, because ~/.ssh is itself an entry in a directory the operator owns
-# and a chown of it is the same escalation as a chown of the key.
+# The one step that touches a path the operator controls is the rename, and it takes two
+# separate arguments to be sound. rename(2) does not resolve its final component, so a
+# symlink planted at the destination is unlinked by the rename rather than written
+# through, and the operator can destroy its own planted link and nothing else. That much
+# holds only for a true rename, which is why both renames are gated on
+# harbor_ssh_assert_one_filesystem: mv degrades to copy-and-unlink across filesystems and
+# a copy does follow the destination symlink.
+#
+# rename(2) does resolve every component above the last, though, and ~ is the operator's,
+# so the final component being safe says nothing about ~/.ssh. An operator that replaces
+# ~/.ssh with a symlink after the checks above have passed redirects the key into whatever
+# that link names, and the checks cannot catch it by looking again, because looking again
+# is another path resolution and resolves to the new thing too. The rename below therefore
+# runs from inside ~/.ssh onto a relative name, a working directory being a held handle to
+# a directory rather than a name that is resolved afresh, and the file that lands is proved
+# by device and inode rather than by its path. StrictModes, which
+# harbor_ssh_assert_operator requires, is the backstop underneath all of it: sshd ignores
+# an authorized_keys owned by neither root nor the account logging in.
+#
+# The directory is created the same way and for the same reason, staged and renamed rather
+# than mkdir'd and then chowned in place, because ~/.ssh is itself an entry in a directory
+# the operator owns and a chown of it is the same escalation as a chown of the key. That
+# rename needs no pinning: the component above it is ~ itself, which sits in a root-owned
+# /home the operator cannot rename or replace.
 harbor_ssh_authorize() {
   local root operator home group ssh_dir target pre source src_state post tmp stage entry
+  local staged_sha staged_id rename_rc
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
     || harbor_die 3 usage "usage: harbor_ssh_authorize <state-root> <operator> <operator-home> [source]"
   root="${1}"
@@ -278,19 +327,61 @@ harbor_ssh_authorize() {
     || harbor_die 2 ssh.copy "copying ${source} to ${tmp} failed; ${target} is unchanged"
   chmod 0600 "${tmp}" \
     || harbor_die 2 ssh.mode "cannot give ${tmp} mode 0600; ${target} is unchanged"
+  # The content is fixed here, before the chown, and proved unchanged after it. The chown
+  # is the moment the staged file first becomes writable by OPERATOR, and STATE_ROOT is
+  # 0755, so from then on the operator can both see the name and write through it. Reading
+  # the content only afterwards would let the operator choose what is journaled as
+  # post_state, and the verification after the rename compares against that same
+  # post_state, so both would agree on a key the operator supplied rather than the one the
+  # administrator did and the journal would vouch for it. Mode and owner are still read
+  # after the chown, those being what it sets.
+  staged_sha="$(harbor_sha256 "${tmp}")"
   chown "${operator}:${group}" "${tmp}" \
     || harbor_die 2 ssh.chown "cannot give ${tmp} to ${operator}:${group}; ${target} is unchanged"
+  harbor_step ssh-key-staged
+  [ "$(harbor_sha256 "${tmp}")" = "${staged_sha}" ] \
+    || harbor_die 2 ssh.stage_changed "the contents of ${tmp} changed between being staged and being given to ${operator}, so what is there is no longer the key read from ${source}; ${target} is unchanged"
   post="$(harbor_observe_file "${tmp}")"
   harbor_journal_create "${root}" authorized-key "${target}" created prepared "${pre}" "${post}"
   entry="${HARBOR_JOURNAL_ENTRY}"
   harbor_step ssh-key-prepared
   harbor_journal_sync_path "${tmp}"
-  if ! mv -f "${tmp}" "${target}"; then
+  staged_id="$(harbor_ssh_path_id "${tmp}")"
+  # The rename runs from inside ~/.ssh, onto a relative name, rather than onto the full
+  # path. rename(2) resolves the directories above its destination at the instant it runs,
+  # and ~ is the operator's, so between the checks above and this line the operator can
+  # replace ~/.ssh with a symlink and have root write the key through it into a directory
+  # of the operator's choosing. A working directory is a held handle to a directory rather
+  # than a name for one: once this subshell is inside ~/.ssh, the operator can re-point the
+  # name ~/.ssh wherever it likes and '.' still refers to the directory that was entered.
+  # The owner and mode are proved again through '.' for that reason, so what is proved and
+  # what is written into are the same directory and not merely the same path twice.
+  rename_rc=0
+  (
+    cd "${ssh_dir}" 2>/dev/null || exit 1
+    [ "$(harbor_stat_owner .)" = "${operator}" ] || exit 2
+    [ "$(harbor_stat_mode .)" = 0700 ] || exit 2
+    mv -f "${tmp}" ./authorized_keys || exit 3
+  ) || rename_rc="$?"
+  if [ "${rename_rc}" != 0 ]; then
     rm -f "${tmp}"
-    harbor_die 2 ssh.rename "renaming ${tmp} onto ${target} failed; ${target} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+    case "${rename_rc}" in
+      2)
+        harbor_die 2 ssh.ssh_dir_swapped "${ssh_dir} is no longer the 0700 directory owned by ${operator} that was checked a moment ago, so the authorized key was not written: something replaced it while ${operator} was being set up. Nothing was written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
+        ;;
+      *)
+        harbor_die 2 ssh.rename "renaming ${tmp} onto ${target} failed; ${target} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
+        ;;
+    esac
   fi
   harbor_journal_sync_path "${ssh_dir}"
   harbor_step ssh-key-copied
+  # Identity before content: every check below names ${target} as a path, and a path is
+  # resolved afresh each time, so on its own it proves something about whatever file that
+  # path reaches now rather than about the file that was staged. Device and inode settle
+  # it. An empty staged_id fails here too, an unreadable staging file being no proof.
+  { [ -n "${staged_id}" ] && [ "$(harbor_ssh_path_id "${target}")" = "${staged_id}" ]; } \
+    || harbor_die 2 ssh.verify_identity "${target} is not the file that was staged for it: the staged key has device and inode ${staged_id:-unreadable} and ${target} has $(harbor_ssh_path_id "${target}"), so the rename did not put it where these checks are reading. $(basename "${entry}") stays prepared and this node should be inspected before rerunning"
   [ "$(harbor_observe_file "${target}")" = "${post}" ] \
     || harbor_die 2 ssh.verify "${target} is not what was staged for it after the copy; $(basename "${entry}") stays prepared"
   [ "$(harbor_stat_mode "${target}")" = 0600 ] \
@@ -518,12 +609,11 @@ harbor_ssh_dropin_write() {
   HARBOR_SSH_DROPIN_ENTRY="${entry}"
 }
 # harbor_ssh_assert_operator OPERATOR SITUATION: the operator half of the design section
-# 3.5 acceptance. sshd itself is asked what it would do for that account, and all three
-# values harbor_ssh_operator_render writes must be the values it wrote; anything else
-# means the drop-in did not take effect and is exit 2 with the node's state, before any
-# reload.
+# 3.5 acceptance. sshd itself is asked what it would do for that account, and every value
+# harbor_ssh_operator_render writes must be the value it wrote; anything else means the
+# drop-in did not take effect and is exit 2 with the node's state, before any reload.
 #
-# All three, not only the two the row turns off. OpenSSH keeps the first value it obtains
+# All three of them, not only the two the row turns off. OpenSSH keeps the first value it obtains
 # for a keyword, Ubuntu's /etc/ssh/sshd_config begins with Include
 # /etc/ssh/sshd_config.d/*.conf, and those files are read in lexical order, so a drop-in
 # sorting before Harbor's, or a global PubkeyAuthentication no obtained ahead of this
@@ -533,10 +623,18 @@ harbor_ssh_dropin_write() {
 # at all, on an account whose drop-in says public-key-only authentication. The expected
 # value therefore travels with each directive rather than being assumed to be no, and the
 # refusal quotes what sshd actually reported for the directive that failed.
+#
+# StrictModes is the fourth asserted directive and the one Harbor does not write. sshd
+# ignores an authorized_keys owned by neither root nor the account logging in, and that is
+# what keeps a key file which reached a path it was not meant to reach from being a key
+# file that works there: it is the backstop behind the directory the key is renamed into.
+# Harbor asserts it rather than setting it, because it is sshd's own default and an
+# administrator who turned it off did so on purpose. The honest answer to finding it off
+# is a refusal naming the reason, not a drop-in that quietly turns it back on.
 harbor_ssh_assert_operator() {
   local operator="${1}" situation="${2}" effective pair directive expected reported
   effective="$(harbor_sshd_effective "${operator}" "${situation}")" || exit "$?"
-  for pair in pubkeyauthentication=yes passwordauthentication=no kbdinteractiveauthentication=no; do
+  for pair in pubkeyauthentication=yes passwordauthentication=no kbdinteractiveauthentication=no strictmodes=yes; do
     directive="${pair%%=*}"
     expected="${pair#*=}"
     if printf '%s\n' "${effective}" | grep -qxF -- "${directive} ${expected}"; then

@@ -342,6 +342,7 @@ permitrootlogin prohibit-password
 pubkeyauthentication yes
 passwordauthentication yes
 kbdinteractiveauthentication yes
+strictmodes yes
 usepam yes
 x11forwarding yes'
   if [ "${who}" = "${OPUSER}" ] && [ -f "${DROPIN}" ]; then
@@ -1274,7 +1275,13 @@ expected_rows() {
 @test "--harden-sshd refuses when the installation user has no key of their own" {
   install_form
   rm "${KEYSRC}"
-  rows --harden-sshd --authorized-key-file "${CHECKOUT}/bin/harbor"
+  # A real key file for the operator's own row, so the run reaches the --harden-sshd check
+  # rather than stopping short at its source: what this test is about is the installation
+  # user having no key, not the operator's source being unusable. Any file standing in for
+  # a key has to be one, the source check reading key lines rather than counting bytes.
+  other="${BATS_TEST_TMPDIR}/other-key"
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 other\n' >"${other}"
+  rows --harden-sshd --authorized-key-file "${other}"
   assert_equal "${status}" 3
   assert_output --partial 'ssh.harden_no_key'
   assert [ ! -e "${GLOBAL_DROPIN}" ]
