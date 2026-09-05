@@ -57,4 +57,11 @@ final class ShellTests: XCTestCase {
         do { _ = try await Shell.run("/nonexistent-insomnia-test", [], timeout: 1); XCTFail("launch succeeded") }
         catch is ShellError {} catch { XCTFail("unexpected error: \(error)") }
     }
+
+    func testOutputLimitCountsBothStreamsTogether() async {
+        do {
+            _ = try await Shell.run("/bin/sh", ["-c", "/usr/bin/head -c 5242880 /dev/zero; /usr/bin/head -c 5242880 /dev/zero >&2"], timeout: 5)
+            XCTFail("combined output must not exceed 8 MiB")
+        } catch ShellError.outputLimitExceeded {} catch { XCTFail("unexpected error: \(error)") }
+    }
 }

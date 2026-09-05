@@ -126,8 +126,8 @@ enum Shell {
                 throw failure!
             }
             do {
-                if !outEOF { outEOF = try drain(out[0], into: &stdout) }
-                if !errEOF { errEOF = try drain(err[0], into: &stderr) }
+                if !outEOF { outEOF = try drain(out[0], into: &stdout, otherBytes: stderr.count) }
+                if !errEOF { errEOF = try drain(err[0], into: &stderr, otherBytes: stdout.count) }
             } catch {
                 // The root can have exited while a descendant still writes.
                 kill(-pid, SIGKILL)
@@ -162,7 +162,7 @@ enum Shell {
         }
     }
 
-    private static func drain(_ fd: Int32, into data: inout Data) throws -> Bool {
+    private static func drain(_ fd: Int32, into data: inout Data, otherBytes: Int) throws -> Bool {
         var buffer = [UInt8](repeating: 0, count: 8192)
         // Bound each drain too: a continuously writing child must not starve
         // cancellation, the deadline, or the other output stream.
@@ -174,7 +174,7 @@ enum Shell {
                 if errno == EAGAIN || errno == EWOULDBLOCK { return false }
                 throw ShellError.launchFailed(exe: "output pipe", underlying: String(cString: strerror(errno)))
             }
-            guard data.count + count <= 8 * 1024 * 1024 else { throw ShellError.outputLimitExceeded }
+            guard data.count + otherBytes + count <= 8 * 1024 * 1024 else { throw ShellError.outputLimitExceeded }
             data.append(contentsOf: buffer.prefix(count))
         }
         return false
