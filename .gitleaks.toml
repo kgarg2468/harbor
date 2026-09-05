@@ -25,7 +25,14 @@ id = "harbor-email"
 description = "Email address outside example.com"
 regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'''
 [rules.allowlist]
-regexes = ['''@example\.com$''']
+# OpenSSH names its certificate and security-key algorithms with @openssh.com.
+# These are protocol constants, not addresses; only the exact identifiers pass.
+regexes = [
+  '''@example\.com$''',
+  '''^ssh-ed25519-cert-v01@openssh\.com$''',
+  '''^sk-ssh-ed25519@openssh\.com$''',
+  '''^-cert-v01@openssh\.com$''',
+]
 
 [[rules]]
 id = "harbor-clerk-user-id"
