@@ -87,6 +87,7 @@ stale_count() {
   paused_resolve lock-acquired "${BATS_TEST_TMPDIR}/b.out"
   pb="${PAUSED_PID}"
   wait_for_one_exit "${pa}" "${pb}"
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -d "${FIX_ROOT}/reclaim.d" ]
   case "$(holder_pid "${FIX_ROOT}")" in
@@ -117,6 +118,7 @@ stale_count() {
   paused_resolve lock-acquired "${BATS_TEST_TMPDIR}/b.out"
   pb="${PAUSED_PID}"
   wait_for_one_exit "${pa}" "${pb}"
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -d "${FIX_ROOT}/reclaim.d" ]
   resume_holder "${FIX_ROOT}" lock-acquired
