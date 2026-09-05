@@ -105,3 +105,24 @@ final class IntegrationWiringTests: XCTestCase {
         XCTAssertEqual(undetermined.statusDescription, "Not requested")
     }
 }
+
+extension IntegrationWiringTests {
+    @MainActor
+    func testStoppedBrowserRefreshCannotPublishToMenu() async {
+        let home = TempHome()
+        defer { home.destroy() }
+        let gate = AsyncGate()
+        let browser = BrowserThrottle(readArgs: { _ in await gate.wait(); return ["Chrome"] }, runningApps: {
+            [BrowserStatus(bundleId: "com.google.Chrome", name: "Chrome", pid: 101, unthrottled: false)]
+        })
+        let services = AppServices(paths: home.paths, notifier: RecordingNotifier(),
+            audio: FakeAudioControl(), processControl: FakeProcessControl(), browser: browser)
+        let task = Task { await services.refreshBrowsers() }
+        await gate.waitUntilStarted()
+        services.stop()
+        await gate.open()
+        await task.value
+        XCTAssertTrue(services.status.browsers.isEmpty)
+        XCTAssertTrue(services.status.throttledBrowsers.isEmpty)
+    }
+}
