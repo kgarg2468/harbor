@@ -11,7 +11,7 @@ is released. Ordinary UI observers do not count as work. A registered consumer
 whose processing loop has not started also blocks a claim, covering startup
 activation and interruption before its first instruction.
 
-The helpers have 14 focused tests covering queue ownership, cancellation,
+The helpers have 15 focused tests covering queue ownership, cancellation,
 consumer startup/failure, callback construction failures, delivery ordering,
 and the acquire-versus-seal race. These tests pass independently on Node 24.
 
@@ -20,3 +20,6 @@ provider adapters, reactors, or the update launcher yet, and does not currently
 detect whether real agents are idle. Native turn and background-task lifecycle
 integration must preserve this ownership across their asynchronous boundaries
 before any live automatic update can use it.
+
+Required consumer names form a set: repeated names create one channel and one
+registration blocker, so a duplicate cannot leave unreachable ownership behind.

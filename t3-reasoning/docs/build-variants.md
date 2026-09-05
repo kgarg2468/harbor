@@ -103,9 +103,9 @@ Recorded on 2026-09-05 from throwaway checkouts of upstream
 | Sequence | Tree id |
 | --- | --- |
 | `0001` + original `0002-desktop-identity` | `6e3be0cb047c695ffc7fdec4fd0fdb6ba8187bd2` |
-| `0001` + original `0002` + `0003` + `0004` (previous flat lock) | `fae2c1a33c3d9a56522766c3971c6dae4c949203` |
-| `reasoning` variant before `0005` (identity last) | `fae2c1a33c3d9a56522766c3971c6dae4c949203` |
-| `managed-nightly` variant before `0005` | `b31b361eb941d8c6142df2d7f96f45216596ae96` |
+| `0001` + original `0002` + `0003` + `0004` (previous flat lock) | `b9af3c082cecc406bbf76724c9daa6d27ca7f44d` |
+| `reasoning` variant before `0005` (identity last) | `b9af3c082cecc406bbf76724c9daa6d27ca7f44d` |
+| `managed-nightly` variant before `0005` | `264c89e43995bf45b4194fac32fd2432c1c58349` |
 
 So the split preserves the Reasoning tree exactly, and the
 two variants differ in exactly the eight files of `reasoning-identity`: the
@@ -117,8 +117,8 @@ local clone; the tree ids above are a one-time record because `0004` is
 expected to change under separate review.
 
 After applying the common `0005` activity helper patch, the managed Nightly tree
-is `ef85662ecedc9e4fc0f8e771097ec39d44170e78` and the Reasoning tree is
-`1008db188917e3e197b89a41766c3824e91476df`. The real-variant materialization test
+is `4bf46b9a8d4e1685f6a10f3a83162310a7235e7f` and the Reasoning tree is
+`77a2d74f8fd3d76002ed2f41ca0e3069f716dbd5`. The real-variant materialization test
 continues to prove that only the eight identity files differ.
 
 ## Not ready for deployment

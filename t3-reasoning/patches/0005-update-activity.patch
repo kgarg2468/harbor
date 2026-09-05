@@ -622,10 +622,10 @@ index 000000000..bf69b0be8
 +);
 diff --git a/apps/server/src/updateActivityFanout.ts b/apps/server/src/updateActivityFanout.ts
 new file mode 100644
-index 000000000..7a1cb0f53
+index 000000000..4edae416d
 --- /dev/null
 +++ b/apps/server/src/updateActivityFanout.ts
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,245 @@
 +/**
 + * UpdateActivityFanout - event fanout whose required consumers own their
 + * deliveries in the UpdateActivity registry.
@@ -687,6 +687,10 @@ index 000000000..7a1cb0f53
 +  unavailable: ActivityBlocker | undefined;
 +}
 +
++/**
++ * `requiredConsumers` is treated as a set of names; duplicates collapse into a
++ * single required consumer.
++ */
 +export const makeTrackedFanout = <A>(
 +  activity: UpdateActivityShape,
 +  name: string,
@@ -696,7 +700,9 @@ index 000000000..7a1cb0f53
 +    const observers = yield* Effect.acquireRelease(PubSub.unbounded<A>(), PubSub.shutdown);
 +    const publishLock = yield* Semaphore.make(1);
 +    const channels = new Map<string, Channel<A>>();
-+    for (const consumer of requiredConsumers) {
++    // Names are a set: a repeated name is one consumer, so it gets exactly one
++    // queue and one blocker rather than an orphaned blocker nobody can clear.
++    for (const consumer of new Set(requiredConsumers)) {
 +      channels.set(consumer, {
 +        consumer,
 +        queue: yield* Queue.unbounded<Delivery<A>>(),
@@ -780,7 +786,9 @@ index 000000000..7a1cb0f53
 +        Effect.flatMap(activity.acquire(`${name} publish`), (producer) =>
 +          restore(
 +            publishLock.withPermits(1)(
-+              Effect.uninterruptible(Effect.flatMap(acquireDeliveries, (leases) => deliver(event, leases))),
++              Effect.uninterruptible(
++                Effect.flatMap(acquireDeliveries, (leases) => deliver(event, leases)),
++              ),
 +            ),
 +          ).pipe(Effect.ensuring(Effect.sync(producer.release))),
 +        ),
@@ -791,23 +799,24 @@ index 000000000..7a1cb0f53
 +    // finalizer is installed before `handle` is constructed; the mask keeps the
 +    // dequeue-to-finalizer handoff atomic while waiting and handling stay
 +    // interruptible.
-+    const runChannel = <E, R>(channel: Channel<A>, handle: (event: A) => Effect.Effect<void, E, R>) =>
++    const runChannel = <E, R>(
++      channel: Channel<A>,
++      handle: (event: A) => Effect.Effect<void, E, R>,
++    ) =>
 +      Effect.onExit(
 +        Effect.sync(() => channel.notRunning?.clear()).pipe(
 +          Effect.andThen(
 +            Effect.uninterruptibleMask((restore) =>
 +              Effect.flatMap(restore(Queue.take(channel.queue)), (delivery) =>
-+                Effect.onExit(
-+                  restore(Effect.suspend(() => handle(delivery.event))),
-+                  (exit) =>
-+                    Effect.sync(() => {
-+                      if (!Exit.isSuccess(exit)) {
-+                        channel.unavailable ??= activity.block(
-+                          `required subscriber unavailable: ${name}/${channel.consumer}`,
-+                        );
-+                      }
-+                      delivery.lease.release();
-+                    }),
++                Effect.onExit(restore(Effect.suspend(() => handle(delivery.event))), (exit) =>
++                  Effect.sync(() => {
++                    if (!Exit.isSuccess(exit)) {
++                      channel.unavailable ??= activity.block(
++                        `required subscriber unavailable: ${name}/${channel.consumer}`,
++                      );
++                    }
++                    delivery.lease.release();
++                  }),
 +                ),
 +              ),
 +            ).pipe(Effect.forever),
@@ -824,7 +833,9 @@ index 000000000..7a1cb0f53
 +            return yield* new UpdateActivityUnavailableError({ reason: "unknown-subscriber" });
 +          }
 +          if (channel.owned) {
-+            return yield* new UpdateActivityUnavailableError({ reason: "subscriber-already-owned" });
++            return yield* new UpdateActivityUnavailableError({
++              reason: "subscriber-already-owned",
++            });
 +          }
 +          channel.owned = true;
 +          yield* Effect.addFinalizer(() => closeChannel(channel));
@@ -840,9 +851,12 @@ index 000000000..7a1cb0f53
 +          ) =>
 +            Effect.suspend((): Effect.Effect<void, E | UpdateActivityUnavailableError, R> => {
 +              if (channel.running) {
-+                return Effect.fail(new UpdateActivityUnavailableError({ reason: "subscriber-already-owned" }));
++                return Effect.fail(
++                  new UpdateActivityUnavailableError({ reason: "subscriber-already-owned" }),
++                );
 +              }
-+              if (channel.closed) return Effect.fail(new UpdateActivityUnavailableError({ reason: "closed" }));
++              if (channel.closed)
++                return Effect.fail(new UpdateActivityUnavailableError({ reason: "closed" }));
 +              channel.running = true;
 +              return runChannel(channel, handle);
 +            });
@@ -859,10 +873,10 @@ index 000000000..7a1cb0f53
 +  });
 diff --git a/apps/server/src/updateActivityFanout.test.ts b/apps/server/src/updateActivityFanout.test.ts
 new file mode 100644
-index 000000000..e55b69d64
+index 000000000..4d521a33c
 --- /dev/null
 +++ b/apps/server/src/updateActivityFanout.test.ts
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,467 @@
 +import { expect, it } from "@effect/vitest";
 +import * as Deferred from "effect/Deferred";
 +import * as Effect from "effect/Effect";
@@ -890,40 +904,42 @@ index 000000000..e55b69d64
 +    return claim as { readonly status: "sealed"; readonly seal: { release: () => void } };
 +  });
 +
-+it.effect("delivery ownership passes from queue to run to a tracked worker without an idle gap", () =>
-+  Effect.gen(function* () {
-+    const activity = yield* make();
-+    const fanout = yield* makeTrackedFanout<Event>(activity, "domain", ["reactor"]);
-+    const subscription = yield* fanout.subscribeRequired("reactor");
-+    yield* fanout.publish({ id: 1 });
++it.effect(
++  "delivery ownership passes from queue to run to a tracked worker without an idle gap",
++  () =>
++    Effect.gen(function* () {
++      const activity = yield* make();
++      const fanout = yield* makeTrackedFanout<Event>(activity, "domain", ["reactor"]);
++      const subscription = yield* fanout.subscribeRequired("reactor");
++      yield* fanout.publish({ id: 1 });
 +
-+    // Registered but run not started: the queued delivery and the not-running blocker both hold.
-+    const queued = yield* expectBusy(activity);
-+    expect(queued.state.blockers).toEqual(["required subscriber not running: domain/reactor"]);
-+    expect(queued.state.outstanding).toBe(1);
++      // Registered but run not started: the queued delivery and the not-running blocker both hold.
++      const queued = yield* expectBusy(activity);
++      expect(queued.state.blockers).toEqual(["required subscriber not running: domain/reactor"]);
++      expect(queued.state.outstanding).toBe(1);
 +
-+    const entered = yield* Deferred.make<Event>();
-+    const gate = yield* Deferred.make<void>();
-+    const worker = yield* makeTrackedWorker<Event, never, never>(activity, "reactor", (event) =>
-+      Deferred.succeed(entered, event).pipe(Effect.andThen(Deferred.await(gate))),
-+    );
-+    const handled = yield* Deferred.make<void>();
-+    yield* Effect.forkScoped(
-+      subscription.run((event) =>
-+        worker.enqueue(event).pipe(Effect.andThen(Deferred.succeed(handled, undefined))),
-+      ),
-+    );
-+    yield* Deferred.await(handled);
-+    expect(yield* Deferred.await(entered)).toEqual({ id: 1 });
-+    const processing = yield* expectBusy(activity);
-+    expect(processing.state.outstanding).toBe(1);
-+    expect(processing.state.blockers).toEqual([]);
++      const entered = yield* Deferred.make<Event>();
++      const gate = yield* Deferred.make<void>();
++      const worker = yield* makeTrackedWorker<Event, never, never>(activity, "reactor", (event) =>
++        Deferred.succeed(entered, event).pipe(Effect.andThen(Deferred.await(gate))),
++      );
++      const handled = yield* Deferred.make<void>();
++      yield* Effect.forkScoped(
++        subscription.run((event) =>
++          worker.enqueue(event).pipe(Effect.andThen(Deferred.succeed(handled, undefined))),
++        ),
++      );
++      yield* Deferred.await(handled);
++      expect(yield* Deferred.await(entered)).toEqual({ id: 1 });
++      const processing = yield* expectBusy(activity);
++      expect(processing.state.outstanding).toBe(1);
++      expect(processing.state.blockers).toEqual([]);
 +
-+    yield* Deferred.succeed(gate, undefined);
-+    yield* worker.drain;
-+    const sealed = yield* expectSealed(activity);
-+    sealed.seal.release();
-+  }),
++      yield* Deferred.succeed(gate, undefined);
++      yield* worker.drain;
++      const sealed = yield* expectSealed(activity);
++      sealed.seal.release();
++    }),
 +);
 +
 +it.effect("events published before registration are delivered once; observers are untracked", () =>
@@ -947,7 +963,9 @@ index 000000000..e55b69d64
 +    const subscription = yield* fanout.subscribeRequired("reactor");
 +    const duplicate = yield* Effect.flip(fanout.subscribeRequired("reactor"));
 +    expect(duplicate.reason).toBe("subscriber-already-owned");
-+    expect((yield* activity.state).blockers).toEqual(["required subscriber not running: domain/reactor"]);
++    expect((yield* activity.state).blockers).toEqual([
++      "required subscriber not running: domain/reactor",
++    ]);
 +
 +    const delivered: Array<Event> = [];
 +    const receipt = yield* Deferred.make<void>();
@@ -955,7 +973,9 @@ index 000000000..e55b69d64
 +      subscription.run((event) =>
 +        Effect.sync(() => {
 +          delivered.push(event);
-+        }).pipe(Effect.andThen(event.id === 2 ? Deferred.succeed(receipt, undefined) : Effect.void)),
++        }).pipe(
++          Effect.andThen(event.id === 2 ? Deferred.succeed(receipt, undefined) : Effect.void),
++        ),
 +      ),
 +    );
 +    yield* fanout.publish({ id: 2 });
@@ -992,7 +1012,9 @@ index 000000000..e55b69d64
 +    const activity = yield* make();
 +    const fanout = yield* makeTrackedFanout<Event>(activity, "domain", ["reactor"]);
 +    const subscriptionScope = yield* Scope.make();
-+    const subscription = yield* fanout.subscribeRequired("reactor").pipe(Scope.provide(subscriptionScope));
++    const subscription = yield* fanout
++      .subscribeRequired("reactor")
++      .pipe(Scope.provide(subscriptionScope));
 +    const entered = yield* Deferred.make<void>();
 +    const gate = yield* Deferred.make<void>();
 +    const run = yield* Effect.forkChild(
@@ -1047,86 +1069,139 @@ index 000000000..e55b69d64
 +  }),
 +);
 +
-+it.effect("a handler that throws while constructing its effect still settles its delivery and blocks", () =>
++it.effect("duplicate required names collapse into one consumer with no orphan blocker", () =>
 +  Effect.gen(function* () {
 +    const activity = yield* make();
-+    const fanout = yield* makeTrackedFanout<Event>(activity, "events", ["r"]);
++    const fanout = yield* makeTrackedFanout<Event>(activity, "events", ["r", "r", "r"]);
++    expect((yield* activity.state).blockers).toEqual([
++      "required subscriber not registered: events/r",
++    ]);
++
 +    const subscription = yield* fanout.subscribeRequired("r");
++    const duplicate = yield* Effect.flip(fanout.subscribeRequired("r"));
++    expect(duplicate.reason).toBe("subscriber-already-owned");
++    expect((yield* activity.state).blockers).toEqual(["required subscriber not running: events/r"]);
++
 +    yield* fanout.publish({ id: 1 });
-+    const run = yield* Effect.forkChild(
-+      subscription.run((): Effect.Effect<void> => {
-+        throw new Error("construction defect");
++    yield* fanout.publish({ id: 2 });
++    expect((yield* activity.state).outstanding).toBe(2);
++
++    const delivered: Array<number> = [];
++    const receipt = yield* Deferred.make<void>();
++    yield* Effect.forkScoped(
++      subscription.run((event) =>
++        Effect.sync(() => {
++          delivered.push(event.id);
++        }).pipe(
++          Effect.andThen(event.id === 2 ? Deferred.succeed(receipt, undefined) : Effect.void),
++        ),
++      ),
++    );
++    yield* Deferred.await(receipt);
++    expect(delivered).toEqual([1, 2]);
++
++    const drained = yield* Effect.forkChild(
++      Effect.gen(function* () {
++        let current = yield* activity.state;
++        while (current.outstanding > 0) current = yield* activity.awaitChange(current.revision);
++        return current;
 +      }),
 +    );
-+    const exit = yield* Fiber.await(run);
-+    expect(Exit.isFailure(exit)).toBe(true);
-+    const state = yield* activity.state;
-+    expect(state.outstanding).toBe(0);
-+    expect(state.blockers).toEqual(["required subscriber unavailable: events/r"]);
-+    yield* expectBusy(activity);
++    const idle = yield* Fiber.join(drained);
++    expect(idle.blockers).toEqual([]);
++    const sealed = yield* expectSealed(activity);
++    sealed.seal.release();
 +  }),
 +);
 +
-+it.effect("a run canceled before its body starts stays blocked while a started run becomes sealable", () =>
-+  Effect.gen(function* () {
-+    const activity = yield* make();
-+    const fanout = yield* makeTrackedFanout<Event>(activity, "events", ["r", "s"]);
++it.effect(
++  "a handler that throws while constructing its effect still settles its delivery and blocks",
++  () =>
++    Effect.gen(function* () {
++      const activity = yield* make();
++      const fanout = yield* makeTrackedFanout<Event>(activity, "events", ["r"]);
++      const subscription = yield* fanout.subscribeRequired("r");
++      yield* fanout.publish({ id: 1 });
++      const run = yield* Effect.forkChild(
++        subscription.run((): Effect.Effect<void> => {
++          throw new Error("construction defect");
++        }),
++      );
++      const exit = yield* Fiber.await(run);
++      expect(Exit.isFailure(exit)).toBe(true);
++      const state = yield* activity.state;
++      expect(state.outstanding).toBe(0);
++      expect(state.blockers).toEqual(["required subscriber unavailable: events/r"]);
++      yield* expectBusy(activity);
++    }),
++);
 +
-+    // Consumer r: registered in its own scope, run canceled before it starts.
-+    const registration = yield* Scope.make();
-+    const subscriptionR = yield* fanout.subscribeRequired("r").pipe(Scope.provide(registration));
-+    yield* fanout.publish({ id: 1 });
-+    const childScope = yield* Scope.make();
-+    const run = yield* Effect.forkIn(subscriptionR.run(() => Effect.void), childScope);
-+    yield* Scope.close(childScope, Exit.void);
-+    const exit = yield* Fiber.await(run);
-+    expect(Exit.isFailure(exit)).toBe(true);
-+    const canceled = yield* activity.state;
-+    expect(canceled.outstanding).toBe(2);
-+    expect(canceled.blockers).toEqual([
-+      "required subscriber not registered: events/s",
-+      "required subscriber not running: events/r",
-+    ]);
++it.effect(
++  "a run canceled before its body starts stays blocked while a started run becomes sealable",
++  () =>
++    Effect.gen(function* () {
++      const activity = yield* make();
++      const fanout = yield* makeTrackedFanout<Event>(activity, "events", ["r", "s"]);
 +
-+    // Closing the registration establishes unavailable before releasing the queued delivery.
-+    const seen: Array<UpdateActivityState> = [];
-+    const watcher = yield* Effect.forkChild(
-+      Effect.gen(function* () {
-+        let current = yield* activity.state;
-+        while (current.outstanding > 1) {
-+          current = yield* activity.awaitChange(current.revision);
-+          seen.push(current);
-+        }
-+      }),
-+    );
-+    yield* Effect.yieldNow;
-+    yield* Scope.close(registration, Exit.void);
-+    yield* Fiber.join(watcher);
-+    for (const snapshot of seen) expect(snapshot.blockers.length).toBeGreaterThan(0);
-+    const closed = yield* activity.state;
-+    expect(closed.outstanding).toBe(1);
-+    expect(closed.blockers).toEqual([
-+      "required subscriber not registered: events/s",
-+      "required subscriber unavailable: events/r",
-+    ]);
++      // Consumer r: registered in its own scope, run canceled before it starts.
++      const registration = yield* Scope.make();
++      const subscriptionR = yield* fanout.subscribeRequired("r").pipe(Scope.provide(registration));
++      yield* fanout.publish({ id: 1 });
++      const childScope = yield* Scope.make();
++      const run = yield* Effect.forkIn(
++        subscriptionR.run(() => Effect.void),
++        childScope,
++      );
++      yield* Scope.close(childScope, Exit.void);
++      const exit = yield* Fiber.await(run);
++      expect(Exit.isFailure(exit)).toBe(true);
++      const canceled = yield* activity.state;
++      expect(canceled.outstanding).toBe(2);
++      expect(canceled.blockers).toEqual([
++        "required subscriber not registered: events/s",
++        "required subscriber not running: events/r",
++      ]);
 +
-+    // Consumer s: registered with no events is busy until its run body starts.
-+    const secondActivity = yield* make();
-+    const second = yield* makeTrackedFanout<Event>(secondActivity, "second", ["s"]);
-+    const subscriptionS = yield* second.subscribeRequired("s");
-+    const parked = yield* expectBusy(secondActivity);
-+    expect(parked.state.blockers).toEqual(["required subscriber not running: second/s"]);
-+    const started = yield* Effect.forkChild(
-+      Effect.gen(function* () {
-+        let current = yield* secondActivity.state;
-+        while (current.blockers.length > 0) current = yield* secondActivity.awaitChange(current.revision);
-+      }),
-+    );
-+    yield* Effect.forkScoped(subscriptionS.run(() => Effect.void));
-+    yield* Fiber.join(started);
-+    const sealed = yield* expectSealed(secondActivity);
-+    sealed.seal.release();
-+  }),
++      // Closing the registration establishes unavailable before releasing the queued delivery.
++      const seen: Array<UpdateActivityState> = [];
++      const watcher = yield* Effect.forkChild(
++        Effect.gen(function* () {
++          let current = yield* activity.state;
++          while (current.outstanding > 1) {
++            current = yield* activity.awaitChange(current.revision);
++            seen.push(current);
++          }
++        }),
++      );
++      yield* Effect.yieldNow;
++      yield* Scope.close(registration, Exit.void);
++      yield* Fiber.join(watcher);
++      for (const snapshot of seen) expect(snapshot.blockers.length).toBeGreaterThan(0);
++      const closed = yield* activity.state;
++      expect(closed.outstanding).toBe(1);
++      expect(closed.blockers).toEqual([
++        "required subscriber not registered: events/s",
++        "required subscriber unavailable: events/r",
++      ]);
++
++      // Consumer s: registered with no events is busy until its run body starts.
++      const secondActivity = yield* make();
++      const second = yield* makeTrackedFanout<Event>(secondActivity, "second", ["s"]);
++      const subscriptionS = yield* second.subscribeRequired("s");
++      const parked = yield* expectBusy(secondActivity);
++      expect(parked.state.blockers).toEqual(["required subscriber not running: second/s"]);
++      const started = yield* Effect.forkChild(
++        Effect.gen(function* () {
++          let current = yield* secondActivity.state;
++          while (current.blockers.length > 0)
++            current = yield* secondActivity.awaitChange(current.revision);
++        }),
++      );
++      yield* Effect.forkScoped(subscriptionS.run(() => Effect.void));
++      yield* Fiber.join(started);
++      const sealed = yield* expectSealed(secondActivity);
++      sealed.seal.release();
++    }),
 +);
 +
 +it.effect("canceling a publisher waiting for the permit releases only its producer lease", () =>
@@ -1153,7 +1228,9 @@ index 000000000..e55b69d64
 +    const held = yield* Deferred.make<void>();
 +    const entered = yield* Deferred.make<void>();
 +    yield* Effect.forkScoped(
-+      subscription.run(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(held)))),
++      subscription.run(() =>
++        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(held))),
++      ),
 +    );
 +
 +    // One accepted delivery is in flight before the contended publishes.
@@ -1191,72 +1268,79 @@ index 000000000..e55b69d64
 +  }),
 +);
 +
-+it.effect("required consumers are independent, ordered, and one loss keeps other deliveries live", () =>
-+  Effect.gen(function* () {
-+    const activity = yield* make();
-+    const fanout = yield* makeTrackedFanout<Event>(activity, "domain", ["a", "b"]);
-+    const seenA: Array<number> = [];
-+    const seenB: Array<number> = [];
-+    const gateA = yield* Deferred.make<void>();
-+    const gateB = yield* Deferred.make<void>();
-+    const doneA = yield* Deferred.make<void>();
-+    const doneB = yield* Deferred.make<void>();
-+    const total = 3;
-+    // Records order for every event and holds only the last one in flight.
-+    const hold =
-+      (seen: Array<number>, gate: Deferred.Deferred<void>, done: Deferred.Deferred<void>) => (event: Event) =>
++it.effect(
++  "required consumers are independent, ordered, and one loss keeps other deliveries live",
++  () =>
++    Effect.gen(function* () {
++      const activity = yield* make();
++      const fanout = yield* makeTrackedFanout<Event>(activity, "domain", ["a", "b"]);
++      const seenA: Array<number> = [];
++      const seenB: Array<number> = [];
++      const gateA = yield* Deferred.make<void>();
++      const gateB = yield* Deferred.make<void>();
++      const doneA = yield* Deferred.make<void>();
++      const doneB = yield* Deferred.make<void>();
++      const total = 3;
++      // Records order for every event and holds only the last one in flight.
++      const hold =
++        (seen: Array<number>, gate: Deferred.Deferred<void>, done: Deferred.Deferred<void>) =>
++        (event: Event) =>
++          Effect.gen(function* () {
++            seen.push(event.id);
++            if (seen.length < total) return;
++            yield* Deferred.succeed(done, undefined);
++            yield* Deferred.await(gate);
++          });
++      const subscriptionA = yield* fanout.subscribeRequired("a");
++      const subscriptionB = yield* fanout.subscribeRequired("b");
++      yield* Effect.forkScoped(subscriptionA.run(hold(seenA, gateA, doneA)));
++      yield* Effect.forkScoped(subscriptionB.run(hold(seenB, gateB, doneB)));
++
++      const publishers = yield* Effect.forEach([1, 2, 3], (id) =>
++        Effect.forkChild(fanout.publish({ id })),
++      );
++      yield* Fiber.joinAll(publishers);
++      yield* Deferred.await(doneA);
++      yield* Deferred.await(doneB);
++      expect(seenA).toEqual(seenB);
++      expect([...seenA].sort()).toEqual([1, 2, 3]);
++      expect((yield* activity.state).outstanding).toBe(2);
++
++      yield* Deferred.succeed(gateA, undefined);
++      const settled = yield* Effect.forkChild(
 +        Effect.gen(function* () {
-+          seen.push(event.id);
-+          if (seen.length < total) return;
-+          yield* Deferred.succeed(done, undefined);
-+          yield* Deferred.await(gate);
-+        });
-+    const subscriptionA = yield* fanout.subscribeRequired("a");
-+    const subscriptionB = yield* fanout.subscribeRequired("b");
-+    yield* Effect.forkScoped(subscriptionA.run(hold(seenA, gateA, doneA)));
-+    yield* Effect.forkScoped(subscriptionB.run(hold(seenB, gateB, doneB)));
++          let current = yield* activity.state;
++          while (current.outstanding > 1) current = yield* activity.awaitChange(current.revision);
++          return current;
++        }),
++      );
++      expect((yield* Fiber.join(settled)).outstanding).toBe(1);
++      yield* expectBusy(activity);
 +
-+    const publishers = yield* Effect.forEach(
-+      [1, 2, 3],
-+      (id) => Effect.forkChild(fanout.publish({ id })),
-+    );
-+    yield* Fiber.joinAll(publishers);
-+    yield* Deferred.await(doneA);
-+    yield* Deferred.await(doneB);
-+    expect(seenA).toEqual(seenB);
-+    expect([...seenA].sort()).toEqual([1, 2, 3]);
-+    expect((yield* activity.state).outstanding).toBe(2);
-+
-+    yield* Deferred.succeed(gateA, undefined);
-+    const settled = yield* Effect.forkChild(
-+      Effect.gen(function* () {
-+        let current = yield* activity.state;
-+        while (current.outstanding > 1) current = yield* activity.awaitChange(current.revision);
-+        return current;
-+      }),
-+    );
-+    expect((yield* Fiber.join(settled)).outstanding).toBe(1);
-+    yield* expectBusy(activity);
-+
-+    // Losing consumer B releases only B's deliveries and blocks; A's are untouched.
-+    const lossScope = yield* Scope.make();
-+    const fanout2 = yield* makeTrackedFanout<Event>(activity, "second", ["x", "y"]);
-+    const heldX = yield* Deferred.make<void>();
-+    const enteredX = yield* Deferred.make<void>();
-+    const subscriptionX = yield* fanout2.subscribeRequired("x");
-+    const subscriptionY = yield* fanout2.subscribeRequired("y").pipe(Scope.provide(lossScope));
-+    yield* Effect.forkScoped(
-+      subscriptionX.run(() => Deferred.succeed(enteredX, undefined).pipe(Effect.andThen(Deferred.await(heldX)))),
-+    );
-+    yield* Effect.forkIn(subscriptionY.run(() => Effect.never), lossScope);
-+    yield* fanout2.publish({ id: 10 });
-+    yield* Deferred.await(enteredX);
-+    const before = yield* activity.state;
-+    yield* Scope.close(lossScope, Exit.void);
-+    const after = yield* activity.state;
-+    expect(after.outstanding).toBe(before.outstanding - 1);
-+    expect(after.blockers).toEqual(["required subscriber unavailable: second/y"]);
-+    yield* Deferred.succeed(gateB, undefined);
-+    yield* Deferred.succeed(heldX, undefined);
-+  }),
++      // Losing consumer B releases only B's deliveries and blocks; A's are untouched.
++      const lossScope = yield* Scope.make();
++      const fanout2 = yield* makeTrackedFanout<Event>(activity, "second", ["x", "y"]);
++      const heldX = yield* Deferred.make<void>();
++      const enteredX = yield* Deferred.make<void>();
++      const subscriptionX = yield* fanout2.subscribeRequired("x");
++      const subscriptionY = yield* fanout2.subscribeRequired("y").pipe(Scope.provide(lossScope));
++      yield* Effect.forkScoped(
++        subscriptionX.run(() =>
++          Deferred.succeed(enteredX, undefined).pipe(Effect.andThen(Deferred.await(heldX))),
++        ),
++      );
++      yield* Effect.forkIn(
++        subscriptionY.run(() => Effect.never),
++        lossScope,
++      );
++      yield* fanout2.publish({ id: 10 });
++      yield* Deferred.await(enteredX);
++      const before = yield* activity.state;
++      yield* Scope.close(lossScope, Exit.void);
++      const after = yield* activity.state;
++      expect(after.outstanding).toBe(before.outstanding - 1);
++      expect(after.blockers).toEqual(["required subscriber unavailable: second/y"]);
++      yield* Deferred.succeed(gateB, undefined);
++      yield* Deferred.succeed(heldX, undefined);
++    }),
 +);
