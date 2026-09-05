@@ -728,6 +728,110 @@ authorize() {
   harbor_lock_release "${FIX_ROOT}"
 }
 
+@test "a pre-existing authorized_keys owned by another account is refused, and one owned by root is not" {
+  # Content is not the whole of it. StrictModes, which harbor_ssh_assert_operator now
+  # asserts of this node, makes sshd refuse an authorized_keys owned by neither root nor
+  # the account logging in, whatever key is in it. A file holding a perfectly good key that
+  # sshd will not read strands the operator exactly as a file holding no key does: the sshd
+  # row takes password and keyboard-interactive authentication away from an account sshd
+  # will not let in by key either, and the observed arm judged content alone.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  printf '%s\n' "${ALICE_KEY}" >"${TARGET}"
+  chmod 0600 "${TARGET}"
+  before_inode="$(inode_of "${TARGET}")"
+  # chown is the one call an unprivileged test cannot make, so a file belonging to a third
+  # account has no other way to exist in a fixture. The library's own helper is the seam,
+  # wrapped for that one path; every other path in the run is answered the real way, read
+  # exactly as lib/journal.sh reads it.
+  harbor_stat_owner() {
+    if [ "${1}" = "${TARGET}" ]; then
+      printf '%s' "${FAKE_TARGET_OWNER}"
+      return 0
+    fi
+    case "$(harbor_os)" in
+      Linux) stat -c '%U' "${1}" ;;
+      Darwin) stat -f '%Su' "${1}" ;;
+    esac
+  }
+  FAKE_TARGET_OWNER=mallory
+  acquire
+  run authorize
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.target_unusable'
+  assert_output --partial mallory
+  assert_output --partial 'StrictModes'
+  assert_output --partial "${TARGET}"
+  assert_output --partial 'password'
+  # A refusal, never a repair: Harbor changes nothing it did not create, so the file keeps
+  # its mode and its inode, and nothing is journaled for a later row to act on.
+  assert_equal "$(inode_of "${TARGET}")" "${before_inode}"
+  assert_equal "$(harbor_stat_mode "${TARGET}")" 0600
+  assert_equal "$(journal_names)" ""
+  # root is the other owner sshd reads a key file from, so a file root owns is accepted and
+  # journaled observed, exactly as the operator's own is.
+  FAKE_TARGET_OWNER=root
+  run authorize
+  assert_success
+  assert_equal "$(inode_of "${TARGET}")" "${before_inode}"
+  assert_equal "$(journal_names)" 0001-authorized-key.json
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" '"observed"'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "a pre-existing authorized_keys that is group- or world-writable is refused, and 0640 and 0644 are not" {
+  # The other half of what StrictModes tests: sshd refuses a key file its group or the
+  # whole node can write, because anyone who can write it can add a key to it. Harbor
+  # accepting one and then taking password authentication away from the account is a
+  # lockout Harbor causes.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  printf '%s\n' "${ALICE_KEY}" >"${TARGET}"
+  chmod 0664 "${TARGET}"
+  before_inode="$(inode_of "${TARGET}")"
+  sha="$(harbor_sha256 "${TARGET}")"
+  acquire
+  run authorize
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.target_unusable'
+  assert_output --partial 'group-writable'
+  assert_output --partial '0664'
+  assert_output --partial 'StrictModes'
+  assert_equal "$(harbor_stat_mode "${TARGET}")" 0664
+  assert_equal "$(inode_of "${TARGET}")" "${before_inode}"
+  assert_equal "$(journal_names)" ""
+  # World-writable is named for what it is rather than folded into the group case.
+  chmod 0666 "${TARGET}"
+  run authorize
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.target_unusable'
+  assert_output --partial 'world-writable'
+  assert_output --partial '0666'
+  assert_equal "$(harbor_stat_mode "${TARGET}")" 0666
+  assert_equal "$(journal_names)" ""
+  # And the modes sshd reads are still accepted. The test is writability, not equality with
+  # 0600: 0640 and 0644 are legitimate administrator choices that StrictModes has nothing
+  # against, and refusing a node Harbor has no complaint about is a lockout of its own kind.
+  chmod 0640 "${TARGET}"
+  run authorize
+  assert_success
+  assert_equal "$(harbor_stat_mode "${TARGET}")" 0640
+  assert_equal "$(journal_names)" 0001-authorized-key.json
+  chmod 0644 "${TARGET}"
+  run authorize
+  assert_success
+  assert_equal "$(harbor_stat_mode "${TARGET}")" 0644
+  assert_equal "$(harbor_sha256 "${TARGET}")" "${sha}"
+  assert_equal "$(inode_of "${TARGET}")" "${before_inode}"
+  run journal_names
+  assert_line --index 1 0002-authorized-key.json
+  assert_equal "${#lines[@]}" 2
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 ownership)" '"observed"'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  harbor_lock_release "${FIX_ROOT}"
+}
+
 paused_authorize() {
   # paused_authorize STEP: harbor_ssh_authorize in a child paused at STEP, so the window
   # between two steps can be interposed on the way an operator with a process on the node
@@ -764,7 +868,8 @@ resume_paused() {
   # is the operator's, so proving ~/.ssh is a 0700 directory owned by the operator proves
   # nothing about what ~/.ssh will be by the time the key is renamed into it. An operator
   # with a process on the node replaces it in that window and root writes the key through
-  # the link. The rename is pinned to the directory that was proved, so it must not follow.
+  # the link. The rename enters a directory and proves that ~/.ssh still denotes that very
+  # directory and is not a symlink, so it must not follow.
   mkdir -p "${SSH_DIR}"
   chmod 0700 "${SSH_DIR}"
   decoy="${BATS_TEST_TMPDIR}/decoy"
@@ -792,7 +897,8 @@ resume_paused() {
   # checks while the key lands where the operator chose. The operator would then have no
   # key where sshd looks for one, and the sshd row would take password authentication away
   # from the account regardless, so this is a lockout the checks would have waved through.
-  # What is held against '.' is the device and inode of the directory that was proved.
+  # What '.' is held against is the name itself: ~/.ssh must not be a symlink and must reach
+  # the very directory the rename entered, which a name aimed elsewhere cannot do.
   mkdir -p "${SSH_DIR}"
   chmod 0700 "${SSH_DIR}"
   decoy="${BATS_TEST_TMPDIR}/decoy"
@@ -810,6 +916,80 @@ resume_paused() {
   assert_output --partial 'no longer the same directory'
   assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
+}
+
+@test "a .ssh swapped before anything downstream has read the name lands no key in the decoy either" {
+  # The window the two tests above cannot see. Both of them interpose after ~/.ssh had
+  # already been read once by the run they interrupt, so neither covers a run that reads the
+  # name for the first time with the operator's decoy already under it: the identity the
+  # rename used to be held against was itself read by path, in this window, and a reading
+  # taken here is a reading of whatever the operator has just put there.
+  #
+  # What the run must do is the same in both windows, and it is proved in the pin rather
+  # than by anything read outside it: the key goes into the directory the name ${SSH_DIR}
+  # denotes at the moment of the write, and a name that is a symlink denotes no such
+  # directory. Nothing read here is consulted for it, so nothing done here can be trusted.
+  #
+  # This does not fail against the shape it replaced, and the summary of the change says so:
+  # harbor_ssh_path_id reads with lstat, so the identity captured here was the link's own and
+  # never agreed with a directory that had been entered. The refusal below was reached by
+  # that accident before and is reached by a stated check now.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  decoy="${BATS_TEST_TMPDIR}/decoy"
+  mkdir -p "${decoy}"
+  chmod 0700 "${decoy}"
+  paused_authorize ssh-dir-checked
+  rmdir "${SSH_DIR}"
+  ln -s "${decoy}" "${SSH_DIR}"
+  resume_paused ssh-dir-checked
+  # First, and on its own: no key is in the directory the operator aimed the name at, and
+  # nothing else was put there either. A run that trusted an identity captured by path
+  # fails this line having already written the key through the link.
+  assert [ ! -e "${decoy}/authorized_keys" ]
+  assert_equal "$(ls -A "${decoy}")" ""
+  assert_equal "${PAUSED_STATUS}" 2
+  run cat "${BATS_TEST_TMPDIR}/child.out"
+  assert_output --partial 'ssh.ssh_dir_swapped'
+  assert_output --partial 'no longer the same directory'
+  # Nothing was left staged in the state root for a later run to pick up, and the
+  # transaction is unfinished rather than abandoned: recovery still owns it.
+  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
+}
+
+@test "a .ssh that is a different directory by the time the key is written is still written into, because by then it is ~/.ssh" {
+  # The other half of proving the directory inside the pin rather than carrying a value into
+  # it, and the half that says which of the two shapes is the sound one. An identity read
+  # before the rename says what ~/.ssh was then; what the write has to be about is what
+  # ~/.ssh is at the moment of the write. An operator that moves a 0700 directory of its own
+  # onto ~/.ssh has an ~/.ssh that is that directory: nothing is being redirected, that is
+  # the operator's own .ssh now, and a key there is a key where sshd looks for one, which is
+  # what was asked for. A rename held against an identity read earlier refuses this run
+  # instead and leaves the account with no key at all, which is the same account with no way
+  # in seen from the other side, so it is the earlier reading that has to go rather than be
+  # taken more carefully.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  other="${BATS_TEST_TMPDIR}/other"
+  mkdir -p "${other}"
+  chmod 0700 "${other}"
+  paused_authorize ssh-key-prepared
+  mv "${SSH_DIR}" "${BATS_TEST_TMPDIR}/hidden"
+  mv "${other}" "${SSH_DIR}"
+  resume_paused ssh-key-prepared
+  run cat "${BATS_TEST_TMPDIR}/child.out"
+  assert_equal "${PAUSED_STATUS}" 0
+  # The key is at the path sshd reads, is the key that was staged, and carries the mode and
+  # the owner Harbor stages before anything of the operator's is touched.
+  assert_equal "$(cat "${TARGET}")" "${ALICE_KEY}"
+  assert_equal "$(harbor_stat_mode "${TARGET}")" 0600
+  assert_equal "$(harbor_stat_owner "${TARGET}")" "${OPERATOR}"
+  # And nothing was written into the directory that stopped being ~/.ssh, which is the
+  # directory the checks before the pin had passed on.
+  assert_equal "$(ls -A "${BATS_TEST_TMPDIR}/hidden")" ""
+  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
 }
 
 @test "a staged key rewritten while it carries the operator's ownership is refused rather than journaled as the key" {

@@ -208,10 +208,12 @@ harbor_ssh_prepared_entry_for() {
 # is decided by inspection first (design section 6.1): an authorized_keys already at
 # the target is journaled observed and left byte for byte alone, no source is consulted
 # for it, and Harbor never appends to, rewrites, re-modes, or removes a key it did not
-# place. Otherwise the source of harbor_ssh_source is staged, chmod 0600 and chowned to
-# OPERATOR before it is anywhere the operator can read, journaled prepared, renamed into
-# place in one step, and verified: owned by OPERATOR, mode 0600, inside a 0700 .ssh owned
-# by OPERATOR. Only a .ssh Harbor creates is created 0700; one that is already there and
+# place. It is accepted only once it is proved to be a file sshd would actually read,
+# which is a question about its owner and its mode as much as about its content: the
+# branch itself says why. Otherwise the source of harbor_ssh_source is staged, chmod 0600
+# and chowned to OPERATOR before it is anywhere the operator can read, journaled prepared,
+# renamed into place in one step, and verified: owned by OPERATOR, mode 0600, inside a
+# 0700 .ssh owned by OPERATOR. Only a .ssh Harbor creates is created 0700; one that is already there and
 # is not a 0700 directory owned by OPERATOR is a precondition rather than a mode Harbor
 # silently changes.
 #
@@ -242,9 +244,13 @@ harbor_ssh_prepared_entry_for() {
 # is another path resolution and resolves to the new thing too. The rename below therefore
 # runs from inside ~/.ssh onto a relative name, a working directory being a held handle to
 # a directory rather than a name that is resolved afresh, and the file that lands is proved
-# by device and inode rather than by its path. StrictModes, which
-# harbor_ssh_assert_operator requires, is the backstop underneath all of it: sshd ignores
-# an authorized_keys owned by neither root nor the account logging in.
+# by device and inode rather than by its path. Everything that has to be true of that
+# directory is proved from inside the pin, about the directory that was entered, and
+# nothing read by path outside the pin is carried into it: a reading taken outside is
+# taken through whatever ~/.ssh resolves to at that instant, which is the operator's to
+# choose. StrictModes, which harbor_ssh_assert_operator requires, is the backstop
+# underneath all of it: sshd ignores an authorized_keys owned by neither root nor the
+# account logging in.
 #
 # The directory is created the same way and for the same reason, staged and renamed rather
 # than mkdir'd and then chowned in place, because ~/.ssh is itself an entry in a directory
@@ -253,7 +259,7 @@ harbor_ssh_prepared_entry_for() {
 # /home the operator cannot rename or replace.
 harbor_ssh_authorize() {
   local root operator home group ssh_dir target pre source src_state post tmp stage entry
-  local staged_sha staged_id rename_rc dir_id
+  local staged_sha staged_id rename_rc verify_rc target_owner target_mode
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
     || harbor_die 3 usage "usage: harbor_ssh_authorize <state-root> <operator> <operator-home> [source]"
   root="${1}"
@@ -292,12 +298,26 @@ harbor_ssh_authorize() {
     fi
     harbor_log ssh "created ${ssh_dir} 0700 for ${operator}"
   fi
-  # Taken here, where ~/.ssh has just been proved a 0700 directory owned by the operator
-  # and not a symlink, rather than at the rename below: this is the directory those checks
-  # were about, and the rename holds what it is standing in against this value so that a
-  # name re-pointed at some other directory of the operator's in between cannot pass the
-  # checks a second time by being a different directory that also answers to them.
-  dir_id="$(harbor_ssh_path_id "${ssh_dir}")"
+  # The boundary at which ~/.ssh is settled: it is there, it is a directory and not a
+  # symlink, it is 0700, and it is the operator's.
+  #
+  # Settled, and not carried forward as a value. The device and inode of ${ssh_dir} were
+  # read here, by path, so that the rename below could hold the directory it was standing in
+  # against them. That reading is a fresh path resolution of its own, taken after the checks
+  # above and through a ~ the operator owns, so it is about whatever ~/.ssh is at this
+  # instant rather than about the directory those checks passed on: an operator with a
+  # process on this node can re-point the name in the window between the two, and a value
+  # read here would then be the one the rename trusted. What kept that from being an opening
+  # was one property nothing here stated: harbor_ssh_path_id reads with lstat, so a name
+  # re-pointed at a decoy read as the link itself and could never equal the identity of a
+  # directory that had been entered. A check made in one place about a name resolved in
+  # another, standing only on the default of stat(1), is not an argument this file should be
+  # resting the operator's way into the node on.
+  #
+  # So nothing about the directory is read by path here at all. Every fact the write depends
+  # on is proved inside the pin below, about the directory that has been entered, at the
+  # moment it is used, and holds however stat(1) treats a link.
+  harbor_step ssh-dir-checked
   pre="$(harbor_observe_file "${target}")"
   case "${pre}" in
     '"absent"') ;;
@@ -312,6 +332,37 @@ harbor_ssh_authorize() {
       # administrator rather than silently overwritten.
       harbor_ssh_has_usable_key "${target}" \
         || harbor_die 3 ssh.target_no_key "${target} is already there and holds no usable authorized-key line (it is empty, or every line in it is blank or a comment), so ${operator} has no key to log in with. Harbor will not disable password authentication for an account that would then have no way in, and it overwrites nothing it cannot prove it created: add ${operator}'s public key to ${target}, or remove ${target} and rerun to have Harbor copy one in; nothing was written"
+      # And a key is not a key sshd will read. StrictModes, which harbor_ssh_assert_operator
+      # requires of this node, makes sshd refuse an authorized_keys that is owned by neither
+      # root nor the account logging in, and refuse one that is group- or world-writable,
+      # whatever key it holds. A pre-existing file carrying a perfectly good key that sshd
+      # will not read strands the operator exactly as a file carrying no key does: the row
+      # below takes password and keyboard-interactive authentication away from an account
+      # sshd will not let in by key either, and content alone cannot tell the two apart. The
+      # check became owed the moment StrictModes stopped being a default sshd happens to have
+      # and became something Harbor asserts of this node and rests on.
+      #
+      # Both properties are refusals rather than repairs. Harbor changes nothing it did not
+      # create, and a chmod or a chown here would be Harbor deciding that a file it found is
+      # its own; the administrator is told which property failed and what sshd does about it.
+      target_owner="$(harbor_stat_owner "${target}")"
+      { [ "${target_owner}" = "${operator}" ] || [ "${target_owner}" = root ]; } \
+        || harbor_die 3 ssh.target_unusable "${target} is already there and is owned by ${target_owner}, which is neither ${operator} nor root, so sshd ignores it: StrictModes reads an authorized_keys only when it belongs to root or to the account logging in. ${operator} would have no key sshd will read, and the sshd row would take password and keyboard-interactive authentication away from it anyway. Harbor changes nothing it did not create: give ${target} to ${operator} by hand, or remove it and rerun to have Harbor copy a key in; nothing was written"
+      # The mode test is group- and world-writability, which is what StrictModes tests, and
+      # not equality with 0600. 0644 and 0640 are modes sshd reads happily and are an
+      # administrator's own choice; refusing them would be Harbor refusing a node it has
+      # nothing to complain about, which is a lockout of its own kind. harbor_stat_mode
+      # prints four octal digits, so the last is the world's and the one before it the
+      # group's, and a digit of 2, 3, 6, or 7 carries the write bit.
+      target_mode="$(harbor_stat_mode "${target}")"
+      case "${target_mode}" in
+        *[2367])
+          harbor_die 3 ssh.target_unusable "${target} is already there and is mode ${target_mode}, which is world-writable, so sshd ignores it: StrictModes refuses an authorized_keys any account on this node could add a key to. ${operator} would have no key sshd will read, and the sshd row would take password and keyboard-interactive authentication away from it anyway. Harbor changes nothing it did not create: narrow the mode of ${target} by hand, or remove it and rerun to have Harbor copy a key in; nothing was written"
+          ;;
+        *[2367][0-7])
+          harbor_die 3 ssh.target_unusable "${target} is already there and is mode ${target_mode}, which is group-writable, so sshd ignores it: StrictModes refuses an authorized_keys every member of its group could add a key to. ${operator} would have no key sshd will read, and the sshd row would take password and keyboard-interactive authentication away from it anyway. Harbor changes nothing it did not create: narrow the mode of ${target} by hand, or remove it and rerun to have Harbor copy a key in; nothing was written"
+          ;;
+      esac
       harbor_journal_create "${root}" authorized-key "${target}" observed applied "${pre}" "${pre}"
       harbor_log ssh "${target} is already there; leaving it exactly as it is"
       harbor_msg "${operator} already has ${target}; it was recorded and left untouched"
@@ -360,20 +411,31 @@ harbor_ssh_authorize() {
   # of the operator's choosing. A working directory is a held handle to a directory rather
   # than a name for one: once this subshell is inside ~/.ssh, the operator can re-point the
   # name ~/.ssh wherever it likes and '.' still refers to the directory that was entered.
-  # The owner and mode are proved again through '.' for that reason, so what is proved and
-  # what is written into are the same directory and not merely the same path twice.
+  #
+  # So the whole proof is made here, about '.', and nothing is brought in from a reading
+  # taken by path outside this subshell. Three facts, in this order:
+  #   the name ${ssh_dir} is not a symlink;
+  #   the name ${ssh_dir} reaches the very directory this subshell entered;
+  #   that directory is owned by ${operator} and is mode 0700.
+  # If a name that is not a symlink reaches the pinned directory, then the pinned directory
+  # is ~/.ssh at that moment, and the key goes into the held handle, so nothing done to the
+  # name afterwards can redirect it. An operator that pinned a decoy and then put the real
+  # directory back under the name fails the identity comparison, because the name and '.'
+  # then disagree. An operator that made its decoy genuinely be ~/.ssh, by moving it there
+  # rather than by pointing a link at it, has an ~/.ssh that is the decoy, and a key written
+  # into it is a key written into the operator's own ~/.ssh, which is what was asked for.
   #
   # Identity, not only owner and mode. The operator owns its home and may own other 0700
-  # directories under it, so a symlink pointing ~/.ssh at one of those satisfies both of
-  # those checks while the key lands somewhere the operator picked: the operator would
-  # then have no key where sshd looks for one, and the row below would take password
-  # authentication away from it anyway. The device and inode recorded when the directory
-  # was proved are what '.' is held against, and two names are the same directory exactly
-  # when those agree.
+  # directories under it, so a name pointed at one of those satisfies both of those checks
+  # while the key lands somewhere the operator picked: the operator would then have no key
+  # where sshd looks for one, and the row below would take password authentication away
+  # from it anyway. Two names are the same directory exactly when their device and inode
+  # agree, which is what harbor_ssh_path_id answers and what no unprivileged user can forge.
   rename_rc=0
   (
     cd "${ssh_dir}" 2>/dev/null || exit 1
-    [ "$(harbor_ssh_path_id .)" = "${dir_id}" ] || exit 4
+    [ ! -L "${ssh_dir}" ] || exit 4
+    [ "$(harbor_ssh_path_id "${ssh_dir}")" = "$(harbor_ssh_path_id .)" ] || exit 4
     [ "$(harbor_stat_owner .)" = "${operator}" ] || exit 2
     [ "$(harbor_stat_mode .)" = 0700 ] || exit 2
     mv -f "${tmp}" ./authorized_keys || exit 3
@@ -382,10 +444,13 @@ harbor_ssh_authorize() {
     rm -f "${tmp}"
     case "${rename_rc}" in
       2)
-        harbor_die 2 ssh.ssh_dir_swapped "${ssh_dir} is no longer the 0700 directory owned by ${operator} that was checked a moment ago, so the authorized key was not written: something replaced it while ${operator} was being set up. Nothing was written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
+        harbor_die 2 ssh.ssh_dir_swapped "the directory ${ssh_dir} reached when the authorized key was about to be written is not a 0700 directory owned by ${operator}, though the directory of that name was one a moment ago, so the key was not written: something replaced it while ${operator} was being set up. Nothing was written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
         ;;
       4)
-        harbor_die 2 ssh.ssh_dir_swapped "${ssh_dir} is a 0700 directory owned by ${operator} but is no longer the same directory that was checked a moment ago: it had device and inode ${dir_id}, and the name now reaches $(harbor_ssh_path_id "${ssh_dir}"). The authorized key was not written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
+        harbor_die 2 ssh.ssh_dir_swapped "${ssh_dir} is no longer the same directory that was checked a moment ago: the name is a symlink now, or it reaches $(harbor_ssh_path_id "${ssh_dir}") rather than the directory this rename had entered and was holding open. The authorized key was not written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
+        ;;
+      1)
+        harbor_die 2 ssh.rename "${ssh_dir} could not be entered, so the authorized key was not renamed into it; ${target} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
         ;;
       *)
         harbor_die 2 ssh.rename "renaming ${tmp} onto ${target} failed; ${target} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
@@ -394,20 +459,57 @@ harbor_ssh_authorize() {
   fi
   harbor_journal_sync_path "${ssh_dir}"
   harbor_step ssh-key-copied
-  # Identity before content: every check below names ${target} as a path, and a path is
-  # resolved afresh each time, so on its own it proves something about whatever file that
-  # path reaches now rather than about the file that was staged. Device and inode settle
-  # it. An empty staged_id fails here too, an unreadable staging file being no proof.
-  { [ -n "${staged_id}" ] && [ "$(harbor_ssh_path_id "${target}")" = "${staged_id}" ]; } \
-    || harbor_die 2 ssh.verify_identity "${target} is not the file that was staged for it: the staged key has device and inode ${staged_id:-unreadable} and ${target} has $(harbor_ssh_path_id "${target}"), so the rename did not put it where these checks are reading. $(basename "${entry}") stays prepared and this node should be inspected before rerunning"
-  [ "$(harbor_observe_file "${target}")" = "${post}" ] \
-    || harbor_die 2 ssh.verify "${target} is not what was staged for it after the copy; $(basename "${entry}") stays prepared"
-  [ "$(harbor_stat_mode "${target}")" = 0600 ] \
-    || harbor_die 2 ssh.verify_mode "${target} is mode $(harbor_stat_mode "${target}") after the copy, not 0600; $(basename "${entry}") stays prepared"
-  [ "$(harbor_stat_owner "${target}")" = "${operator}" ] \
-    || harbor_die 2 ssh.verify_owner "${target} is owned by $(harbor_stat_owner "${target}") after the copy, not by ${operator}; $(basename "${entry}") stays prepared"
-  [ "$(harbor_stat_mode "${ssh_dir}")" = 0700 ] && [ "$(harbor_stat_owner "${ssh_dir}")" = "${operator}" ] \
-    || harbor_die 2 ssh.verify_dir "${ssh_dir} is mode $(harbor_stat_mode "${ssh_dir}") owned by $(harbor_stat_owner "${ssh_dir}") after the copy, not 0700 owned by ${operator}; $(basename "${entry}") stays prepared"
+  # What has to be proved now is about the file sshd will read at ${target}, and ${target}
+  # is a path: resolved afresh at every check, through a ~/.ssh the operator can re-point
+  # again now that the rename has returned. So the reading is pinned exactly as the write
+  # was, and for the same reason, and the checks are made through '.' rather than through a
+  # name that is resolved once per check.
+  #
+  # Identity before content, and both of them read through the pin, because neither settles
+  # anything alone. A file with the right bytes, mode, and owner is a file the operator can
+  # write, and even the staged file's own device and inode are not out of the operator's
+  # reach: the chown above makes ${tmp} the operator's, and a hard link to it carries that
+  # identity to any name the operator can create. What the operator cannot do is have both
+  # at ./authorized_keys inside a directory that is provably ~/.ssh without that directory
+  # being the operator's own ~/.ssh, which is the case where a key there is the key it
+  # asked for. rename(2) keeps device and inode, so the file in the pinned directory is the
+  # staged file exactly when they agree. An empty staged_id fails here too, an unreadable
+  # staging file being no proof. The directory's own mode and owner are read again at the
+  # end because the operator owns it and may widen it after the key has landed in it.
+  verify_rc=0
+  (
+    cd "${ssh_dir}" 2>/dev/null || exit 1
+    [ ! -L "${ssh_dir}" ] || exit 1
+    [ "$(harbor_ssh_path_id "${ssh_dir}")" = "$(harbor_ssh_path_id .)" ] || exit 1
+    [ -n "${staged_id}" ] || exit 2
+    [ "$(harbor_ssh_path_id ./authorized_keys)" = "${staged_id}" ] || exit 2
+    [ "$(harbor_observe_file ./authorized_keys)" = "${post}" ] || exit 3
+    [ "$(harbor_stat_mode ./authorized_keys)" = 0600 ] || exit 4
+    [ "$(harbor_stat_owner ./authorized_keys)" = "${operator}" ] || exit 5
+    [ "$(harbor_stat_mode .)" = 0700 ] || exit 6
+    [ "$(harbor_stat_owner .)" = "${operator}" ] || exit 6
+  ) || verify_rc="$?"
+  case "${verify_rc}" in
+    0) ;;
+    1)
+      harbor_die 2 ssh.verify_swapped "the authorized key was renamed into the directory ${ssh_dir} named at that moment, but the name no longer reaches it: it is a symlink now, or it reaches $(harbor_ssh_path_id "${ssh_dir}") instead, so what sshd would read at ${target} cannot be proved to be the key that was written. $(basename "${entry}") stays prepared and this node should be inspected before rerunning"
+      ;;
+    2)
+      harbor_die 2 ssh.verify_identity "${target} is not the file that was staged for it: the staged key has device and inode ${staged_id:-unreadable} and the file that name reaches has $(harbor_ssh_path_id "${target}"), so the rename did not put it where these checks are reading. $(basename "${entry}") stays prepared and this node should be inspected before rerunning"
+      ;;
+    3)
+      harbor_die 2 ssh.verify "${target} is not what was staged for it after the copy; $(basename "${entry}") stays prepared"
+      ;;
+    4)
+      harbor_die 2 ssh.verify_mode "${target} is mode $(harbor_stat_mode "${target}") after the copy, not 0600; $(basename "${entry}") stays prepared"
+      ;;
+    5)
+      harbor_die 2 ssh.verify_owner "${target} is owned by $(harbor_stat_owner "${target}") after the copy, not by ${operator}; $(basename "${entry}") stays prepared"
+      ;;
+    *)
+      harbor_die 2 ssh.verify_dir "${ssh_dir} is mode $(harbor_stat_mode "${ssh_dir}") owned by $(harbor_stat_owner "${ssh_dir}") after the copy, not 0700 owned by ${operator}; $(basename "${entry}") stays prepared"
+      ;;
+  esac
   harbor_journal_set_phase "${entry}" applied
   harbor_step ssh-key-applied
   harbor_msg "copied the authorized key from ${source} to ${target}"
