@@ -6,6 +6,9 @@ import Foundation
 struct RuntimeState: Codable, Equatable, Sendable {
     var sleepDisabledByUs: Bool = false
     var lowPowerSetByUs: Bool = false
+    /// nil with a legacy ownership flag means restore off. New writes snapshot first.
+    var originalSleepDisabled: Bool? = nil
+    var originalBatteryLowPowerMode: Bool? = nil
     /// Compatibility/UI mirror. Entries without a matching identity are legacy, unresolved ownership.
     var frozenPids: [Int32] = []
     var frozenProcesses: [ProcessIdentity] = []
@@ -30,7 +33,8 @@ struct RuntimeState: Codable, Equatable, Sendable {
 
     /// True when at least one entry still needs undoing.
     var isDirty: Bool {
-        sleepDisabledByUs || lowPowerSetByUs || hasUnresolvedOwnedChanges
+        sleepDisabledByUs || lowPowerSetByUs || originalSleepDisabled != nil
+            || originalBatteryLowPowerMode != nil || hasUnresolvedOwnedChanges
     }
 
     // Tolerate missing keys so a state.json written by an older build, or by
@@ -41,6 +45,8 @@ struct RuntimeState: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sleepDisabledByUs = try c.decodeIfPresent(Bool.self, forKey: .sleepDisabledByUs) ?? false
         lowPowerSetByUs = try c.decodeIfPresent(Bool.self, forKey: .lowPowerSetByUs) ?? false
+        originalSleepDisabled = try c.decodeIfPresent(Bool.self, forKey: .originalSleepDisabled)
+        originalBatteryLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .originalBatteryLowPowerMode)
         frozenPids = try c.decodeIfPresent([Int32].self, forKey: .frozenPids) ?? []
         frozenProcesses = try c.decodeIfPresent([ProcessIdentity].self, forKey: .frozenProcesses) ?? []
         dockerFrozen = try c.decodeIfPresent(Bool.self, forKey: .dockerFrozen) ?? false

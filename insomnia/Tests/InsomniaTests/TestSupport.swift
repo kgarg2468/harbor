@@ -91,6 +91,11 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
         return sleepDisabled
     }
 
+    func batteryLowPowerMode() async throws -> Bool {
+        try record("pmset -g custom")
+        return lowPower
+    }
+
     func setLowPowerMode(_ on: Bool) async throws {
         try record("lowpowermode \(on ? 1 : 0)")
         if on, let gate = lowPowerGate { await gate.wait() }

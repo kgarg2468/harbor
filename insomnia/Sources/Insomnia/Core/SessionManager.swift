@@ -19,6 +19,9 @@ enum EndReason: String, Sendable {
 @Observable
 final class SessionManager {
     private(set) var session: Session?
+    /// Identity captured at launch permits quit before startup reconciliation,
+    /// while still refusing cleanup of a journal replaced by another process.
+    @ObservationIgnored private var initialSession: Session?
     private(set) var state: RuntimeState
     var config: Config
     /// Minute-granularity remaining time for the popover ("2h 14m").
@@ -31,6 +34,9 @@ final class SessionManager {
     var isActive: Bool { session != nil && pendingEnds == 0 }
     /// Confirmed by a successful sleep-guard command, independent of journal intent.
     private(set) var sleepHeld = false
+    /// Includes unreadable journals and failed durable cleanup, not just known owned fields.
+    private(set) var cleanupPending = false
+    private(set) var backstopArmed = false
     @ObservationIgnored private let operationGate = SessionOperationGate()
     @ObservationIgnored private var generation: UInt64 = 0
     private var pendingEnds = 0
@@ -48,16 +54,19 @@ final class SessionManager {
     private let clamshell: @Sendable () -> Bool?
     private let clock: @Sendable () -> Date
     private let installerGuardActive: @Sendable () -> Bool
+    private let sessionRemover: @Sendable () throws -> Void
 
     /// System integrations (lid, battery, network, ...). Set by `live()`;
     /// nil in tests. Started after a session starts, stopped when it ends.
     @ObservationIgnored var services: AppServices?
 
+    @ObservationIgnored private var cleanupTimer: Timer?
     @ObservationIgnored private var deadlineTimer: Timer?
     @ObservationIgnored private var countdownTimer: Timer?
     /// Whether the 1 Hz redraw is currently on the run loop. Tests assert on
     /// this to prove an idle session leaves no repeating wakeup behind.
     var countdownTimerArmed: Bool { countdownTimer != nil }
+    var cleanupRetryScheduled: Bool { cleanupTimer != nil }
     @ObservationIgnored private var countdownPaused = false
 
     init(
@@ -69,7 +78,8 @@ final class SessionManager {
         notifier: any Notifying = RecordingNotifier(),
         clamshell: @escaping @Sendable () -> Bool? = { LidObserver.readClamshellState() },
         clock: @escaping @Sendable () -> Date = { Date() },
-        installerGuardActive: @escaping @Sendable () -> Bool = { AppInstanceLease.isInstallationActive() }
+        installerGuardActive: @escaping @Sendable () -> Bool = { AppInstanceLease.isInstallationActive() },
+        sessionRemover: (@Sendable () throws -> Void)? = nil
     ) {
         self.paths = paths
         self.store = Store(paths: paths)
@@ -81,10 +91,16 @@ final class SessionManager {
         self.clamshell = clamshell
         self.clock = clock
         self.installerGuardActive = installerGuardActive
+        self.sessionRemover = sessionRemover ?? { try Store(paths: paths).deleteSession() }
 
         try? paths.createDirectories()
-        let loadedState = (try? store.loadState()) ?? nil
-        self.state = loadedState ?? .clean
+        self.state = .clean
+        do { self.state = try store.loadState() ?? .clean }
+        catch {
+            cleanupPending = true
+            lastError = "Recovery state is unreadable: \(error.localizedDescription)"
+        }
+        initialSession = (try? store.loadSession()) ?? nil
         if let c = (try? store.loadConfig()) ?? nil {
             self.config = c
         } else {
@@ -145,37 +161,45 @@ final class SessionManager {
             if session != nil { invalidateLocalSession() }
             state = try store.loadState() ?? .clean
         } catch {
-            fail("could not read journal before start: \(error.localizedDescription)")
+            cleanupFailed("could not read journal before start: \(error.localizedDescription)")
             return
         }
         // A previous failed cleanup still owns those changes. Restore before
         // writing a new session, and require the clean journal to reach disk.
         do {
             let recorded = try store.loadState()
-            if state.isDirty || recorded?.isDirty == true {
+            if cleanupPending || state.isDirty || recorded?.isDirty == true {
+                cleanupPending = false
                 await restoreAllUnlocked()
                 let remaining = try store.loadState() ?? state
-                guard !state.isDirty, !remaining.isDirty else {
+                guard !cleanupPending, !state.isDirty, !remaining.isDirty else {
                     fail("could not start: previous session cleanup is incomplete")
                     return
                 }
             }
         } catch {
-            fail("could not read recovery state before start: \(error.localizedDescription)")
+            cleanupFailed("could not read recovery state before start: \(error.localizedDescription)")
             return
         }
         guard pendingEnds == 0, !Task.isCancelled else { return }
         let now = clock()
         let new = SessionMath.newSession(now: now, duration: duration, maxDuration: config.maxDuration)
+        let original: Bool
+        do { original = try await sleepGuard.isSleepDisabled() }
+        catch { fail("could not read original sleep setting: \(error.localizedDescription)"); return }
+        guard pendingEnds == 0, !Task.isCancelled else { return }
 
         do {
             try store.saveSession(new)
+            initialSession = new
             var s = state
-            s.sleepDisabledByUs = true
+            s.sleepDisabledByUs = !original
+            s.originalSleepDisabled = original ? nil : original
             try persistState(s)
         } catch {
             fail("could not write session: \(error.localizedDescription)")
-            try? store.deleteSession()
+            do { try sessionRemover(); initialSession = nil }
+            catch { cleanupFailed("could not delete failed session: \(error.localizedDescription)") }
             return
         }
 
@@ -184,7 +208,7 @@ final class SessionManager {
         // RunAtLoad fires backstop.sh immediately; the session on disk is
         // valid, so that run is a no-op.
         do {
-            try await backstop.schedule(endsAt: new.endsAt)
+            try await scheduleBackstop(endsAt: new.endsAt)
         } catch {
             rollBackStart()
             fail("could not arm backstop: \(error.localizedDescription)")
@@ -192,7 +216,7 @@ final class SessionManager {
         }
 
         do {
-            try await sleepGuard.setSleepDisabled(true)
+            if !original { try await sleepGuard.setSleepDisabled(true) }
         } catch {
             // A failed command can have partially applied; keep ownership until
             // a compensating restore succeeds.
@@ -201,7 +225,10 @@ final class SessionManager {
             return
         }
 
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
         session = new
+        initialSession = nil
         sleepHeld = true
         countdownPaused = clamshell() == true
         lastError = nil
@@ -220,17 +247,17 @@ final class SessionManager {
         guard requestedGeneration == generation, !Task.isCancelled else { return }
         await withRecoveryLease {
             guard requestedGeneration == generation, !Task.isCancelled else { return }
-            await extendUnlocked(by: extra)
+            try await extendUnlocked(by: extra)
         }
     }
 
-    private func extendUnlocked(by extra: TimeInterval) async {
-        guard (try? validateOwnership(requireActive: true)) == true,
+    private func extendUnlocked(by extra: TimeInterval) async throws {
+        guard try validateOwnership(requireActive: true),
               let current = session else { return }
         let updated = SessionMath.extended(current, by: extra, now: clock(), maxDuration: config.maxDuration)
         // A failed replacement may also have lost its previous recovery job.
         do {
-            try await backstop.schedule(endsAt: updated.endsAt)
+            try await scheduleBackstop(endsAt: updated.endsAt)
         } catch {
             await endUnlocked(reason: .backstop)
             fail("could not move backstop: \(error.localizedDescription)")
@@ -273,33 +300,39 @@ final class SessionManager {
         // Recovery-triggered ends also invalidate work already queued at the gate.
         generation &+= 1
         let had = session != nil
+        cleanupPending = false
         Log.info("session end (\(reason.rawValue))")
         stopTimers()
+        initialSession = session ?? initialSession
         session = nil
         scheduledDeadline = nil
         remainingText = ""
         countdownText = ""
         countdownPaused = false
         do {
-            try store.deleteSession()
+            try sessionRemover()
+            initialSession = nil
         } catch {
-            Log.error("could not delete session.json: \(error.localizedDescription)")
+            cleanupFailed("could not delete session.json: \(error.localizedDescription)")
         }
         services?.stop()
         await restoreAllUnlocked()
         // Keep independent recovery armed when any restoration still needs retry.
-        if !state.isDirty {
+        if !cleanupPending, !state.isDirty {
             do {
+                backstopArmed = false
                 try await backstop.clear()
             } catch {
-                Log.error("backstop clear failed: \(error.localizedDescription)")
+                cleanupFailed("backstop clear failed: \(error.localizedDescription)")
             }
         }
-        // App Nap defaults are intentionally left set (spec: open decisions).
-        if state.isDirty {
+        if cleanupPending || state.isDirty {
+            cleanupPending = true
+            await armCleanupRecovery()
             if lastError == nil { fail("session cleanup is incomplete") }
             notifier.post(title: "Cleanup incomplete", body: "Some session changes could not be restored. Recovery information was kept; retry cleanup before starting another session.")
         } else {
+            lastError = nil
             notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason))
         }
     }
@@ -350,11 +383,16 @@ final class SessionManager {
 
     private func setLowPowerUnlocked(_ on: Bool) async -> Bool {
         if on {
-            guard !state.lowPowerSetByUs else { return false }
+            guard !state.lowPowerSetByUs, state.originalBatteryLowPowerMode == nil else { return false }
             do {
-                try journal { $0.lowPowerSetByUs = true }
+                let original = try await sleepGuard.batteryLowPowerMode()
+                guard !original, isActive, !Task.isCancelled else { return false }
+                try journal {
+                    $0.originalBatteryLowPowerMode = original
+                    $0.lowPowerSetByUs = true
+                }
             } catch {
-                Log.error("could not journal low power mode: \(error.localizedDescription)")
+                fail("could not snapshot/journal low power mode: \(error.localizedDescription)")
                 return false
             }
             do {
@@ -362,21 +400,22 @@ final class SessionManager {
                 Log.info("low power mode on")
                 return true
             } catch {
-                Log.error("could not enable low power mode: \(error.localizedDescription)")
-                // The command may have applied before failing. Only a successful
-                // compensating off may clear the ownership journal.
+                fail("could not enable low power mode: \(error.localizedDescription)")
                 _ = await setLowPowerUnlocked(false)
                 return false
             }
         } else {
-            guard state.lowPowerSetByUs else { return false }
+            guard state.lowPowerSetByUs || state.originalBatteryLowPowerMode != nil else { return false }
             do {
-                try await sleepGuard.setLowPowerMode(false)
-                try? journal { $0.lowPowerSetByUs = false }
-                Log.info("low power mode off")
+                try await sleepGuard.setLowPowerMode(state.originalBatteryLowPowerMode ?? false)
+                try journal {
+                    $0.lowPowerSetByUs = false
+                    $0.originalBatteryLowPowerMode = nil
+                }
+                Log.info("original battery low power mode restored")
                 return true
             } catch {
-                Log.error("could not disable low power mode: \(error.localizedDescription)")
+                cleanupFailed("could not restore low power mode: \(error.localizedDescription)")
                 return false
             }
         }
@@ -397,15 +436,13 @@ final class SessionManager {
     }
 
     private func undoLidActionsUnlocked() {
-        var s: RuntimeState
         do {
-            s = try store.loadState() ?? .clean
+            var s = try store.loadState() ?? state
+            state = s
+            undoLidActions(in: &s)
         } catch {
-            Log.error("state.json unreadable (\(error.localizedDescription)); assuming in-memory state")
-            s = state
+            cleanupFailed("state.json unreadable; recovery information retained: \(error.localizedDescription)")
         }
-        undoLidActions(in: &s)
-        state = s
     }
 
     // MARK: Restore
@@ -425,40 +462,32 @@ final class SessionManager {
 
     private func restoreAllUnlocked() async {
         var s: RuntimeState
-        do {
-            s = try store.loadState() ?? .clean
-        } catch {
-            Log.error("state.json unreadable (\(error.localizedDescription)); assuming in-memory state")
-            s = state
+        do { s = try store.loadState() ?? state }
+        catch {
+            cleanupFailed("state.json unreadable; recovery information retained: \(error.localizedDescription)")
+            return
         }
-
-        // Keep the latest durable ownership until each successful write clears it.
-        // Side effects succeeding alone do not make the recovery journal clean.
         state = s
-        if s.sleepDisabledByUs {
+        if s.sleepDisabledByUs || s.originalSleepDisabled != nil {
             do {
-                try await sleepGuard.setSleepDisabled(false)
-                sleepHeld = false
+                let original = s.originalSleepDisabled ?? false
+                try await sleepGuard.setSleepDisabled(original)
+                sleepHeld = original
                 s.sleepDisabledByUs = false
-                try? persistState(s)
-                Log.info("sleep restored")
-            } catch {
-                Log.error("could not restore sleep: \(error.localizedDescription)")
-                lastError = "could not restore sleep: \(error.localizedDescription)"
-            }
+                s.originalSleepDisabled = nil
+                try persistState(s)
+                Log.info("original sleep setting restored")
+            } catch { cleanupFailed("could not restore sleep: \(error.localizedDescription)") }
         }
-
-        if s.lowPowerSetByUs {
+        if s.lowPowerSetByUs || s.originalBatteryLowPowerMode != nil {
             do {
-                try await sleepGuard.setLowPowerMode(false)
+                try await sleepGuard.setLowPowerMode(s.originalBatteryLowPowerMode ?? false)
                 s.lowPowerSetByUs = false
-                try? persistState(s)
-                Log.info("low power mode cleared")
-            } catch {
-                Log.error("could not clear low power mode: \(error.localizedDescription)")
-            }
+                s.originalBatteryLowPowerMode = nil
+                try persistState(s)
+                Log.info("original battery low power mode restored")
+            } catch { cleanupFailed("could not restore low power mode: \(error.localizedDescription)") }
         }
-
         undoLidActions(in: &s)
     }
 
@@ -492,9 +521,21 @@ final class SessionManager {
 
     private func reconcileUnlocked() async {
         let now = clock()
+        // Check captured ownership before even an unreadable-state cleanup
+        // path can delete a journal belonging to a replacement session.
+        do {
+            if session != nil || initialSession != nil, try !validateOwnership() { return }
+        } catch {
+            cleanupFailed("could not read session identity: \(error.localizedDescription)")
+            return
+        }
         // Another process may have recovered since this manager was created.
-        state = (try? store.loadState()) ?? .clean
-        if session != nil, (try? validateOwnership()) != true { return }
+        do { state = try store.loadState() ?? state }
+        catch {
+            await endUnlocked(reason: .backstop)
+            cleanupFailed("could not read recovery state: \(error.localizedDescription)")
+            return
+        }
         var onDisk: Session?
         do {
             onDisk = try store.loadSession()
@@ -504,26 +545,31 @@ final class SessionManager {
         }
 
         if let s = onDisk, !s.isExpired(at: now) {
-            // As on start, recovery must be journaled and armed before pmset.
+            let original: Bool
             do {
-                var st = state
-                st.sleepDisabledByUs = true
-                try persistState(st)
+                original = try await sleepGuard.isSleepDisabled()
+                if !state.sleepDisabledByUs, state.originalSleepDisabled == nil, !original {
+                    var st = state
+                    st.sleepDisabledByUs = true
+                    st.originalSleepDisabled = original
+                    try persistState(st)
+                }
             } catch {
                 await endUnlocked(reason: .backstop)
-                await clearUnownedSleep()
-                fail("could not journal reconciled session: \(error.localizedDescription)")
+                fail("could not snapshot/journal reconciled session: \(error.localizedDescription)")
                 return
             }
             do {
-                try await backstop.schedule(endsAt: s.endsAt)
+                try await scheduleBackstop(endsAt: s.endsAt)
             } catch {
                 await endUnlocked(reason: .backstop)
                 fail("could not re-arm backstop: \(error.localizedDescription)")
                 return
             }
             do {
-                try await sleepGuard.setSleepDisabled(true)
+                if !original || state.sleepDisabledByUs || state.originalSleepDisabled != nil {
+                    try await sleepGuard.setSleepDisabled(true)
+                }
             } catch {
                 await endUnlocked(reason: .backstop)
                 fail("could not re-apply sleep guard: \(error.localizedDescription)")
@@ -531,6 +577,7 @@ final class SessionManager {
             }
             sleepHeld = true
             session = s
+            initialSession = nil
             lastError = nil
             Log.info("reconcile: session valid until \(iso(s.endsAt))")
             let lidClosed = clamshell()
@@ -549,27 +596,24 @@ final class SessionManager {
         if onDisk != nil {
             Log.info("reconcile: session expired, restoring")
             await endUnlocked(reason: .timer)
-        } else if state.isDirty {
+        } else if cleanupPending || state.isDirty {
             Log.info("reconcile: no session but dirty state, restoring")
             await endUnlocked(reason: .backstop)
         } else {
             Log.info("reconcile: no session, nothing to restore")
         }
 
-        await clearUnownedSleep()
+        // With no owned journal, an existing sleep preference belongs to the user.
     }
 
-    private func clearUnownedSleep() async {
-        // Step 3: SleepDisabled set with no session -> clear it.
-        do {
-            if try await sleepGuard.isSleepDisabled() {
-                Log.info("reconcile: pmset reports SleepDisabled with no session, clearing")
-                try await sleepGuard.setSleepDisabled(false)
-                sleepHeld = false
-            }
-        } catch {
-            Log.error("reconcile: sleep check failed: \(error.localizedDescription)")
+    /// A failed cleanup must not be bypassed by a second quit request.
+    func prepareToQuit() async -> Bool {
+        await end(reason: .quit)
+        guard !cleanupPending, !state.isDirty, session == nil, pendingEnds == 0 else {
+            cleanupFailed("Quit cancelled: session cleanup is incomplete. Fix the reported recovery error and retry Quit.")
+            return false
         }
+        return true
     }
 
     // MARK: Countdown (1 Hz redraw)
@@ -619,6 +663,7 @@ final class SessionManager {
         do {
             try await JournalLock.withLease(at: paths.recoveryLock, operation)
         } catch {
+            cleanupPending = true
             fail("could not coordinate recovery: \(error.localizedDescription)")
         }
     }
@@ -627,13 +672,14 @@ final class SessionManager {
     /// seconds. A stale manager must never delete or resurrect another journal.
     private func validateOwnership(requireActive: Bool = false) throws -> Bool {
         let recorded = try store.loadSession()
-        if let session {
+        if let expected = session ?? initialSession {
             guard let recorded,
-                  try Store.makeEncoder().encode(session) == Store.makeEncoder().encode(recorded) else {
+                  try Store.makeEncoder().encode(expected) == Store.makeEncoder().encode(recorded) else {
                 invalidateLocalSession()
                 state = try store.loadState() ?? .clean
                 return false
             }
+            if requireActive, session == nil { return false }
         } else if requireActive || (recorded.map { !$0.isExpired(at: clock()) } ?? false) {
             return false
         }
@@ -648,6 +694,7 @@ final class SessionManager {
         services?.stop()
         stopTimers()
         session = nil
+        initialSession = nil
         sleepHeld = false
         scheduledDeadline = nil
         remainingText = ""
@@ -659,8 +706,9 @@ final class SessionManager {
     private func rollBackStart() {
         var s = state
         s.sleepDisabledByUs = false
-        try? persistState(s)
-        try? store.deleteSession()
+        s.originalSleepDisabled = nil
+        do { try persistState(s); try sessionRemover(); initialSession = nil }
+        catch { cleanupFailed("could not roll back start: \(error.localizedDescription)") }
     }
 
     /// In-process timers only; the launchd backstop is scheduled by callers
@@ -704,6 +752,8 @@ final class SessionManager {
     }
 
     private func stopTimers() {
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
         deadlineTimer?.invalidate()
         deadlineTimer = nil
         countdownTimer?.invalidate()
@@ -711,8 +761,46 @@ final class SessionManager {
     }
 
     private func persistState(_ s: RuntimeState) throws {
-        try store.saveState(s)
-        state = s
+        do { try store.saveState(s); state = s }
+        catch { cleanupPending = true; throw error }
+    }
+
+    private func scheduleBackstop(endsAt: Date) async throws {
+        backstopArmed = false
+        try await backstop.schedule(endsAt: endsAt)
+        backstopArmed = true
+    }
+
+    private func cleanupFailed(_ message: String) {
+        cleanupPending = true
+        fail(message)
+    }
+
+    /// Retry arming even if a failed replacement already removed the old job.
+    /// Keep a local retry too, and refuse quit until cleanup itself succeeds.
+    private func armCleanupRecovery() async {
+        do { try await scheduleBackstop(endsAt: clock()) }
+        catch { cleanupFailed("could not arm cleanup recovery: \(error.localizedDescription)") }
+        cleanupTimer?.invalidate()
+        let retry = makeCleanupRetryAction()
+        let timer = Timer(timeInterval: 60, repeats: false) { _ in
+            Task { @MainActor in await retry() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cleanupTimer = timer
+    }
+
+    /// Capture the same guarded action for the timer and deterministic tests.
+    /// A callback already queued on the main actor cannot end a later session.
+    func makeCleanupRetryAction() -> @MainActor () async -> Void {
+        let expectedGeneration = generation
+        let expectedSession = initialSession
+        return { [weak self] in
+            guard let self, self.generation == expectedGeneration,
+                  self.cleanupPending, self.session == nil,
+                  self.initialSession == expectedSession else { return }
+            await self.end(reason: .backstop)
+        }
     }
 
     private func fail(_ message: String) {
