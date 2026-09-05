@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 from pathlib import Path
 import subprocess
 import tempfile
@@ -39,6 +40,9 @@ if name == 'install':
     import shutil
     shutil.copyfile(args[-2], args[-1])
 if name == 'plutil':
+    if len(args) > 1 and os.environ.get('POWER_EDIT_FAIL') == ':'.join(args[:2]):
+        calls = [json.loads(line) for line in (root/'calls').read_text().splitlines()]
+        if any(c[0] == 'pmset' for c in calls): sys.exit(71)
     if os.environ.get('WRITE_FAIL') and '-replace' in args: sys.exit(1)
     os.execv('/usr/bin/plutil', ['/usr/bin/plutil']+args)
 '''
@@ -85,7 +89,7 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.home = self.root/'home & tests'
         self.support = self.home/'support & journal'
-        self.support.mkdir(parents=True)
+        self.support.mkdir(parents=True, mode=0o700)
         self.shims = self.root/'shims'
         self.shims.mkdir()
         names = ['sudo', 'pmset', 'kill', 'ps', 'pgrep', 'pkill', 'osascript', 'sleep',
@@ -243,6 +247,179 @@ class RecoveryTests(Fixture):
             self.assertEqual((self.support/'state.json').read_bytes(), before)
         self.assertFalse(any(c[0] == 'pmset' for c in self.calls()))
 
+    def recover_with_log_timeout(self, native_complete=True):
+        process = subprocess.Popen(['/bin/bash', str(self.repo/'scripts/backstop.sh'), '--force'],
+                                   env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            # Only this test's freshly created process group, including its blocked
+            # logging child. Never leave a red FIFO case holding the fixture lease.
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
+            self.fail('Unsafe recovery path blocked recovery for 10 seconds')
+        self.assertEqual(process.returncode, 0 if native_complete else 1, stdout + stderr)
+        self.assertFalse(self.journal()['sleepDisabledByUs'])
+        self.assertEqual(self.journal()['frozenPids'], [] if native_complete else [42])
+        return stdout + stderr
+
+    def test_fifo_helper_paths_fall_back_to_power_without_blocking(self):
+        for name in ['InsomniaRecovery', 'InsomniaRecovery.protocol']:
+            with self.subTest(name=name):
+                self.install_helper()
+                self.state()
+                path = self.support/name
+                path.unlink()
+                os.mkfifo(path, 0o600)
+                before = path.lstat()
+                try:
+                    self.recover_with_log_timeout(native_complete=False)
+                    self.assertEqual(path.lstat().st_mode, before.st_mode)
+                    self.assertEqual(path.lstat().st_ino, before.st_ino)
+                    self.assertFalse(any(c[0] == 'native' for c in self.calls()))
+                finally:
+                    path.unlink()
+
+
+    def test_symlink_helper_paths_never_execute_even_with_matching_hash(self):
+        for name in ['InsomniaRecovery', 'InsomniaRecovery.protocol']:
+            with self.subTest(name=name):
+                self.install_helper()
+                self.state()
+                path = self.support/name
+                outside = self.root/('outside-' + name)
+                path.rename(outside)
+                before = outside.stat()
+                content = outside.read_bytes()
+                path.symlink_to(outside)
+                self.recover_with_log_timeout(native_complete=False)
+                self.assertTrue(path.is_symlink())
+                self.assertEqual(outside.read_bytes(), content)
+                self.assertEqual(outside.stat().st_mode, before.st_mode)
+                self.assertEqual(outside.stat().st_mtime_ns, before.st_mtime_ns)
+                self.assertFalse(any(c[0] == 'native' for c in self.calls()))
+                path.unlink()
+
+    def test_oversized_protocol_marker_is_not_read_or_executed(self):
+        self.state()
+        (self.support/'InsomniaRecovery.protocol').write_text('x' * 1024)
+        cat_shim = self.shims/'protocol-cat'
+        cat_shim.write_text(SHIM)
+        cat_shim.chmod(0o700)
+        script = self.repo/'scripts/backstop.sh'
+        script.write_text(script.read_text().replace('/bin/cat', str(cat_shim)))
+        self.recover_with_log_timeout(native_complete=False)
+        self.assertFalse(any(c[0] in ['protocol-cat', 'native'] for c in self.calls()))
+
+    def test_custom_root_owned_by_another_uid_is_rejected_before_lock(self):
+        self.state()
+        before = (self.support/'state.json').read_bytes()
+        result = self.run_script('backstop.sh', '--force', ROOT_USER='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.support/'state.json').read_bytes(), before)
+        self.assertFalse((self.support/'recovery.lock').exists())
+        self.assertFalse(any(c[0] in ['lockf', 'native', 'pmset'] for c in self.calls()))
+
+    def test_shared_custom_root_is_rejected_before_chmod_lock_or_journal_mutation(self):
+        self.state()
+        self.support.chmod(0o755)
+        before = self.support.stat()
+        state = (self.support/'state.json').read_bytes()
+        session = (self.support/'session.json').read_bytes()
+        result = self.run_script('backstop.sh', '--force')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.support.stat().st_mode, before.st_mode)
+        self.assertEqual(self.support.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertEqual((self.support/'state.json').read_bytes(), state)
+        self.assertEqual((self.support/'session.json').read_bytes(), session)
+        self.assertFalse((self.support/'recovery.lock').exists())
+        self.assertFalse(any(c[0] in ['lockf', 'native', 'pmset'] for c in self.calls()))
+
+    def test_symlink_custom_root_is_rejected_without_touching_target(self):
+        outside = self.root/'private-outside-root'
+        outside.mkdir(mode=0o700)
+        link = self.root/'custom-link'
+        link.symlink_to(outside, target_is_directory=True)
+        before = outside.stat()
+        result = self.run_script('backstop.sh', '--force', INSOMNIA_HOME=str(link))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(outside.stat().st_mode, before.st_mode)
+        self.assertEqual(outside.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertFalse(any(c[0] == 'lockf' for c in self.calls()))
+
+    def test_new_custom_root_is_created_private(self):
+        custom = self.root/'new-root'
+        result = self.run_script('backstop.sh', '--force', INSOMNIA_HOME=str(custom))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(custom.stat().st_mode & 0o777, 0o700)
+        self.assertTrue((custom/'recovery.lock').exists())
+
+    def test_fifo_log_is_skipped_without_blocking_or_chmod(self):
+        self.state()
+        log = self.support/'Logs/insomnia.log'
+        log.parent.mkdir()
+        os.mkfifo(log, 0o644)
+        before = log.lstat()
+        self.recover_with_log_timeout()
+        self.assertEqual(log.lstat().st_mode, before.st_mode)
+        self.assertEqual(log.lstat().st_ino, before.st_ino)
+
+    def test_nonregular_archive_is_preserved_when_rotation_would_replace_it(self):
+        self.state()
+        log = self.support/'Logs/insomnia.log'
+        log.parent.mkdir()
+        log.write_text('legacy line\n' * 30000)
+        archive = log.with_name('insomnia.log.1')
+        os.mkfifo(archive, 0o644)
+        before = archive.lstat()
+        self.recover_with_log_timeout()
+        self.assertEqual(archive.lstat().st_mode, before.st_mode)
+        self.assertEqual(archive.lstat().st_ino, before.st_ino)
+        self.assertEqual(log.read_text(), 'legacy line\n' * 30000)
+
+    def test_dangling_symlink_log_does_not_create_outside_target(self):
+        self.state()
+        outside = self.root/'must-not-be-created'
+        log = self.support/'Logs/insomnia.log'
+        log.parent.mkdir()
+        log.symlink_to(outside)
+        self.recover_with_log_timeout()
+        self.assertTrue(log.is_symlink())
+        self.assertFalse(outside.exists())
+
+    def test_symlink_log_and_archive_never_touch_outside_target(self):
+        outside = self.root/'outside-secret'
+        outside.write_text('private target must remain untouched\n')
+        outside.chmod(0o644)
+        before = outside.stat()
+        log_dir = self.support/'Logs'
+        log_dir.mkdir()
+        for name in ['insomnia.log', 'insomnia.log.1']:
+            with self.subTest(name=name):
+                self.state()
+                path = log_dir/name
+                path.symlink_to(outside)
+                output = self.recover_with_log_timeout()
+                self.assertTrue(path.is_symlink())
+                self.assertEqual(outside.read_text(), 'private target must remain untouched\n')
+                self.assertEqual(outside.stat().st_mode, before.st_mode)
+                self.assertEqual(outside.stat().st_mtime_ns, before.st_mtime_ns)
+                self.assertNotIn('private target', output)
+                path.unlink()
+
+    def test_symlink_log_directory_never_creates_or_chmods_outside_logs(self):
+        self.state()
+        outside = self.root/'outside-directory'
+        outside.mkdir(mode=0o755)
+        before = outside.stat()
+        (self.support/'Logs').symlink_to(outside, target_is_directory=True)
+        self.recover_with_log_timeout()
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(outside.stat().st_mode, before.st_mode)
+        self.assertEqual(outside.stat().st_mtime_ns, before.st_mtime_ns)
+
     def test_broken_log_does_not_block_restore(self):
         self.state()
         (self.support/'Logs/insomnia.log').mkdir(parents=True)
@@ -276,6 +453,19 @@ class RecoveryTests(Fixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.support/'state.json').read_bytes(), before)
         self.assertFalse((self.support/'session.json').exists())
+
+    def test_power_journal_edit_failures_after_successful_pmset_preserve_original(self):
+        for operation in ['-replace:sleepDisabledByUs', '-remove:originalSleepDisabled']:
+            with self.subTest(operation=operation):
+                self.state(originalSleepDisabled=True, originalBatteryLowPowerMode=False)
+                before = (self.support/'state.json').read_bytes()
+                calls_before = len(self.calls())
+                result = self.run_script('backstop.sh', '--force', POWER_EDIT_FAIL=operation)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(['pmset', '-a', 'disablesleep', '1'], self.calls()[calls_before:])
+                self.assertEqual((self.support/'state.json').read_bytes(), before)
+                self.assertFalse((self.support/'session.json').exists())
+                self.assertNotIn('recovery complete', (self.support/'Logs/insomnia.log').read_text())
 
     def test_shared_flock_guards_decision_and_preserves_new_session(self):
         self.state()

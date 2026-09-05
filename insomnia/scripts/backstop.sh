@@ -21,8 +21,23 @@ done
 SESSION="$APP_SUPPORT/session.json"
 STATE="$APP_SUPPORT/state.json"
 PLUTIL=/usr/bin/plutil
-/bin/mkdir -p "$APP_SUPPORT"
-/bin/chmod 700 "$APP_SUPPORT"
+if [[ -n "${INSOMNIA_HOME:-}" ]]; then
+  # A custom root is caller-selected: never repair a shared directory's modes.
+  [[ ! -L "$APP_SUPPORT" && ( ! -e "$APP_SUPPORT" || -d "$APP_SUPPORT" ) ]] || exit 1
+  # umask 077 creates the new root and any missing parents with mode 0700.
+  if [[ ! -d "$APP_SUPPORT" ]]; then /bin/mkdir -p "$APP_SUPPORT"; fi
+  [[ ! -L "$APP_SUPPORT" && -d "$APP_SUPPORT" ]] || exit 1
+  metadata="$(/usr/bin/stat -f '%u %Lp' "$APP_SUPPORT")" || exit 1
+  read -r owner permissions <<< "$metadata"
+  if [[ "$owner" != "$(/usr/bin/id -u)" || ! "$permissions" =~ ^[0-7]{3,4}$ ]] ||
+     (( (8#$permissions & 077) != 0 )); then
+    echo "INSOMNIA_HOME must be a private directory owned by the current account." >&2
+    exit 1
+  fi
+else
+  /bin/mkdir -p "$APP_SUPPORT"
+  /bin/chmod 700 "$APP_SUPPORT"
+fi
 if (( locked == 0 )); then
   # -k retains the inode for existing waiters. The child inherits INSOMNIA_HOME.
   exec /usr/bin/lockf -k -t 30 "$APP_SUPPORT/recovery.lock" /bin/bash "$0" --locked ${original_args[@]+"${original_args[@]}"}
@@ -30,9 +45,14 @@ fi
 log() {
   # Logging is bounded and private, and every failure is independent of recovery.
   (
+    # Never open a FIFO/device or follow a link while holding the recovery lease.
+    [[ ! -L "$LOG_DIR" && ( ! -e "$LOG_DIR" || -d "$LOG_DIR" ) ]] || exit 0
     /bin/mkdir -p "$LOG_DIR" || exit 0
     /bin/chmod 700 "$LOG_DIR" || exit 0
     file="$LOG_DIR/insomnia.log"
+    for candidate in "$file" "$file.1"; do
+      [[ ! -L "$candidate" && ( ! -e "$candidate" || -f "$candidate" ) ]] || exit 0
+    done
     [[ ! -e "$file" ]] || /bin/chmod 600 "$file" || exit 0
     record="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ) backstop: $*"
     size=0
@@ -93,8 +113,19 @@ for spec in frozenPids:array frozenProcesses:array dockerFrozen:bool savedOutput
   fi
 done
 # A hash-bound marker prevents accidentally launching an old GUI binary.
-digest="$(/usr/bin/shasum -a 256 "$HELPER" 2>/dev/null || true)"
-marker="$(/bin/cat "$HELPER.protocol" 2>/dev/null || true)"
+digest=''
+marker=''
+if [[ ! -L "$HELPER" && -f "$HELPER" && -x "$HELPER" &&
+      ! -L "$HELPER.protocol" && -f "$HELPER.protocol" ]]; then
+  helper_size="$(/usr/bin/stat -f %z "$HELPER" 2>/dev/null || true)"
+  marker_size="$(/usr/bin/stat -f %z "$HELPER.protocol" 2>/dev/null || true)"
+  # v1 + space + SHA-256 + newline is exactly 89 bytes; match the app verifier.
+  if [[ "$helper_size" =~ ^[0-9]+$ && "$marker_size" == 89 ]] &&
+     (( helper_size > 0 && helper_size <= 67108864 )); then
+    digest="$(/usr/bin/shasum -a 256 "$HELPER" 2>/dev/null || true)"
+    marker="$(/bin/cat "$HELPER.protocol" 2>/dev/null || true)"
+  fi
+fi
 if [[ -x "$HELPER" && -n "$digest" && "$marker" == "insomnia-maintenance-v1 ${digest%% *}" ]]; then
   "$HELPER" --validate-recovery-state "$tmp" || exit 1
   # The helper never takes another lease. Import successful partial work even
@@ -123,8 +154,9 @@ restore_power() {
     value=0
     [[ "$prior" != true ]] || value=1
     if /usr/bin/sudo -n /usr/bin/pmset "$scope" "$setting" "$value"; then
-      "$PLUTIL" -replace "$flag" -bool false "$tmp" >/dev/null
-      if [[ -n "$prior" ]]; then "$PLUTIL" -remove "$original" "$tmp" >/dev/null; fi
+      # Keep the original journal if either staged metadata update fails.
+      "$PLUTIL" -replace "$flag" -bool false "$tmp" >/dev/null || exit 1
+      if [[ -n "$prior" ]]; then "$PLUTIL" -remove "$original" "$tmp" >/dev/null || exit 1; fi
     else failed=1; fi
   fi
 }
