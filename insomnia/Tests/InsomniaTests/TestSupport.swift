@@ -55,9 +55,11 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
     private var _calls: [String] = []
     private var _sleepDisabled = false
     private var _lowPower = false
+    var onSleepChange: (@Sendable (Bool) -> Void)?
     var sleepGate: AsyncGate?
     private var _lowPowerGate: AsyncGate?
     var throwOn: Set<String> = []
+    var throwAfterApplying: Set<String> = []
 
     var calls: [String] { lock.withLock { _calls } }
     var sleepDisabled: Bool {
@@ -81,6 +83,7 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
         try record("disablesleep \(disabled ? 1 : 0)")
         if disabled, let gate = sleepGate { await gate.wait() }
         sleepDisabled = disabled
+        onSleepChange?(disabled)
     }
 
     func isSleepDisabled() async throws -> Bool {
@@ -92,6 +95,9 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
         try record("lowpowermode \(on ? 1 : 0)")
         if on, let gate = lowPowerGate { await gate.wait() }
         lock.withLock { _lowPower = on }
+        if throwAfterApplying.contains("lowpowermode \(on ? 1 : 0)") {
+            throw SleepGuardError(command: "lowpowermode", status: 1, stderr: "failure after applying")
+        }
     }
 }
 

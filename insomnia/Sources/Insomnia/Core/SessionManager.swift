@@ -115,7 +115,7 @@ final class SessionManager {
     /// Ignored if a session is already active; use `extend`.
     ///
     /// Ordering: session.json, then state.json, then `pmset disablesleep 1`.
-    /// If pmset fails the journal is rolled back so nothing is left on disk.
+    /// If pmset fails, compensate before clearing its recovery ownership.
     func start(duration: TimeInterval) async {
         let requestedGeneration = generation
         guard pendingEnds == 0 else { return }
@@ -130,6 +130,23 @@ final class SessionManager {
             Log.info("start ignored: session already active")
             return
         }
+        // A previous failed cleanup still owns those changes. Restore before
+        // writing a new session, and require the clean journal to reach disk.
+        do {
+            let recorded = try store.loadState()
+            if state.isDirty || recorded?.isDirty == true {
+                await restoreAllUnlocked()
+                let remaining = try store.loadState() ?? state
+                guard !state.isDirty, !remaining.isDirty else {
+                    fail("could not start: previous session cleanup is incomplete")
+                    return
+                }
+            }
+        } catch {
+            fail("could not read recovery state before start: \(error.localizedDescription)")
+            return
+        }
+        guard pendingEnds == 0, !Task.isCancelled else { return }
         let now = clock()
         let new = SessionMath.newSession(now: now, duration: duration, maxDuration: config.maxDuration)
 
@@ -254,7 +271,12 @@ final class SessionManager {
             }
         }
         // App Nap defaults are intentionally left set (spec: open decisions).
-        notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason))
+        if state.isDirty {
+            if lastError == nil { fail("session cleanup is incomplete") }
+            notifier.post(title: "Cleanup incomplete", body: "Some session changes could not be restored. Recovery information was kept; retry cleanup before starting another session.")
+        } else {
+            notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason))
+        }
     }
 
     // MARK: Journal hooks for LidActions / FloorRules
@@ -298,7 +320,9 @@ final class SessionManager {
                 return true
             } catch {
                 Log.error("could not enable low power mode: \(error.localizedDescription)")
-                try? journal { $0.lowPowerSetByUs = false }
+                // The command may have applied before failing. Only a successful
+                // compensating off may clear the ownership journal.
+                _ = await setLowPowerUnlocked(false)
                 return false
             }
         } else {
@@ -353,12 +377,15 @@ final class SessionManager {
     private func restoreAllUnlocked() async {
         var s: RuntimeState
         do {
-            s = try store.loadState() ?? .clean
+            s = try store.loadState() ?? state
         } catch {
             Log.error("state.json unreadable (\(error.localizedDescription)); assuming in-memory state")
             s = state
         }
 
+        // Keep the latest durable ownership until each successful write clears it.
+        // Side effects succeeding alone do not make the recovery journal clean.
+        state = s
         if s.sleepDisabledByUs {
             do {
                 try await sleepGuard.setSleepDisabled(false)
@@ -384,7 +411,6 @@ final class SessionManager {
         }
 
         undoLidActions(in: &s)
-        state = s
     }
 
     /// Shared body of `undoLidActions()` and `restoreAll()`; each entry is

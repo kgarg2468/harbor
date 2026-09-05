@@ -182,4 +182,100 @@ final class SessionLifecycleTests: XCTestCase {
         XCTAssertNotNil(m.lastError)
     }
 
+
+    func testStartRefusesToOverwriteUnrestoredOwnership() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        h.guardFake.throwOn = ["disablesleep 0"]
+        await m.end(reason: .user)
+        let scheduleCount = h.backstop.scheduled.count
+        await m.start(duration: 7200)
+        XCTAssertFalse(m.isActive)
+        XCTAssertNil(try h.store.loadSession())
+        XCTAssertEqual(h.backstop.scheduled.count, scheduleCount)
+        XCTAssertTrue(m.state.sleepDisabledByUs)
+        XCTAssertTrue(h.guardFake.sleepDisabled)
+        XCTAssertNotNil(m.lastError)
+        h.guardFake.throwOn = []
+        await m.end(reason: .user)
+    }
+
+    func testStartRestoresOldOwnershipBeforeArmingNewSession() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager()
+        var oldState = RuntimeState.clean; oldState.lowPowerSetByUs = true
+        try h.store.saveState(oldState)
+        try await h.guardFake.setLowPowerMode(true)
+        await m.start(duration: 3600)
+        XCTAssertTrue(m.isActive)
+        XCTAssertFalse(h.guardFake.lowPower)
+        XCTAssertFalse(m.state.lowPowerSetByUs)
+        XCTAssertEqual(h.guardFake.calls, ["lowpowermode 1", "lowpowermode 0", "disablesleep 1"])
+        await m.end(reason: .user)
+    }
+
+    func testIncompleteCleanupReportsRecoveryFailure() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        h.guardFake.throwOn = ["disablesleep 0"]
+        await m.end(reason: .user)
+        XCTAssertEqual(h.notifier.posts.last?.title, "Cleanup incomplete")
+        XCTAssertFalse(h.notifier.posts.last?.body.contains("back to normal") ?? true)
+        XCTAssertEqual(h.backstop.clears, 0)
+    }
+
+    func testPartiallyAppliedLowPowerFailureIsCompensated() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        h.guardFake.throwAfterApplying = ["lowpowermode 1"]
+        let changed = await m.setLowPower(true)
+        XCTAssertFalse(changed)
+        XCTAssertFalse(h.guardFake.lowPower)
+        XCTAssertFalse(m.state.lowPowerSetByUs)
+        XCTAssertEqual(try h.store.loadState()?.lowPowerSetByUs, false)
+        XCTAssertEqual(h.guardFake.calls.suffix(2), ["lowpowermode 1", "lowpowermode 0"])
+        await m.end(reason: .user)
+    }
+
+    func testLowPowerCompensationFailureRetainsOwnershipForRetry() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        h.guardFake.throwAfterApplying = ["lowpowermode 1"]
+        h.guardFake.throwOn = ["lowpowermode 0"]
+        let changed = await m.setLowPower(true)
+        XCTAssertFalse(changed)
+        XCTAssertTrue(h.guardFake.lowPower)
+        XCTAssertTrue(m.state.lowPowerSetByUs)
+        XCTAssertEqual(try h.store.loadState()?.lowPowerSetByUs, true)
+        await m.end(reason: .user)
+        XCTAssertEqual(h.notifier.posts.last?.title, "Cleanup incomplete")
+        XCTAssertEqual(h.backstop.clears, 0)
+        h.guardFake.throwOn = []
+        await m.end(reason: .user)
+        try assertEnded(m, h)
+    }
+
+
+    func testCleanupJournalFailureKeepsOwnershipAndReportsIncomplete() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        let stateFile = h.home.paths.stateFile
+        h.guardFake.onSleepChange = { disabled in
+            guard !disabled else { return }
+            try? FileManager.default.removeItem(at: stateFile)
+            try? FileManager.default.createDirectory(at: stateFile, withIntermediateDirectories: false)
+        }
+        await m.end(reason: .user)
+        XCTAssertFalse(h.guardFake.sleepDisabled)
+        XCTAssertTrue(m.state.sleepDisabledByUs, "uncommitted cleanup must keep recovery intent")
+        XCTAssertEqual(h.notifier.posts.last?.title, "Cleanup incomplete")
+        XCTAssertEqual(h.backstop.clears, 0)
+        await m.start(duration: 3600)
+        XCTAssertFalse(m.isActive)
+        h.guardFake.onSleepChange = nil
+        try FileManager.default.removeItem(at: stateFile)
+        await m.end(reason: .user)
+        try assertEnded(m, h)
+    }
+
 }
