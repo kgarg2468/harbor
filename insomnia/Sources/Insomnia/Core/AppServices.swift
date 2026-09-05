@@ -90,9 +90,9 @@ final class AppServices {
         }
 
         (notifier as? Notifier)?.requestAuthorizationIfNeeded()
-        AppNap.disable(for: config.agentList)
+        // Persistent App Nap edits are withheld until original preferences can be restored.
 
-        lidActions = LidActions(manager: manager, freezer: freezer, docker: docker, audio: audio)
+        let actions = LidActions(manager: manager, freezer: freezer, docker: docker, audio: audio)
         floors = FloorRuleDriver(manager: manager, notifier: notifier)
 
         lid.onChange = { [weak self] closed in self?.lidChanged(closed) }
@@ -120,6 +120,23 @@ final class AppServices {
 
         browserTasks.append(Task { await self.refreshBrowsers() })
         syncState()
+        startLidActions(actions, closed: status.lidClosed)
+    }
+
+    /// Starting with the lid already closed must use the same journaled actions
+    /// as a later close event, without waiting for an IOKit change notification.
+    @discardableResult
+    func startLidActions(_ actions: LidActions, closed: Bool) -> Task<Void, Never>? {
+        lidActions = actions
+        status.lidClosed = closed
+        guard closed else { return nil }
+        let task = Task { @MainActor [weak self] in
+            await actions.onClose()
+            guard !Task.isCancelled else { return }
+            self?.syncState()
+        }
+        lidTasks.append(task)
+        return task
     }
 
     func stop() {

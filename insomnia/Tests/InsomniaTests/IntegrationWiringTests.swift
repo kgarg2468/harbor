@@ -4,6 +4,30 @@ import XCTest
 
 final class IntegrationWiringTests: XCTestCase {
     @MainActor
+    func testInitiallyClosedLidAppliesJournaledActionsWithoutHardwareEvents() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let manager = h.makeManager()
+        manager.config.muteOnLidClose = true
+        manager.config.dockerRule = false
+        let freezer = FakeFreezer(apps: [], processes: [], control: h.procs)
+        let actions = LidActions(manager: manager, freezer: freezer,
+                                 docker: DockerRule(freezer: freezer, probe: { false }), audio: h.audio)
+        let services = AppServices(paths: h.home.paths, notifier: h.notifier, audio: h.audio,
+                                   processControl: h.procs,
+                                   locationPermission: LocationPermission(authorizationStatus: .authorizedAlways))
+        await manager.start(duration: 3600)
+        XCTAssertNil(services.startLidActions(actions, closed: false))
+        XCTAssertEqual(h.audio.mutes, 0)
+        let close = services.startLidActions(actions, closed: true)
+        await close?.value
+        XCTAssertEqual(h.audio.mutes, 1)
+        XCTAssertEqual(try h.store.loadState()?.savedMuted, false)
+        XCTAssertFalse(manager.countdownTimerArmed)
+        await manager.end(reason: .user)
+        XCTAssertFalse(h.audio.muted)
+    }
+
+    @MainActor
     func testLiveStatusSourceReadsEveryValueFromSystemStatus() {
         let home = TempHome()
         defer { home.destroy() }

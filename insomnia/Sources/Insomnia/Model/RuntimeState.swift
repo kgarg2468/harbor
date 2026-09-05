@@ -6,6 +6,9 @@ import Foundation
 struct RuntimeState: Codable, Equatable, Sendable {
     var sleepDisabledByUs: Bool = false
     var lowPowerSetByUs: Bool = false
+    /// nil with a legacy ownership flag means restore off. New writes snapshot first.
+    var originalSleepDisabled: Bool? = nil
+    var originalBatteryLowPowerMode: Bool? = nil
     var frozenPids: [Int32] = []
     var dockerFrozen: Bool = false
     /// nil when mute is off or the lid is open.
@@ -17,7 +20,8 @@ struct RuntimeState: Codable, Equatable, Sendable {
 
     /// True when at least one entry still needs undoing.
     var isDirty: Bool {
-        sleepDisabledByUs || lowPowerSetByUs || !frozenPids.isEmpty || dockerFrozen
+        sleepDisabledByUs || lowPowerSetByUs || originalSleepDisabled != nil
+            || originalBatteryLowPowerMode != nil || !frozenPids.isEmpty || dockerFrozen
             || savedOutputVolume != nil || savedMuted != nil
     }
 
@@ -29,6 +33,8 @@ struct RuntimeState: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sleepDisabledByUs = try c.decodeIfPresent(Bool.self, forKey: .sleepDisabledByUs) ?? false
         lowPowerSetByUs = try c.decodeIfPresent(Bool.self, forKey: .lowPowerSetByUs) ?? false
+        originalSleepDisabled = try c.decodeIfPresent(Bool.self, forKey: .originalSleepDisabled)
+        originalBatteryLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .originalBatteryLowPowerMode)
         frozenPids = try c.decodeIfPresent([Int32].self, forKey: .frozenPids) ?? []
         dockerFrozen = try c.decodeIfPresent(Bool.self, forKey: .dockerFrozen) ?? false
         savedOutputVolume = try c.decodeIfPresent(Float.self, forKey: .savedOutputVolume)

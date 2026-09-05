@@ -77,11 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting always ends the session (spec 1). Terminate is deferred until
     /// sleep has been restored.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminating else { return .terminateNow }
+        guard !terminating else { return .terminateCancel }
         terminating = true
         Task {
-            await manager.end(reason: .quit)
-            sender.reply(toApplicationShouldTerminate: true)
+            let restored = await manager.prepareToQuit()
+            if !restored { terminating = false }
+            sender.reply(toApplicationShouldTerminate: restored)
         }
         return .terminateLater
     }
