@@ -1,5 +1,7 @@
 # Insomnia launch-readiness audit — 2026-09-05
 
+**Historical baseline audit.** Findings and reproduction commands below describe the audited revision, not the current implementation. See [release checks](release-checks.md) for current work and remaining hardware acceptance.
+
 **Verdict: the source is already public and MIT-licensed, but this revision is not ready for a stable public release.** Buildability is in good shape. Recovery correctness, installation failure handling, feature verification, and release documentation need work before recommending it to other users.
 
 Scope: public **download-source, build, and use** distribution. A signed binary release is a separate, optional delivery target. This audit is led and independently reviewed by GPT-6 Astra in the Codex harness. It continues the original “Lid-Closed Agent Runtime” thread in the platform-created worktree on `t3code/open-source-launch-readiness`. Audited repository revision: `561e41dad3a44385835c4c3d3a086d1163891a5e`; latest Insomnia source commit: `205a4c1`. Insomnia source matches the local main checkout.
@@ -154,7 +156,7 @@ These are outstanding checks, not claims that they passed. Hotspot credentials, 
 
 Probe source: [`audit-probes/AuditRegressionTests.swift`](audit-probes/AuditRegressionTests.swift). It deliberately asserts the desired safe behavior and currently fails; it lives outside the normal test target. It uses the existing Harness/fakes plus gated backstop/power fakes. It does not operate real pmset, launchd, networking, or other apps.
 
-From `insomnia/`, copy source and tests into a temporary package:
+Check out audited revision `561e41dad3a44385835c4c3d3a086d1163891a5e` in a separate worktree first, then copy this probe source from the audit commit into that checkout. From its `insomnia/` directory, copy source and tests into a temporary package:
 
 ```sh
 probe_dir="$(mktemp -d /tmp/insomnia-audit-probes.XXXXXX)"
