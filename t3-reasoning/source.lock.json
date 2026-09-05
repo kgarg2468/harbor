@@ -44,6 +44,11 @@
       "sha256": "63c2ef75141dc3785034c8c5d11374bed76c4bf3b23a6250846c2d4634ec70fc"
     },
     {
+      "id": "activity-wiring",
+      "path": "patches/0009-activity-wiring.patch",
+      "sha256": "e4d5163ca0fa8d243d937596b14fb0ca78d31b4f747a6419bbad2514768bc9ad"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -58,7 +63,8 @@
       "update-activity",
       "thread-fork-backend",
       "thread-fork-ui",
-      "shared-default"
+      "shared-default",
+      "activity-wiring"
     ],
     "reasoning": [
       "reasoning-full",
@@ -69,6 +75,7 @@
       "thread-fork-backend",
       "thread-fork-ui",
       "shared-default",
+      "activity-wiring",
       "reasoning-identity"
     ]
   }
