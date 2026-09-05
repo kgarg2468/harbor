@@ -20,7 +20,7 @@ final class BackstopReplacementTests: XCTestCase {
     func testFailedBootstrapRestoresPreviousPlistAndReloadsPreviousJob() async throws {
         let home = TempHome()
         defer { home.destroy() }
-        try Data("#!/bin/bash\nexit 0\n".utf8).write(to: home.paths.backstopScript)
+        try RecoveryHelperFixture.install(home.paths)
         let runner = ReplacementRunner()
         let backstop = LaunchdBackstop(paths: home.paths, runner: { try await runner.run($0, $1) })
         try backstop.writePlist(endsAt: Date(timeIntervalSince1970: 1_900_000_000))
@@ -32,6 +32,30 @@ final class BackstopReplacementTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: home.paths.backstopPlist), previous)
         let commands = await runner.recorded()
         XCTAssertEqual(commands.map { $0.first! }, ["bootout", "bootstrap", "bootout", "bootstrap"])
+    }
+
+    func testFailedUnloadPreservesLoadedJobUnlessAbsenceIsConfirmed() async throws {
+        for status: Int32 in [0, 5, 113] {
+            let home = TempHome()
+            defer { home.destroy() }
+            try RecoveryHelperFixture.install(home.paths)
+            let commands = Locked<[[String]]>([])
+            let backstop = LaunchdBackstop(paths: home.paths, runner: { _, args in
+                commands.value.append(args)
+                return ShellResult(status: args.first == "bootout" ? 5 : args.first == "print" ? status : 0,
+                                   stdout: "", stderr: "")
+            })
+            try backstop.writePlist(endsAt: Date(timeIntervalSince1970: 1_900_000_000))
+            let previous = try Data(contentsOf: home.paths.backstopPlist)
+            do {
+                try await backstop.schedule(endsAt: Date(timeIntervalSince1970: 1_900_003_600))
+                XCTAssertEqual(status, 113, "only confirmed absence permits replacement")
+            } catch { XCTAssertNotEqual(status, 113) }
+            let recorded = commands.value
+            XCTAssertEqual(recorded.map { $0.first! }, status == 113 ? ["bootout", "print", "bootstrap"] : ["bootout", "print"])
+            XCTAssertEqual(recorded[1].last, "gui/\(getuid())/\(Paths.backstopLabel)")
+            if status != 113 { XCTAssertEqual(try Data(contentsOf: home.paths.backstopPlist), previous) }
+        }
     }
 
     func testMissingScriptDoesNotOverwriteExistingSchedule() async throws {
