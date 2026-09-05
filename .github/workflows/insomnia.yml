@@ -38,6 +38,8 @@ jobs:
           swift --version
       - name: Swift tests
         run: swift test
+      - name: Isolated install and recovery failure tests
+        run: /usr/bin/python3 -m unittest discover -s Tests/scripts -p 'test_*.py' -v
       - name: Release build
         run: swift build -c release
       - name: Validate source-built app bundle
