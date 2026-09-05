@@ -29,6 +29,12 @@ lets your user run exactly four commands without a password:
 /usr/bin/pmset -b lowpowermode 0
 ```
 
+The installer asks the app to quit and checks again after building, then holds
+`recovery.lock` while restoring and replacing the installation. Keep Insomnia
+closed until install or uninstall finishes. The journal lock protects the file
+transaction; the app does not yet reject a launch that waits for that lock and
+starts after the installer releases it.
+
 Then `open ~/Applications/Insomnia.app` and pick a duration from the menu.
 
 **First run:** run `./scripts/install.sh`, start a 30m session, close the lid,
@@ -84,6 +90,11 @@ the tests and by `backstop.sh`).
 ./scripts/uninstall.sh          # restores sleep, removes agent, sudoers, app
 ./scripts/uninstall.sh --purge  # also removes config.json and logs
 ```
+
+Uninstall keeps the installed files when recovery fails or the LaunchAgent
+cannot be confirmed unloaded. Resolve the reported failure and retry. The
+persistent `recovery.lock` file remains even with `--purge` so concurrent users of
+the lock cannot accidentally acquire different inodes.
 
 ## Development
 
