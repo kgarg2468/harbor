@@ -38,7 +38,7 @@ final class ReconcileLidGatingTests: XCTestCase {
         XCTAssertTrue(after.dockerFrozen)
         XCTAssertEqual(after.savedOutputVolume, 0.4)
         XCTAssertEqual(m.state, after)
-        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1"])
+        XCTAssertEqual(h.guardFake.calls, ["pmset -g", "disablesleep 1"])
     }
 
     func testLidOpenResumesFrozenPidsAndRestoresAudio() async throws {

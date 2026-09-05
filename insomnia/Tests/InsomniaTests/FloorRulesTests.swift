@@ -98,7 +98,7 @@ final class FloorRuleDriverTests: XCTestCase {
         await m.start(duration: 3600)
         let driver = FloorRuleDriver(manager: m, notifier: h.notifier)
         await driver.run(percent: 35, isCharging: false, thermal: .nominal)
-        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1", "lowpowermode 1"])
+        XCTAssertEqual(h.guardFake.calls, ["pmset -g", "disablesleep 1", "pmset -g custom", "lowpowermode 1"])
         XCTAssertEqual(try h.store.loadState()?.lowPowerSetByUs, true)
         XCTAssertEqual(h.notifier.posts.last?.title, "Low Power Mode on")
         XCTAssertTrue(h.notifier.posts.last?.body.contains("35%") ?? false)

@@ -79,9 +79,7 @@ final class AppServices {
 
     /// Called by SessionManager once a session is active.
     func start(for manager: SessionManager) {
-        guard !running else { return }
-        running = true
-        self.manager = manager
+        guard beginSession(for: manager) else { return }
         let config = manager.config
         status.lastGap = nil
 
@@ -90,9 +88,9 @@ final class AppServices {
         }
 
         (notifier as? Notifier)?.requestAuthorizationIfNeeded()
-        AppNap.disable(for: config.agentList)
+        // Persistent App Nap edits are withheld until original preferences can be restored.
 
-        lidActions = LidActions(manager: manager, freezer: freezer, docker: docker, audio: audio)
+        let actions = LidActions(manager: manager, freezer: freezer, docker: docker, audio: audio)
         floors = FloorRuleDriver(manager: manager, notifier: notifier)
 
         lid.onChange = { [weak self] closed in self?.lidChanged(closed) }
@@ -120,6 +118,38 @@ final class AppServices {
 
         browserTasks.append(Task { await self.refreshBrowsers() })
         syncState()
+        startLidActions(actions, closed: status.lidClosed, after: floorTasks.last)
+    }
+
+    /// Establish session identity separately from starting hardware observers.
+    @discardableResult
+    func beginSession(for manager: SessionManager) -> Bool {
+        guard !running else { return false }
+        running = true
+        self.manager = manager
+        return true
+    }
+
+    /// Starting with the lid already closed must use the same journaled actions
+    /// as a later close event, without waiting for an IOKit change notification.
+    @discardableResult
+    func startLidActions(_ actions: LidActions, closed: Bool, after initialFloor: Task<Void, Never>? = nil) -> Task<Void, Never>? {
+        lidActions = actions
+        status.lidClosed = closed
+        guard closed else { return nil }
+        let requestedSession = manager?.session
+        let task = Task { @MainActor [weak self] in
+            // Initial Low Power Mode may hold the journal lease across an await.
+            // Run close actions only after that initial floor operation releases it.
+            await initialFloor?.value
+            guard let self, !Task.isCancelled, self.running, self.status.lidClosed,
+                  self.manager?.isActive == true, self.manager?.session == requestedSession else { return }
+            await actions.onClose()
+            guard !Task.isCancelled, self.running, self.manager?.session == requestedSession else { return }
+            self.syncState()
+        }
+        lidTasks.append(task)
+        return task
     }
 
     func stop() {

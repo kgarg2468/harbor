@@ -213,7 +213,7 @@ final class SessionLifecycleTests: XCTestCase {
         XCTAssertTrue(m.isActive)
         XCTAssertFalse(h.guardFake.lowPower)
         XCTAssertFalse(m.state.lowPowerSetByUs)
-        XCTAssertEqual(h.guardFake.calls, ["lowpowermode 1", "lowpowermode 0", "disablesleep 1"])
+        XCTAssertEqual(h.guardFake.calls, ["lowpowermode 1", "lowpowermode 0", "pmset -g", "disablesleep 1"])
         await m.end(reason: .user)
     }
 
@@ -370,7 +370,7 @@ final class SessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.guardFake.calls, [])
         peer.release(); await start.value
         XCTAssertTrue(m.isActive)
-        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1"])
+        XCTAssertEqual(h.guardFake.calls, ["pmset -g", "disablesleep 1"])
         XCTAssertFalse(m.state.lowPowerSetByUs)
         await m.end(reason: .user)
     }
