@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import ServiceManagement
 
 /// Shared by GUI cleanup and the headless helper. Callers own the journal lease.
 enum OwnedRecovery {
@@ -23,7 +24,7 @@ enum OwnedRecovery {
             do {
                 try audio.restore(snapshot)
             } catch {
-                Log.error("saved audio device could not be restored: \(error.localizedDescription)")
+                FileHandle.standardError.write(Data("Saved audio device could not be restored: \(error.localizedDescription)\n".utf8))
                 return false
             }
             next = state
@@ -40,6 +41,23 @@ enum OwnedRecovery {
 /// --recover-owned receives a staged journal from backstop.sh while its lease is
 /// held. It must not acquire JournalLock or initialize AppDelegate/SwiftUI.
 enum RecoveryCommand {
+    static let protocolVersion = "insomnia-maintenance-v1"
+
+    /// Pure schema validation lets shell recovery fail before any power side effect.
+    static func validate(stateFile: URL) -> Bool {
+        do {
+            let data = try Data(contentsOf: stateFile)
+            _ = try Store.makeDecoder().decode(RuntimeState.self, from: data)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            for key in ["sleepDisabledByUs", "lowPowerSetByUs", "originalSleepDisabled", "originalBatteryLowPowerMode"] {
+                if let value = object[key] {
+                    guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+                }
+            }
+            return true
+        } catch { return false }
+    }
+
     static func run(arguments: [String]) -> Int32 {
         guard arguments.count == 2, arguments[0] == "--recover-owned", arguments[1].hasPrefix("/") else {
             FileHandle.standardError.write(Data("usage: InsomniaRecovery --recover-owned /absolute/staged-state.json\n".utf8))
@@ -84,6 +102,36 @@ enum RecoveryCommand {
         try data.write(to: temporary)
         guard rename(temporary.path, destination.path) == 0 else {
             throw StoreError.rename(from: temporary.path, to: destination.path, errno: errno)
+        }
+    }
+}
+
+/// Maintenance runs only from the actual installed app bundle, never its loose
+/// recovery copy: SMAppService.mainApp derives identity from Bundle.main.
+@MainActor
+enum MaintenanceCommand {
+    static func run(arguments: [String]) -> Int32 {
+        let bundle = Bundle.main
+        let isApp = bundle.bundleURL.pathExtension == "app" && bundle.bundleIdentifier == Paths.bundleIdentifier
+        return run(arguments: arguments, isAppBundle: isApp, unregister: {
+            if SMAppService.mainApp.status != .notRegistered { try SMAppService.mainApp.unregister() }
+        }, purgeHotspots: { try KeychainStore().deleteService(service: KeychainStore.service) })
+    }
+
+    static func run(arguments: [String], isAppBundle: Bool, unregister: () throws -> Void,
+                    purgeHotspots: () throws -> Void) -> Int32 {
+        guard arguments == ["--maintenance-uninstall"] || arguments == ["--maintenance-uninstall", "--purge"] else { return 2 }
+        guard isAppBundle else {
+            FileHandle.standardError.write(Data("Login cleanup requires the installed Insomnia.app executable.\n".utf8))
+            return 1
+        }
+        do {
+            try unregister()
+            if arguments.last == "--purge" { try purgeHotspots() }
+            return 0
+        } catch {
+            FileHandle.standardError.write(Data("Maintenance incomplete: \(error.localizedDescription)\n".utf8))
+            return 1
         }
     }
 }

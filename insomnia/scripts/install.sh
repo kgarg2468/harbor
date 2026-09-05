@@ -28,8 +28,8 @@ stage=''
 cleanup() {
   status=$?
   if [[ -n "$stage" ]]; then
-    if (( status != 0 )) && [[ -e "$stage/previous.app" ]]; then
-      echo "Previous app retained for recovery at $stage/previous.app" >&2
+    if (( status != 0 )) && [[ -e "$stage/previous.app" || -e "$stage/rollback-failed" ]]; then
+      echo "Recovery rollback files retained at $stage; inspect before retrying." >&2
     else /bin/rm -rf "$stage"; fi
   fi
   /bin/rmdir "$INSTALL_LOCK" || true
@@ -97,6 +97,11 @@ cd "$ROOT"
 /usr/bin/swift build -c release
 BIN="$(/usr/bin/swift build -c release --show-bin-path)/Insomnia"
 [[ -x "$BIN" ]] || { echo "Missing executable: $BIN" >&2; exit 1; }
+# Verify a static marker before ever passing an unknown argument to a binary.
+if ! /usr/bin/strings -a "$BIN" | /usr/bin/grep -F 'insomnia-maintenance-v1' >/dev/null ||
+   [[ "$("$BIN" --maintenance-protocol)" != insomnia-maintenance-v1 ]]; then
+  echo "Built executable does not support safe maintenance." >&2; exit 1
+fi
 # Building can take minutes; the app may have been reopened since the first check.
 quit_app
 /bin/mkdir -p "$APP_DIR" "$APP_SUPPORT" "$LOG_DIR" "$HOME/Library/LaunchAgents"
@@ -109,9 +114,16 @@ bundle="$stage/Insomnia.app"
 /bin/mkdir -p "$bundle/Contents/MacOS"
 /bin/cp "$BIN" "$bundle/Contents/MacOS/Insomnia"
 /bin/cp "$ROOT/Resources/Info.plist" "$bundle/Contents/Info.plist"
+/usr/bin/plutil -replace InsomniaMaintenanceProtocol -string insomnia-maintenance-v1 "$bundle/Contents/Info.plist"
 /usr/bin/plutil -lint "$bundle/Contents/Info.plist" >/dev/null
 /usr/bin/codesign --force --sign - --deep "$bundle"
 /usr/bin/codesign --verify --deep --strict "$bundle"
+
+/bin/cp "$bundle/Contents/MacOS/Insomnia" "$stage/InsomniaRecovery"
+/bin/chmod 700 "$stage/InsomniaRecovery"
+digest="$(/usr/bin/shasum -a 256 "$stage/InsomniaRecovery")"
+printf 'insomnia-maintenance-v1 %s\n' "${digest%% *}" > "$stage/InsomniaRecovery.protocol"
+/bin/cp "$ROOT/scripts/backstop.sh" "$stage/backstop.sh"
 
 # plutil serializes paths, including &, < and non-ASCII home-directory names.
 new_plist="$stage/backstop.plist"
@@ -147,31 +159,60 @@ fi
 if ! /usr/bin/sudo -n -l /usr/bin/pmset -a disablesleep 0; then
   echo "Sudoers verification failed; existing installation retained." >&2; exit 1
 fi
-if ! /bin/bash "$ROOT/scripts/backstop.sh" --locked --force; then
+if ! /bin/bash "$ROOT/scripts/backstop.sh" --locked --force --helper "$stage/InsomniaRecovery"; then
   echo "Restoration incomplete; existing app and recovery files retained. Retry after recovery." >&2; exit 1
 fi
-# No teardown until recovery succeeds. Keep the previous agent plist for rollback.
-if [[ -f "$PLIST" ]]; then /bin/cp "$PLIST" "$stage/previous.plist"; fi
+# Pair replacement is serialized by recovery.lock. Each file is atomically
+# renamed; any failure rolls the entire generation and app bundle back.
+for name in backstop.sh InsomniaRecovery InsomniaRecovery.protocol; do
+  if [[ -e "$APP_SUPPORT/$name" ]]; then /bin/cp -p "$APP_SUPPORT/$name" "$stage/previous.$name"; fi
+done
+if [[ -f "$PLIST" ]]; then /bin/cp -p "$PLIST" "$stage/previous.plist"; fi
 unload_agent
-/bin/cp "$ROOT/scripts/backstop.sh" "$APP_SUPPORT/backstop.sh"
-/bin/chmod 700 "$APP_SUPPORT/backstop.sh"
+app_moved=0
+new_app=0
+rollback() {
+  status=$?
+  (( status != 0 )) || return 0
+  trap - EXIT
+  rollback_failed=0
+  if (( new_app == 1 )); then /bin/mv "$APP" "$bundle" || rollback_failed=1; fi
+  if (( app_moved == 1 )); then
+    if [[ ! -e "$APP" ]]; then /bin/mv "$stage/previous.app" "$APP" || rollback_failed=1
+    else rollback_failed=1; fi
+  fi
+  for name in backstop.sh InsomniaRecovery InsomniaRecovery.protocol; do
+    if [[ -e "$stage/previous.$name" ]]; then
+      /bin/cp -p "$stage/previous.$name" "$APP_SUPPORT/.$name.new" &&
+        /bin/mv -f "$APP_SUPPORT/.$name.new" "$APP_SUPPORT/$name" || rollback_failed=1
+    else /bin/rm -f "$APP_SUPPORT/$name" || rollback_failed=1; fi
+    /bin/rm -f "$APP_SUPPORT/.$name.new" || rollback_failed=1
+  done
+  if [[ -f "$stage/previous.plist" ]]; then
+    /bin/cp -p "$stage/previous.plist" "$PLIST" || rollback_failed=1
+    if ! /bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
+      echo "Reloading the previous recovery job also failed. No recovery agent is confirmed loaded; re-run install successfully before using Insomnia." >&2
+      rollback_failed=1
+    fi
+  else /bin/rm -f "$PLIST" || rollback_failed=1; fi
+  if (( rollback_failed != 0 )); then /usr/bin/touch "$stage/rollback-failed"; fi
+  echo "Installation failed; previous app and recovery generation retained." >&2
+  exit "$status"
+}
+trap rollback EXIT
+for name in InsomniaRecovery InsomniaRecovery.protocol backstop.sh; do
+  /bin/cp "$stage/$name" "$APP_SUPPORT/.$name.new"
+  if [[ "$name" == *.protocol ]]; then mode=600; else mode=700; fi
+  /bin/chmod "$mode" "$APP_SUPPORT/.$name.new"
+  /bin/mv -f "$APP_SUPPORT/.$name.new" "$APP_SUPPORT/$name"
+done
 /bin/cp "$new_plist" "$PLIST"
 /bin/chmod 600 "$PLIST"
-if ! /bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
-  if [[ -f "$stage/previous.plist" ]]; then
-    /bin/cp "$stage/previous.plist" "$PLIST"
-    if ! /bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
-      echo "Reloading the previous recovery job also failed. Sleep restoration completed, but no recovery agent is confirmed loaded. Re-run install successfully before using Insomnia." >&2
-      exit 1
-    fi
-  fi
-  echo "LaunchAgent installation failed; existing app retained." >&2; exit 1
-fi
-if [[ -e "$APP" ]]; then /bin/mv "$APP" "$stage/previous.app"; fi
-if ! /bin/mv "$bundle" "$APP"; then
-  if [[ -d "$stage/previous.app" ]]; then /bin/mv "$stage/previous.app" "$APP"; fi
-  exit 1
-fi
+if [[ -e "$APP" ]]; then /bin/mv "$APP" "$stage/previous.app"; app_moved=1; fi
+/bin/mv "$bundle" "$APP"
+new_app=1
+/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+trap - EXIT
 echo "Installed: $APP"
 echo "Config: $APP_SUPPORT/config.json; logs: $LOG_DIR"
 COMMIT

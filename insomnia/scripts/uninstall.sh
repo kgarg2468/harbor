@@ -114,19 +114,34 @@ if ! /bin/bash "$ROOT/scripts/backstop.sh" --locked --force; then
   echo "Restoration incomplete; journal, helper, grant and app retained. Retry after recovery." >&2
   exit 1
 fi
+# The signed bundle marker is checked before invoking any CLI argument. Legacy
+# apps may interpret unknown options as a request to open their GUI.
+app_binary="$APP/Contents/MacOS/Insomnia"
+protocol="$(/usr/bin/plutil -extract InsomniaMaintenanceProtocol raw -o - "$APP/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$protocol" != insomnia-maintenance-v1 || ! -x "$app_binary" ]] ||
+   ! /usr/bin/codesign --verify --deep --strict "$APP" ||
+   [[ "$("$app_binary" --maintenance-protocol)" != insomnia-maintenance-v1 ]]; then
+  echo "Legacy or unverified app: automatic login cleanup is unavailable. Installed files retained. Install the current version, or remove Insomnia in System Settings > General > Login Items before manual removal." >&2
+  exit 1
+fi
+maintenance=(--maintenance-uninstall)
+if (( PURGE == 1 )); then maintenance+=(--purge); fi
+if ! "$app_binary" "${maintenance[@]}"; then
+  echo "Login/Keychain cleanup incomplete; app, helper and grant retained." >&2; exit 1
+fi
 unload_agent
 /bin/rm -f "$PLIST"
 /usr/bin/sudo /bin/rm -f "$SUDOERS"
 /bin/rm -rf "$APP"
 if (( PURGE == 1 )); then
-  # Never unlink recovery.lock: an existing waiter may still hold its inode.
+  # Never unlink either persistent lock: existing waiters may hold their inodes.
   for file in "$APP_SUPPORT"/* "$APP_SUPPORT"/.[!.]* "$APP_SUPPORT"/..?*; do
-    [[ "${file##*/}" == recovery.lock ]] || /bin/rm -rf "$file"
+    [[ "${file##*/}" == recovery.lock || "${file##*/}" == instance.lock ]] || /bin/rm -rf "$file"
   done
   if [[ "$LOG_DIR" != "$APP_SUPPORT" ]]; then /bin/rm -rf "$LOG_DIR"; fi
 else
-  /bin/rm -f "$APP_SUPPORT/backstop.sh" "$APP_SUPPORT/state.json"
+  /bin/rm -f "$APP_SUPPORT/backstop.sh" "$APP_SUPPORT/InsomniaRecovery" "$APP_SUPPORT/InsomniaRecovery.protocol" "$APP_SUPPORT/state.json"
   echo "Kept config and logs (use --purge to remove)."
 fi
-echo "Uninstalled. The persistent recovery.lock file is retained."
+echo "Uninstalled. Persistent instance.lock and recovery.lock files are retained."
 COMMIT

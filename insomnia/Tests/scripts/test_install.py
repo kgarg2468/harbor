@@ -8,6 +8,7 @@ class InstallTests(Fixture):
         self.support = self.home/'Library/Application Support/Insomnia'
         self.support.mkdir(parents=True)
         self.env['INSOMNIA_HOME'] = ''
+        self.install_helper()
 
     def inject_shim(self, name, code):
         path = self.shims/name
@@ -18,6 +19,11 @@ class InstallTests(Fixture):
         app = self.home/'Applications/Insomnia.app'
         app.mkdir(parents=True)
         (app/'sentinel').write_text('existing')
+        (app/'Contents/MacOS').mkdir(parents=True)
+        binary = app/'Contents/MacOS/Insomnia'
+        binary.write_bytes((self.root/'bin/Insomnia').read_bytes())
+        binary.chmod(0o700)
+        (app/'Contents/Info.plist').write_bytes(plistlib.dumps({'InsomniaMaintenanceProtocol': 'insomnia-maintenance-v1'}))
         helper = self.support/'backstop.sh'
         helper.write_text('existing helper')
         plist = self.home/'Library/LaunchAgents/com.insomnia.backstop.plist'
@@ -28,6 +34,66 @@ class InstallTests(Fixture):
         grant.write_text(''.join(
             f'alice ALL=(root) NOPASSWD: {self.shims}/pmset {command}\n' for command in commands))
         return app, helper, plist, grant
+
+    def test_install_uses_staged_helper_before_atomic_replacement(self):
+        self.state()
+        (self.support/'InsomniaRecovery').write_text('legacy helper')
+        result = self.run_script('install.sh')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        recover = next(c for c in self.calls() if c[0] == 'native' and c[2] == '--recover-owned')
+        self.assertIn('.insomnia-install.', recover[1])
+        self.assertEqual((self.support/'InsomniaRecovery').stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.support/'InsomniaRecovery.protocol').stat().st_mode & 0o777, 0o600)
+        app = self.home/'Applications/Insomnia.app'
+        self.assertEqual((self.support/'InsomniaRecovery').read_bytes(), (app/'Contents/MacOS/Insomnia').read_bytes())
+
+    def test_bootstrap_failure_restores_previous_helper_generation(self):
+        app, helper, plist, grant = self.installed_files()
+        paths = [helper, plist, self.support/'InsomniaRecovery', self.support/'InsomniaRecovery.protocol']
+        before = [p.read_bytes() for p in paths]
+        self.inject_shim('launchctl', "if args[0] == 'bootstrap' and not (root/'failed-once').exists():\n    (root/'failed-once').touch(); sys.exit(5)")
+        result = self.run_script('install.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual([p.read_bytes() for p in paths], before)
+        self.assertTrue((app/'sentinel').exists())
+        self.assertEqual(sum(c[:2] == ['launchctl', 'bootstrap'] for c in self.calls()), 2)
+
+    def test_failure_midway_through_helper_pair_rolls_back_both_files(self):
+        app, helper, plist, grant = self.installed_files()
+        paths = [helper, plist, self.support/'InsomniaRecovery', self.support/'InsomniaRecovery.protocol']
+        before = [p.read_bytes() for p in paths]
+        self.inject_shim('mv', "if args[-1].endswith('/InsomniaRecovery.protocol') and not (root/'failed-once').exists():\n    (root/'failed-once').touch(); sys.exit(5)")
+        result = self.run_script('install.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual([p.read_bytes() for p in paths], before)
+        self.assertTrue((app/'sentinel').exists())
+
+    def test_legacy_bundle_is_not_invoked_and_teardown_stops(self):
+        app, helper, plist, grant = self.installed_files()
+        (app/'Contents/Info.plist').write_bytes(plistlib.dumps({}))
+        result = self.run_script('uninstall.sh', '--purge')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('System Settings', result.stderr)
+        self.assertFalse(any(c[0] == 'native' for c in self.calls()))
+        for path in [app, helper, plist, grant]: self.assertTrue(path.exists())
+
+    def test_maintenance_failure_retains_recovery_capability(self):
+        paths = self.installed_files()
+        result = self.run_script('uninstall.sh', '--purge', MAINTENANCE_FAIL='1')
+        self.assertNotEqual(result.returncode, 0)
+        for path in paths: self.assertTrue(path.exists())
+        self.assertFalse(any(c[0] == 'launchctl' for c in self.calls()))
+
+    def test_purge_uses_actual_bundle_and_keeps_both_lock_inodes(self):
+        app, _, _, _ = self.installed_files()
+        locks = [self.support/name for name in ['recovery.lock', 'instance.lock']]
+        for lock in locks: lock.touch()
+        inodes = [lock.stat().st_ino for lock in locks]
+        result = self.run_script('uninstall.sh', '--purge')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['native', str(app/'Contents/MacOS/Insomnia'), '--maintenance-uninstall', '--purge'], self.calls())
+        self.assertEqual([lock.stat().st_ino for lock in locks], inodes)
+        self.assertEqual(set(p.name for p in self.support.iterdir()), {'recovery.lock', 'instance.lock'})
 
     def test_app_reopened_during_build_blocks_commit(self):
         app, helper, plist, grant = self.installed_files()
@@ -167,7 +233,8 @@ with lock.open('a') as held:
         self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
         self.assertIn('# Insomnia owner UID: 501', (self.root/'sudoers').read_text())
 
-    def test_empty_journal_restore_failure_blocks_install(self):
+    def test_owned_power_restore_failure_blocks_install(self):
+        self.state()
         result = self.run_script('install.sh', PMSET_FAIL='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.journal()['sleepDisabledByUs'])

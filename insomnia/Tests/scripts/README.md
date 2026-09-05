@@ -20,9 +20,24 @@ LaunchAgents paths, and reject any nonempty INSOMNIA_HOME before side effects.
 The app and standalone backstop still support relocated journals for testing;
 installer scripts cannot purge a custom root. Failed
 recovery invalidates the session under the shared lock, keeps outstanding state,
-returns nonzero, and prevents uninstall teardown. Audio recovery remains the
-app's responsibility: outstanding saved audio values prevent shell uninstall.
-The lock inode is retained even with --purge to keep existing waiters coordinated.
+returns nonzero, and prevents uninstall teardown. The native helper restores identified process/audio ownership under that lease;
+legacy bare PIDs and unidentified audio remain unresolved. Fixtures simulate the
+native contract; Swift tests cover the actual implementation. Missing or unverified
+helpers never run, but known-owned power preferences can still be restored.
+Both instance.lock and recovery.lock inodes remain even with --purge.
+
+Install stages the same built binary as InsomniaRecovery (0700). Its private
+InsomniaRecovery.protocol sidecar contains `insomnia-maintenance-v1 <SHA-256>`.
+The signed bundle's InsomniaMaintenanceProtocol plist marker gates maintenance
+arguments. Uninstall runs login-item cleanup from that actual bundle; only
+--purge requests service-wide hotspot Keychain deletion. A legacy bundle without
+this protocol blocks teardown and explains the manual Login Items/upgrade path.
+Failed replacement rolls the app, helper, sidecar, script and plist back under
+the shared lease. A crash during replacement can leave a hash mismatch, which
+fails closed; rerunning the current installer repairs the generation.
+
+Shell logs rotate at 256 KiB, retain a bounded whole-line .1 tail, and set private
+modes before appending. All logging failures are best effort.
 These tests do not certify real macOS permissions, launchd or hardware behavior.
 
 Install and uninstall share `/private/tmp/com.kgarg.insomnia-install.lock`, an

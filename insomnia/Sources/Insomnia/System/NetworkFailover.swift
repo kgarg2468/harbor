@@ -153,6 +153,13 @@ struct KeychainStore: KeychainStoring {
         guard status == errSecSuccess else { throw KeychainError(status: status) }
     }
 
+    /// Delete all SSID accounts for this service without retrieving secret values.
+    func deleteService(service: String, delete: (CFDictionary) -> OSStatus = SecItemDelete) throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service]
+        let status = delete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
+    }
+
     func delete(service: String, account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
