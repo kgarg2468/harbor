@@ -1,0 +1,291 @@
+diff --git a/apps/server/src/updateAdmission.test.ts b/apps/server/src/updateAdmission.test.ts
+index 1d92716f7..be80fad6d 100644
+--- a/apps/server/src/updateAdmission.test.ts
++++ b/apps/server/src/updateAdmission.test.ts
+@@ -33,6 +33,19 @@ const forkMaintenance = Effect.fn("forkMaintenance")(function* (admission: Updat
+   return { fiber, started, finish };
+ });
+ 
++/** Forks a nonwaiting claim whose callback signals `started` and blocks until `finish`. */
++const forkTryClaim = Effect.fn("forkTryClaim")(function* (admission: UpdateAdmissionShape) {
++  const started = yield* Deferred.make<void>();
++  const finish = yield* Deferred.make<void>();
++  const fiber = yield* admission
++    .tryWithMaintenance(
++      Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(finish))),
++    )
++    .pipe(Effect.forkChild);
++  yield* Effect.yieldNow;
++  return { fiber, started, finish };
++});
++
+ describe("updateAdmission", () => {
+   it.effect("starts open with nothing in flight and runs admitted commands", () =>
+     Effect.gen(function* () {
+@@ -209,4 +222,185 @@ describe("updateAdmission", () => {
+       assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
+     }),
+   );
++
++  describe("tryWithMaintenance", () => {
++    it.effect("answers busy for an admitted long command and keeps replies admissible", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const command = yield* holdCommand(admission);
++
++        let invoked = false;
++        const claim = yield* admission.tryWithMaintenance(
++          Effect.sync(() => {
++            invoked = true;
++          }),
++        );
++        assert.deepStrictEqual(claim, { status: "busy" });
++        assert.isFalse(invoked);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 1 });
++
++        // An approval-style reply for the long command is still admitted.
++        const reply = yield* admission.withAdmission(Effect.succeed("approved"));
++        assert.equal(reply, "approved");
++
++        yield* Deferred.succeed(command.release, undefined);
++        yield* Fiber.join(command.fiber);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++      }),
++    );
++
++    it.effect("a successful claim closes the gate synchronously and rejects new commands", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const claim = yield* forkTryClaim(admission);
++
++        yield* Deferred.await(claim.started);
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        const error = yield* admission.withAdmission(Effect.succeed("late")).pipe(Effect.flip);
++        assert.instanceOf(error, UpdateAdmissionClosedError);
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        yield* Deferred.succeed(claim.finish, undefined);
++        assert.deepStrictEqual(yield* Fiber.join(claim.fiber), { status: "ran", value: undefined });
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++
++        const result = yield* admission.withAdmission(Effect.succeed("after"));
++        assert.equal(result, "after");
++      }),
++    );
++
++    it.effect("returns the callback value", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const claim = yield* admission.tryWithMaintenance(Effect.succeed("ran"));
++        assert.deepStrictEqual(claim, { status: "ran", value: "ran" });
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++      }),
++    );
++
++    it.effect("a failing callback reopens the gate and propagates the error", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const error = yield* admission
++          .tryWithMaintenance(Effect.fail("update failed"))
++          .pipe(Effect.flip);
++        assert.equal(error, "update failed");
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++
++        const result = yield* admission.withAdmission(Effect.succeed("after"));
++        assert.equal(result, "after");
++      }),
++    );
++
++    it.effect("an interrupted callback reopens the gate", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const claim = yield* forkTryClaim(admission);
++        yield* Deferred.await(claim.started);
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        yield* Fiber.interrupt(claim.fiber);
++        const exit = yield* Fiber.await(claim.fiber);
++        assert.isTrue(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause));
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++
++        const result = yield* admission.withAdmission(Effect.succeed("after"));
++        assert.equal(result, "after");
++      }),
++    );
++
++    it.effect("two claims never overlap: the second is busy until the first exits", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const first = yield* forkTryClaim(admission);
++        yield* Deferred.await(first.started);
++
++        let invoked = false;
++        const second = yield* admission.tryWithMaintenance(
++          Effect.sync(() => {
++            invoked = true;
++          }),
++        );
++        assert.deepStrictEqual(second, { status: "busy" });
++        assert.isFalse(invoked);
++        assert.isFalse(yield* Deferred.isDone(first.finish));
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        yield* Deferred.succeed(first.finish, undefined);
++        yield* Fiber.join(first.fiber);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++
++        const retry = yield* admission.tryWithMaintenance(Effect.succeed("second"));
++        assert.deepStrictEqual(retry, { status: "ran", value: "second" });
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++      }),
++    );
++
++    it.effect("is busy while a waiting maintenance owns the gate and does not reopen it", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const command = yield* holdCommand(admission);
++        const maintenance = yield* forkMaintenance(admission);
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 1 });
++
++        const claim = yield* admission.tryWithMaintenance(Effect.succeed("stolen"));
++        assert.deepStrictEqual(claim, { status: "busy" });
++        // The busy answer must leave the waiting maintenance's closure intact.
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 1 });
++        assert.isFalse(yield* Deferred.isDone(maintenance.started));
++
++        yield* Deferred.succeed(command.release, undefined);
++        yield* Fiber.join(command.fiber);
++        yield* Deferred.await(maintenance.started);
++
++        const during = yield* admission.tryWithMaintenance(Effect.succeed("stolen"));
++        assert.deepStrictEqual(during, { status: "busy" });
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        yield* Deferred.succeed(maintenance.finish, undefined);
++        yield* Fiber.join(maintenance.fiber);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++      }),
++    );
++
++    it.effect("a held claim makes a waiting maintenance queue behind it without reopening", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        const claim = yield* forkTryClaim(admission);
++        yield* Deferred.await(claim.started);
++
++        const maintenance = yield* forkMaintenance(admission);
++        assert.isFalse(yield* Deferred.isDone(maintenance.started));
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        yield* Deferred.succeed(claim.finish, undefined);
++        yield* Fiber.join(claim.fiber);
++        yield* Deferred.await(maintenance.started);
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        yield* Deferred.succeed(maintenance.finish, undefined);
++        yield* Fiber.join(maintenance.fiber);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++      }),
++    );
++
++    it.effect("a callback that answers busy itself releases the gate before any later wait", () =>
++      Effect.gen(function* () {
++        const admission = yield* make();
++        // Coordinator shape: the claim succeeds on empty admission, but the
++        // activity check inside answers busy, so the callback exits at once.
++        const claim = yield* admission.tryWithMaintenance(Effect.succeed({ status: "busy" }));
++        assert.deepStrictEqual(claim, { status: "ran", value: { status: "busy" } });
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++
++        // The subsequent wait/retry happens with the gate open: work is admitted.
++        const command = yield* holdCommand(admission);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 1 });
++        yield* Deferred.succeed(command.release, undefined);
++        yield* Fiber.join(command.fiber);
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++      }),
++    );
++  });
+ });
+diff --git a/apps/server/src/updateAdmission.ts b/apps/server/src/updateAdmission.ts
+index 0995e87c8..76bef32c7 100644
+--- a/apps/server/src/updateAdmission.ts
++++ b/apps/server/src/updateAdmission.ts
+@@ -2,6 +2,7 @@ import * as Context from "effect/Context";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
+ import * as Semaphore from "effect/Semaphore";
+ 
+@@ -25,6 +26,11 @@ export interface UpdateAdmissionState {
+   readonly inFlight: number;
+ }
+ 
++/** Outcome of a nonwaiting maintenance claim; see `tryWithMaintenance`. */
++export type UpdateMaintenanceClaim<A> =
++  | { readonly status: "busy" }
++  | { readonly status: "ran"; readonly value: A };
++
+ export interface UpdateAdmissionShape {
+   /**
+    * Counts `effect` as an in-flight client command for its whole lifetime.
+@@ -38,6 +44,15 @@ export interface UpdateAdmissionShape {
+    * then runs `callback` with the gate still closed. Reopens on every exit.
+    */
+   readonly withMaintenance: <A, E, R>(callback: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
++  /**
++   * Nonwaiting variant of `withMaintenance`: claims the gate only if no
++   * maintenance owns it and nothing is in flight, otherwise answers `busy`
++   * immediately without closing or waiting. A successful claim closes the
++   * gate synchronously, runs `callback`, and reopens on every exit.
++   */
++  readonly tryWithMaintenance: <A, E, R>(
++    callback: Effect.Effect<A, E, R>,
++  ) => Effect.Effect<UpdateMaintenanceClaim<A>, E, R>;
+   readonly state: Effect.Effect<UpdateAdmissionState>;
+ }
+ 
+@@ -100,6 +115,31 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
+       ),
+     );
+ 
++  // Ownership is taken only when a permit is free right now, so a running or
++  // drain-waiting maintenance makes the claim busy. Under the permit, the
++  // in-flight check and the close are one synchronous step: nothing can be
++  // admitted between them, and a busy answer leaves the gate untouched.
++  const busy: UpdateMaintenanceClaim<never> = { status: "busy" };
++  const tryWithMaintenance: UpdateAdmissionShape["tryWithMaintenance"] = <A, E, R>(
++    callback: Effect.Effect<A, E, R>,
++  ) =>
++    ownership
++      .withPermitsIfAvailable(1)(
++        Effect.uninterruptibleMask((restore) =>
++          Effect.suspend((): Effect.Effect<UpdateMaintenanceClaim<A>, E, R> => {
++            if (inFlight > 0) {
++              return Effect.succeed(busy);
++            }
++            closed = true;
++            return restore(callback).pipe(
++              Effect.map((value): UpdateMaintenanceClaim<A> => ({ status: "ran", value })),
++              Effect.ensuring(reopen),
++            );
++          }),
++        ),
++      )
++      .pipe(Effect.map(Option.getOrElse((): UpdateMaintenanceClaim<A> => busy)));
++
+   const state = Effect.sync((): UpdateAdmissionState => ({
+     phase: closed ? "maintenance" : "open",
+     inFlight,
+@@ -110,7 +150,7 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
+     Effect.suspend(() => (drained === undefined ? Effect.void : Deferred.interrupt(drained))),
+   );
+ 
+-  return UpdateAdmission.of({ withAdmission, withMaintenance, state });
++  return UpdateAdmission.of({ withAdmission, withMaintenance, tryWithMaintenance, state });
+ });
+ 
+ export const layer = Layer.effect(UpdateAdmission, make());

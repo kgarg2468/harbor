@@ -34,6 +34,11 @@
       "sha256": "a2a81bfcb5712ff623602b9ac8fc48a1238b1422db2a31d59a6b789739ac3c54"
     },
     {
+      "id": "nonwaiting-admission",
+      "path": "patches/0010-nonwaiting-admission.patch",
+      "sha256": "9224d603246a69485f4eade4d83119b68ea4ad5db95e2863518311152e6d3815"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -46,7 +51,8 @@
       "update-admission",
       "queued-update",
       "update-activity",
-      "thread-fork-backend"
+      "thread-fork-backend",
+      "nonwaiting-admission"
     ],
     "reasoning": [
       "reasoning-full",
@@ -55,6 +61,7 @@
       "queued-update",
       "update-activity",
       "thread-fork-backend",
+      "nonwaiting-admission",
       "reasoning-identity"
     ]
   }
