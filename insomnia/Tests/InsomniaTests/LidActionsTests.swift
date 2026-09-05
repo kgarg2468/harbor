@@ -30,6 +30,7 @@ final class LidActionsTests: XCTestCase {
 
     private func make(dockerIdle: @escaping @Sendable () async throws -> Bool = { true }, mute: Bool = true) async -> (SessionManager, LidActions) {
         let m = h.makeManager()
+        m.config.dockerRule = true // These integration tests explicitly opt in.
         m.config.muteOnLidClose = mute
         m.config.freezeList = ["com.tinyspeck.slackmacgap"]
         let docker = DockerRule(freezer: freezer, probe: dockerIdle)
