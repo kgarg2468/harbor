@@ -158,7 +158,7 @@ final class BrowserThrottle {
     }
 
     @discardableResult
-    func scan(config: Config) async -> [BrowserStatus] {
+    func scan(config: Config) async -> [BrowserStatus]? {
         scanGeneration += 1
         let generation = scanGeneration
         let ids = ChromiumFlags.chromiumBundleIds(config: config)
@@ -170,12 +170,12 @@ final class BrowserThrottle {
             } catch {
                 Log.error("browser throttle: could not read args of \(app.name): \(error.localizedDescription)")
             }
-            guard generation == scanGeneration, !Task.isCancelled else { return statuses }
+            guard generation == scanGeneration, !Task.isCancelled else { return nil }
             if runningApps().contains(where: { $0.pid == app.pid && $0.bundleId == app.bundleId }) {
                 out.append(BrowserStatus(bundleId: app.bundleId, name: app.name, pid: app.pid, unthrottled: unthrottled))
             }
         }
-        guard generation == scanGeneration, !Task.isCancelled else { return statuses }
+        guard generation == scanGeneration, !Task.isCancelled else { return nil }
         statuses = out
         return statuses
     }
@@ -204,9 +204,8 @@ final class BrowserThrottle {
                   !Task.isCancelled else { return false }
             var config = Config()
             config.agentList.append(bundleId)
-            _ = await scan(config: config)
-            guard !Task.isCancelled else { return false }
-            let current = statuses.filter { $0.bundleId == bundleId }
+            guard let verifiedScan = await scan(config: config), !Task.isCancelled else { return false }
+            let current = verifiedScan.filter { $0.bundleId == bundleId }
             let verified = !current.isEmpty && current.allSatisfy(\.unthrottled)
             if verified { Log.info("relaunched \(bundleId) unthrottled") }
             else { Log.error("relaunch: \(bundleId) flags could not be verified") }
