@@ -49,6 +49,15 @@ case "${harbor_cmd}" in
   help | --help | -h)
     harbor_usage
     ;;
+  bootstrap)
+    shift
+    # node/bootstrap.sh is sourced with this command's arguments rather than executed,
+    # because an installed release carries it 0644 like every other ordinary file and
+    # only bin/harbor is executable (design section 5.2). It sources the libraries it
+    # uses that are not sourced above.
+    # shellcheck source=../node/bootstrap.sh
+    . "${HARBOR_ROOT}/node/bootstrap.sh" ${1+"$@"}
+    ;;
   journal)
     shift
     harbor_journal_cmd ${1+"$@"}
