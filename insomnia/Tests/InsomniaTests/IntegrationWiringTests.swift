@@ -111,6 +111,9 @@ extension IntegrationWiringTests {
     func testStoppedBrowserRefreshCannotPublishToMenu() async {
         let home = TempHome()
         defer { home.destroy() }
+        var config = Config()
+        config.browserThrottleEnabled = true
+        try! Store(paths: home.paths).saveConfig(config)
         let gate = AsyncGate()
         let browser = BrowserThrottle(readArgs: { _ in await gate.wait(); return ["Chrome"] }, runningApps: {
             [BrowserStatus(bundleId: "com.google.Chrome", name: "Chrome", pid: 101, unthrottled: false)]

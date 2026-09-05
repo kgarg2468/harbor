@@ -5,7 +5,7 @@ import Foundation
 /// with defaults filled in.
 struct Config: Codable, Equatable, Sendable {
     // Session
-    /// Preset durations in seconds, shown as chips.
+    /// Preset durations in seconds, shown in the right-click menu and Settings.
     var presets: [TimeInterval] = Config.defaultPresets
     var defaultPreset: TimeInterval = 4 * 3600
     /// Hard ceiling on a session, including extensions. 30 days.
@@ -14,10 +14,11 @@ struct Config: Codable, Equatable, Sendable {
     // Lid-close actions
     /// Bundle ids to SIGSTOP while the lid is closed.
     var freezeList: [String] = Config.defaultFreezeList
-    var dockerRule: Bool = true
+    var dockerRule: Bool = false
+    var browserThrottleEnabled: Bool = false
     var muteOnLidClose: Bool = false
 
-    // Agent apps that must never be throttled or frozen.
+    // Apps protected from normal freezing. The opt-in Docker rule is an exception.
     var agentList: [String] = Config.defaultAgentList
 
     // Battery / thermal floors
@@ -71,6 +72,28 @@ struct Config: Codable, Equatable, Sendable {
         "com.docker.docker",              // Docker Desktop
     ]
 
+    /// Transient explanation; never written into the user's configuration.
+    var floorCorrectionNotice: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case presets, defaultPreset, maxDuration, freezeList, dockerRule, browserThrottleEnabled
+        case muteOnLidClose, agentList, lowPowerFloor, endFloor, thermalRules
+        case hotspotSSID, nudgeThreshold, tmuxTargets, launchAtLogin
+    }
+
+    enum ValidationError: Error, LocalizedError {
+        case batteryFloors
+        var errorDescription: String? {
+            "Battery thresholds must be 1–99%, with the end threshold at or below the Low Power Mode threshold."
+        }
+    }
+
+    func validateFloors() throws {
+        guard (1...99).contains(lowPowerFloor), (1...99).contains(endFloor), endFloor <= lowPowerFloor else {
+            throw ValidationError.batteryFloors
+        }
+    }
+
     init() {}
 
     init(from decoder: Decoder) throws {
@@ -81,10 +104,18 @@ struct Config: Codable, Equatable, Sendable {
         maxDuration = try c.decodeIfPresent(TimeInterval.self, forKey: .maxDuration) ?? d.maxDuration
         freezeList = try c.decodeIfPresent([String].self, forKey: .freezeList) ?? d.freezeList
         dockerRule = try c.decodeIfPresent(Bool.self, forKey: .dockerRule) ?? d.dockerRule
+        browserThrottleEnabled = try c.decodeIfPresent(Bool.self, forKey: .browserThrottleEnabled) ?? d.browserThrottleEnabled
         muteOnLidClose = try c.decodeIfPresent(Bool.self, forKey: .muteOnLidClose) ?? d.muteOnLidClose
         agentList = try c.decodeIfPresent([String].self, forKey: .agentList) ?? d.agentList
-        lowPowerFloor = try c.decodeIfPresent(Int.self, forKey: .lowPowerFloor) ?? d.lowPowerFloor
-        endFloor = try c.decodeIfPresent(Int.self, forKey: .endFloor) ?? d.endFloor
+        do {
+            lowPowerFloor = try c.decodeIfPresent(Int.self, forKey: .lowPowerFloor) ?? d.lowPowerFloor
+            endFloor = try c.decodeIfPresent(Int.self, forKey: .endFloor) ?? d.endFloor
+            try validateFloors()
+        } catch {
+            lowPowerFloor = d.lowPowerFloor
+            endFloor = d.endFloor
+            floorCorrectionNotice = "Saved battery thresholds were invalid. Using 40% for Low Power Mode and 10% to end sessions. Save these defaults or choose valid thresholds below."
+        }
         thermalRules = try c.decodeIfPresent(Bool.self, forKey: .thermalRules) ?? d.thermalRules
         hotspotSSID = try c.decodeIfPresent(String.self, forKey: .hotspotSSID) ?? d.hotspotSSID
         nudgeThreshold = try c.decodeIfPresent(TimeInterval.self, forKey: .nudgeThreshold) ?? d.nudgeThreshold

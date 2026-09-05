@@ -200,6 +200,7 @@ final class AppServices {
 
     /// Quit and relaunch a Chromium browser with both anti-throttle flags.
     func relaunchUnthrottled(_ bundleId: String) async {
+        guard currentConfig.browserThrottleEnabled else { return }
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.browser.relaunchUnthrottled(bundleId: bundleId)
@@ -210,6 +211,28 @@ final class AppServices {
         }
         browserTasks.append(task)
         await task.value
+    }
+
+    /// Settings edits use the current power sample immediately; no new OS event is required.
+    func reevaluateFloors() {
+        guard running else { return }
+        powerChanged()
+    }
+
+    func refreshBrowserConfiguration() {
+        browserRefreshGeneration += 1
+        if !currentConfig.browserThrottleEnabled {
+            for task in browserTasks { task.cancel() }
+            browserTasks.removeAll()
+            status.browsers = []
+            status.throttledBrowsers = []
+        } else {
+            browserTasks.append(Task { await self.refreshBrowsers() })
+        }
+    }
+
+    private var currentConfig: Config {
+        manager?.config ?? (try? Store(paths: paths).loadConfig()) ?? Config()
     }
 
     // MARK: Private
@@ -260,7 +283,12 @@ final class AppServices {
     func refreshBrowsers() async {
         browserRefreshGeneration += 1
         let generation = browserRefreshGeneration
-        let config = manager?.config ?? Config()
+        let config = currentConfig
+        guard config.browserThrottleEnabled else {
+            status.browsers = []
+            status.throttledBrowsers = []
+            return
+        }
         guard let statuses = await browser.scan(config: config) else { return }
         guard generation == browserRefreshGeneration, !Task.isCancelled else { return }
         status.browsers = statuses
