@@ -106,6 +106,15 @@ admin_config() {
     lines="${lines}
 maxauthtries 3"
   fi
+  # ADMIN_PUBKEY=no models the node --harden-sshd must refuse before it reloads: a drop-in
+  # sorting before Harbor's, or a global PubkeyAuthentication no, was obtained ahead of
+  # 51-harbor-global.conf, and OpenSSH keeps the first value it gets for a keyword, so key
+  # authentication is off for the installation user whatever Harbor's file says. The
+  # configuration still parses, so sshd -t has nothing to object to; what the reload would
+  # do is take this account's password and root login away as well.
+  if [ "${ADMIN_PUBKEY:-yes}" != yes ]; then
+    lines="$(printf '%s\n' "${lines}" | sed -e 's/^pubkeyauthentication .*/pubkeyauthentication no/')"
+  fi
   # SHUFFLE=1 prints the same directives in another order, which a proof that compares
   # the whole normalized output must be indifferent to.
   if [ "${SHUFFLE:-0}" = 1 ]; then
@@ -246,6 +255,40 @@ configure() {
 
 harden() {
   harbor_ssh_harden "${FIX_ROOT}" "${ADMIN}" "${ETC}"
+}
+
+admin_key() {
+  printf '%s/%s/.ssh/authorized_keys' "${HOMES}" "${ADMIN}"
+}
+
+admin_key_owner() {
+  # admin_key_owner [NAME]: make the installation user's own authorized_keys report NAME,
+  # the installation user by default, as its owner. chown is the one call an unprivileged
+  # test cannot make, so a file belonging to an account the test cannot create has no other
+  # way to exist in a fixture: every file here belongs to the account the tests run as,
+  # which is neither ${ADMIN} nor root, so without this seam every --harden-sshd test would
+  # be modeling the very node the refusal under test exists to catch rather than the path it
+  # is about. The library's own helper is the seam, wrapped for that one path; every other
+  # path in the run is answered the real way, read exactly as lib/journal.sh reads it, so
+  # nothing else any test observes is faked.
+  FAKE_ADMIN_KEY_OWNER="${1:-${ADMIN}}"
+  ADMIN_KEY_PATH="$(admin_key)"
+  harbor_stat_owner() {
+    if [ "${1}" = "${ADMIN_KEY_PATH}" ]; then
+      printf '%s' "${FAKE_ADMIN_KEY_OWNER}"
+      return 0
+    fi
+    case "$(harbor_os)" in
+      Linux) stat -c '%U' "${1}" ;;
+      Darwin) stat -f '%Su' "${1}" ;;
+    esac
+  }
+}
+
+staged_key_dir() {
+  # The directory the authorized key is staged in, which is a directory of its own inside
+  # the state root rather than a file lying directly in it.
+  ls -d "${FIX_ROOT}"/.tmp.key.* 2>/dev/null || true
 }
 
 seed_key() {
@@ -605,7 +648,10 @@ authorize() {
   chmod 0444 "${VICTIM}"
   victim_sha="$(harbor_sha256 "${VICTIM}")"
   acquire
-  planted="${SSH_DIR}/.tmp.authorized_keys.${HARBOR_LOCK_ID_PID}"
+  # The name is the one Harbor stages the key under, which is now a directory in the state
+  # root: mkdir, cp, chmod, and chown would each resolve a link at it if any of them ever
+  # named it under the operator's home.
+  planted="${SSH_DIR}/.tmp.key.${HARBOR_LOCK_ID_PID}"
   ln -s "${VICTIM}" "${planted}"
   run authorize
   assert_success
@@ -634,6 +680,12 @@ authorize() {
   # exactly the window an escalation would be won in. Everything root wrote is in the
   # state root, which design section 5.2 creates 0755 root-owned under root-owned
   # ancestors, and the operator's own directory is empty.
+  #
+  # The state root being 0755 is why the key is not staged directly in it. 0755 is
+  # traversable by every account on the node, so a file lying in it that has been chowned
+  # to the operator is a file the operator can open and write; the key is staged one level
+  # down instead, in a directory of its own that is created 0700 and never given away, and
+  # search permission on that directory is what the operator does not have.
   run env HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=ssh-key-prepared SUDO_USER=alice \
     bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/ssh.sh"; HARBOR_PID=$$; harbor_lock_acquire "${1}" operator; harbor_ssh_authorize "${1}" "${2}" "${3}"' \
     _ "${FIX_ROOT}" "${OPERATOR}" "${OP_HOME}"
@@ -645,12 +697,24 @@ authorize() {
   assert_equal "$(ls -A "${SSH_DIR}")" ""
   assert [ ! -e "${TARGET}" ]
   # The staged file is in the state root and already carries the target's mode and owner.
-  run find "${FIX_ROOT}" -maxdepth 1 -name '.tmp.authorized_keys.*'
+  run find "${FIX_ROOT}" -maxdepth 1 -name '.tmp.key.*'
   assert_equal "${#lines[@]}" 1
-  staged="${lines[0]}"
+  staged_dir="${lines[0]}"
+  staged="${staged_dir}/authorized_keys"
   assert_equal "$(harbor_stat_mode "${staged}")" 0600
   assert_equal "$(harbor_stat_owner "${staged}")" "${OPERATOR}"
   assert_equal "$(cat "${staged}")" "${ALICE_KEY}"
+  # And the directory holding it is 0700. These tests are unprivileged, so root and the
+  # operator are one account here and no assertion made in this fixture can tell a
+  # root-owned directory from an operator-owned one; the mode is the half that is
+  # observable, and that the directory is never chowned is read straight off the code by
+  # the test below. The file is the only thing in there, so nothing else was staged at a
+  # name the operator could have guessed.
+  assert_equal "$(harbor_stat_mode "${staged_dir}")" 0700
+  assert_equal "$(ls -A "${staged_dir}")" authorized_keys
+  # Nothing is staged directly in the 0755 state root, which is where it used to be.
+  run find "${FIX_ROOT}" -maxdepth 1 -type f -name '.tmp.*'
+  assert_equal "${#lines[@]}" 0
   # The killed child left its lock behind; production reclaims it, this test removes it.
   rm -rf "${FIX_ROOT}/lock.d"
 }
@@ -886,7 +950,7 @@ resume_paused() {
   run cat "${BATS_TEST_TMPDIR}/child.out"
   assert_output --partial 'ssh.ssh_dir_swapped'
   # And nothing was left staged in the state root for a later run to pick up.
-  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert [ -z "$(staged_key_dir)" ]
   # The transaction is unfinished, not silently abandoned: recovery still owns it.
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
 }
@@ -914,7 +978,7 @@ resume_paused() {
   assert_output --partial 'ssh.ssh_dir_swapped'
   # By identity rather than by mode, which the decoy deliberately satisfies.
   assert_output --partial 'no longer the same directory'
-  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert [ -z "$(staged_key_dir)" ]
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
 }
 
@@ -954,7 +1018,7 @@ resume_paused() {
   assert_output --partial 'no longer the same directory'
   # Nothing was left staged in the state root for a later run to pick up, and the
   # transaction is unfinished rather than abandoned: recovery still owns it.
-  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert [ -z "$(staged_key_dir)" ]
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
 }
 
@@ -988,26 +1052,35 @@ resume_paused() {
   # And nothing was written into the directory that stopped being ~/.ssh, which is the
   # directory the checks before the pin had passed on.
   assert_equal "$(ls -A "${BATS_TEST_TMPDIR}/hidden")" ""
-  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert [ -z "$(staged_key_dir)" ]
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
 }
 
-@test "a staged key rewritten while it carries the operator's ownership is refused rather than journaled as the key" {
-  # The chown is the moment the staged file becomes the operator's, and the state root is
-  # 0755, so from then until it is read the operator can both see the name and write
-  # through it. Reading the content only afterwards would record what the operator wrote
-  # as post_state, and the check after the rename compares against that same post_state,
-  # so the two would agree on it and the journal would vouch for the operator's own key.
+@test "a staged key whose bytes change before it is journaled is refused rather than journaled as the key" {
+  # What the journal records for the key is one observation of the staged file, and that
+  # observation is also what the check after the rename compares what landed against, so a
+  # file whose bytes are not the ones read from the source must never reach it: the two
+  # would agree on the wrong key and the journal would vouch for it. The sha taken before
+  # the chown is what the observation is held against, and it is the observation itself
+  # that is checked rather than a further reading of the file, so what is checked and what
+  # is used are one value.
+  #
+  # A 0700 staging directory is what keeps the operator out of this window on a real node;
+  # this test is unprivileged and owns everything in the fixture, so it stands in for any
+  # cause at all of the staged bytes changing and proves the refusal, not the permission.
   mkdir -p "${SSH_DIR}"
   chmod 0700 "${SSH_DIR}"
   paused_authorize ssh-key-staged
-  printf '%s\n' 'ssh-ed25519 FIXTUREKEYMALLORY mallory@example.com' >"${FIX_ROOT}/.tmp.authorized_keys.${PAUSED_PID}"
+  printf '%s\n' 'ssh-ed25519 FIXTUREKEYMALLORY mallory@example.com' >"${FIX_ROOT}/.tmp.key.${PAUSED_PID}/authorized_keys"
   resume_paused ssh-key-staged
   assert_equal "${PAUSED_STATUS}" 2
   run cat "${BATS_TEST_TMPDIR}/child.out"
   assert_output --partial 'ssh.stage_changed'
   assert [ ! -e "${TARGET}" ]
   refute_output --partial FIXTUREKEYMALLORY
+  # Nothing was journaled for the target at all, so no later row can act on a key that was
+  # never proved to be the administrator's.
+  assert_equal "$(journal_names)" 0001-authorized-key-source.json
 }
 
 @test "a file of prose is not a key: the predicate takes options and certificates and refuses text" {
@@ -1090,6 +1163,7 @@ resume_paused() {
   assert_equal "$(harbor_ssh_global_dropin_path)" /etc/ssh/sshd_config.d/51-harbor-global.conf
   assert_equal "$(harbor_ssh_dropin_path "${ETC}")" "${DROPIN}"
   assert_equal "$(harbor_ssh_global_dropin_path "${ETC}")" "${GLOBAL_DROPIN}"
+  admin_key_owner
   acquire
   run configure
   assert_success
@@ -1341,6 +1415,7 @@ resume_paused() {
 }
 
 @test "--harden-sshd refuses unless the installation user has an authorized key" {
+  admin_key_owner
   acquire
   # Missing: the global drop-in would take away the installation user's password and
   # leave them nothing to log in with.
@@ -1380,6 +1455,7 @@ resume_paused() {
   # PermitRootLogin no and PasswordAuthentication no for every account, so the account
   # it would strand is the administrator running the command over SSH at that moment,
   # and root behind them. [ -s ] accepted both of these files.
+  admin_key_owner
   acquire
   printf '# my key is on the other laptop\n' >"${HOMES}/${ADMIN}/.ssh/authorized_keys"
   assert [ -s "${HOMES}/${ADMIN}/.ssh/authorized_keys" ]
@@ -1410,6 +1486,7 @@ resume_paused() {
 }
 
 @test "--harden-sshd writes a separate journaled file that the unchanged-directive proof does not judge" {
+  admin_key_owner
   acquire
   run configure
   assert_success
@@ -1429,12 +1506,158 @@ resume_paused() {
   # the operator drop-in's unchanged-for-every-directive proof is not applied to it.
   run admin_config
   assert_output --partial 'permitrootlogin no'
+  # sshd is asked what it would do for the installation user between its own syntax check
+  # and the reload, which is the whole of what stands between this flag and an account
+  # with no way in once its password and root login are gone.
   run shim_lines
   assert_line --index 0 "sshd${TAB}-t"
-  assert_line --index 1 "systemctl${TAB}is-active${TAB}ssh.service"
-  assert_line --index 2 "systemctl${TAB}reload${TAB}ssh.service"
-  assert_equal "${#lines[@]}" 3
+  assert_line --index 1 "sshd${TAB}-T${TAB}-C${TAB}user=${ADMIN}"
+  assert_line --index 2 "systemctl${TAB}is-active${TAB}ssh.service"
+  assert_line --index 3 "systemctl${TAB}reload${TAB}ssh.service"
+  assert_equal "${#lines[@]}" 4
   harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd refuses an installation user's key file sshd would ignore, and writes nothing when it does" {
+  # The gate judged this file by its bytes alone. StrictModes makes sshd ignore an
+  # authorized_keys owned by neither root nor the account logging in, and ignore one that
+  # is group- or world-writable, whatever key is in it, so a file full of perfectly good
+  # keys can be a file sshd will never read. --harden-sshd sets PermitRootLogin no and
+  # PasswordAuthentication no for every account, so the administrator whose own key file
+  # sshd ignores loses password login, root login, and key login in one reload, from the
+  # session they are running the command in. Content alone cannot tell that node from a
+  # healthy one.
+  acquire
+  # Owned by a third account: neither root nor the installation user.
+  admin_key_owner mallory
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial mallory
+  assert_output --partial 'StrictModes'
+  assert_output --partial "$(admin_key)"
+  assert_output --partial '--harden-sshd'
+  assert_output --partial "${ADMIN}"
+  # Nothing written, nothing journaled, and refused before any vendor command, so the node
+  # is left exactly as it is and --harden-sshd is not applied.
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  # A refusal, never a repair: Harbor changes nothing it did not create, so the file keeps
+  # the mode it had.
+  assert_equal "$(harbor_stat_mode "$(admin_key)")" 0600
+  # Group-writable: sshd refuses a key file every member of its group could add a key to.
+  admin_key_owner
+  chmod 0664 "$(admin_key)"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial 'group-writable'
+  assert_output --partial '0664'
+  assert_output --partial 'StrictModes'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  assert_equal "$(harbor_stat_mode "$(admin_key)")" 0664
+  # World-writable is named for what it is rather than folded into the group case.
+  chmod 0666 "$(admin_key)"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial 'world-writable'
+  assert_output --partial '0666'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd accepts an installation user's key file at any mode sshd reads, and one owned by root" {
+  # The other direction, and the reason the mode test is writability rather than equality
+  # with 0600: 0644 is a mode sshd reads happily and an administrator's own choice, and
+  # refusing it would deny a flag that was safe to give, which is a lockout of its own
+  # kind. root is the other owner sshd reads a key file from.
+  admin_key_owner
+  chmod 0644 "$(admin_key)"
+  acquire
+  run harden
+  assert_success
+  assert [ -f "${GLOBAL_DROPIN}" ]
+  assert_equal "$(harbor_stat_mode "$(admin_key)")" 0644
+  assert_entry 0001 file "${GLOBAL_DROPIN}" created applied '"absent"' "$(harbor_observe_file "${GLOBAL_DROPIN}")"
+  # A file owned by root is read by sshd for any account, so it is accepted too.
+  rm -f "${GLOBAL_DROPIN}"
+  admin_key_owner root
+  chmod 0600 "$(admin_key)"
+  run harden
+  assert_success
+  assert [ -f "${GLOBAL_DROPIN}" ]
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd refuses to reload a node whose installation user has no key authentication left" {
+  # sshd -t proves the configuration parses and says nothing about which value any keyword
+  # ends up with. OpenSSH keeps the first value it obtains for a keyword and Ubuntu's
+  # sshd_config includes sshd_config.d/*.conf in lexical order, so a drop-in sorting before
+  # 51-harbor-global.conf, or a global PubkeyAuthentication no, is the value sshd uses.
+  # That node passes the syntax check, and the reload it would be given takes password
+  # authentication and root login away from every account: the administrator running the
+  # command over SSH has no password, no root login, and no key authentication either.
+  ADMIN_PUBKEY=no
+  admin_key_owner
+  acquire
+  run harden
+  assert_equal "${status}" 2
+  assert_output --partial 'ssh.harden_admin_no_pubkey'
+  assert_output --partial 'pubkeyauthentication yes'
+  # The refusal names what sshd actually reported, not only what Harbor wanted.
+  assert_output --partial "it reports 'pubkeyauthentication no'"
+  assert_output --partial "${ADMIN}"
+  # Nothing was reloaded, and the unit was never even asked about: the running sshd still
+  # has the configuration it had, which is the one this account can still log in under.
+  assert_equal "$(shim_calls "reload")" 0
+  assert_equal "$(shim_calls "is-active")" 0
+  # sshd's own syntax check passed, which is exactly why it is not enough on its own.
+  assert_equal "$(shim_calls "^sshd${TAB}-t\$")" 1
+  # The drop-in is on disk and its entry stays prepared for recovery, which is what the
+  # message says, and what makes the reload still owed by a later run.
+  assert [ -f "${GLOBAL_DROPIN}" ]
+  assert_entry 0001 file "${GLOBAL_DROPIN}" created prepared '"absent"' "$(harbor_observe_file "${GLOBAL_DROPIN}")"
+  # And the positive: the same node with public-key authentication on for that account
+  # reloads. The file is byte for byte what Harbor renders by now, so nothing is rewritten,
+  # and the reload happens because the transaction the refusal left open is still unfinished.
+  ADMIN_PUBKEY=yes
+  : >"${HARBOR_SHIM_LOG}"
+  run harden
+  assert_success
+  assert_equal "$(shim_calls "reload")" 1
+  assert_equal "$(shim_calls "user=${ADMIN}")" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "the directory the authorized key is staged in is never given away, and nothing is staged loose in the state root" {
+  # The property read straight off the code, which is where it has to hold. The state root
+  # is 0755, so every account on the node may traverse it: a key file lying directly in it
+  # and chowned to the operator is a file the operator can open and write, and every read
+  # of it after that chown is a read of a file the operator may have rewritten. The key is
+  # staged in a directory of its own instead, created 0700 and never chowned, and search
+  # permission on that directory is what the operator does not have.
+  #
+  # chmod and chown between them are the whole of it: the directory must be moded 0700, and
+  # it must never appear as a chown argument, or the account it were given to could enter
+  # it and reach the file inside.
+  run code_naming '^[[:space:]]*chown[[:space:]]'
+  assert_success
+  refute_output --partial '"${key_stage}"'
+  assert_output --partial '"${tmp}"'
+  run code_naming 'chmod 0700 "\${key_stage}"'
+  assert_equal "${#lines[@]}" 1
+  # And the key is staged inside that directory rather than beside it in the state root.
+  run code_naming 'key_stage="\${root}'
+  assert_equal "${#lines[@]}" 1
+  run code_naming 'tmp="\${key_stage}/authorized_keys"'
+  assert_equal "${#lines[@]}" 1
 }
 
 @test "a user name sshd could not safely be told is refused, and the argument list is checked" {

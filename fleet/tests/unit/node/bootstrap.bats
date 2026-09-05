@@ -223,6 +223,59 @@ vendor_wrapper() {
   chmod 0755 "${BIN}/${1}"
 }
 
+admin_key_owner() {
+  # admin_key_owner NAME: who ${KEYSRC}, the installation user's own authorized_keys,
+  # reports as its owner inside the run. The default is the installation user, which is
+  # what a real node has and what an unprivileged test cannot otherwise produce: chown is
+  # the one call these tests may not make, so every file in this fixture belongs to the
+  # account the tests run as, which is neither ${ADMIN} nor root. Without this the fixture
+  # would be modeling a node whose administrator has a key file sshd ignores, and the
+  # --harden-sshd row would be right to refuse it. The state is a file the stand-in reads
+  # at each call, exactly as linger_state and unit_state model their own commands, so a
+  # test changes it between runs without rebuilding anything.
+  printf '%s\n' "${1}" >"${VST}/admin-key-owner"
+}
+
+stat_standin() {
+  # stat is not a vendor command of any design section 5.2 row and nothing logs it: it is
+  # the platform helper lib/journal.sh reads a mode and an owner with. The subject here is
+  # a subprocess, so a shell function cannot stand in for it as tests/unit/lib/ssh.bats
+  # does in-process, and a script on ${BIN} is the seam instead, beside the shim links.
+  #
+  # It stands in for exactly one reading: the owner of ${KEYSRC}. Every other format and
+  # every other path is delegated to the real stat, so no other assertion in this file
+  # silently changes meaning, and both platforms are delegated identically. The two forms
+  # intercepted are the two lib/journal.sh asks an owner in, stat -c '%U' on Linux and
+  # stat -f '%Su' on Darwin; the mode, device, and inode readings the same helper makes are
+  # not among them and are answered by the real stat like everything else.
+  {
+    printf '#!/bin/bash\nset -euo pipefail\n'
+    printf '. "${HARBOR_TEST_VENDOR}"\n'
+    cat <<'WRAPPER'
+# The real stat by absolute path, never by another PATH search: this script is itself
+# first on PATH inside the run, so searching again would find it and recurse forever.
+real=/usr/bin/stat
+[ -x "${real}" ] || real=/bin/stat
+[ -x "${real}" ] || {
+  printf 'stat stand-in: no real stat at /usr/bin/stat or /bin/stat to delegate to\n' >&2
+  exit 127
+}
+owner=""
+[ ! -f "${VST}/admin-key-owner" ] || owner="$(cat "${VST}/admin-key-owner")"
+if [ "$#" -eq 3 ] && [ -n "${owner}" ] && [ "${3}" = "${KEYSRC}" ]; then
+  case "${1} ${2}" in
+    '-c %U' | '-f %Su')
+      printf '%s\n' "${owner}"
+      exit 0
+      ;;
+  esac
+fi
+exec "${real}" "$@"
+WRAPPER
+  } >"${BIN}/stat"
+  chmod 0755 "${BIN}/stat"
+}
+
 vendor_init() {
   # Every vendor command of the design section 5.2 rows, answering from this test's
   # own fixture tree, with the state a real command would leave modeled beside it.
@@ -247,7 +300,12 @@ vendor_init() {
     printf 'LOGIND="%s"\n' "${LOGIND}"
     printf 'PROPERTIES="%s"\n' "${PROPERTIES}"
     printf 'OPUSER="%s"\n' "${OPUSER}"
+    printf 'KEYSRC="%s"\n' "${KEYSRC}"
   } >"${VENDOR_ENV}"
+  # The installation user's own key file belongs to the installation user, which is what
+  # the --harden-sshd row reads it for and what this fixture cannot arrange with chown.
+  stat_standin
+  admin_key_owner "${ADMIN}"
   # Packages: the repository's own dpkg-query and apt-get fixture sets, a node on
   # which none of the six is installed, and the installed set the mutating call
   # switches to, exactly as tests/unit/lib/apt.bats composes them.
@@ -1285,6 +1343,29 @@ expected_rows() {
   assert_equal "${status}" 3
   assert_output --partial 'ssh.harden_no_key'
   assert [ ! -e "${GLOBAL_DROPIN}" ]
+}
+
+@test "--harden-sshd refuses when the installation user's own key file is one sshd would ignore" {
+  # The other half of the same refusal, reaching through the row rather than through the
+  # library. A key file that is there and holds a key is not yet a key file sshd will read:
+  # StrictModes makes sshd ignore an authorized_keys owned by neither root nor the account
+  # logging in. This flag sets PermitRootLogin no and PasswordAuthentication no for every
+  # account, so the administrator whose own file sshd ignores loses password login, root
+  # login, and key login in one reload, from the session they are running the command in.
+  install_form
+  admin_key_owner mallory
+  rows --harden-sshd
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial mallory
+  assert_output --partial 'StrictModes'
+  assert_output --partial "${KEYSRC}"
+  # Nothing was written for the flag and nothing was journaled for it: the row refused
+  # rather than hardening a node its administrator could not get back into.
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(phase_of file "${GLOBAL_DROPIN}")" none
+  # A refusal, never a repair: the file is left exactly as it was.
+  assert [ -f "${KEYSRC}" ]
 }
 
 @test "--adopt-firewall reaches the firewall row and journals the prior default" {
