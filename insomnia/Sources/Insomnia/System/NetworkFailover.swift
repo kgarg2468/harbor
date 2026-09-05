@@ -201,6 +201,11 @@ final class NetworkFailover {
     private var monitor: NWPathMonitor?
     private var retryTimer: Timer?
     private var generation = 0
+    private var lifetime = 0
+    private var operation = 0
+    private var stopped = false
+    private var work: [UUID: Task<Void, Never>] = [:]
+    var hasScheduledRetry: Bool { retryTimer != nil }
 
     init(
         paths: Paths,
@@ -224,12 +229,18 @@ final class NetworkFailover {
 
     func start() async {
         guard monitor == nil else { return }
+        lifetime += 1
+        let epoch = lifetime
+        stopped = false
         await resolveInterface()
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, !stopped, lifetime == epoch else { return }
         let m = NWPathMonitor(requiredInterfaceType: .wifi)
         m.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
-            Task { @MainActor in self?.handlePath(satisfied: satisfied) }
+            Task { @MainActor in
+                guard let self, !self.stopped, self.lifetime == epoch else { return }
+                self.handlePath(satisfied: satisfied)
+            }
         }
         m.start(queue: .main)
         monitor = m
@@ -237,6 +248,12 @@ final class NetworkFailover {
     }
 
     func stop() {
+        stopped = true
+        lifetime += 1
+        operation += 1
+        for task in work.values { task.cancel() }
+        work.removeAll()
+        lastGap = nil
         monitor?.cancel()
         monitor = nil
         cancelTimer()
@@ -260,8 +277,10 @@ final class NetworkFailover {
 
     private func resolveInterface() async {
         guard wifiInterface == nil else { return }
+        let epoch = lifetime
         do {
             let r = try await Shell.run(Self.networksetup, ["-listallhardwareports"], timeout: 5)
+            guard !Task.isCancelled, lifetime == epoch else { return }
             wifiInterface = HardwarePortsParser.wifiInterface(from: r.stdout)
             if wifiInterface == nil {
                 Log.error("could not find a Wi-Fi port in networksetup -listallhardwareports")
@@ -274,31 +293,57 @@ final class NetworkFailover {
     }
 
     private func handlePath(satisfied: Bool) {
-        Task { await process(satisfied: satisfied) }
+        _ = process(satisfied: satisfied)
     }
 
-    /// Feed one path update through the machine and apply its outputs.
-    /// Public so tests can drive the driver without an NWPathMonitor.
+    /// Drives the same tracked work as NWPathMonitor, without starting it.
     func simulate(satisfied: Bool) async {
-        await process(satisfied: satisfied)
+        let task = process(satisfied: satisfied)
+        await withTaskCancellationHandler {
+            await task?.value
+        } onCancel: {
+            task?.cancel()
+        }
     }
 
-    private func process(satisfied: Bool) async {
+    private func process(satisfied: Bool) -> Task<Void, Never>? {
+        guard !stopped, !Task.isCancelled else { return nil }
         let now = clock()
         let outputs = satisfied ? machine.pathSatisfied(at: now) : machine.pathUnsatisfied(at: now)
-        if outputs.isEmpty { return }
+        guard !outputs.isEmpty else { return nil }
+        operation += 1
+        for task in work.values { task.cancel() }
         if !satisfied { Log.info("wifi path unsatisfied") }
-        await apply(outputs)
+        return launch(outputs)
     }
 
-    private func fireTimer() {
-        retryTimer = nil
-        let outputs = machine.timerFired(at: clock())
-        Task { await apply(outputs) }
+    private func launch(_ outputs: [FailoverMachine.Output]) -> Task<Void, Never> {
+        let id = UUID()
+        let token = operation
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.apply(outputs, token: token)
+            self.work.removeValue(forKey: id)
+        }
+        work[id] = task
+        return task
     }
 
-    private func apply(_ outputs: [FailoverMachine.Output]) async {
+    /// Also used by tests to fire the retry without a wall-clock wait.
+    @discardableResult
+    func fireTimer() -> Task<Void, Never>? {
+        guard !stopped else { return nil }
+        cancelTimer()
+        return launch(machine.timerFired(at: clock()))
+    }
+
+    private func isCurrent(_ token: Int) -> Bool {
+        !stopped && operation == token && !Task.isCancelled
+    }
+
+    private func apply(_ outputs: [FailoverMachine.Output], token: Int) async {
         for o in outputs {
+            guard isCurrent(token) else { return }
             switch o {
             case let .scheduleRetry(after):
                 schedule(after: after)
@@ -306,7 +351,7 @@ final class NetworkFailover {
                 await joinHotspot()
             case let .recovered(start, gap):
                 cancelTimer()
-                await recovered(start: start, gap: gap)
+                await recovered(start: start, gap: gap, token: token)
             }
         }
     }
@@ -332,6 +377,8 @@ final class NetworkFailover {
     }
 
     func joinHotspot() async {
+        let token = operation
+        guard isCurrent(token) else { return }
         let config = configProvider()
         let ssid = config.hotspotSSID.trimmingCharacters(in: .whitespaces)
         guard !ssid.isEmpty else {
@@ -356,29 +403,33 @@ final class NetworkFailover {
         Log.info("joining hotspot \(ssid) on \(iface) (attempt \(machine.joins))")
         do {
             let joined = try await hotspotJoiner.join(ssid: ssid, password: password, interfaceName: iface)
+            guard isCurrent(token) else { return }
             if !joined {
                 Log.error("CoreWLAN scan found no network for hotspot \(ssid); retrying with backoff")
             }
         } catch {
+            guard isCurrent(token) else { return }
             Log.error("CoreWLAN hotspot join failed: \(error.localizedDescription)")
         }
     }
 
-    private func recovered(start: Date, gap: TimeInterval) async {
+    private func recovered(start: Date, gap: TimeInterval, token: Int) async {
         let end = clock()
-        lastGap = gap
         let line = FailoverMachine.logLine(start: start, end: end, gap: gap)
         appendHandoff(line)
         Log.info("wifi path satisfied after \(FailoverMachine.humanGap(gap))")
         let config = configProvider()
         if gap >= config.nudgeThreshold {
             let count = await nudge.nudge(targets: config.tmuxTargets)
+            guard isCurrent(token) else { return }
             let panes = count == 1 ? "1 tmux pane" : "\(count) tmux panes"
             notifier.post(
                 title: "Network recovered",
                 body: "Network was down \(FailoverMachine.humanGap(gap)). Nudged \(panes). Check GUI agents."
             )
         }
+        guard isCurrent(token) else { return }
+        lastGap = gap
         onRecovered?(gap)
     }
 
