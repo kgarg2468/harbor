@@ -3,6 +3,38 @@ import XCTest
 @testable import Insomnia
 
 final class LogTests: XCTestCase {
+    func testFIFOLoggingReturnsAndReleasesRecoveryLease() throws {
+        let fixtureKey = "INSOMNIA_FIFO_LOG_FIXTURE"
+        if let root = ProcessInfo.processInfo.environment[fixtureKey] {
+            let paths = Paths(root: URL(fileURLWithPath: root))
+            Log.append(level: "info", "FIFO fixture", paths: paths)
+            try JournalLock.withLock(at: paths.recoveryLock) {}
+            return
+        }
+        for name in ["insomnia.log", "handoffs.log", "insomnia.log.1"] {
+            let home = TempHome(); defer { home.destroy() }
+            try home.paths.createDirectories()
+            XCTAssertEqual(mkfifo(home.paths.logs.appendingPathComponent(name).path, 0o600), 0)
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            child.arguments = ["xctest", "-XCTest", "InsomniaTests.LogTests/testFIFOLoggingReturnsAndReleasesRecoveryLease",
+                               Bundle(for: LogTests.self).bundleURL.path]
+            child.environment = ProcessInfo.processInfo.environment.merging([fixtureKey: home.root.path,
+                "INSOMNIA_HOME": home.root.path]) { _, new in new }
+            child.standardOutput = FileHandle.nullDevice
+            child.standardError = FileHandle.nullDevice
+            try child.run()
+            let deadline = Date().addingTimeInterval(5)
+            while child.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            let blocked = child.isRunning
+            if blocked { kill(child.processIdentifier, SIGKILL) }
+            child.waitUntilExit()
+            XCTAssertFalse(blocked, "FIFO at \(name) blocked logging")
+            XCTAssertEqual(child.terminationStatus, 0, name)
+            try JournalLock.withLock(at: home.paths.recoveryLock) {}
+        }
+    }
+
     func testDynamicDiagnosticsAreNotPersisted() throws {
         let home = TempHome(); defer { home.destroy() }
         let privateSSID = "PRIVATE_SSID"

@@ -22,7 +22,8 @@ enum PrivateFiles {
 
     static func handle(_ url: URL, flags: Int32) throws -> FileHandle {
         try directory(url.deletingLastPathComponent())
-        let fd = open(url.path, flags | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        // Reject special files below without blocking while opening a FIFO.
+        let fd = open(url.path, flags | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw failure() }
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
