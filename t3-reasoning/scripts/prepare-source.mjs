@@ -8,7 +8,17 @@
 // the git binary only.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -82,15 +92,52 @@ async function readLock(lockPath) {
   return lock;
 }
 
+// True when `target` is `dir` itself or lies somewhere beneath it. Both paths
+// must already be absolute and normalized. Only an exact `..` segment counts
+// as a parent reference; a name that merely starts with two dots, such as
+// `..patches`, is an ordinary directory.
+function isWithin(dir, target) {
+  const relative = path.relative(dir, target);
+  if (relative === "") return true;
+  if (path.isAbsolute(relative)) return false;
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`);
+}
+
+// Resolves a lock's patch path to the real file it names, refusing anything
+// that lands outside the lock directory: absolute paths, `..` escapes, and
+// symlinks (at any depth) whose target lies elsewhere. Returns the real path,
+// which is what the caller then reads. `realLockDir` is the lock directory
+// with its own symlinks already resolved, so both sides compare like for like.
+async function resolvePatchFile(realLockDir, patchPath) {
+  if (path.isAbsolute(patchPath)) {
+    fail(`patch ${patchPath}: path must be relative to the lock directory, not absolute`);
+  }
+  const nominal = path.resolve(realLockDir, patchPath);
+  if (!isWithin(realLockDir, nominal)) {
+    fail(`patch ${patchPath}: path resolves outside the lock directory ${realLockDir}`);
+  }
+  let real;
+  try {
+    real = await realpath(nominal);
+  } catch (error) {
+    fail(`patch ${patchPath}: cannot resolve ${nominal}: ${error.message}`);
+  }
+  if (!isWithin(realLockDir, real)) {
+    fail(`patch ${patchPath}: ${nominal} links to ${real}, outside the lock directory ${realLockDir}`);
+  }
+  return real;
+}
+
 // Returns the patches in lock order with their verified bytes, after
-// confirming each file's SHA-256 matches the lock. Runs before any network or
-// filesystem work; the bytes verified here are the bytes applied later, so a
-// patch file changing on disk after this point cannot reach `git apply`.
+// confirming each file lies within the lock directory and its SHA-256 matches
+// the lock. Runs before any network or filesystem work; the bytes verified
+// here are the bytes applied later, so a patch file changing on disk after
+// this point cannot reach `git apply`.
 async function verifyPatches(lock, lockPath) {
-  const lockDir = path.dirname(lockPath);
+  const lockDir = await realpath(path.dirname(lockPath));
   const verified = [];
   for (const patch of lock.patches) {
-    const file = path.resolve(lockDir, patch.path);
+    const file = await resolvePatchFile(lockDir, patch.path);
     let content;
     try {
       content = await readFile(file);

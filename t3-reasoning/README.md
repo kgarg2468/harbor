@@ -16,8 +16,11 @@ reproducibility baseline, not a claim that it is the current Nightly.
 
 - `source.lock.json`: the pin. `version` is `1`; `repository` is the upstream
   HTTPS URL; `commit` is the full SHA-1; `patches` is the ordered list of
-  `{ "path", "sha256" }` entries, with paths relative to the lock file. The
-  patch list is empty until the feature import lands.
+  `{ "path", "sha256" }` entries. Each path is relative to the lock file and
+  must stay inside the lock file's directory: absolute paths, `..` escapes,
+  and symlinks whose real target lies elsewhere are rejected even when the
+  checksum matches. Subdirectories are fine. The patch list is empty until the
+  feature import lands.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
   temporary fixture repository with real `git` processes.
@@ -43,9 +46,11 @@ Defaults are the component's `source.lock.json` and the destination
   resolved against the directory you run the command from; URLs and SCP-like
   `host:path` forms are passed to `git` unchanged.
 
-The tool first reads every patch and verifies its SHA-256 against the lock,
-before any network or filesystem work. It then fetches the pinned commit into
-a staging directory next to the destination, checks it out detached, applies
+The tool first checks that every patch path stays inside the lock directory
+(symlinks resolved), then reads each patch and verifies its SHA-256 against
+the lock, all before any network or filesystem work. It then fetches the
+pinned commit into a staging directory next to the destination, checks it out
+detached, applies
 the patches in order by piping the already-verified bytes into `git apply`
 (the patch files are never re-read, so a file changing after verification
 cannot reach the checkout), and only then renames the staging directory into

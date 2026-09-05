@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -371,5 +371,100 @@ exec "$REAL_GIT" "$@"
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /commit/);
     assert.deepEqual(await entries(dir), []);
+  });
+
+  describe("patch path containment", () => {
+    // Every rejection case points at a repository that does not exist, so a
+    // run that reached git would fail with a fetch error instead of the
+    // containment error asserted here. Every patch file carries a matching
+    // checksum, so the checksum check alone would have let it through.
+    const noRepository = "/nonexistent/prepare-source-never-fetched.git";
+
+    async function expectRejected(dir, destination, lock, patchPath) {
+      const result = await prepare({ lock, destination, repository: noRepository });
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /lock directory/);
+      assert.ok(result.stderr.includes(patchPath), result.stderr);
+      assert.doesNotMatch(result.stderr, /git |fetching/);
+      assert.deepEqual(await entries(dir), []);
+    }
+
+    it("rejects a patch path that escapes the lock directory with ..", async () => {
+      const { dir, destination } = await freshCase();
+      // The file really exists one level above the lock directory.
+      await writeFile(path.join(root, "escape.patch"), PATCH_ONE);
+      const lock = await writeLock("escape.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [{ path: "../escape.patch", sha256: sha256(PATCH_ONE) }],
+      });
+      await expectRejected(dir, destination, lock, "../escape.patch");
+    });
+
+    it("rejects an absolute patch path", async () => {
+      const { dir, destination } = await freshCase();
+      const absolute = path.join(root, "absolute.patch");
+      await writeFile(absolute, PATCH_ONE);
+      const lock = await writeLock("absolute.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [{ path: absolute, sha256: sha256(PATCH_ONE) }],
+      });
+      await expectRejected(dir, destination, lock, absolute);
+    });
+
+    it("rejects a symlink inside the lock directory that points outside it", async () => {
+      const { dir, destination } = await freshCase();
+      const target = path.join(root, "symlink-target.patch");
+      await writeFile(target, PATCH_ONE);
+      await symlink(target, path.join(lockDir, "link.patch"));
+      const lock = await writeLock("symlink.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [{ path: "link.patch", sha256: sha256(PATCH_ONE) }],
+      });
+      await expectRejected(dir, destination, lock, "link.patch");
+    });
+
+    it("accepts a patch nested in a subdirectory of the lock directory", async () => {
+      const { destination } = await freshCase();
+      await mkdir(path.join(lockDir, "patches", "nested"), { recursive: true });
+      const nested = path.join("patches", "nested", "0001-nested.patch");
+      await writeFile(path.join(lockDir, nested), PATCH_ONE);
+      const lock = await writeLock("nested.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [{ path: nested, sha256: sha256(PATCH_ONE) }],
+      });
+      const result = await prepare({ lock, destination });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(path.join(destination, "hello.txt"), "utf8"), "one patched\n");
+      const provenance = JSON.parse(
+        await readFile(path.join(destination, ".git", "harbor-source.json"), "utf8"),
+      );
+      assert.deepEqual(provenance.patches, [{ path: nested, sha256: sha256(PATCH_ONE) }]);
+    });
+
+    it("accepts a contained directory whose name merely starts with ..", async () => {
+      const { destination } = await freshCase();
+      // "..patches" is an ordinary name, not a parent reference; a naive
+      // startsWith("..") check would reject it.
+      await mkdir(path.join(lockDir, "..patches"), { recursive: true });
+      const dotted = path.join("..patches", "feature.patch");
+      await writeFile(path.join(lockDir, dotted), PATCH_ONE);
+      const lock = await writeLock("dotted.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [{ path: dotted, sha256: sha256(PATCH_ONE) }],
+      });
+      const result = await prepare({ lock, destination });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(path.join(destination, "hello.txt"), "utf8"), "one patched\n");
+    });
   });
 });
