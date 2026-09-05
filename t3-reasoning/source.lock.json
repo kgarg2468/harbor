@@ -24,6 +24,11 @@
       "sha256": "a1242b0c4d74d0830e611686f87de6403befc7fe6cb36b31b989d3a583c208ce"
     },
     {
+      "id": "update-activity",
+      "path": "patches/0005-update-activity.patch",
+      "sha256": "79f9a1d428990ebd092ddc1e5c32b54c7cbba67c51c817300a0a3f3c5ef2f2f2"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -34,13 +39,15 @@
       "reasoning-full",
       "desktop-runtime-common",
       "update-admission",
-      "queued-update"
+      "queued-update",
+      "update-activity"
     ],
     "reasoning": [
       "reasoning-full",
       "desktop-runtime-common",
       "update-admission",
       "queued-update",
+      "update-activity",
       "reasoning-identity"
     ]
   }
