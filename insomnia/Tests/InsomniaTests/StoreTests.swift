@@ -94,4 +94,33 @@ final class StoreTests: XCTestCase {
         XCTAssertThrowsError(try store.deleteSession())
     }
 
+    func testMetadataFilesAndOwnedDirectoryArePrivate() throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: home.paths.appSupport.path)
+        try store.saveConfig(Config())
+        try store.saveState(.clean)
+        try store.saveSession(Session(startedAt: Date(), endsAt: Date()))
+        for file in [home.paths.configFile, home.paths.stateFile, home.paths.sessionFile] {
+            let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+            XCTAssertEqual(mode?.intValue, 0o600)
+        }
+        let mode = try FileManager.default.attributesOfItem(atPath: home.paths.appSupport.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o700)
+    }
+
+    func testReadingLegacyMetadataTightensModeAndRefusesSymlinkTargets() throws {
+        try store.saveConfig(Config())
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: home.paths.configFile.path)
+        XCTAssertNotNil(try store.loadConfig())
+        let mode = try FileManager.default.attributesOfItem(atPath: home.paths.configFile.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
+        let outside = home.root.appendingPathComponent("other-file")
+        try Data("PRIVATE_EXTERNAL_CONTENT".utf8).write(to: outside)
+        try FileManager.default.removeItem(at: home.paths.configFile)
+        try FileManager.default.createSymbolicLink(at: home.paths.configFile, withDestinationURL: outside)
+        XCTAssertThrowsError(try store.loadConfig())
+        try store.saveConfig(Config())
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "PRIVATE_EXTERNAL_CONTENT")
+        XCTAssertNotNil(try store.loadConfig())
+    }
+
 }
