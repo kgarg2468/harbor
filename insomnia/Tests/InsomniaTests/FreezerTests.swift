@@ -93,32 +93,23 @@ final class FreezerTests: XCTestCase {
     func testSuspendAndResumeSignalsGoToProcessControl() {
         let control = FakeProcessControl()
         let f = FakeFreezer(apps: apps, processes: processes, control: control)
-        f.suspend(pids: [100, 101], expectedParents: [100: 1, 101: 100])
-        f.resume(pids: [100, 101])
+        let identities = [100, 101].map(FakeProcessControl.identity)
+        XCTAssertEqual(f.suspend(processes: identities, expectedParents: [100: 1, 101: 100]), identities)
+        XCTAssertEqual(f.resume(processes: identities), [])
         XCTAssertEqual(control.suspended, [[100, 101]])
         XCTAssertEqual(control.resumed, [[100, 101]])
     }
 
-    func testSignalFiltersUseCurrentParentAndStoppedState() {
+    func testSignalFiltersUseCurrentIdentityParentAndStoppedState() {
         let states: [Int32: ProcessSignalState] = [
-            100: ProcessSignalState(ppid: 1, stopped: false),
-            101: ProcessSignalState(ppid: 999, stopped: true),
-            102: ProcessSignalState(ppid: 100, stopped: true),
-            103: ProcessSignalState(ppid: 100, stopped: false),
+            100: ProcessSignalState(identity: FakeProcessControl.identity(100), ppid: 1, stopped: false),
+            101: ProcessSignalState(identity: FakeProcessControl.identity(101), ppid: 999, stopped: false),
+            102: ProcessSignalState(identity: FakeProcessControl.identity(102), ppid: 100, stopped: true),
         ]
-        let lookup: SignalProcessControl.StateLookup = { states[$0] }
-
-        XCTAssertEqual(
-            SignalProcessControl.suspendable(
-                pids: [100, 101, 102, 404],
-                expectedParents: [100: 1, 101: 100, 102: 100, 404: 100],
-                stateLookup: lookup
-            ),
-            [100, 102]
-        )
-        XCTAssertEqual(
-            SignalProcessControl.resumable(pids: [101, 102, 103, 404], stateLookup: lookup),
-            [101, 102]
-        )
+        let control = SignalProcessControl(stateLookup: { states[$0].map(ProcessLookup.found) ?? .exited },
+                                           send: { _, _ in XCTFail("Planning must not signal"); return 0 })
+        XCTAssertEqual(control.prepareSuspend(processes: [100, 101, 102, 404].map(FakeProcessControl.identity),
+                                              expectedParents: [100: 1, 101: 100, 102: 100, 404: 100]),
+                       [FakeProcessControl.identity(100)])
     }
 }

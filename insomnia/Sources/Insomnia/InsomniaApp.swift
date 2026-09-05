@@ -6,6 +6,17 @@ import SwiftUI
 /// `SettingsWindow`), so there is no SwiftUI scene with any content in it.
 /// `App` still requires one, hence the empty `Settings`.
 @main
+enum InsomniaEntryPoint {
+    @MainActor
+    static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "--recover-owned" {
+            exit(RecoveryCommand.run(arguments: arguments))
+        }
+        InsomniaApp.main()
+    }
+}
+
 struct InsomniaApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
 
