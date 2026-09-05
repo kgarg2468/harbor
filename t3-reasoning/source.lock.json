@@ -10,6 +10,10 @@
     {
       "path": "patches/0002-desktop-identity.patch",
       "sha256": "cc839a3d8682e71340e848a10116e7ab1dd530f3e10c3c424d711eb889bcbd09"
+    },
+    {
+      "path": "patches/0003-update-admission.patch",
+      "sha256": "663f8d54b6c79b5eaaebac0fd7e25c4cb84c3fc7ffba0cc2dd7566911cbf712a"
     }
   ]
 }

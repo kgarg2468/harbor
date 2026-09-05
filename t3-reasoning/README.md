@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly. `source.lock.json` pins upstream commit
 `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, and two checksummed patches. Preparing the
+`v0.0.39-nightly.20260905.1284`, and three checksummed patches. Preparing the
 source yields a checkout you can install dependencies into and build the
 server from, using upstream's own scripts.
 
@@ -39,6 +39,9 @@ What this component does not do:
 - `patches/0002-desktop-identity.patch`: the separate Reasoning desktop
   identity, the disabled updater feed, the packaged backend PATH fix, and the
   manual macOS updater script.
+- `patches/0003-update-admission.patch`: a tested command-admission primitive
+  for maintenance. It is not yet wired into server requests or an updater;
+  it does not by itself detect agent activity or enable automatic updates.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
@@ -127,6 +130,7 @@ npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml 't3-reasoning/**/*.
 These are the commands `.github/workflows/t3-reasoning.yml` runs on Linux and
 macOS whenever this directory changes.
 
-To confirm the pin reproduces the port commit, prepare the source, stage every
-file in the checkout, and compare `git write-tree` against the port commit's
-tree id recorded in `docs/nightly-port.md`.
+The first two patches reproduce the port commit's tree recorded in
+`docs/nightly-port.md`. Later patches add incremental features beyond that
+baseline. The admission primitive's focused check in a prepared checkout is
+`pnpm --filter t3 test src/updateAdmission.test.ts` (11 tests).

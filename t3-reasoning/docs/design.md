@@ -4,8 +4,10 @@ Status: approved by the owner. No live installation or activation has occurred.
 
 ## Product contract
 
-Keep the official Nightly app and the Reasoning app side by side. Reasoning is
-the same upstream product plus a maintained feature patch set. Both clients show
+Keep managed Nightly and Reasoning apps side by side. The owner approved managed
+custom builds of both variants so each can enforce a shared default on every
+launch. Reasoning is the same upstream product plus a maintained feature patch
+set. Both clients show
 the same projects, threads, messages, attachments, approvals, and work status
 when connected to the same environment. A message sent in either client becomes
 visible in the other through T3's existing event stream.
@@ -30,8 +32,9 @@ set here, with build tooling, focused tests, and durable architecture documents.
 Materialize upstream source in an ignored build checkout. Do not publish private
 chat data, connections, credentials, machine names, or build output.
 
-The Reasoning release combines the exact Nightly source with the accepted
-patch set. The official Nightly bundle remains an official signed artifact.
+Both releases combine the exact official Nightly source with shared-server
+support. Reasoning also includes the accepted feature patch set. The managed
+Nightly bundle is a custom build, not the official signed artifact.
 A plain stock download must never overwrite Reasoning and silently remove its
 features. A source conflict or failing compatibility test retains the previous
 working Reasoning release and reports the reason; automatic discovery retries.
@@ -50,10 +53,10 @@ or divergent Reasoning history to both clients as a clearly labeled legacy
 environment. Do not silently drop, deduplicate, or replay divergent event streams.
 Make shared environments the normal destination for new work in both apps.
 
-The exact supported mechanism for configuring those defaults in stock Nightly
-must be verified before activation. If stock behavior cannot enforce a default,
-show the limitation explicitly rather than claiming all local fallback activity
-is synchronized. Verify stock compatibility with the reasoning-capable server.
+Persist the shared default in both managed variants and restore it on every
+launch and reconnect. An unavailable shared environment stays selected with an
+offline state; never silently route new work to a separate embedded store.
+Verify both managed clients against the reasoning-capable shared server.
 
 ## Updates queued per machine
 
@@ -86,9 +89,9 @@ Display Available, Downloading, Queued (agents working), Updating, Current, and
 Failed states with versions and a concise reason. Provide queue cancellation and
 retry. An offline target remains pending and retries after reconnect.
 
-Verify desktop auto-updater ownership before replacing a bundle. Stock Nightly
-must not race an external installer. Do not promise unattended stock activation
-until its supported updater control path and final idle guard are demonstrated.
+Give the managed release coordinator exclusive desktop update ownership; the
+upstream updater must not race it or replace either variant with stock code.
+Verify the final idle guard before unattended activation.
 Similarly, verify server code and database rollback together; an old binary is
 not a recovery plan for an incompatible migrated database.
 
