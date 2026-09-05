@@ -153,7 +153,7 @@ final class ReconcileTests: XCTestCase {
         XCTAssertEqual(h.backstop.clears, 1)
         let err = try XCTUnwrap(m.lastError)
         XCTAssertTrue(err.contains("password is required"), err)
-        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1"])
+        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1", "disablesleep 0"])
     }
 
     func testStartFailsBeforeDisablingSleepWhenBackstopCannotBeArmed() async throws {
@@ -169,16 +169,16 @@ final class ReconcileTests: XCTestCase {
         XCTAssertTrue(err.contains("backstop"), err)
     }
 
-    func testExtendKeepsOldDeadlineWhenBackstopCannotBeMoved() async throws {
+    func testExtendEndsSafelyWhenBackstopCannotBeMoved() async throws {
         let m = h.makeManager()
         await m.start(duration: 3600)
-        let original = try XCTUnwrap(m.session)
         h.backstop.failSchedule = true
         await m.extend(by: 3600)
 
-        XCTAssertEqual(m.session, original)
-        XCTAssertEqual(try h.store.loadSession(), original)
-        XCTAssertEqual(m.scheduledDeadline, original.endsAt)
+        XCTAssertNil(m.session)
+        XCTAssertNil(try h.store.loadSession())
+        XCTAssertNil(m.scheduledDeadline)
+        XCTAssertFalse(h.guardFake.sleepDisabled)
         XCTAssertNotNil(m.lastError)
     }
 
@@ -238,6 +238,7 @@ final class ReconcileTests: XCTestCase {
         XCTAssertNil(try h.store.loadSession())
         XCTAssertEqual(try h.store.loadState()?.sleepDisabledByUs, true)
         XCTAssertNotNil(m.lastError)
+        XCTAssertEqual(h.backstop.clears, 0, "failed restoration must retain recovery")
     }
 
     func testCountdownPauseResume() async throws {

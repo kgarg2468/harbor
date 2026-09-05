@@ -160,9 +160,13 @@ final class FloorRuleDriverTests: XCTestCase {
         let floor = Task { await driver.run(percent: 35, isCharging: false, thermal: .nominal) }
         await gate.waitUntilStarted()
 
-        await m.end(reason: .user)
+        let ending = expectation(description: "end requested")
+        let end = Task { ending.fulfill(); await m.end(reason: .user) }
+        await fulfillment(of: [ending])
         await gate.open()
         await floor.value
+        await end.value
+        XCTAssertFalse(h.guardFake.lowPower)
 
         XCTAssertEqual(try h.store.loadState()?.lowPowerSetByUs, false)
         XCTAssertFalse(h.notifier.posts.contains { $0.title == "Low Power Mode on" })

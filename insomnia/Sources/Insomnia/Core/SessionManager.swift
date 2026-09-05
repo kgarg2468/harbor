@@ -28,7 +28,12 @@ final class SessionManager {
     /// Last failure worth showing in the menu; cleared on the next success.
     private(set) var lastError: String?
 
-    var isActive: Bool { session != nil }
+    var isActive: Bool { session != nil && pendingEnds == 0 }
+    /// Confirmed by a successful sleep-guard command, independent of journal intent.
+    private(set) var sleepHeld = false
+    @ObservationIgnored private let operationGate = SessionOperationGate()
+    @ObservationIgnored private var generation: UInt64 = 0
+    private var pendingEnds = 0
 
     /// Fire date of the single deadline timer, exposed for tests and the menu.
     private(set) var scheduledDeadline: Date?
@@ -112,6 +117,15 @@ final class SessionManager {
     /// Ordering: session.json, then state.json, then `pmset disablesleep 1`.
     /// If pmset fails the journal is rolled back so nothing is left on disk.
     func start(duration: TimeInterval) async {
+        let requestedGeneration = generation
+        guard pendingEnds == 0 else { return }
+        await operationGate.acquire()
+        defer { operationGate.release() }
+        guard requestedGeneration == generation, !Task.isCancelled else { return }
+        await startUnlocked(duration: duration)
+    }
+
+    private func startUnlocked(duration: TimeInterval) async {
         guard session == nil else {
             Log.info("start ignored: session already active")
             return
@@ -145,35 +159,49 @@ final class SessionManager {
         do {
             try await sleepGuard.setSleepDisabled(true)
         } catch {
-            // Roll back the journal: no session may exist if sleep is not disabled.
-            rollBackStart()
-            try? await backstop.clear()
+            // A failed command can have partially applied; keep ownership until
+            // a compensating restore succeeds.
+            await endUnlocked(reason: .backstop)
             fail("could not disable sleep: \(error.localizedDescription)")
             return
         }
 
         session = new
+        sleepHeld = true
+        countdownPaused = clamshell() == true
         lastError = nil
         Log.info("session started until \(iso(new.endsAt)) (\(Int(duration))s requested)")
         await armDeadline(new.endsAt)
         // App Nap defaults and every observer live in AppServices.
-        services?.start(for: self)
+        if pendingEnds == 0 { services?.start(for: self) }
         // PR3: schedule "5 minutes left" notification.
     }
 
     func extend(by extra: TimeInterval) async {
+        let requestedGeneration = generation
+        guard pendingEnds == 0 else { return }
+        await operationGate.acquire()
+        defer { operationGate.release() }
+        guard requestedGeneration == generation, !Task.isCancelled else { return }
+        await extendUnlocked(by: extra)
+    }
+
+    private func extendUnlocked(by extra: TimeInterval) async {
         guard let current = session else { return }
         let updated = SessionMath.extended(current, by: extra, now: clock(), maxDuration: config.maxDuration)
-        // Move the backstop first; if launchd rejects it the old deadline stays.
+        // A failed replacement may also have lost its previous recovery job.
         do {
             try await backstop.schedule(endsAt: updated.endsAt)
         } catch {
+            await endUnlocked(reason: .backstop)
             fail("could not move backstop: \(error.localizedDescription)")
             return
         }
         do {
             try store.saveSession(updated)
         } catch {
+            // Disk and recovery disagree; safely end instead of accepting either deadline.
+            await endUnlocked(reason: .backstop)
             fail("could not write session: \(error.localizedDescription)")
             return
         }
@@ -187,6 +215,21 @@ final class SessionManager {
     /// a clean "no session" for reconcile/backstop), then undo RuntimeState
     /// from disk, then clear the backstop trigger.
     func end(reason: EndReason) async {
+        generation &+= 1
+        pendingEnds += 1
+        // Stop producers now; already-started mutations finish before cleanup.
+        services?.stop()
+        await operationGate.acquire()
+        defer {
+            pendingEnds -= 1
+            operationGate.release()
+        }
+        await endUnlocked(reason: reason)
+    }
+
+    private func endUnlocked(reason: EndReason) async {
+        // Recovery-triggered ends also invalidate work already queued at the gate.
+        generation &+= 1
         let had = session != nil
         Log.info("session end (\(reason.rawValue))")
         stopTimers()
@@ -194,19 +237,23 @@ final class SessionManager {
         scheduledDeadline = nil
         remainingText = ""
         countdownText = ""
+        countdownPaused = false
         do {
             try store.deleteSession()
         } catch {
             Log.error("could not delete session.json: \(error.localizedDescription)")
         }
-        await restoreAll()
-        do {
-            try await backstop.clear()
-        } catch {
-            Log.error("backstop clear failed: \(error.localizedDescription)")
+        services?.stop()
+        await restoreAllUnlocked()
+        // Keep independent recovery armed when any restoration still needs retry.
+        if !state.isDirty {
+            do {
+                try await backstop.clear()
+            } catch {
+                Log.error("backstop clear failed: \(error.localizedDescription)")
+            }
         }
         // App Nap defaults are intentionally left set (spec: open decisions).
-        services?.stop()
         notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason))
     }
 
@@ -226,6 +273,17 @@ final class SessionManager {
     /// when the mode was actually changed.
     @discardableResult
     func setLowPower(_ on: Bool) async -> Bool {
+        let requestedGeneration = generation
+        let requestedSession = session?.startedAt
+        await operationGate.acquire()
+        defer { operationGate.release() }
+        guard requestedGeneration == generation, !Task.isCancelled,
+              !on || (isActive && session?.startedAt == requestedSession) else { return false }
+        let changed = await setLowPowerUnlocked(on)
+        return changed && requestedGeneration == generation && pendingEnds == 0
+    }
+
+    private func setLowPowerUnlocked(_ on: Bool) async -> Bool {
         if on {
             guard !state.lowPowerSetByUs else { return false }
             do {
@@ -261,6 +319,14 @@ final class SessionManager {
     /// clear the Docker marker, restore volume and mute. Used by lid open,
     /// reconcile (lid open) and the full restore.
     func undoLidActions() async {
+        let requestedGeneration = generation
+        await operationGate.acquire()
+        defer { operationGate.release() }
+        guard requestedGeneration == generation else { return }
+        undoLidActionsUnlocked()
+    }
+
+    private func undoLidActionsUnlocked() {
         var s: RuntimeState
         do {
             s = try store.loadState() ?? .clean
@@ -279,6 +345,12 @@ final class SessionManager {
     /// Failures are logged and the entry is left set so the next reconcile or
     /// the backstop retries it.
     func restoreAll() async {
+        await operationGate.acquire()
+        defer { operationGate.release() }
+        await restoreAllUnlocked()
+    }
+
+    private func restoreAllUnlocked() async {
         var s: RuntimeState
         do {
             s = try store.loadState() ?? .clean
@@ -290,6 +362,7 @@ final class SessionManager {
         if s.sleepDisabledByUs {
             do {
                 try await sleepGuard.setSleepDisabled(false)
+                sleepHeld = false
                 s.sleepDisabledByUs = false
                 try? persistState(s)
                 Log.info("sleep restored")
@@ -346,6 +419,15 @@ final class SessionManager {
     // MARK: Reconcile (spec section 8)
 
     func reconcile() async {
+        let requestedGeneration = generation
+        guard pendingEnds == 0 else { return }
+        await operationGate.acquire()
+        defer { operationGate.release() }
+        guard requestedGeneration == generation, !Task.isCancelled else { return }
+        await reconcileUnlocked()
+    }
+
+    private func reconcileUnlocked() async {
         let now = clock()
         var onDisk: Session?
         do {
@@ -356,56 +438,68 @@ final class SessionManager {
         }
 
         if let s = onDisk, !s.isExpired(at: now) {
-            // Step 2: valid session. Re-apply disablesleep (idempotent), rearm timers.
-            session = s
-            var st = state
-            if !st.sleepDisabledByUs {
-                st.sleepDisabledByUs = true
-                try? persistState(st)
-            }
+            // As on start, recovery must be journaled and armed before pmset.
             do {
-                try await sleepGuard.setSleepDisabled(true)
-                lastError = nil
+                var st = state
+                st.sleepDisabledByUs = true
+                try persistState(st)
             } catch {
-                fail("could not re-apply sleep guard: \(error.localizedDescription)")
+                await endUnlocked(reason: .backstop)
+                await clearUnownedSleep()
+                fail("could not journal reconciled session: \(error.localizedDescription)")
+                return
             }
-            Log.info("reconcile: session valid until \(iso(s.endsAt))")
             do {
                 try await backstop.schedule(endsAt: s.endsAt)
             } catch {
+                await endUnlocked(reason: .backstop)
                 fail("could not re-arm backstop: \(error.localizedDescription)")
+                return
             }
-            // Lid-close actions still on disk are undone only if the lid is
-            // open now. Closed (or unknown): they are already journaled and
-            // will be undone on the next lid open or at session end.
+            do {
+                try await sleepGuard.setSleepDisabled(true)
+            } catch {
+                await endUnlocked(reason: .backstop)
+                fail("could not re-apply sleep guard: \(error.localizedDescription)")
+                return
+            }
+            sleepHeld = true
+            session = s
+            lastError = nil
+            Log.info("reconcile: session valid until \(iso(s.endsAt))")
             let lidClosed = clamshell()
+            countdownPaused = lidClosed == true
             if lidClosed == false {
-                undoLidActions(in: &st)
-                state = st
-            } else if st.frozenPids.isEmpty == false || st.savedOutputVolume != nil {
+                undoLidActionsUnlocked()
+            } else if !state.frozenPids.isEmpty || state.savedOutputVolume != nil {
                 Log.info("reconcile: lid \(lidClosed == nil ? "unknown" : "closed"), keeping lid-close actions")
             }
             await armDeadline(s.endsAt)
-            services?.start(for: self)
+            if pendingEnds == 0 { services?.start(for: self) }
             return
         }
 
         // Step 1: missing or expired -> full end.
         if onDisk != nil {
             Log.info("reconcile: session expired, restoring")
-            await end(reason: .timer)
+            await endUnlocked(reason: .timer)
         } else if state.isDirty {
             Log.info("reconcile: no session but dirty state, restoring")
-            await end(reason: .backstop)
+            await endUnlocked(reason: .backstop)
         } else {
             Log.info("reconcile: no session, nothing to restore")
         }
 
+        await clearUnownedSleep()
+    }
+
+    private func clearUnownedSleep() async {
         // Step 3: SleepDisabled set with no session -> clear it.
         do {
             if try await sleepGuard.isSleepDisabled() {
                 Log.info("reconcile: pmset reports SleepDisabled with no session, clearing")
                 try await sleepGuard.setSleepDisabled(false)
+                sleepHeld = false
             }
         } catch {
             Log.error("reconcile: sleep check failed: \(error.localizedDescription)")
