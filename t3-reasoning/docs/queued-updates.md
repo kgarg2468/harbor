@@ -1,6 +1,6 @@
 # Durable update queue
 
-`0004-queued-update.patch` adds the queue controller and 34 focused tests. It is
+`0004-queued-update.patch` adds the queue controller and 37 focused tests. It is
 not installed or connected to RPC handlers, nightly discovery, or the launcher.
 
 The controller records an exact target version before starting background
@@ -26,6 +26,12 @@ If saving that answer fails, the controller retains its activation reservation
 and retries only the state write. It does not repeat activation while the
 previous result is waiting to become durable. Accepted handoffs remain updating.
 
+Before its first state replacement, each controller creates any missing state
+directories and syncs their full ancestor chain. It repeats that proof after
+a failed barrier, including after a process restart with partially created
+directories still visible. Subsequent writes reuse the proof while the directory
+exists.
+
 State writes sync the temporary file before replacement and sync its parent
 directory afterward. Commands acknowledge only after both barriers succeed.
 If the directory sync fails after replacement, memory follows the new pathname
@@ -40,14 +46,15 @@ running binary's version stamp and artifact verification.
 ## Verification
 
 On Node 24.13.1, `pnpm --filter t3 test src/cloud/queuedUpdate.test.ts` passes all
-34 tests. Coverage includes busy and unknown activity, restart recovery, staged
+37 tests. Coverage includes busy and unknown activity, restart recovery, staged
 failures, cancellation and replacement races, interrupted commands, exact-version
 validation, and failed state writes after both busy and failed activation.
 
 Independent review found four activation races, then a persistence recovery
 gap. Regression tests reproduce the failures and pass with the corrections.
-Greptile identified the missing durability barriers; five additional tests cover
+Greptile identified the missing durability barriers; eight additional tests cover
 file sync, directory sync, canceled intent across recovery, and observers waiting
-for durable state.
+for durable state, nested directory creation, and restarting after a failed
+creation barrier.
 Live activation still requires the separate activity tracker, admission wiring,
 verified artifact staging, and launcher integration.

@@ -1,9 +1,9 @@
 diff --git a/apps/server/src/cloud/queuedUpdate.ts b/apps/server/src/cloud/queuedUpdate.ts
 new file mode 100644
-index 000000000..e44fb6041
+index 000000000..301609c9c
 --- /dev/null
 +++ b/apps/server/src/cloud/queuedUpdate.ts
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,620 @@
 +import * as Context from "effect/Context";
 +import * as Deferred from "effect/Deferred";
 +import type * as Duration from "effect/Duration";
@@ -232,13 +232,39 @@ index 000000000..e44fb6041
 +  const tempPath = `${statePath}.tmp`;
 +  const encoder = new TextEncoder();
 +
++  const syncDirectory = (directory: string) =>
++    Effect.scoped(fs.open(directory, { flag: "r" }).pipe(Effect.flatMap((handle) => handle.sync)));
++
++  /**
++   * A directory created for the state file is an entry in its parent, and that
++   * entry is only durable once the parent has been fsynced. A previous process
++   * may have created part of the path and died before proving it, leaving
++   * directories that exist but that a power loss can still forget, so nothing
++   * on disk can tell this controller which entries are owed a sync. Before its
++   * first replacement it therefore creates whatever is missing and syncs every
++   * ancestor from the state directory's parent up to the filesystem root,
++   * deepest first. A failure part-way repeats the whole chain next time. Once
++   * proven, later replacements only need the leaf to still exist; if it went
++   * missing, the chain is proven again.
++   */
++  let ancestryProven = false;
++  const ensureStateDirectory = Effect.gen(function* () {
++    if (ancestryProven && (yield* fs.exists(stateDirectory))) return;
++    yield* fs.makeDirectory(stateDirectory, { recursive: true, mode: 0o700 });
++    for (let ancestor = path.dirname(stateDirectory); ; ancestor = path.dirname(ancestor)) {
++      yield* syncDirectory(ancestor);
++      if (path.dirname(ancestor) === ancestor) break;
++    }
++    ancestryProven = true;
++  });
++
 +  /**
 +   * Writes and fsyncs a sibling temp file, then renames it over the state
 +   * file. Until the rename returns, the old state is untouched on disk.
 +   */
 +  const replace = Effect.fn("queuedUpdate.replace")(
 +    function* (next: PersistedQueuedUpdate) {
-+      yield* fs.makeDirectory(stateDirectory, { recursive: true, mode: 0o700 });
++      yield* ensureStateDirectory;
 +      yield* Effect.scoped(
 +        Effect.gen(function* () {
 +          const file = yield* fs.open(tempPath, { flag: "w", mode: 0o600 });
@@ -255,9 +281,9 @@ index 000000000..e44fb6041
 +   * The durability barrier: fsyncs the parent directory so the rename itself
 +   * survives power loss. Nothing is acknowledged until this has landed.
 +   */
-+  const barrier = Effect.scoped(
-+    fs.open(stateDirectory, { flag: "r" }).pipe(Effect.flatMap((directory) => directory.sync)),
-+  ).pipe(Effect.mapError((cause) => stateError("persist", cause)));
++  const barrier = syncDirectory(stateDirectory).pipe(
++    Effect.mapError((cause) => stateError("persist", cause)),
++  );
 +
 +  const persist = (next: PersistedQueuedUpdate) => replace(next).pipe(Effect.andThen(barrier));
 +
@@ -600,10 +626,10 @@ index 000000000..e44fb6041
 +});
 diff --git a/apps/server/src/cloud/queuedUpdate.test.ts b/apps/server/src/cloud/queuedUpdate.test.ts
 new file mode 100644
-index 000000000..454698ac0
+index 000000000..aed766968
 --- /dev/null
 +++ b/apps/server/src/cloud/queuedUpdate.test.ts
-@@ -0,0 +1,1221 @@
+@@ -0,0 +1,1373 @@
 +import { assert, describe, it } from "@effect/vitest";
 +import * as NodeServices from "@effect/platform-node/NodeServices";
 +import * as Deferred from "effect/Deferred";
@@ -708,13 +734,15 @@ index 000000000..454698ac0
 +  return { fakes, deps };
 +});
 +
++/** Directories are labelled `directory` for the state file's own, else by their path under the temp root (`.` for the root). */
 +type PersistOp =
++  | "mkdir"
 +  | "open:file"
 +  | "write:file"
 +  | "sync:file"
 +  | "rename"
-+  | "open:directory"
-+  | "sync:directory";
++  | `open:directory${string}`
++  | `sync:directory${string}`;
 +
 +/**
 + * The real filesystem with the persist path made observable: records the
@@ -722,10 +750,21 @@ index 000000000..454698ac0
 + * call (once, or until cleared) with a PlatformError, and lets a test wait for
 + * the next injected failure or the next landed directory sync.
 + */
-+const observedFileSystem = Effect.fn("observedFileSystem")(function* (statePath: string) {
++type Disk = Effect.Success<ReturnType<typeof observedFileSystem>>;
++
++const observedFileSystem = Effect.fn("observedFileSystem")(function* (
++  root: string,
++  statePath: string,
++) {
 +  const fs = yield* FileSystem.FileSystem;
 +  const path = yield* Path.Path;
 +  const directory = path.dirname(statePath);
++  const labelFor = (target: string): "directory" | "file" | `directory:${string}` =>
++    target === directory
++      ? "directory"
++      : target === `${statePath}.tmp`
++        ? "file"
++        : `directory:${path.relative(root, target) || "."}`;
 +  const ops: Array<PersistOp> = [];
 +  let failing: { readonly op: PersistOp; readonly once: boolean } | undefined;
 +  type Event = "failure" | "sync:directory";
@@ -773,18 +812,19 @@ index 000000000..454698ac0
 +  const fileSystem = FileSystem.FileSystem.of({
 +    ...fs,
 +    open: (target, options) => {
-+      const kind = target === directory ? "directory" : "file";
++      const label = labelFor(target);
 +      return observe(
-+        `open:${kind}`,
++        `open:${label}`,
 +        fs.open(target, options).pipe(
 +          Effect.map((file): FileSystem.File => ({
 +            ...file,
-+            sync: observe(`sync:${kind}`, file.sync),
++            sync: observe(`sync:${label}`, file.sync),
 +            writeAll: (buffer) => observe("write:file", file.writeAll(buffer)),
 +          })),
 +        ),
 +      );
 +    },
++    makeDirectory: (target, options) => observe("mkdir", fs.makeDirectory(target, options)),
 +    rename: (from, to) => observe("rename", fs.rename(from, to)),
 +  });
 +  return {
@@ -806,18 +846,22 @@ index 000000000..454698ac0
 +  readonly scope?: Scope.Scope;
 +  /** Run the controller on `observedFileSystem` instead of the real one. */
 +  readonly observed?: boolean;
++  /** Put the state file two absent directories deeper than usual. */
++  readonly nested?: boolean;
++  /** Reuse another controller's observed filesystem and state path, as a restart would. */
++  readonly restartOf?: { readonly root: string; readonly statePath: string; readonly disk: Disk };
 +}) {
 +  const fs = yield* FileSystem.FileSystem;
 +  const path = yield* Path.Path;
++  const root =
++    options?.restartOf?.root ??
++    (yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" }));
 +  const statePath =
++    options?.restartOf?.statePath ??
 +    options?.statePath ??
-+    path.join(
-+      yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" }),
-+      "runtime",
-+      "queued-update.json",
-+    );
++    path.join(root, ...(options?.nested ? ["a", "b"] : []), "runtime", "queued-update.json");
 +  const { fakes, deps } = yield* makeFakes(statePath);
-+  const disk = yield* observedFileSystem(statePath);
++  const disk = options?.restartOf?.disk ?? (yield* observedFileSystem(root, statePath));
 +  const controller = yield* make({
 +    statePath,
 +    installedVersion: options?.installedVersion ?? INSTALLED,
@@ -829,8 +873,25 @@ index 000000000..454698ac0
 +      ? Effect.provideService(FileSystem.FileSystem, disk.fileSystem)
 +      : (effect) => effect,
 +  );
-+  return { controller, fakes, statePath, disk };
++  return { controller, fakes, statePath, disk, root };
 +});
++
++/** The open/sync pairs the controller records while proving `labels` (directory labels, deepest first). */
++const chain = (labels: ReadonlyArray<string>): Array<PersistOp> =>
++  labels.flatMap((label): Array<PersistOp> => [
++    `open:directory:${label}`,
++    `sync:directory:${label}`,
++  ]);
++
++/** Labels of every directory above the temp root, up to and including the filesystem root. */
++const ancestorsAbove = (root: string) =>
++  Effect.map(Path.Path, (path) => {
++    const labels: Array<string> = [];
++    for (let ancestor = path.dirname(root); ; ancestor = path.dirname(ancestor)) {
++      labels.push(path.relative(root, ancestor));
++      if (path.dirname(ancestor) === ancestor) return labels;
++    }
++  });
 +
 +/**
 + * Activation answers definitively (busy or a typed failure) but the durable
@@ -1209,11 +1270,13 @@ index 000000000..454698ac0
 +  it.effect("persist syncs the temp file before the rename and the directory after it", () =>
 +    provide(
 +      Effect.gen(function* () {
-+        const { controller, fakes, disk } = yield* setup({ observed: true });
++        const { controller, fakes, disk, root } = yield* setup({ observed: true });
 +        fakes.stage = (yield* blockedStaging()).stage;
 +
 +        yield* controller.queue(TARGET);
 +        assert.deepStrictEqual(disk.ops, [
++          "mkdir",
++          ...chain([".", ...(yield* ancestorsAbove(root))]),
 +          "open:file",
 +          "write:file",
 +          "sync:file",
@@ -1223,6 +1286,121 @@ index 000000000..454698ac0
 +        ]);
 +      }),
 +    ),
++  );
++
++  it.effect("the whole ancestry is synced, deepest first, before the first write", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk, root } = yield* setup({ observed: true, nested: true });
++        fakes.stage = (yield* blockedStaging()).stage;
++
++        yield* controller.queue(TARGET);
++        const ancestry = chain(["a/b", "a", ".", ...(yield* ancestorsAbove(root))]);
++        assert.deepStrictEqual(disk.ops.slice(0, ancestry.length + 2), [
++          "mkdir",
++          ...ancestry,
++          "open:file",
++        ]);
++        disk.ops.length = 0;
++
++        // Once durable, later replacements do not revisit the parents.
++        yield* controller.queue(NEWER);
++        assert.equal(disk.ops.includes("mkdir"), false);
++        assert.equal(disk.ops[0], "open:file");
++      }),
++    ),
++  );
++
++  it.effect("a partial ancestry sync failure is retried in full before any state is written", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const { controller, fakes, disk, statePath, root } = yield* setup({
++          observed: true,
++          nested: true,
++        });
++        const ancestry = chain(["a/b", "a", ".", ...(yield* ancestorsAbove(root))]);
++
++        disk.fail("sync:directory:a", "once");
++        const error = yield* controller.queue(TARGET).pipe(Effect.flip);
++        assert.equal(error._tag, "QueuedUpdateStateError");
++        assert.deepStrictEqual(disk.ops, ["mkdir", ...chain(["a/b", "a"])]);
++        assert.equal(yield* fs.exists(statePath), false);
++        assert.equal((yield* controller.getState).stage, "current");
++        assert.deepStrictEqual(fakes.stageCalls, []);
++        disk.ops.length = 0;
++
++        // The directories exist now, but none of the owed syncs may be skipped.
++        yield* controller.queue(TARGET);
++        assert.deepStrictEqual(disk.ops.slice(0, ancestry.length + 2), [
++          "mkdir",
++          ...ancestry,
++          "open:file",
++        ]);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stateAtStage, [
++          { version: 1, stage: "downloading", targetVersion: TARGET },
++        ]);
++        assert.equal(fakes.activateCalls.length, 1);
++      }),
++    ),
++  );
++
++  it.effect(
++    "a restart after an unproven creation proves the whole ancestry before acknowledging",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const path = yield* Path.Path;
++          const firstScope = yield* Scope.make();
++          const first = yield* setup({ observed: true, nested: true, scope: firstScope });
++          const { disk, statePath, root } = first;
++          const ancestry = chain(["a/b", "a", ".", ...(yield* ancestorsAbove(root))]);
++
++          // The first process creates the path, fails part-way through proving
++          // it, and dies. Nothing on disk records which entries were synced.
++          disk.fail("sync:directory:a", "once");
++          assert.equal(
++            (yield* first.controller.queue(TARGET).pipe(Effect.flip))._tag,
++            "QueuedUpdateStateError",
++          );
++          yield* Scope.close(firstScope, Exit.void);
++          assert.equal(yield* fs.exists(path.dirname(statePath)), true);
++          assert.equal(yield* fs.exists(statePath), false);
++          disk.ops.length = 0;
++
++          // The next process finds the directories but must not trust them: its
++          // first replacement proves every ancestor, and cannot acknowledge or
++          // stage until all of them land.
++          const second = yield* setup({ observed: true, restartOf: { root, statePath, disk } });
++          disk.fail("sync:directory:.", "once");
++          assert.equal(
++            (yield* second.controller.queue(TARGET).pipe(Effect.flip))._tag,
++            "QueuedUpdateStateError",
++          );
++          assert.deepStrictEqual(disk.ops, ["mkdir", ...chain(["a/b", "a", "."])]);
++          assert.equal(yield* fs.exists(statePath), false);
++          assert.deepStrictEqual(second.fakes.stageCalls, []);
++          disk.ops.length = 0;
++
++          yield* second.controller.queue(TARGET);
++          assert.deepStrictEqual(disk.ops.slice(0, ancestry.length + 2), [
++            "mkdir",
++            ...ancestry,
++            "open:file",
++          ]);
++          yield* second.controller.awaitState(
++            (state) => state.stage === "queued" && state.reason !== undefined,
++          );
++          assert.deepStrictEqual(second.fakes.stateAtStage, [
++            { version: 1, stage: "downloading", targetVersion: TARGET },
++          ]);
++          assert.equal(second.fakes.activateCalls.length, 1);
++        }),
++      ),
 +  );
 +
 +  it.effect(
