@@ -305,6 +305,25 @@ snapshot() {
   assert_output --partial 'entrypoint.record_unreadable'
 }
 
+@test "the recorded tag is read from release_tag and from no second spelling of it" {
+  assert_equal "$(harbor_entrypoint_record_tag "${RECORD}")" "${TAG}"
+  # lib/state.sh writes release_tag, so that is the only key this reader answers from: a
+  # record spelling it any other way is not a record Harbor wrote, and reading it under a
+  # second name would let a hand-written file decide which release every command trusts.
+  printf '{\n  "tag": "%s"\n}\n' "${TAG}" >"${RECORD}"
+  run harbor_entrypoint_record_tag "${RECORD}"
+  assert_failure
+  assert_output ''
+  run harbor_entrypoint_check "${ARGV0}" "${RECORD}"
+  assert_equal "${status}" 3
+  assert_output --partial 'entrypoint.record_unreadable'
+  # An absent record is still the record-less form and never an unreadable one.
+  rm "${RECORD}"
+  run harbor_entrypoint_record_tag "${RECORD}"
+  assert_failure
+  assert_output ''
+}
+
 @test "HARBOR_DEV=1 relaxes the check for a non-root operator command" {
   build_checkout "${FIX_BASE}/checkout"
   rm "${RECORD}"
