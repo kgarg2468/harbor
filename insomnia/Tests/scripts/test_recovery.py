@@ -97,6 +97,7 @@ class Fixture(unittest.TestCase):
         self.repo = self.root/'repo'
         (self.repo/'scripts').mkdir(parents=True)
         (self.repo/'Resources').mkdir()
+        (self.repo/'Resources/AppIcon.icns').write_bytes(b'fixture-icon')
         (self.repo/'Resources/Info.plist').write_text('<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
         (self.root/'bin').mkdir()
         binary = self.root/'bin/Insomnia'

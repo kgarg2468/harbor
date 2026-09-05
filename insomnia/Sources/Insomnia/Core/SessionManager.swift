@@ -584,7 +584,7 @@ final class SessionManager {
             countdownPaused = lidClosed == true
             if lidClosed == false {
                 undoLidActionsUnlocked()
-            } else if !state.frozenPids.isEmpty || state.savedOutputVolume != nil {
+            } else if state.hasUnresolvedOwnedChanges {
                 Log.info("reconcile: lid \(lidClosed == nil ? "unknown" : "closed"), keeping lid-close actions")
             }
             await armDeadline(s.endsAt)

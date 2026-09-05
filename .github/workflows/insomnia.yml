@@ -45,9 +45,10 @@ jobs:
       - name: Validate source-built app bundle
         run: |
           app="${RUNNER_TEMP}/Insomnia.app"
-          mkdir -p "${app}/Contents/MacOS"
+          mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
           cp "$(swift build -c release --show-bin-path)/Insomnia" "${app}/Contents/MacOS/Insomnia"
           cp Resources/Info.plist "${app}/Contents/Info.plist"
+          cp Resources/AppIcon.icns "${app}/Contents/Resources/AppIcon.icns"
           plutil -lint "${app}/Contents/Info.plist"
           codesign --force --sign - "${app}"
           codesign --verify --deep --strict --verbose=2 "${app}"

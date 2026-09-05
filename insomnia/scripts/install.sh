@@ -111,9 +111,10 @@ for file in "$APP_SUPPORT/config.json" "$APP_SUPPORT/state.json" "$APP_SUPPORT/s
 done
 stage="$(/usr/bin/mktemp -d "$APP_DIR/.insomnia-install.XXXXXX")"
 bundle="$stage/Insomnia.app"
-/bin/mkdir -p "$bundle/Contents/MacOS"
+/bin/mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 /bin/cp "$BIN" "$bundle/Contents/MacOS/Insomnia"
 /bin/cp "$ROOT/Resources/Info.plist" "$bundle/Contents/Info.plist"
+/bin/cp "$ROOT/Resources/AppIcon.icns" "$bundle/Contents/Resources/AppIcon.icns"
 /usr/bin/plutil -replace InsomniaMaintenanceProtocol -string insomnia-maintenance-v1 "$bundle/Contents/Info.plist"
 /usr/bin/plutil -lint "$bundle/Contents/Info.plist" >/dev/null
 /usr/bin/codesign --force --sign - --deep "$bundle"
