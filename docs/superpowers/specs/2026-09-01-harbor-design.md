@@ -1,9 +1,9 @@
 # Harbor design specification
 
-- Status: proposed (PR 1), revised after technical review
+- Status: accepted (PR 1), revised after technical review; section 9 approved as recommended
 - Date: 2026-09-01
 - Repository: `kgarg2468/harbor`
-- Author: Claude Fable 5.1; technical review: Codex; owner review pending
+- Author: Claude Fable 5.1; technical review: Codex; owner review 2026-09-05
 
 Harbor turns a spare machine into a private, always-on AI-agent node. It is the public,
 reproducible glue between four things Harbor does not own: Ubuntu Server, Tailscale, the agent
@@ -1543,7 +1543,17 @@ on a real node until 7 lands, never a CI dependency. PR 9 is last.
 
 ## 9. Decisions requiring owner approval
 
-Each has a recommended default that PR 2 onward will implement unless changed.
+All eight were approved as recommended by the owner on 2026-09-05, and the recommended
+default named in each is the decision. They are kept here as written, rather than folded
+into the sections they bind, so that what was chosen and what the alternative was both
+stay on the record: decision 1 in particular is a deliberate trade, and the paragraph
+below says what it costs.
+
+Decision 1 is the one worth restating plainly. `connect` opens no inbound port, so it does
+not weaken goal 2 as goal 2 is written, but it does mean the node is reachable through the
+vendor's relay rather than only from the owner's tailnet. That is a convenience chosen over
+tailnet privacy for the default, knowingly, with `tailnet` available to anyone who wants
+the stricter posture and no loss of function in taking it.
 
 1. Default access mode `connect` (authenticated but not tailnet-private), with `tailnet` and
    `ssh` as explicit alternatives. This is a recommendation; the alternative is defaulting to
