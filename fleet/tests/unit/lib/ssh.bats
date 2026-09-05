@@ -786,6 +786,32 @@ resume_paused() {
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
 }
 
+@test "a .ssh swapped for another 0700 directory the operator owns is refused by identity, not by mode" {
+  # Owner and mode do not identify a directory. The operator owns its home and may own
+  # other 0700 directories under it, so a link aimed at one of those answers both of those
+  # checks while the key lands where the operator chose. The operator would then have no
+  # key where sshd looks for one, and the sshd row would take password authentication away
+  # from the account regardless, so this is a lockout the checks would have waved through.
+  # What is held against '.' is the device and inode of the directory that was proved.
+  mkdir -p "${SSH_DIR}"
+  chmod 0700 "${SSH_DIR}"
+  decoy="${BATS_TEST_TMPDIR}/decoy"
+  mkdir -p "${decoy}"
+  chmod 0700 "${decoy}"
+  paused_authorize ssh-key-prepared
+  rmdir "${SSH_DIR}"
+  ln -s "${decoy}" "${SSH_DIR}"
+  resume_paused ssh-key-prepared
+  assert [ ! -e "${decoy}/authorized_keys" ]
+  assert_equal "${PAUSED_STATUS}" 2
+  run cat "${BATS_TEST_TMPDIR}/child.out"
+  assert_output --partial 'ssh.ssh_dir_swapped'
+  # By identity rather than by mode, which the decoy deliberately satisfies.
+  assert_output --partial 'no longer the same directory'
+  assert [ -z "$(ls "${FIX_ROOT}"/.tmp.authorized_keys.* 2>/dev/null)" ]
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
+}
+
 @test "a staged key rewritten while it carries the operator's ownership is refused rather than journaled as the key" {
   # The chown is the moment the staged file becomes the operator's, and the state root is
   # 0755, so from then until it is read the operator can both see the name and write

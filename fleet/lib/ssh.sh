@@ -253,7 +253,7 @@ harbor_ssh_prepared_entry_for() {
 # /home the operator cannot rename or replace.
 harbor_ssh_authorize() {
   local root operator home group ssh_dir target pre source src_state post tmp stage entry
-  local staged_sha staged_id rename_rc
+  local staged_sha staged_id rename_rc dir_id
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] \
     || harbor_die 3 usage "usage: harbor_ssh_authorize <state-root> <operator> <operator-home> [source]"
   root="${1}"
@@ -292,6 +292,12 @@ harbor_ssh_authorize() {
     fi
     harbor_log ssh "created ${ssh_dir} 0700 for ${operator}"
   fi
+  # Taken here, where ~/.ssh has just been proved a 0700 directory owned by the operator
+  # and not a symlink, rather than at the rename below: this is the directory those checks
+  # were about, and the rename holds what it is standing in against this value so that a
+  # name re-pointed at some other directory of the operator's in between cannot pass the
+  # checks a second time by being a different directory that also answers to them.
+  dir_id="$(harbor_ssh_path_id "${ssh_dir}")"
   pre="$(harbor_observe_file "${target}")"
   case "${pre}" in
     '"absent"') ;;
@@ -356,9 +362,18 @@ harbor_ssh_authorize() {
   # name ~/.ssh wherever it likes and '.' still refers to the directory that was entered.
   # The owner and mode are proved again through '.' for that reason, so what is proved and
   # what is written into are the same directory and not merely the same path twice.
+  #
+  # Identity, not only owner and mode. The operator owns its home and may own other 0700
+  # directories under it, so a symlink pointing ~/.ssh at one of those satisfies both of
+  # those checks while the key lands somewhere the operator picked: the operator would
+  # then have no key where sshd looks for one, and the row below would take password
+  # authentication away from it anyway. The device and inode recorded when the directory
+  # was proved are what '.' is held against, and two names are the same directory exactly
+  # when those agree.
   rename_rc=0
   (
     cd "${ssh_dir}" 2>/dev/null || exit 1
+    [ "$(harbor_ssh_path_id .)" = "${dir_id}" ] || exit 4
     [ "$(harbor_stat_owner .)" = "${operator}" ] || exit 2
     [ "$(harbor_stat_mode .)" = 0700 ] || exit 2
     mv -f "${tmp}" ./authorized_keys || exit 3
@@ -368,6 +383,9 @@ harbor_ssh_authorize() {
     case "${rename_rc}" in
       2)
         harbor_die 2 ssh.ssh_dir_swapped "${ssh_dir} is no longer the 0700 directory owned by ${operator} that was checked a moment ago, so the authorized key was not written: something replaced it while ${operator} was being set up. Nothing was written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
+        ;;
+      4)
+        harbor_die 2 ssh.ssh_dir_swapped "${ssh_dir} is a 0700 directory owned by ${operator} but is no longer the same directory that was checked a moment ago: it had device and inode ${dir_id}, and the name now reaches $(harbor_ssh_path_id "${ssh_dir}"). The authorized key was not written, $(basename "${entry}") stays prepared, and this node should be inspected before rerunning"
         ;;
       *)
         harbor_die 2 ssh.rename "renaming ${tmp} onto ${target} failed; ${target} holds what it held before and $(basename "${entry}") stays prepared, rerun after fixing the cause"
