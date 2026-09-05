@@ -261,7 +261,7 @@ final class AppServices {
         browserRefreshGeneration += 1
         let generation = browserRefreshGeneration
         let config = manager?.config ?? Config()
-        let statuses = await browser.scan(config: config)
+        guard let statuses = await browser.scan(config: config) else { return }
         guard generation == browserRefreshGeneration, !Task.isCancelled else { return }
         status.browsers = statuses
         status.throttledBrowsers = browser.throttledBrowsers
