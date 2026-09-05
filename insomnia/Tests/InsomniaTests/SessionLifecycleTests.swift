@@ -424,4 +424,36 @@ final class SessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.guardFake.calls, calls)
     }
 
+    func testQueuedStartAndReconcileRefuseInstallerGuardAfterLeaseAcquisition() async throws {
+        for reconciling in [false, true] {
+            let h = Harness(); defer { h.home.destroy() }
+            if reconciling {
+                try h.store.saveSession(Session(startedAt: h.clock.now, endsAt: h.clock.now.addingTimeInterval(3600)))
+            }
+            var oldState = RuntimeState.clean; oldState.lowPowerSetByUs = true
+            try h.store.saveState(oldState)
+            let originalSession = try h.store.loadSession()
+            let installing = Locked(false)
+            let clock = h.clock
+            let m = SessionManager(paths: h.home.paths, sleepGuard: h.guardFake,
+                                   processControl: h.procs, backstop: h.backstop,
+                                   clock: { clock.now }, installerGuardActive: { installing.value })
+            let peer = try JournalLockPeer(paths: h.home.paths); defer { peer.release() }
+            try await peer.waitForLease()
+            let request = Task {
+                if reconciling { await m.reconcile() } else { await m.start(duration: 3600) }
+            }
+            try await Task.sleep(for: .milliseconds(60))
+            installing.value = true
+            peer.release(); await request.value
+            XCTAssertFalse(m.isActive)
+            XCTAssertEqual(h.guardFake.calls, [])
+            XCTAssertEqual(h.backstop.scheduled, [])
+            XCTAssertEqual(h.backstop.clears, 0)
+            XCTAssertEqual(try h.store.loadState(), oldState)
+            XCTAssertEqual(try h.store.loadSession(), originalSession)
+            XCTAssertTrue(m.lastError?.contains("installation") == true)
+        }
+    }
+
 }

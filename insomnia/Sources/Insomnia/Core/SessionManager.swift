@@ -47,6 +47,7 @@ final class SessionManager {
     private let notifier: any Notifying
     private let clamshell: @Sendable () -> Bool?
     private let clock: @Sendable () -> Date
+    private let installerGuardActive: @Sendable () -> Bool
 
     /// System integrations (lid, battery, network, ...). Set by `live()`;
     /// nil in tests. Started after a session starts, stopped when it ends.
@@ -67,7 +68,8 @@ final class SessionManager {
         audio: any AudioControlling = NoopAudioControl(),
         notifier: any Notifying = RecordingNotifier(),
         clamshell: @escaping @Sendable () -> Bool? = { LidObserver.readClamshellState() },
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        installerGuardActive: @escaping @Sendable () -> Bool = { AppInstanceLease.isInstallationActive() }
     ) {
         self.paths = paths
         self.store = Store(paths: paths)
@@ -78,6 +80,7 @@ final class SessionManager {
         self.notifier = notifier
         self.clamshell = clamshell
         self.clock = clock
+        self.installerGuardActive = installerGuardActive
 
         try? paths.createDirectories()
         let loadedState = (try? store.loadState()) ?? nil
@@ -123,7 +126,8 @@ final class SessionManager {
         defer { operationGate.release() }
         guard requestedGeneration == generation, !Task.isCancelled else { return }
         await withRecoveryLease {
-            guard requestedGeneration == generation, !Task.isCancelled else { return }
+            guard requestedGeneration == generation, !Task.isCancelled,
+                  activationIsAllowed() else { return }
             await startUnlocked(duration: duration)
         }
     }
@@ -496,7 +500,8 @@ final class SessionManager {
         defer { operationGate.release() }
         guard requestedGeneration == generation, !Task.isCancelled else { return }
         await withRecoveryLease {
-            guard requestedGeneration == generation, !Task.isCancelled else { return }
+            guard requestedGeneration == generation, !Task.isCancelled,
+                  activationIsAllowed() else { return }
             await reconcileUnlocked()
         }
     }
@@ -617,6 +622,14 @@ final class SessionManager {
     }
 
     // MARK: Private
+
+    private func activationIsAllowed() -> Bool {
+        guard !installerGuardActive() else {
+            fail("could not activate session: Insomnia installation or removal is in progress")
+            return false
+        }
+        return true
+    }
 
     private func withRecoveryLease(_ operation: () async throws -> Void) async {
         do {

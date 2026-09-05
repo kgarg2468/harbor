@@ -27,7 +27,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var terminating = false
 
     override init() {
-        let manager = SessionManager.live()
+        let paths = Paths.fromEnvironment()
+        do {
+            try AppInstanceLease.acquireForProcess(paths: paths)
+        } catch {
+            let message = "Insomnia could not launch: \(error.localizedDescription)"
+            Log.error(message)
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            // Do not keep a refused launch alive in a modal alert: an installer
+            // may already be waiting for every Insomnia PID to disappear.
+            exit(EXIT_FAILURE)
+        }
+        let manager = SessionManager.live(paths: paths)
         self.manager = manager
         secrets = KeychainHotspotSecretStore(keychain: KeychainStore()) {
             manager.config.hotspotSSID
