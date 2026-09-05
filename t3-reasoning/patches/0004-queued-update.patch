@@ -1,9 +1,9 @@
 diff --git a/apps/server/src/cloud/queuedUpdate.ts b/apps/server/src/cloud/queuedUpdate.ts
 new file mode 100644
-index 000000000..4732c55de
+index 000000000..e44fb6041
 --- /dev/null
 +++ b/apps/server/src/cloud/queuedUpdate.ts
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,594 @@
 +import * as Context from "effect/Context";
 +import * as Deferred from "effect/Deferred";
 +import type * as Duration from "effect/Duration";
@@ -158,6 +158,13 @@ index 000000000..4732c55de
 +  readonly staged: StagedArtifact | undefined;
 +  readonly reason: string | undefined;
 +  readonly handoffAccepted: boolean;
++  /**
++   * False while the state names what a just-renamed file says but its
++   * directory barrier has not landed: no command has been acknowledged for it
++   * and a restart may still find the previous state. Commands and `awaitState`
++   * only act on or report durable state; `getState` reports either.
++   */
++  readonly durable: boolean;
 +}
 +
 +export type QueuedUpdateCommandError = QueuedUpdateRejectedError | QueuedUpdateStateError;
@@ -221,17 +228,38 @@ index 000000000..4732c55de
 +  const stateError = (operation: QueuedUpdateStateError["operation"], cause: unknown) =>
 +    new QueuedUpdateStateError({ operation, statePath, cause });
 +
-+  const persist = Effect.fn("queuedUpdate.persist")(
++  const stateDirectory = path.dirname(statePath);
++  const tempPath = `${statePath}.tmp`;
++  const encoder = new TextEncoder();
++
++  /**
++   * Writes and fsyncs a sibling temp file, then renames it over the state
++   * file. Until the rename returns, the old state is untouched on disk.
++   */
++  const replace = Effect.fn("queuedUpdate.replace")(
 +    function* (next: PersistedQueuedUpdate) {
-+      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true, mode: 0o700 });
-+      const tempPath = `${statePath}.tmp`;
-+      yield* fs.writeFileString(tempPath, `${encodePersistedQueuedUpdate(next)}\n`, {
-+        mode: 0o600,
-+      });
++      yield* fs.makeDirectory(stateDirectory, { recursive: true, mode: 0o700 });
++      yield* Effect.scoped(
++        Effect.gen(function* () {
++          const file = yield* fs.open(tempPath, { flag: "w", mode: 0o600 });
++          yield* file.writeAll(encoder.encode(`${encodePersistedQueuedUpdate(next)}\n`));
++          yield* file.sync;
++        }),
++      );
 +      yield* fs.rename(tempPath, statePath);
 +    },
 +    Effect.mapError((cause) => stateError("persist", cause)),
 +  );
++
++  /**
++   * The durability barrier: fsyncs the parent directory so the rename itself
++   * survives power loss. Nothing is acknowledged until this has landed.
++   */
++  const barrier = Effect.scoped(
++    fs.open(stateDirectory, { flag: "r" }).pipe(Effect.flatMap((directory) => directory.sync)),
++  ).pipe(Effect.mapError((cause) => stateError("persist", cause)));
++
++  const persist = (next: PersistedQueuedUpdate) => replace(next).pipe(Effect.andThen(barrier));
 +
 +  const load = fs.readFileString(statePath).pipe(
 +    Effect.map(Option.some),
@@ -273,6 +301,15 @@ index 000000000..4732c55de
 +    yield* persist(current);
 +  }
 +
++  /**
++   * `current` mirrors the pathname on disk from the moment a rename returns,
++   * whether or not that rename would survive power loss; `getState` reports it
++   * as such. `durable` says the barrier has landed on top of it. Until it has,
++   * no command is acknowledged (each first re-runs the barrier under the
++   * mutex), `awaitState` waiters are not told, and the worker neither stages
++   * nor reserves, so nothing acts on state the disk may still forget.
++   */
++  let durable = true;
 +  let handoffAccepted = false;
 +  let wake = Deferred.makeUnsafe<void>();
 +  const waiters = new Set<{
@@ -288,6 +325,7 @@ index 000000000..4732c55de
 +    staged: current.staged,
 +    reason: current.reason,
 +    handoffAccepted,
++    durable,
 +  });
 +
 +  const notify = () => {
@@ -301,11 +339,16 @@ index 000000000..4732c55de
 +  };
 +
 +  /**
-+   * The only writer. Decides under the mutex against the latest state, persists
-+   * before exposing the new state, and cannot be interrupted between the two.
++   * The only writer. Decides under the mutex against the latest durable state,
++   * persists before acknowledging, and cannot be interrupted in between.
 +   * `wake` interrupts whatever the worker is staging or waiting on. Because
 +   * every command is refused while `updating`, no command persist can be in
 +   * flight when an attempt accepts the handoff.
++   *
++   * A persist failure before the rename leaves both disk and memory as they
++   * were. One after the rename (the barrier) still fails the caller, but the
++   * new state is already what the pathname names, so memory follows it and the
++   * next commit must prove it durable before deciding anything on top of it.
 +   */
 +  const commit = (
 +    decide: (
@@ -315,20 +358,56 @@ index 000000000..4732c55de
 +  ): Effect.Effect<QueuedUpdateState, QueuedUpdateCommandError> =>
 +    mutex.withPermits(1)(
 +      Effect.uninterruptible(
-+        Effect.suspend((): Effect.Effect<QueuedUpdateState, QueuedUpdateCommandError> => {
++        Effect.gen(function* () {
++          if (!durable) {
++            yield* barrier;
++            durable = true;
++            notify();
++          }
 +          const next = decide(current);
-+          if (next === undefined) return Effect.succeed(snapshot());
-+          if (isRejected(next)) return Effect.fail(next);
-+          return persist(next).pipe(
-+            Effect.map(() => {
-+              current = next;
-+              if (options.wake) Deferred.doneUnsafe(wake, Effect.void);
-+              notify();
-+              return snapshot();
-+            }),
++          if (next === undefined) return snapshot();
++          if (isRejected(next)) return yield* next;
++          yield* replace(next);
++          current = next;
++          durable = false;
++          // Waiters and the worker learn of the state once its barrier has
++          // landed, so nothing observed through the service can be forgotten
++          // by the disk. On failure the worker still wakes, to retry it.
++          // `durable` is settled before the wake because the woken fiber may
++          // run before this one resumes.
++          yield* barrier.pipe(
++            Effect.tap(() =>
++              Effect.sync(() => {
++                durable = true;
++                notify();
++              }),
++            ),
++            Effect.ensuring(
++              Effect.sync(() => {
++                if (options.wake) Deferred.doneUnsafe(wake, Effect.void);
++              }),
++            ),
 +          );
++          return snapshot();
 +        }),
 +      ),
++    );
++
++  /**
++   * For decisions that become no-ops once applied: keeps trying on the poll
++   * interval until the disk accepts the transition and its barrier. Cannot
++   * fail: these decisions never reject, and state errors are retried forever.
++   */
++  const commitDurably = (
++    decide: (state: PersistedQueuedUpdate) => PersistedQueuedUpdate | undefined,
++  ) =>
++    commit(decide, { wake: false }).pipe(
++      Effect.tapError((error) => Effect.logWarning(error.message, { cause: error })),
++      Effect.retry({
++        schedule: Schedule.spaced(deps.pollInterval),
++        while: (error) => error._tag === "QueuedUpdateStateError",
++      }),
++      Effect.orDie,
 +    );
 +
 +  const matches = (state: PersistedQueuedUpdate, stage: QueuedUpdateStage, targetVersion: string) =>
@@ -375,12 +454,12 @@ index 000000000..4732c55de
 +    staged: StagedArtifact,
 +    signal: Deferred.Deferred<void>,
 +  ) {
-+    const updating = yield* commit(
-+      (state) =>
-+        matches(state, "queued", targetVersion)
-+          ? { version: 1, stage: "updating", targetVersion, staged }
-+          : undefined,
-+      { wake: false },
++    // Retried so a reservation whose rename landed without its barrier is
++    // proven durable rather than abandoned; activation waits for that proof.
++    const updating = yield* commitDurably((state) =>
++      matches(state, "queued", targetVersion)
++        ? { version: 1, stage: "updating", targetVersion, staged }
++        : undefined,
 +    );
 +    if (updating.stage !== "updating" || updating.targetVersion !== targetVersion) return;
 +
@@ -409,15 +488,8 @@ index 000000000..4732c55de
 +    // making it durable. A transient persist failure must not drop the answer,
 +    // re-ask, or release the reservation: hold `updating` (commands keep being
 +    // rejected) and retry the write on the poll interval until it lands.
-+    const after = yield* commit(
-+      (state) => (matches(state, "updating", targetVersion) ? next : undefined),
-+      { wake: false },
-+    ).pipe(
-+      Effect.tapError((error) => Effect.logWarning(error.message, { cause: error })),
-+      Effect.retry({
-+        schedule: Schedule.spaced(deps.pollInterval),
-+        while: (error) => error._tag === "QueuedUpdateStateError",
-+      }),
++    const after = yield* commitDurably((state) =>
++      matches(state, "updating", targetVersion) ? next : undefined,
 +    );
 +    if (
 +      next.stage === "queued" &&
@@ -431,6 +503,14 @@ index 000000000..4732c55de
 +  const iteration = Effect.fn("queuedUpdate.iteration")(function* (
 +    signal: Deferred.Deferred<void>,
 +  ) {
++    // Never stage or reserve on a rename the disk may still forget.
++    if (!durable) {
++      const settled = yield* untilWoken(
++        commitDurably(() => undefined),
++        signal,
++      );
++      if (settled === WOKEN) return;
++    }
 +    const state = current;
 +    if (state.stage === "current" || state.stage === "failed") {
 +      yield* Deferred.await(signal);
@@ -454,9 +534,11 @@ index 000000000..4732c55de
 +      wake = Deferred.makeUnsafe<void>();
 +      const signal = wake;
 +      yield* iteration(signal).pipe(
++        // A rename that landed without its barrier is retried by the next
++        // iteration; any other persist failure waits for a command.
 +        Effect.catchTag("QueuedUpdateStateError", (error) =>
 +          Effect.logError(error.message, { cause: error }).pipe(
-+            Effect.andThen(Deferred.await(signal)),
++            Effect.andThen(Effect.suspend(() => (durable ? Deferred.await(signal) : Effect.void))),
 +          ),
 +        ),
 +      );
@@ -504,7 +586,9 @@ index 000000000..4732c55de
 +  const awaitState: QueuedUpdateShape["awaitState"] = (predicate) =>
 +    Effect.suspend(() => {
 +      const state = snapshot();
-+      if (predicate(state)) return Effect.succeed(state);
++      // A match on undurable state waits for its barrier like any other
++      // observer; `notify` runs again once it lands.
++      if (state.durable && predicate(state)) return Effect.succeed(state);
 +      const waiter = { predicate, deferred: Deferred.makeUnsafe<QueuedUpdateState>() };
 +      waiters.add(waiter);
 +      return Deferred.await(waiter.deferred).pipe(
@@ -516,10 +600,10 @@ index 000000000..4732c55de
 +});
 diff --git a/apps/server/src/cloud/queuedUpdate.test.ts b/apps/server/src/cloud/queuedUpdate.test.ts
 new file mode 100644
-index 000000000..5fb2f8b58
+index 000000000..454698ac0
 --- /dev/null
 +++ b/apps/server/src/cloud/queuedUpdate.test.ts
-@@ -0,0 +1,971 @@
+@@ -0,0 +1,1221 @@
 +import { assert, describe, it } from "@effect/vitest";
 +import * as NodeServices from "@effect/platform-node/NodeServices";
 +import * as Deferred from "effect/Deferred";
@@ -624,36 +708,94 @@ index 000000000..5fb2f8b58
 +  return { fakes, deps };
 +});
 +
-+/** The real filesystem, except that `rename` fails once after `failNextRename` and reports it through `failed`. */
-+const faultyRename = Effect.fn("faultyRename")(function* () {
++type PersistOp =
++  | "open:file"
++  | "write:file"
++  | "sync:file"
++  | "rename"
++  | "open:directory"
++  | "sync:directory";
++
++/**
++ * The real filesystem with the persist path made observable: records the
++ * order of the durability-relevant calls for the state file, fails one chosen
++ * call (once, or until cleared) with a PlatformError, and lets a test wait for
++ * the next injected failure or the next landed directory sync.
++ */
++const observedFileSystem = Effect.fn("observedFileSystem")(function* (statePath: string) {
 +  const fs = yield* FileSystem.FileSystem;
-+  const failed = yield* Deferred.make<void>();
-+  let failNext = false;
++  const path = yield* Path.Path;
++  const directory = path.dirname(statePath);
++  const ops: Array<PersistOp> = [];
++  let failing: { readonly op: PersistOp; readonly once: boolean } | undefined;
++  type Event = "failure" | "sync:directory";
++  const waiters = new Set<{
++    readonly event: Event;
++    remaining: number;
++    readonly deferred: Deferred.Deferred<void>;
++  }>();
++  const emit = (event: Event) => {
++    for (const waiter of waiters) {
++      if (waiter.event === event && --waiter.remaining === 0) {
++        waiters.delete(waiter);
++        Deferred.doneUnsafe(waiter.deferred, Effect.void);
++      }
++    }
++  };
++  /** Resolves once `event` has happened `count` more times. Register it before triggering the event. */
++  const next = (event: Event, count = 1) => {
++    const waiter = { event, remaining: count, deferred: Deferred.makeUnsafe<void>() };
++    waiters.add(waiter);
++    return Deferred.await(waiter.deferred);
++  };
++  const observe = <A, E, R>(
++    op: PersistOp,
++    effect: Effect.Effect<A, E, R>,
++  ): Effect.Effect<A, E | PlatformError.PlatformError, R> =>
++    Effect.suspend((): Effect.Effect<A, E | PlatformError.PlatformError, R> => {
++      ops.push(op);
++      if (failing?.op !== op) {
++        return op === "sync:directory"
++          ? effect.pipe(Effect.tap(() => Effect.sync(() => emit("sync:directory"))))
++          : effect;
++      }
++      if (failing.once) failing = undefined;
++      emit("failure");
++      return Effect.fail(
++        PlatformError.systemError({
++          _tag: "Unknown",
++          module: "FileSystem",
++          method: op,
++          description: `injected ${op} failure`,
++        }),
++      );
++    });
 +  const fileSystem = FileSystem.FileSystem.of({
 +    ...fs,
-+    rename: (from, to) =>
-+      Effect.suspend(() => {
-+        if (!failNext) return fs.rename(from, to);
-+        failNext = false;
-+        return Deferred.succeed(failed, undefined).pipe(
-+          Effect.andThen(
-+            Effect.fail(
-+              PlatformError.systemError({
-+                _tag: "Unknown",
-+                module: "FileSystem",
-+                method: "rename",
-+                description: "injected rename failure",
-+              }),
-+            ),
-+          ),
-+        );
-+      }),
++    open: (target, options) => {
++      const kind = target === directory ? "directory" : "file";
++      return observe(
++        `open:${kind}`,
++        fs.open(target, options).pipe(
++          Effect.map((file): FileSystem.File => ({
++            ...file,
++            sync: observe(`sync:${kind}`, file.sync),
++            writeAll: (buffer) => observe("write:file", file.writeAll(buffer)),
++          })),
++        ),
++      );
++    },
++    rename: (from, to) => observe("rename", fs.rename(from, to)),
 +  });
 +  return {
 +    fileSystem,
-+    failed,
-+    failNextRename: () => {
-+      failNext = true;
++    ops,
++    next,
++    fail: (op: PersistOp, mode: "once" | "until-cleared") => {
++      failing = { op, once: mode === "once" };
++    },
++    clear: () => {
++      failing = undefined;
 +    },
 +  };
 +});
@@ -662,7 +804,8 @@ index 000000000..5fb2f8b58
 +  readonly installedVersion?: string;
 +  readonly statePath?: string;
 +  readonly scope?: Scope.Scope;
-+  readonly fileSystem?: FileSystem.FileSystem;
++  /** Run the controller on `observedFileSystem` instead of the real one. */
++  readonly observed?: boolean;
 +}) {
 +  const fs = yield* FileSystem.FileSystem;
 +  const path = yield* Path.Path;
@@ -674,6 +817,7 @@ index 000000000..5fb2f8b58
 +      "queued-update.json",
 +    );
 +  const { fakes, deps } = yield* makeFakes(statePath);
++  const disk = yield* observedFileSystem(statePath);
 +  const controller = yield* make({
 +    statePath,
 +    installedVersion: options?.installedVersion ?? INSTALLED,
@@ -681,11 +825,11 @@ index 000000000..5fb2f8b58
 +    ...deps,
 +  }).pipe(
 +    options?.scope ? Scope.provide(options.scope) : (effect) => effect,
-+    options?.fileSystem
-+      ? Effect.provideService(FileSystem.FileSystem, options.fileSystem)
++    options?.observed
++      ? Effect.provideService(FileSystem.FileSystem, disk.fileSystem)
 +      : (effect) => effect,
 +  );
-+  return { controller, fakes, statePath };
++  return { controller, fakes, statePath, disk };
 +});
 +
 +/**
@@ -696,8 +840,7 @@ index 000000000..5fb2f8b58
 +const persistFailureRecovers = (answer: "busy" | "failure") =>
 +  provide(
 +    Effect.gen(function* () {
-+      const faulty = yield* faultyRename();
-+      const { controller, fakes } = yield* setup({ fileSystem: faulty.fileSystem });
++      const { controller, fakes, disk } = yield* setup({ observed: true });
 +      const asked = yield* Deferred.make<void>();
 +      const release = yield* Deferred.make<void>();
 +      fakes.activate = () =>
@@ -720,9 +863,10 @@ index 000000000..5fb2f8b58
 +
 +      yield* controller.queue(TARGET);
 +      yield* Deferred.await(asked);
-+      faulty.failNextRename();
++      disk.fail("rename", "once");
++      const failed = disk.next("failure");
 +      yield* Deferred.succeed(release, undefined);
-+      yield* Deferred.await(faulty.failed);
++      yield* failed;
 +
 +      assert.equal((yield* controller.getState).stage, "updating");
 +      assert.deepStrictEqual(yield* fakes.readState, reserved);
@@ -771,6 +915,7 @@ index 000000000..5fb2f8b58
 +          staged: undefined,
 +          reason: undefined,
 +          handoffAccepted: false,
++          durable: true,
 +        });
 +        assert.isFalse(yield* fs.exists(statePath));
 +      }),
@@ -1059,6 +1204,195 @@ index 000000000..5fb2f8b58
 +
 +  it.effect("a failed persist after an activation failure keeps the reservation and recovers", () =>
 +    persistFailureRecovers("failure"),
++  );
++
++  it.effect("persist syncs the temp file before the rename and the directory after it", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk } = yield* setup({ observed: true });
++        fakes.stage = (yield* blockedStaging()).stage;
++
++        yield* controller.queue(TARGET);
++        assert.deepStrictEqual(disk.ops, [
++          "open:file",
++          "write:file",
++          "sync:file",
++          "rename",
++          "open:directory",
++          "sync:directory",
++        ]);
++      }),
++    ),
++  );
++
++  it.effect(
++    "a file sync failure before the rename leaves the old state and fails the command",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const { controller, fakes, disk } = yield* setup({ observed: true });
++          fakes.stage = (yield* blockedStaging()).stage;
++          yield* controller.queue(TARGET);
++          const before = { version: 1, stage: "downloading", targetVersion: TARGET };
++          disk.ops.length = 0;
++
++          disk.fail("sync:file", "once");
++          const error = yield* controller.queue(NEWER).pipe(Effect.flip);
++          assert.equal(error._tag, "QueuedUpdateStateError");
++          assert.deepStrictEqual(disk.ops, ["open:file", "write:file", "sync:file"]);
++          assert.equal((yield* controller.getState).targetVersion, TARGET);
++          assert.deepStrictEqual(yield* fakes.readState, before);
++
++          assert.equal((yield* controller.queue(NEWER)).targetVersion, NEWER);
++          assert.deepStrictEqual(yield* fakes.readState, { ...before, targetVersion: NEWER });
++        }),
++      ),
++  );
++
++  it.effect(
++    "a directory sync failure after the rename is retried before anything is acknowledged",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const { controller, fakes, disk } = yield* setup({ observed: true });
++          yield* controller.queue(TARGET);
++          yield* controller.awaitState(
++            (state) => state.stage === "queued" && state.reason !== undefined,
++          );
++          const current = { version: 1, stage: "current", targetVersion: INSTALLED };
++          const observer = yield* Effect.forkChild(awaitStage(controller, "current"));
++
++          // The rename lands but its barrier does not: the pathname already names
++          // `current`, so memory follows it, but the cancel is not acknowledged and
++          // nobody waiting on the state is told. The woken worker fails the same
++          // barrier and parks on the poll interval.
++          disk.fail("sync:directory", "until-cleared");
++          const bothFailed = disk.next("failure", 2);
++          const error = yield* controller.cancel.pipe(Effect.flip);
++          assert.equal(error._tag, "QueuedUpdateStateError");
++          const unacknowledged = yield* controller.getState;
++          assert.equal(unacknowledged.stage, "current");
++          assert.equal(unacknowledged.durable, false);
++          assert.deepStrictEqual(yield* fakes.readState, current);
++          yield* bothFailed;
++          disk.ops.length = 0;
++          // An observer arriving after the failure matches the pathname state
++          // but must still wait for its barrier.
++          const lateObserver = yield* Effect.forkChild(awaitStage(controller, "current"));
++          yield* Effect.yieldNow;
++          assert.equal(lateObserver.pollUnsafe(), undefined);
++
++          const retried = yield* controller.cancel.pipe(Effect.flip);
++          assert.equal(retried._tag, "QueuedUpdateStateError");
++          assert.deepStrictEqual(disk.ops, ["open:directory", "sync:directory"]);
++          assert.equal(observer.pollUnsafe(), undefined);
++          assert.equal(lateObserver.pollUnsafe(), undefined);
++
++          // Once the disk recovers the same command proves durability without a
++          // second replacement, and the controller carries on normally.
++          disk.clear();
++          disk.ops.length = 0;
++          const acknowledged = yield* controller.cancel;
++          assert.equal(acknowledged.stage, "current");
++          assert.equal(acknowledged.durable, true);
++          assert.deepStrictEqual(disk.ops, ["open:directory", "sync:directory"]);
++          assert.equal((yield* Fiber.join(observer)).stage, "current");
++          const late = yield* Fiber.join(lateObserver);
++          assert.equal(late.stage, "current");
++          assert.equal(late.durable, true);
++          assert.equal(fakes.activateCalls.length, 1);
++          yield* controller.queue(NEWER);
++          yield* controller.awaitState(
++            (state) =>
++              state.stage === "queued" &&
++              state.targetVersion === NEWER &&
++              state.reason !== undefined,
++          );
++          assert.deepStrictEqual(fakes.activateCalls, [artifactFor(TARGET), artifactFor(NEWER)]);
++        }),
++      ),
++  );
++
++  it.effect("the worker proves durability before staging a target whose barrier failed", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk } = yield* setup({ observed: true });
++
++        disk.fail("sync:directory", "until-cleared");
++        const bothFailed = disk.next("failure", 2);
++        const error = yield* controller.queue(TARGET).pipe(Effect.flip);
++        assert.equal(error._tag, "QueuedUpdateStateError");
++        yield* bothFailed;
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "downloading",
++          targetVersion: TARGET,
++        });
++        assert.deepStrictEqual(fakes.stageCalls, []);
++
++        disk.clear();
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(POLL);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET]);
++        assert.deepStrictEqual(fakes.stateAtStage, [
++          { version: 1, stage: "downloading", targetVersion: TARGET },
++        ]);
++        assert.equal(fakes.activateCalls.length, 1);
++      }),
++    ),
++  );
++
++  it.effect("a directory sync failure after a busy answer is retried without re-asking", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk } = yield* setup({ observed: true });
++        const asked = yield* Deferred.make<void>();
++        const release = yield* Deferred.make<void>();
++        fakes.activate = () =>
++          Deferred.succeed(asked, undefined).pipe(
++            Effect.andThen(Deferred.await(release)),
++            Effect.as({ status: "busy" as const, reason: "agent running" }),
++          );
++        const queued = {
++          version: 1,
++          stage: "queued",
++          targetVersion: TARGET,
++          staged: artifactFor(TARGET),
++          reason: "busy: agent running",
++        };
++
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(asked);
++        disk.fail("sync:directory", "until-cleared");
++        const failed = disk.next("failure");
++        yield* Deferred.succeed(release, undefined);
++        yield* failed;
++
++        // The answer was renamed into place but is not yet durable: the
++        // reservation is released in memory, yet no command is acknowledged.
++        const pathname = yield* controller.getState;
++        assert.equal(pathname.stage, "queued");
++        assert.equal(pathname.durable, false);
++        assert.deepStrictEqual(yield* fakes.readState, queued);
++        assert.equal((yield* controller.cancel.pipe(Effect.flip))._tag, "QueuedUpdateStateError");
++
++        disk.clear();
++        const landed = disk.next("sync:directory");
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(POLL);
++        yield* landed;
++        assert.equal(fakes.activateCalls.length, 1);
++        assert.equal((yield* controller.cancel).stage, "current");
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "current",
++          targetVersion: INSTALLED,
++        });
++      }),
++    ),
 +  );
 +
 +  it.effect("a cancel racing the handoff can never claim success", () =>

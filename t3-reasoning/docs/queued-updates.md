@@ -1,6 +1,6 @@
 # Durable update queue
 
-`0004-queued-update.patch` adds the queue controller and 29 focused tests. It is
+`0004-queued-update.patch` adds the queue controller and 34 focused tests. It is
 not installed or connected to RPC handlers, nightly discovery, or the launcher.
 
 The controller records an exact target version before starting background
@@ -26,6 +26,13 @@ If saving that answer fails, the controller retains its activation reservation
 and retries only the state write. It does not repeat activation while the
 previous result is waiting to become durable. Accepted handoffs remain updating.
 
+State writes sync the temporary file before replacement and sync its parent
+directory afterward. Commands acknowledge only after both barriers succeed.
+If the directory sync fails after replacement, memory follows the new pathname
+with `durable: false`; waiters and activation remain blocked until the barrier
+succeeds. This implementation targets macOS and Linux filesystems that support
+directory sync.
+
 The injected installed version must be an exact version. The controller
 validates queued targets and staged identities; release integration owns the
 running binary's version stamp and artifact verification.
@@ -33,11 +40,14 @@ running binary's version stamp and artifact verification.
 ## Verification
 
 On Node 24.13.1, `pnpm --filter t3 test src/cloud/queuedUpdate.test.ts` passes all
-29 tests. Coverage includes busy and unknown activity, restart recovery, staged
+34 tests. Coverage includes busy and unknown activity, restart recovery, staged
 failures, cancellation and replacement races, interrupted commands, exact-version
 validation, and failed state writes after both busy and failed activation.
 
 Independent review found four activation races, then a persistence recovery
 gap. Regression tests reproduce the failures and pass with the corrections.
+Greptile identified the missing durability barriers; five additional tests cover
+file sync, directory sync, canceled intent across recovery, and observers waiting
+for durable state.
 Live activation still requires the separate activity tracker, admission wiring,
 verified artifact staging, and launcher integration.

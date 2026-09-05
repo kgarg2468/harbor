@@ -17,7 +17,7 @@
     },
     {
       "path": "patches/0004-queued-update.patch",
-      "sha256": "e5b73a59069b55b3843168abb2a05a5145d73844f2534881ca1898f7d748a010"
+      "sha256": "a734c2087741aa139f44a6da18f72bae20df04fa9311d68865775711cf739c7a"
     }
   ]
 }
