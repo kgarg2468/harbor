@@ -54,6 +54,7 @@ final class SessionManager {
     private let clamshell: @Sendable () -> Bool?
     private let clock: @Sendable () -> Date
     private let installerGuardActive: @Sendable () -> Bool
+    private let sessionRemover: @Sendable () throws -> Void
 
     /// System integrations (lid, battery, network, ...). Set by `live()`;
     /// nil in tests. Started after a session starts, stopped when it ends.
@@ -77,7 +78,8 @@ final class SessionManager {
         notifier: any Notifying = RecordingNotifier(),
         clamshell: @escaping @Sendable () -> Bool? = { LidObserver.readClamshellState() },
         clock: @escaping @Sendable () -> Date = { Date() },
-        installerGuardActive: @escaping @Sendable () -> Bool = { AppInstanceLease.isInstallationActive() }
+        installerGuardActive: @escaping @Sendable () -> Bool = { AppInstanceLease.isInstallationActive() },
+        sessionRemover: (@Sendable () throws -> Void)? = nil
     ) {
         self.paths = paths
         self.store = Store(paths: paths)
@@ -89,6 +91,7 @@ final class SessionManager {
         self.clamshell = clamshell
         self.clock = clock
         self.installerGuardActive = installerGuardActive
+        self.sessionRemover = sessionRemover ?? { try Store(paths: paths).deleteSession() }
 
         try? paths.createDirectories()
         self.state = .clean
@@ -188,13 +191,15 @@ final class SessionManager {
 
         do {
             try store.saveSession(new)
+            initialSession = new
             var s = state
             s.sleepDisabledByUs = !original
             s.originalSleepDisabled = original ? nil : original
             try persistState(s)
         } catch {
             fail("could not write session: \(error.localizedDescription)")
-            try? store.deleteSession()
+            do { try sessionRemover(); initialSession = nil }
+            catch { cleanupFailed("could not delete failed session: \(error.localizedDescription)") }
             return
         }
 
@@ -220,6 +225,8 @@ final class SessionManager {
             return
         }
 
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
         session = new
         initialSession = nil
         sleepHeld = true
@@ -296,14 +303,15 @@ final class SessionManager {
         cleanupPending = false
         Log.info("session end (\(reason.rawValue))")
         stopTimers()
+        initialSession = session ?? initialSession
         session = nil
-        initialSession = nil
         scheduledDeadline = nil
         remainingText = ""
         countdownText = ""
         countdownPaused = false
         do {
-            try store.deleteSession()
+            try sessionRemover()
+            initialSession = nil
         } catch {
             cleanupFailed("could not delete session.json: \(error.localizedDescription)")
         }
@@ -529,17 +537,19 @@ final class SessionManager {
 
     private func reconcileUnlocked() async {
         let now = clock()
+        // Check captured ownership before even an unreadable-state cleanup
+        // path can delete a journal belonging to a replacement session.
+        do {
+            if session != nil || initialSession != nil, try !validateOwnership() { return }
+        } catch {
+            cleanupFailed("could not read session identity: \(error.localizedDescription)")
+            return
+        }
         // Another process may have recovered since this manager was created.
         do { state = try store.loadState() ?? state }
         catch {
             await endUnlocked(reason: .backstop)
             cleanupFailed("could not read recovery state: \(error.localizedDescription)")
-            return
-        }
-        do {
-            if session != nil, try !validateOwnership() { return }
-        } catch {
-            cleanupFailed("could not read session identity: \(error.localizedDescription)")
             return
         }
         var onDisk: Session?
@@ -713,7 +723,7 @@ final class SessionManager {
         var s = state
         s.sleepDisabledByUs = false
         s.originalSleepDisabled = nil
-        do { try persistState(s); try store.deleteSession() }
+        do { try persistState(s); try sessionRemover(); initialSession = nil }
         catch { cleanupFailed("could not roll back start: \(error.localizedDescription)") }
     }
 
@@ -788,11 +798,25 @@ final class SessionManager {
         do { try await scheduleBackstop(endsAt: clock()) }
         catch { cleanupFailed("could not arm cleanup recovery: \(error.localizedDescription)") }
         cleanupTimer?.invalidate()
-        let timer = Timer(timeInterval: 60, repeats: false) { [weak self] _ in
-            Task { @MainActor in await self?.end(reason: .backstop) }
+        let retry = makeCleanupRetryAction()
+        let timer = Timer(timeInterval: 60, repeats: false) { _ in
+            Task { @MainActor in await retry() }
         }
         RunLoop.main.add(timer, forMode: .common)
         cleanupTimer = timer
+    }
+
+    /// Capture the same guarded action for the timer and deterministic tests.
+    /// A callback already queued on the main actor cannot end a later session.
+    func makeCleanupRetryAction() -> @MainActor () async -> Void {
+        let expectedGeneration = generation
+        let expectedSession = initialSession
+        return { [weak self] in
+            guard let self, self.generation == expectedGeneration,
+                  self.cleanupPending, self.session == nil,
+                  self.initialSession == expectedSession else { return }
+            await self.end(reason: .backstop)
+        }
     }
 
     private func fail(_ message: String) {

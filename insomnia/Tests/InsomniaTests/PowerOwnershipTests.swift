@@ -227,3 +227,103 @@ extension PowerOwnershipTests {
         XCTAssertFalse(h.guardFake.calls.contains("disablesleep 0"))
     }
 }
+
+
+extension PowerOwnershipTests {
+    func testQuitRetriesOwnedSessionDeletionAfterIORecovers() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let blocked = Locked(true)
+        let store = h.store
+        let clock = h.clock
+        let m = SessionManager(paths: h.home.paths, sleepGuard: h.guardFake,
+                               processControl: h.procs, backstop: h.backstop, clamshell: { false },
+                               clock: { clock.now }, sessionRemover: {
+                                   if blocked.value { throw POSIXError(.EACCES) }
+                                   try store.deleteSession()
+                               })
+        await m.start(duration: 3600)
+        let original = try XCTUnwrap(try h.store.loadSession())
+        let first = await m.prepareToQuit()
+        XCTAssertFalse(first)
+        XCTAssertEqual(try h.store.loadSession(), original)
+        XCTAssertTrue(m.cleanupPending)
+        blocked.value = false
+        let retry = await m.prepareToQuit()
+        XCTAssertTrue(retry)
+        XCTAssertNil(try h.store.loadSession())
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertFalse(m.cleanupPending)
+        XCTAssertFalse(m.cleanupRetryScheduled)
+    }
+
+    func testSuccessfulStartCancelsPreviousCleanupRetry() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager()
+        await m.start(duration: 3600)
+        h.guardFake.throwOn = ["disablesleep 0"]
+        await m.end(reason: .user)
+        XCTAssertTrue(m.cleanupRetryScheduled)
+        let queuedRetry = m.makeCleanupRetryAction()
+        h.guardFake.throwOn = []
+        await m.start(duration: 7200)
+        XCTAssertTrue(m.isActive)
+        XCTAssertFalse(m.cleanupPending)
+        XCTAssertFalse(m.cleanupRetryScheduled)
+        let replacement = m.session
+        await queuedRetry()
+        XCTAssertTrue(m.isActive)
+        XCTAssertEqual(m.session, replacement)
+        XCTAssertEqual(try h.store.loadSession(), replacement)
+        await m.end(reason: .user)
+    }
+
+    func testQuitCanCleanFailedStartBeforeSessionWasPublished() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let blocked = Locked(true)
+        let store = h.store
+        let clock = h.clock
+        h.backstop.failSchedule = true
+        let m = SessionManager(paths: h.home.paths, sleepGuard: h.guardFake,
+                               processControl: h.procs, backstop: h.backstop, clamshell: { false },
+                               clock: { clock.now }, sessionRemover: {
+                                   if blocked.value { throw POSIXError(.EACCES) }
+                                   try store.deleteSession()
+                               })
+        await m.start(duration: 3600)
+        XCTAssertFalse(m.isActive)
+        XCTAssertNotNil(try h.store.loadSession())
+        XCTAssertTrue(m.cleanupPending)
+        blocked.value = false
+        h.backstop.failSchedule = false
+        let approved = await m.prepareToQuit()
+        XCTAssertTrue(approved)
+        XCTAssertNil(try h.store.loadSession())
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertFalse(m.cleanupPending)
+    }
+
+    func testCorruptReplacementStateCannotBypassReconcileOwnershipCheck() async throws {
+        for alreadyActive in [false, true] {
+            let h = Harness(); defer { h.home.destroy() }
+            if !alreadyActive {
+                try h.store.saveSession(Session(startedAt: h.clock.now, endsAt: h.clock.now.addingTimeInterval(3600)))
+            }
+            let m = h.makeManager()
+            if alreadyActive { await m.start(duration: 3600) }
+            let replacement = Session(startedAt: h.clock.now, endsAt: h.clock.now.addingTimeInterval(7200))
+            try h.store.saveSession(replacement)
+            let corrupt = Data("{replacement-unreadable".utf8)
+            try corrupt.write(to: h.home.paths.stateFile)
+            let calls = h.guardFake.calls
+            let scheduled = h.backstop.scheduled
+            await m.reconcile()
+            XCTAssertEqual(try h.store.loadSession(), replacement)
+            XCTAssertEqual(try Data(contentsOf: h.home.paths.stateFile), corrupt)
+            XCTAssertEqual(h.guardFake.calls, calls)
+            XCTAssertEqual(h.backstop.scheduled, scheduled)
+            XCTAssertEqual(h.backstop.clears, 0)
+            XCTAssertFalse(m.isActive)
+        }
+    }
+
+}
