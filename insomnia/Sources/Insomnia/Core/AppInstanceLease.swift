@@ -15,7 +15,7 @@ final class AppInstanceLease {
 
     init(paths: Paths, installerGuard: URL = Paths.installerGuard) throws {
         try Self.checkInstaller(installerGuard)
-        try FileManager.default.createDirectory(at: paths.appSupport, withIntermediateDirectories: true)
+        try PrivateFiles.directory(paths.appSupport)
         let fd = open(paths.instanceLock.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw Failure.system(errno) }
         do {

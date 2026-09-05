@@ -30,7 +30,7 @@ enum JournalLock {
     }
 
     private static func openLock(_ url: URL) throws -> Int32 {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try PrivateFiles.directory(url.deletingLastPathComponent())
         let fd = Darwin.open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw Failure.system(errno) }
         return fd
