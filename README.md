@@ -1,5 +1,9 @@
 # Harbor
 
+This repository also contains [Insomnia](insomnia/README.md), a Swift macOS menu
+bar app for timed awake sessions. Its source-build setup and release status are
+documented separately.
+
 Harbor provisions a single Ubuntu 24.04 node as a T3 Code agent host and pairs a macOS
 controller with it, using only the vendors' own tools (Tailscale, Node.js, Claude Code, Codex,
 `t3`), with every mutation journaled so it can be inspected and undone exactly.

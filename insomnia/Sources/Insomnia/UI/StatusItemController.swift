@@ -85,8 +85,6 @@ final class StatusItemController: NSObject {
         (button.cell as? NSButtonCell)?.highlightsBy = []
         hostingView = host
         widthChanged(host.fittingSize.width)
-        logFrames("installed")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.logFrames("after 1s") }
     }
 
     /// Centralizes the AppKit/SwiftUI boundary so its sizing contract can be
@@ -95,17 +93,6 @@ final class StatusItemController: NSObject {
         let host = StatusHostingView(rootView: root)
         host.sizingOptions = [.intrinsicContentSize]
         return host
-    }
-
-    /// Where the item sits on screen; used to find it for screenshots.
-    func logFrames(_ tag: String) {
-        guard let button, let host = hostingView else { return }
-        let win = button.window.map { NSStringFromRect($0.frame) } ?? "?"
-        Log.info("status item \(tag): window \(win) button \(NSStringFromRect(button.frame)) host \(NSStringFromRect(host.frame)) fitting \(NSStringFromSize(host.fittingSize)) length \(statusItem.length)")
-        if let window = button.window, let screen = window.screen {
-            let safe = screen.safeAreaInsets
-            Log.info("status item \(tag): visible \(window.isVisible) alpha \(window.alphaValue) occlusion \(window.occlusionState.rawValue) screen \(screen.localizedName) \(NSStringFromRect(screen.frame)) safe {\(safe.top),\(safe.left),\(safe.bottom),\(safe.right)} button hidden \(button.isHidden) alpha \(button.alphaValue) host hidden \(host.isHidden) alpha \(host.alphaValue)")
-        }
     }
 
     /// Set the item's width to what SwiftUI just laid out. Deliberately not
@@ -421,7 +408,8 @@ final class StatusItemController: NSObject {
             target: self,
             settings: #selector(menuOpenSettings),
             quit: #selector(menuQuit),
-            relaunchBrowser: #selector(menuRelaunchBrowser(_:))
+            relaunchBrowser: #selector(menuRelaunchBrowser(_:)),
+            preset: #selector(menuPreset(_:))
         )
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
@@ -429,7 +417,7 @@ final class StatusItemController: NSObject {
     private func menuItems() -> [StatusMenu.Item] {
         StatusMenu.items(
             sessionActive: manager.isActive,
-            sleepHeld: manager.state.sleepDisabledByUs,
+            sleepHeld: manager.sleepHeld,
             machine: StatusLines.machine(
                 lidClosed: status.lidClosed,
                 watts: status.instantWatts(),
@@ -445,9 +433,16 @@ final class StatusItemController: NSObject {
                 dockerPaused: status.dockerPaused,
                 lastGap: status.lastGap
             ),
-            throttledBrowsers: status.throttledBrowsers,
-            error: manager.lastError
+            throttledBrowsers: manager.config.browserThrottleEnabled ? status.throttledBrowsers : [],
+            error: [manager.lastError, manager.config.floorCorrectionNotice].compactMap { $0 }.joined(separator: " "),
+            presets: model.pendingCountdown == nil ? manager.config.presets : [],
+            maxDuration: manager.config.maxDuration
         )
+    }
+
+    @objc private func menuPreset(_ sender: NSMenuItem) {
+        guard model.pendingCountdown == nil, let duration = sender.representedObject as? NSNumber else { return }
+        run(mode: manager.isActive ? .extend : .start, duration: duration.doubleValue)
     }
 
     @objc private func menuRelaunchBrowser(_ sender: NSMenuItem) {
@@ -494,7 +489,7 @@ final class StatusItemController: NSObject {
         if let button { panel.move(toStatusButton: button) }
         panel.makeKeyAndOrderFront(nil)
         keyCatcher = panel
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             // Local monitors always run on the main thread.
             let consumed = MainActor.assumeIsolated { self?.handleKey(event) ?? false }

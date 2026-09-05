@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import ServiceManagement
 import SwiftUI
 
@@ -9,6 +10,16 @@ struct SettingsView: View {
     let secrets: any HotspotSecretStore
     let locationPermission: LocationPermission
 
+    @State private var editor: SettingsEditor
+    @State private var secretError: String?
+
+    init(manager: SessionManager, secrets: any HotspotSecretStore, locationPermission: LocationPermission) {
+        self.manager = manager
+        self.secrets = secrets
+        self.locationPermission = locationPermission
+        _editor = State(initialValue: SettingsEditor(manager: manager))
+    }
+
     @State private var newPreset = ""
     @State private var presetError: String?
     @State private var newFreezeBundle = ""
@@ -16,10 +27,19 @@ struct SettingsView: View {
     @State private var newTmuxTarget = ""
     @State private var hotspotPassword = ""
     @State private var hotspotSaved = false
-    @State private var loginItemError: String?
+    @State private var loginItemEnabled = false
 
     var body: some View {
         Form {
+            if let notice = manager.config.floorCorrectionNotice {
+                Section("Battery settings corrected") {
+                    Text(notice)
+                    Button("Save corrected defaults") { editor.save(manager.config) }
+                }
+            }
+            if let error = editor.error {
+                Text(error).foregroundStyle(.red)
+            }
             sessionSection
             lidSection
             agentSection
@@ -31,7 +51,9 @@ struct SettingsView: View {
         .frame(width: 520)
         .frame(minHeight: 560, idealHeight: 720)
         .onAppear {
-            hotspotPassword = (try? secrets.load()) ?? ""
+            loginItemEnabled = SMAppService.mainApp.status == .enabled
+            do { hotspotPassword = try secrets.load() ?? ""; secretError = nil }
+            catch { secretError = "Could not load hotspot password: \(error.localizedDescription)" }
         }
     }
 
@@ -42,26 +64,16 @@ struct SettingsView: View {
             get: { manager.config[keyPath: keyPath] },
             set: { value in
                 guard manager.config[keyPath: keyPath] != value else { return }
-                manager.config[keyPath: keyPath] = value
-                save()
+                update { $0[keyPath: keyPath] = value }
             }
         )
-    }
-
-    private func save() {
-        do {
-            try manager.store.saveConfig(manager.config)
-        } catch {
-            Log.error("could not save config: \(error.localizedDescription)")
-        }
     }
 
     private func update(_ change: (inout Config) -> Void) {
         var c = manager.config
         change(&c)
         guard c != manager.config else { return }
-        manager.config = c
-        save()
+        editor.save(c)
     }
 
     // MARK: Sections
@@ -130,19 +142,22 @@ struct SettingsView: View {
                 add: { id in update { if !$0.freezeList.contains(id) { $0.freezeList.append(id) } } },
                 remove: { id in update { $0.freezeList.removeAll { $0 == id } } }
             )
-            Toggle("Pause Docker Desktop when no containers are running", isOn: bind(\.dockerRule))
-            Toggle("Mute audio on lid close", isOn: bind(\.muteOnLidClose))
+            Toggle("Opt in: pause idle Docker Desktop", isOn: bind(\.dockerRule))
+            Toggle("Opt in: mute audio on lid close", isOn: bind(\.muteOnLidClose))
         } header: {
             Text("Lid-close actions")
         } footer: {
-            Text("Frozen apps are stopped with SIGSTOP and resumed when the lid opens. Agents are never frozen.")
+            Text("Frozen apps are stopped with SIGSTOP and resumed when the lid opens. The agent list protects normal freezes. Opting into the Docker rule explicitly allows Docker Desktop to be paused even when it is on the agent list. Docker and audio recovery need testing on your Mac.")
         }
     }
 
     private var agentSection: some View {
         Section {
+            Toggle("Opt in: browser flag checks and relaunch", isOn: bind(\.browserThrottleEnabled))
+            Text("Browser relaunch closes and reopens selected Chromium browsers. Verify it preserves your profiles and work before relying on it.")
+                .font(.caption).foregroundStyle(.secondary)
             bundleList(
-                title: "Never throttle or freeze",
+                title: "Protected from normal freezing",
                 items: manager.config.agentList,
                 newValue: $newAgentBundle,
                 add: { id in update { if !$0.agentList.contains(id) { $0.agentList.append(id) } } },
@@ -155,10 +170,12 @@ struct SettingsView: View {
 
     private var powerSection: some View {
         Section("Battery and thermal") {
-            Stepper(value: bind(\.lowPowerFloor), in: 0...100, step: 5) {
+            Text("Thresholds must be 1–99%. The end threshold cannot exceed the Low Power Mode threshold. Changes apply to the current session immediately.")
+                .font(.caption).foregroundStyle(.secondary)
+            Stepper(value: bind(\.lowPowerFloor), in: manager.config.endFloor...99, step: 1) {
                 LabeledContent("Low Power Mode below", value: "\(manager.config.lowPowerFloor)%")
             }
-            Stepper(value: bind(\.endFloor), in: 0...100, step: 5) {
+            Stepper(value: bind(\.endFloor), in: 1...manager.config.lowPowerFloor, step: 1) {
                 LabeledContent("End session below", value: "\(manager.config.endFloor)%")
             }
             Toggle("Thermal rules (Low Power Mode when hot, end when critical)", isOn: bind(\.thermalRules))
@@ -167,13 +184,14 @@ struct SettingsView: View {
 
     private var networkSection: some View {
         Section {
-            TextField("Hotspot SSID", text: bind(\.hotspotSSID))
+            TextField("Hotspot SSID (optional opt-in)", text: bind(\.hotspotSSID))
             HStack {
                 SecureField("Hotspot password", text: $hotspotPassword)
                     .onSubmit(savePassword)
                 Button(hotspotSaved ? "Saved" : "Save", action: savePassword)
                     .disabled(hotspotPassword.isEmpty)
             }
+            if let secretError { Text(secretError).font(.caption).foregroundStyle(.red) }
             HStack {
                 Text("Location: \(locationPermission.statusDescription)")
                     .foregroundStyle(.secondary)
@@ -206,7 +224,7 @@ struct SettingsView: View {
         } header: {
             Text("Network failover")
         } footer: {
-            Text("The password is kept in the login keychain. Location permission lets macOS reveal Wi-Fi network names and find the configured hotspot.")
+            Text("Hotspot failover is off until you enter an SSID. Adding a tmux target opts into sending “continue” and Enter to that pane after an outage. Test both integrations before relying on them. The password stays in the login keychain; Location permission allows Wi-Fi names and hotspot discovery.")
         }
     }
 
@@ -228,8 +246,10 @@ struct SettingsView: View {
                 try secrets.save(hotspotPassword)
             }
             hotspotSaved = true
+            secretError = nil
         } catch {
-            Log.error("could not save hotspot password: \(error.localizedDescription)")
+            hotspotSaved = false
+            secretError = "Could not save hotspot password: \(error.localizedDescription)"
         }
     }
 
@@ -243,9 +263,6 @@ struct SettingsView: View {
     private var appSection: some View {
         Section("App") {
             Toggle("Launch at login", isOn: launchAtLogin)
-            if let loginItemError {
-                Text(loginItemError).font(.caption).foregroundStyle(.red)
-            }
             LabeledContent("Config") {
                 Text(manager.paths.configFile.path)
                     .font(.caption)
@@ -257,21 +274,15 @@ struct SettingsView: View {
 
     private var launchAtLogin: Binding<Bool> {
         Binding(
-            get: { manager.config.launchAtLogin },
+            get: { loginItemEnabled },
             set: { on in
-                do {
-                    if on {
+                loginItemEnabled = editor.setLaunchAtLogin(on, apply: { enabled in
+                    if enabled {
                         try SMAppService.mainApp.register()
                     } else {
                         try SMAppService.mainApp.unregister()
                     }
-                    loginItemError = nil
-                    // Persist only what macOS actually applied.
-                    update { $0.launchAtLogin = on }
-                } catch {
-                    loginItemError = "Login item: \(error.localizedDescription)"
-                    Log.error("launch at login \(on ? "register" : "unregister") failed: \(error.localizedDescription)")
-                }
+                }, isEnabled: { SMAppService.mainApp.status == .enabled })
             }
         )
     }
@@ -370,5 +381,59 @@ enum RunningApps {
             return url.deletingPathExtension().lastPathComponent
         }
         return bundleID.split(separator: ".").last.map(String.init) ?? bundleID
+    }
+}
+
+/// Persist before publishing settings so failed writes never change live behavior.
+@MainActor
+@Observable
+final class SettingsEditor {
+    private let manager: SessionManager
+    @ObservationIgnored private let reevaluateFloors: () -> Void
+    private(set) var error: String?
+
+    init(manager: SessionManager, reevaluateFloors: (() -> Void)? = nil) {
+        self.manager = manager
+        self.reevaluateFloors = reevaluateFloors ?? { manager.services?.reevaluateFloors() }
+    }
+
+    func setLaunchAtLogin(_ on: Bool, apply: (Bool) throws -> Void, isEnabled: () -> Bool) -> Bool {
+        do {
+            try apply(on)
+        } catch {
+            self.error = "Login item: \(error.localizedDescription)"
+            return isEnabled()
+        }
+        // Registration is external state. A failed config write must not make
+        // the control claim macOS rolled that change back.
+        let observed = isEnabled()
+        var next = manager.config
+        next.launchAtLogin = observed
+        if save(next), observed != on {
+            error = "macOS has not applied the requested login-item state. Check Login Items in System Settings."
+        }
+        return observed
+    }
+
+    @discardableResult
+    func save(_ proposed: Config) -> Bool {
+        let previous = manager.config
+        var next = proposed
+        next.floorCorrectionNotice = nil
+        do {
+            try manager.store.saveConfig(next)
+            manager.config = next
+            error = nil
+            if previous.lowPowerFloor != next.lowPowerFloor || previous.endFloor != next.endFloor || previous.thermalRules != next.thermalRules {
+                reevaluateFloors()
+            }
+            if previous.browserThrottleEnabled != next.browserThrottleEnabled {
+                manager.services?.refreshBrowserConfiguration()
+            }
+            return true
+        } catch {
+            self.error = "Settings were not saved: \(error.localizedDescription)"
+            return false
+        }
     }
 }

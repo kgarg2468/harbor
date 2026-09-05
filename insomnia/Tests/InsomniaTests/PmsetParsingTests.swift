@@ -35,29 +35,57 @@ final class PmsetParsingTests: XCTestCase {
      sleep                1
     """
 
-    func testDetectsSleepDisabledOne() {
-        XCTAssertTrue(PmsetSleepGuard.parseSleepDisabled(withFlag))
+    func testDetectsSleepDisabledOne() throws {
+        XCTAssertTrue(try PmsetSleepGuard.parseSleepDisabled(withFlag))
     }
 
-    func testAbsentFlagIsFalse() {
-        XCTAssertFalse(PmsetSleepGuard.parseSleepDisabled(withoutFlag))
+    func testAbsentFlagIsUnknown() {
+        XCTAssertThrowsError(try PmsetSleepGuard.parseSleepDisabled(withoutFlag))
     }
 
-    func testZeroFlagIsFalse() {
-        XCTAssertFalse(PmsetSleepGuard.parseSleepDisabled(zeroFlag))
+    func testZeroFlagIsFalse() throws {
+        XCTAssertFalse(try PmsetSleepGuard.parseSleepDisabled(zeroFlag))
     }
 
-    func testEmptyOutputIsFalse() {
-        XCTAssertFalse(PmsetSleepGuard.parseSleepDisabled(""))
+    func testEmptyOutputIsUnknown() {
+        XCTAssertThrowsError(try PmsetSleepGuard.parseSleepDisabled(""))
     }
 
     func testDoesNotMatchSubstringsOfOtherKeys() {
-        XCTAssertFalse(PmsetSleepGuard.parseSleepDisabled(" SleepDisabledFoo 1\n"))
-        XCTAssertFalse(PmsetSleepGuard.parseSleepDisabled(" sleep 1\n"))
+        XCTAssertThrowsError(try PmsetSleepGuard.parseSleepDisabled(" SleepDisabledFoo 1\n"))
+        XCTAssertThrowsError(try PmsetSleepGuard.parseSleepDisabled(" sleep 1\n"))
     }
 
-    func testTabSeparated() {
-        XCTAssertTrue(PmsetSleepGuard.parseSleepDisabled("SleepDisabled\t1\n"))
+    func testTabSeparated() throws {
+        XCTAssertTrue(try PmsetSleepGuard.parseSleepDisabled("SleepDisabled\t1\n"))
+    }
+
+    func testAmbiguousSleepValuesAreUnknown() {
+        for output in ["SleepDisabled 2", "SleepDisabled", "SleepDisabled 1 extra", "SleepDisabled 0\nSleepDisabled 1"] {
+            XCTAssertThrowsError(try PmsetSleepGuard.parseSleepDisabled(output))
+        }
+    }
+
+    func testBatteryLowPowerIgnoresACSetting() throws {
+        let output = "Battery Power:\n lowpowermode 0\nAC Power:\n lowpowermode 1\n"
+        XCTAssertFalse(try PmsetSleepGuard.parseBatteryLowPowerMode(output))
+        XCTAssertTrue(try PmsetSleepGuard.parseBatteryLowPowerMode("AC Power:\n lowpowermode 0\nBattery Power:\n lowpowermode 1"))
+    }
+
+    func testMissingOrAmbiguousBatterySettingIsUnknown() {
+        for output in ["", "AC Power:\n lowpowermode 0", "Battery Power:\n sleep 1", "Battery Power:\n lowpowermode 2", "Battery Power:\n lowpowermode 0\n lowpowermode 1", "Battery Power:\n lowpowermode 0\nBattery Power:\n lowpowermode 0"] {
+            XCTAssertThrowsError(try PmsetSleepGuard.parseBatteryLowPowerMode(output))
+        }
+    }
+
+    func testBatteryReadUsesCustomAndRejectsCommandFailure() async throws {
+        let requests = Locked([[String]]())
+        let guardService = PmsetSleepGuard { _, args in
+            requests.value.append(args)
+            return ShellResult(status: 1, stdout: "Battery Power:\n lowpowermode 1", stderr: "injected failure")
+        }
+        do { _ = try await guardService.batteryLowPowerMode(); XCTFail("failed read accepted") } catch {}
+        XCTAssertEqual(requests.value, [["-g", "custom"]])
     }
 
     func testErrorMessageMentionsInstall() {

@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Insomnia
 
@@ -30,6 +31,7 @@ final class LidActionsTests: XCTestCase {
 
     private func make(dockerIdle: @escaping @Sendable () async throws -> Bool = { true }, mute: Bool = true) async -> (SessionManager, LidActions) {
         let m = h.makeManager()
+        m.config.dockerRule = true // These integration tests explicitly opt in.
         m.config.muteOnLidClose = mute
         m.config.freezeList = ["com.tinyspeck.slackmacgap"]
         let docker = DockerRule(freezer: freezer, probe: dockerIdle)
@@ -188,6 +190,56 @@ final class LidActionsTests: XCTestCase {
         XCTAssertEqual(try h.store.loadState(), RuntimeState.clean)
     }
 
+    func testExternalRecoveryPreventsStaleLidSideEffects() async throws {
+        let (m, actions) = await make()
+        await m.start(duration: 3600)
+        try h.store.deleteSession(); try h.store.saveState(.clean)
+        await actions.onClose()
+        XCTAssertEqual(h.audio.mutes, 0)
+        XCTAssertEqual(h.procs.suspended, [])
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertFalse(m.isActive)
+    }
+
+    func testMuteAndFreezeHoldLeaseThroughSideEffects() async throws {
+        let (m, actions) = await make()
+        await m.start(duration: 3600)
+        let lockPath = h.home.paths.recoveryLock.path
+        let excluded = Locked(true)
+        let probe: @Sendable () -> Void = {
+            let fd = open(lockPath, O_RDWR | O_CLOEXEC)
+            defer { _ = close(fd) }
+            if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+                excluded.value = false
+                _ = flock(fd, LOCK_UN)
+            }
+        }
+        h.audio.onMute = probe
+        h.procs.onSuspend = { _ in probe() }
+        await actions.onClose()
+        XCTAssertEqual(h.audio.mutes, 1)
+        XCTAssertEqual(h.procs.suspended.count, 2)
+        XCTAssertTrue(excluded.value)
+        await m.end(reason: .user)
+    }
+
+    func testBackstopCanRecoverDuringDockerProbeAndPreventsLaterFreeze() async throws {
+        let gate = AsyncGate()
+        let (m, actions) = await make(dockerIdle: { await gate.wait(); return true })
+        await m.start(duration: 3600)
+        let close = Task { await actions.onClose() }
+        await gate.waitUntilStarted()
+        let peer = try JournalLockPeer(paths: h.home.paths, recovery: true); defer { peer.release() }
+        try await peer.waitForLease()
+        peer.release()
+        // Wait for peer release before exercising the stale-session check.
+        try await JournalLock.withLease(at: h.home.paths.recoveryLock) {}
+        await gate.open(); await close.value
+        XCTAssertEqual(h.procs.suspended, [[100, 101, 102]])
+        XCTAssertEqual(try h.store.loadState(), .clean)
+        XCTAssertFalse(m.isActive)
+    }
+
     func testAudioReadFailureSkipsMuteButStillFreezes() async throws {
         let (m, actions) = await make()
         h.audio.throwOnRead = true
@@ -207,4 +259,32 @@ final class Locked<T: Sendable>: @unchecked Sendable {
         get { lock.withLock { _v } }
         set { lock.withLock { _v = newValue } }
     }
+}
+
+extension LidActionsTests {
+    func testAlreadyStoppedProcessesAreNotJournaledAndFailedStopsAreRemoved() async throws {
+        h.procs.stoppedBeforePlanning = [100]
+        h.procs.failedSuspends = [101]
+        let (manager, actions) = await make(mute: false)
+        await manager.start(duration: 3600)
+        await actions.onClose()
+        let state = try XCTUnwrap(try h.store.loadState())
+        XCTAssertFalse(state.frozenPids.contains(100))
+        XCTAssertFalse(state.frozenPids.contains(101))
+        XCTAssertFalse(h.procs.suspended.flatMap { $0 }.contains(100))
+        XCTAssertEqual(Set(state.frozenPids), Set(state.frozenProcesses.map(\.pid)))
+    }
+
+    func testRepeatedCloseKeepsOriginalAudioDeviceOwnership() async throws {
+        let (manager, actions) = await make()
+        await manager.start(duration: 3600)
+        await actions.onClose()
+        h.audio.defaultDeviceUID = "new-default"
+        await actions.onClose()
+        XCTAssertEqual(h.audio.mutedDevices, ["test-output", "test-output"])
+        XCTAssertEqual(try h.store.loadState()?.savedOutputDeviceUID, "test-output")
+        await actions.onOpen()
+        XCTAssertEqual(h.audio.restoredDevices, ["test-output"])
+    }
+
 }

@@ -4,6 +4,111 @@ import XCTest
 
 final class IntegrationWiringTests: XCTestCase {
     @MainActor
+    func testInitialLidActionsWaitForLowPowerLease() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let manager = h.makeManager()
+        manager.config.muteOnLidClose = true
+        manager.config.dockerRule = false
+        manager.config.freezeList = ["org.example.fixture"]
+        let freezer = FakeFreezer(apps: [RunningApp(pid: 100, bundleId: "org.example.fixture", name: "Fixture")],
+                                  processes: [ProcessEntry(pid: 100, ppid: 1)], control: h.procs)
+        let actions = LidActions(manager: manager, freezer: freezer,
+                                 docker: DockerRule(freezer: freezer, probe: { false }), audio: h.audio)
+        let services = AppServices(paths: h.home.paths, notifier: h.notifier, audio: h.audio,
+                                   processControl: h.procs,
+                                   locationPermission: LocationPermission(authorizationStatus: .authorizedAlways))
+        await manager.start(duration: 3600)
+        services.beginSession(for: manager)
+        let gate = AsyncGate()
+        h.guardFake.lowPowerGate = gate
+        let floors = FloorRuleDriver(manager: manager, notifier: h.notifier)
+        let initialFloor = Task { await floors.run(percent: manager.config.lowPowerFloor - 1,
+                                                  isCharging: false, thermal: .nominal) }
+        await gate.waitUntilStarted()
+        let close = services.startLidActions(actions, closed: true, after: initialFloor)
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(h.audio.mutes, 0)
+        await gate.open()
+        await initialFloor.value
+        await close?.value
+        XCTAssertTrue(h.guardFake.lowPower)
+        XCTAssertEqual(h.audio.mutes, 1)
+        XCTAssertEqual(try h.store.loadState()?.savedMuted, false)
+        XCTAssertEqual(try h.store.loadState()?.frozenPids, [100])
+        await manager.end(reason: .user)
+        services.stop()
+    }
+
+    @MainActor
+    func testInitialLidActionsDoNotOutliveSessionOrLidState() async throws {
+        for outcome in ["battery", "thermal", "stopped", "replacement", "opened"] {
+            let h = Harness(); defer { h.home.destroy() }
+            let manager = h.makeManager()
+            manager.config.muteOnLidClose = true
+            manager.config.dockerRule = false
+            let freezer = FakeFreezer(apps: [], processes: [], control: h.procs)
+            let actions = LidActions(manager: manager, freezer: freezer,
+                                     docker: DockerRule(freezer: freezer, probe: { false }), audio: h.audio)
+            let services = AppServices(paths: h.home.paths, notifier: h.notifier, audio: h.audio,
+                                       processControl: h.procs,
+                                       locationPermission: LocationPermission(authorizationStatus: .authorizedAlways))
+            await manager.start(duration: 3600)
+            services.beginSession(for: manager)
+            let gate = AsyncGate()
+            let floors = FloorRuleDriver(manager: manager, notifier: h.notifier)
+            let initialFloor = Task {
+                await gate.wait()
+                if outcome == "battery" {
+                    await floors.run(percent: 0, isCharging: false, thermal: .nominal)
+                } else if outcome == "thermal" {
+                    await floors.run(percent: 100, isCharging: true, thermal: .critical)
+                }
+            }
+            await gate.waitUntilStarted()
+            let close = services.startLidActions(actions, closed: true, after: initialFloor)
+            if outcome == "stopped" { services.stop() }
+            if outcome == "replacement" {
+                await manager.end(reason: .user)
+                await manager.start(duration: 7200)
+            }
+            if outcome == "opened" { services.startLidActions(actions, closed: false) }
+            await gate.open()
+            await close?.value
+            XCTAssertEqual(h.audio.mutes, 0, outcome)
+            XCTAssertNil(try h.store.loadState()?.savedMuted, outcome)
+            if outcome == "battery" || outcome == "thermal" { XCTAssertFalse(manager.isActive, outcome) }
+            services.stop()
+            await manager.end(reason: .user)
+        }
+    }
+
+    @MainActor
+    func testInitiallyClosedLidAppliesJournaledActionsWithoutHardwareEvents() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let manager = h.makeManager()
+        manager.config.muteOnLidClose = true
+        manager.config.dockerRule = false
+        let freezer = FakeFreezer(apps: [], processes: [], control: h.procs)
+        let actions = LidActions(manager: manager, freezer: freezer,
+                                 docker: DockerRule(freezer: freezer, probe: { false }), audio: h.audio)
+        let services = AppServices(paths: h.home.paths, notifier: h.notifier, audio: h.audio,
+                                   processControl: h.procs,
+                                   locationPermission: LocationPermission(authorizationStatus: .authorizedAlways))
+        await manager.start(duration: 3600)
+        services.beginSession(for: manager)
+        XCTAssertNil(services.startLidActions(actions, closed: false))
+        XCTAssertEqual(h.audio.mutes, 0)
+        let close = services.startLidActions(actions, closed: true)
+        await close?.value
+        XCTAssertEqual(h.audio.mutes, 1)
+        XCTAssertEqual(try h.store.loadState()?.savedMuted, false)
+        XCTAssertFalse(manager.countdownTimerArmed)
+        await manager.end(reason: .user)
+        XCTAssertFalse(h.audio.muted)
+        services.stop()
+    }
+
+    @MainActor
     func testLiveStatusSourceReadsEveryValueFromSystemStatus() {
         let home = TempHome()
         defer { home.destroy() }
@@ -103,5 +208,29 @@ final class IntegrationWiringTests: XCTestCase {
         let undetermined = LocationPermission(authorizationStatus: .notDetermined)
         XCTAssertFalse(undetermined.isAuthorized)
         XCTAssertEqual(undetermined.statusDescription, "Not requested")
+    }
+}
+
+extension IntegrationWiringTests {
+    @MainActor
+    func testStoppedBrowserRefreshCannotPublishToMenu() async {
+        let home = TempHome()
+        defer { home.destroy() }
+        var config = Config()
+        config.browserThrottleEnabled = true
+        try! Store(paths: home.paths).saveConfig(config)
+        let gate = AsyncGate()
+        let browser = BrowserThrottle(readArgs: { _ in await gate.wait(); return ["Chrome"] }, runningApps: {
+            [BrowserStatus(bundleId: "com.google.Chrome", name: "Chrome", pid: 101, unthrottled: false)]
+        })
+        let services = AppServices(paths: home.paths, notifier: RecordingNotifier(),
+            audio: FakeAudioControl(), processControl: FakeProcessControl(), browser: browser)
+        let task = Task { await services.refreshBrowsers() }
+        await gate.waitUntilStarted()
+        services.stop()
+        await gate.open()
+        await task.value
+        XCTAssertTrue(services.status.browsers.isEmpty)
+        XCTAssertTrue(services.status.throttledBrowsers.isEmpty)
     }
 }

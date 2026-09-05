@@ -30,18 +30,29 @@ struct Store: Sendable {
     /// Returns nil when the file does not exist. Throws on unreadable or
     /// undecodable content.
     func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
+        try JournalLock.withLock(at: paths.recoveryLock) { try readUnlocked(type, from: url) }
+    }
+
+    private func readUnlocked<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let data = try Data(contentsOf: url)
+        let handle = try PrivateFiles.handle(url, flags: O_RDONLY)
+        defer { try? handle.close() }
+        let data = try handle.readToEnd() ?? Data()
         return try Store.makeDecoder().decode(T.self, from: data)
     }
 
     /// Atomic write: temp file + rename(2).
     func write<T: Encodable>(_ value: T, to url: URL) throws {
+        try JournalLock.withLock(at: paths.recoveryLock) { try writeUnlocked(value, to: url) }
+    }
+
+    private func writeUnlocked<T: Encodable>(_ value: T, to url: URL) throws {
         let data = try Store.makeEncoder().encode(value)
         let dir = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try PrivateFiles.directory(dir)
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
-        try data.write(to: tmp, options: [])
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try PrivateFiles.write(data, to: tmp, exclusive: true)
         if rename(tmp.path, url.path) != 0 {
             let err = errno
             try? FileManager.default.removeItem(at: tmp)
@@ -51,7 +62,12 @@ struct Store: Sendable {
 
     /// Removes the file; a missing file is not an error.
     func remove(at url: URL) throws {
+        try JournalLock.withLock(at: paths.recoveryLock) { try removeUnlocked(at: url) }
+    }
+
+    private func removeUnlocked(at url: URL) throws {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try PrivateFiles.directory(url.deletingLastPathComponent())
         try FileManager.default.removeItem(at: url)
     }
 
@@ -64,8 +80,11 @@ struct Store: Sendable {
     func loadState() throws -> RuntimeState? { try read(RuntimeState.self, from: paths.stateFile) }
     func saveState(_ s: RuntimeState) throws { try write(s, to: paths.stateFile) }
 
-    func loadConfig() throws -> Config? { try read(Config.self, from: paths.configFile) }
-    func saveConfig(_ c: Config) throws { try write(c, to: paths.configFile) }
+    func loadConfig() throws -> Config? { try readUnlocked(Config.self, from: paths.configFile) }
+    func saveConfig(_ c: Config) throws {
+        try c.validateFloors()
+        try writeUnlocked(c, to: paths.configFile)
+    }
 }
 
 enum StoreError: Error, LocalizedError {

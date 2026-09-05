@@ -3,12 +3,16 @@ import Foundation
 /// An active keep-awake session. `endsAt` is the only thing that keeps sleep
 /// disabled; everything else is bookkeeping.
 struct Session: Codable, Equatable, Sendable {
+    /// New sessions have durable identity even when their timestamps match.
+    /// Synthesized decoding leaves legacy journals without an ID as nil.
+    let id: UUID?
     var startedAt: Date
     var endsAt: Date
     /// Every extension applied, in order, in seconds.
     var extensions: [TimeInterval]
 
-    init(startedAt: Date, endsAt: Date, extensions: [TimeInterval] = []) {
+    init(startedAt: Date, endsAt: Date, extensions: [TimeInterval] = [], id: UUID? = UUID()) {
+        self.id = id
         self.startedAt = startedAt
         self.endsAt = endsAt
         self.extensions = extensions

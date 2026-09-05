@@ -3,13 +3,18 @@
 ## Reporting a vulnerability
 
 Report vulnerabilities through GitHub's private vulnerability reporting on this repository
-("Security" tab, "Report a vulnerability"). Do not open a public issue for a security problem.
+([private report form](https://github.com/kgarg2468/harbor/security/advisories/new)). Do not open a public issue for a security problem.
 There is no reporting email address.
 
 Expect an acknowledgement within seven days. Fixes ship as ordinary pull requests once a
 mitigation exists; the advisory is published when the fix is merged.
 
 ## Scope
+
+Insomnia (`insomnia/`) is also in scope: power grants, session/recovery journals,
+process and audio ownership, installer/removal behavior, hotspot credentials,
+subprocess execution and diagnostic privacy. Private reporting is enabled for
+this repository. Insomnia source previews do not promise a signed binary release.
 
 In scope: anything Harbor itself does on the node or the Mac, including the command lock, the
 ownership journal, file modes, firewall and SSH changes, and how Harbor invokes vendor tools.

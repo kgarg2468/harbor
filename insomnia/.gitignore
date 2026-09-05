@@ -6,3 +6,6 @@ xcuserdata/
 DerivedData/
 *.app
 .DS_Store
+
+# Isolated Python script-test caches
+__pycache__/

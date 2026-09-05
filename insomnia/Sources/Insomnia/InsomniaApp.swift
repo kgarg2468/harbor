@@ -6,6 +6,31 @@ import SwiftUI
 /// `SettingsWindow`), so there is no SwiftUI scene with any content in it.
 /// `App` still requires one, hence the empty `Settings`.
 @main
+enum InsomniaEntryPoint {
+    @MainActor
+    static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "--recover-owned" {
+            exit(RecoveryCommand.run(arguments: arguments))
+        }
+        if arguments == ["--maintenance-protocol"] {
+            print(RecoveryCommand.protocolVersion)
+            exit(0)
+        }
+        if arguments.first == "--validate-recovery-state", arguments.count == 2, arguments[1].hasPrefix("/") {
+            exit(RecoveryCommand.validate(stateFile: URL(fileURLWithPath: arguments[1])) ? 0 : 1)
+        }
+        if arguments.first == "--maintenance-uninstall" {
+            exit(MaintenanceCommand.run(arguments: arguments))
+        }
+        guard arguments.isEmpty || arguments.allSatisfy({ $0.hasPrefix("-psn_") }) else {
+            FileHandle.standardError.write(Data("Unknown Insomnia command; no GUI or maintenance action started.\n".utf8))
+            exit(2)
+        }
+        InsomniaApp.main()
+    }
+}
+
 struct InsomniaApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
 
@@ -27,7 +52,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var terminating = false
 
     override init() {
-        let manager = SessionManager.live()
+        let paths = Paths.fromEnvironment()
+        do {
+            try AppInstanceLease.acquireForProcess(paths: paths)
+        } catch {
+            let message = "Insomnia could not launch: \(error.localizedDescription)"
+            Log.error(message)
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            // Do not keep a refused launch alive in a modal alert: an installer
+            // may already be waiting for every Insomnia PID to disappear.
+            exit(EXIT_FAILURE)
+        }
+        let manager = SessionManager.live(paths: paths)
         self.manager = manager
         secrets = KeychainHotspotSecretStore(keychain: KeychainStore()) {
             manager.config.hotspotSSID
@@ -66,11 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting always ends the session (spec 1). Terminate is deferred until
     /// sleep has been restored.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminating else { return .terminateNow }
+        guard !terminating else { return .terminateCancel }
         terminating = true
         Task {
-            await manager.end(reason: .quit)
-            sender.reply(toApplicationShouldTerminate: true)
+            let restored = await manager.prepareToQuit()
+            if !restored { terminating = false }
+            sender.reply(toApplicationShouldTerminate: restored)
         }
         return .terminateLater
     }
