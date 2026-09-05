@@ -1,0 +1,2 @@
+# Materialized upstream source and any staging left by an interrupted run.
+.build/
