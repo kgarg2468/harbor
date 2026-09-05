@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/app/DesktopClerk.test.ts b/apps/desktop/src/app/DesktopClerk.test.ts
-index 2f61ca909aef7f78270539cd73bc1978a7924754..a099dac037619301b13819879659054cb840c997 100644
+index 2f61ca909..a099dac03 100644
 --- a/apps/desktop/src/app/DesktopClerk.test.ts
 +++ b/apps/desktop/src/app/DesktopClerk.test.ts
 @@ -211,7 +211,7 @@ describe("DesktopClerk", () => {
@@ -12,7 +12,7 @@ index 2f61ca909aef7f78270539cd73bc1978a7924754..a099dac037619301b13819879659054c
      const bridge = { cleanup: vi.fn(), isPrimaryInstance: true };
      storageMock.mockReturnValue(storageAdapter);
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index 89cc592831a7bc67626cc964267239210cec504f..555673dfa431b93a8d03f5783d3cf6d134092f7c 100644
+index 89cc59283..555673dfa 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
 @@ -131,7 +131,56 @@ describe("DesktopEnvironment", () => {
@@ -74,7 +74,7 @@ index 89cc592831a7bc67626cc964267239210cec504f..555673dfa431b93a8d03f5783d3cf6d1
    );
  
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index 4583e51240918d0440040f30dadde203de80573d..1b0331f18767e931751acaafd6310b4eddeaa16d 100644
+index 4583e5124..1b0331f18 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
 @@ -86,6 +86,9 @@ export class DesktopEnvironment extends Context.Service<
@@ -166,7 +166,7 @@ index 4583e51240918d0440040f30dadde203de80573d..1b0331f18767e931751acaafd6310b4e
      appImagePath: config.appImagePath,
      userDataDirName,
 diff --git a/apps/desktop/src/electron/ElectronProtocol.test.ts b/apps/desktop/src/electron/ElectronProtocol.test.ts
-index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b77bdb80b6 100644
+index a5c03e0b9..5d527e6e9 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.test.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.test.ts
 @@ -23,6 +23,15 @@ describe("ElectronProtocol", () => {
@@ -256,7 +256,7 @@ index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b7
    });
  });
 diff --git a/apps/desktop/src/electron/ElectronProtocol.ts b/apps/desktop/src/electron/ElectronProtocol.ts
-index fabd598d7ffab125afd5e73c70d71996564d0646..91b9204888dfa8704d836c63d6b3e56c40c63e31 100644
+index fabd598d7..91b920488 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.ts
 @@ -9,7 +9,9 @@ import * as Scope from "effect/Scope";
@@ -271,18 +271,18 @@ index fabd598d7ffab125afd5e73c70d71996564d0646..91b9204888dfa8704d836c63d6b3e56c
  
  export function getDesktopScheme(isDevelopment: boolean): string {
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f667234a1 100644
+index f9d9eb5a6..2b2d4d03e 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -54,7 +54,6 @@ import {
+@@ -55,7 +55,6 @@ import {
    resolveResourceMonitorRustTargets,
    resolveWindowsServerAsarIgnoreGlobs,
    resourceMonitorExecutableName,
 -  resolveGitHubPublishConfig,
+   InvalidProductVariantError,
+   MissingProductVariantError,
    resolveMockUpdateServerPort,
-   resolveMockUpdateServerUrl,
-   resolvePackageManagerUserAgent,
-@@ -259,9 +258,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -262,9 +261,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
    });
  
@@ -295,13 +295,61 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
    });
  
    it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
-@@ -283,86 +282,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -286,10 +285,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
    });
  
+-  it("keeps managed nightly versions on the nightly channel with nightly identity", () => {
++  it("keeps managed nightly versions on the nightly channel with Reasoning identity", () => {
+     const managedVersion = "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab";
+     assert.equal(resolveDesktopUpdateChannel(managedVersion), "nightly");
+-    assert.equal(resolveDesktopProductName(managedVersion), "T3 Code (Nightly)");
++    assert.equal(resolveDesktopProductName(managedVersion), "T3 Code (Reasoning)");
+     assert.equal(resolveDesktopWebAssetBrand(managedVersion), "nightly");
+     assert.deepStrictEqual(resolveDesktopBuildIconAssets(managedVersion), {
+       macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
+@@ -310,7 +309,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+       "0.0.39-managed.1.p0123456789ab",
+     ]) {
+       assert.equal(resolveDesktopUpdateChannel(version), "latest", version);
+-      assert.equal(resolveDesktopProductName(version), "T3 Code (Alpha)", version);
++      assert.equal(resolveDesktopProductName(version), "T3 Code (Reasoning)", version);
+     }
+   });
+ 
+@@ -344,21 +343,16 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+         undefined,
+       );
+ 
+-      assert.equal(managed.productName, "T3 Code (Nightly)");
++      assert.equal(managed.productName, "T3 Code (Reasoning)");
+       // Explicit null, not an absent key: only null disables electron-builder's
+       // provider inference (JSON keeps null, so it survives the staged package.json).
+       assert.property(managed, "publish");
+       assert.strictEqual(managed.publish, null);
+       assert.strictEqual(managedWithMockUpdates.publish, null);
+-      assert.deepStrictEqual(upstreamNightly.publish, [
+-        {
+-          provider: "github",
+-          owner: "pingdotgg",
+-          repo: "t3code",
+-          releaseType: "prerelease",
+-          channel: "nightly",
+-        },
+-      ]);
++      // The private Reasoning build never resolves the official GitHub feed for
++      // upstream nightlies either; it is disabled the same way.
++      assert.property(upstreamNightly, "publish");
++      assert.strictEqual(upstreamNightly.publish, null);
+     }).pipe(
+       Effect.provide(
+         ConfigProvider.layer(
+@@ -373,81 +367,43 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     ),
+   );
+ 
 -  it.effect("resolves GitHub desktop publish config from Effect config", () =>
-+  it.effect("never wires an official update feed into the package", () =>
-     Effect.gen(function* () {
+-    Effect.gen(function* () {
 -      const latestConfig = yield* resolveGitHubPublishConfig("latest").pipe(
 -        Effect.provide(
 -          ConfigProvider.layer(
@@ -342,7 +390,8 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
 -  );
 -
 -  it.effect("omits update feeds for pull request preview builds", () =>
--    Effect.gen(function* () {
++  it.effect("never wires an official update feed into the package", () =>
+     Effect.gen(function* () {
 -      const preview = yield* createBuildConfig(
 +      const release = yield* createBuildConfig(
          "mac",
@@ -375,8 +424,11 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
 -          releaseType: "release",
 -        },
 -      ]);
-+      assert.notProperty(release, "publish");
-+      assert.notProperty(nightly, "publish");
++      // Explicit null rather than an absent key: an absent key would still let
++      // electron-builder infer a feed from an inherited GH_TOKEN (see the seam
++      // test below).
++      assert.strictEqual(release.publish, null);
++      assert.strictEqual(nightly.publish, null);
      }).pipe(
 +      // CI-style env that used to select the official GitHub feed must not
 +      // reintroduce it for the private Reasoning build.
@@ -392,7 +444,9 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
          ),
        ),
      ),
-   );
+@@ -552,6 +508,38 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     });
+   });
  
 +  it.effect("keeps mock updates opt-in and away from preview builds", () =>
 +    Effect.gen(function* () {
@@ -421,14 +475,15 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
 +          url: "http://localhost:4100",
 +        },
 +      ]);
-+      assert.notProperty(preview, "publish");
++      // Previews get the same explicit opt-out as every other non-mock build.
++      assert.strictEqual(preview.publish, null);
 +    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
 +  );
 +
    it("omits bundled workspace packages from staged desktop dependencies", () => {
      assert.deepStrictEqual(
        resolveDesktopRuntimeDependencies(
-@@ -658,7 +647,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -847,7 +835,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          "**/node_modules/.bin/**",
        ]);
        assert.deepStrictEqual(mac.dmg, {
@@ -437,7 +492,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
          background: "dmg/dmg-background-latest.png",
          window: { width: 540, height: 412 },
          contents: [
-@@ -668,11 +657,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -857,11 +845,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          iconSize: 80,
          iconTextSize: 12,
        });
@@ -467,7 +522,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
        assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
        assert.notProperty(mac.mac as Record<string, unknown>, "sign");
        for (const config of [linux, win]) {
-@@ -1587,7 +1591,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1776,7 +1779,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      });
  
      assert.deepStrictEqual(configuration, {
@@ -476,7 +531,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
        teamId: "ABC1234567",
        rpDomains: ["example.clerk.accounts.dev"],
        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-@@ -1607,7 +1611,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1796,7 +1799,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        "clerk.example.com",
        "example.clerk.accounts.dev",
      ]);
@@ -485,7 +540,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
      assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
      assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
      assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
-@@ -1694,7 +1698,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1883,7 +1886,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.notInclude(error.message, secret);
    });
  
@@ -494,7 +549,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
      Effect.gen(function* () {
        const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
          entitlementsPath: "/tmp/entitlements.mac.plist",
-@@ -1702,12 +1706,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1891,12 +1894,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        });
  
        const mac = config.mac as Record<string, unknown>;
@@ -510,10 +565,10 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..d66b06ba27541d0ed91388ac5ff37b6f
      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
    );
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f48097d23883a 100644
+index ed9fb7c3d..0da93d78b 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -52,7 +52,9 @@ import { Command, Flag } from "effect/unstable/cli";
+@@ -59,7 +59,9 @@ import { Command, Flag } from "effect/unstable/cli";
  import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
  
  const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
@@ -524,7 +579,7 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
  const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
  
  const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
-@@ -2485,32 +2487,6 @@ export function resolveDesktopRuntimeDependencies(
+@@ -2528,32 +2530,6 @@ export function resolveDesktopRuntimeDependencies(
    return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
  }
  
@@ -554,10 +609,10 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
 -  };
 -});
 -
+ // Mirrors isNightlyDesktopVersion in apps/desktop/src/updates/updateChannels.ts:
+ // an upstream nightly, or a managed release cut from one, stays on nightly.
  export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
-   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
- }
-@@ -2556,10 +2532,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
+@@ -2603,10 +2579,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
    return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
  }
  
@@ -573,7 +628,7 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
  }
  
  export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
-@@ -2584,7 +2561,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2631,7 +2608,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    const buildConfig: Record<string, unknown> = {
      appId: DESKTOP_APP_ID,
      productName: resolveDesktopProductName(version),
@@ -582,11 +637,36 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
      electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
      files: [
        ...DESKTOP_FILE_EXCLUSIONS,
-@@ -2605,18 +2582,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2652,26 +2629,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      ],
    };
    const updateChannel = resolveDesktopUpdateChannel(version);
--  if (!isDesktopPreviewVersion(version)) {
+-  // A managed release never carries an Electron update feed; the managed
+-  // installer owns updates. `publish: null` is the only value electron-builder
+-  // treats as "disabled" (app-builder-lib PublishManager.getPublishConfigs):
+-  // an absent key lets it infer GitHub from an inherited GH_TOKEN/GITHUB_TOKEN
+-  // or from ambient CI repository variables, and its afterPack hook then
+-  // embeds app-update.yml even under `--publish never`.
+-  if (isManagedNightlyVersion(version)) {
++  // The Reasoning build is private: no official update feed ever lands in the
++  // package, even when CI-style env (GITHUB_REPOSITORY, GH_TOKEN) is present,
++  // and a managed release is updated by the managed installer instead.
++  // `publish: null` is the only value electron-builder treats as "disabled"
++  // (app-builder-lib PublishManager.getPublishConfigs): an absent key lets it
++  // infer GitHub from an inherited GH_TOKEN/GITHUB_TOKEN or from ambient CI
++  // repository variables, and its afterPack hook then embeds app-update.yml
++  // even under `--publish never`. The opt-in mock update server remains for
++  // local update testing of unmanaged, non-preview builds.
++  if (!isManagedNightlyVersion(version) && !isDesktopPreviewVersion(version) && mockUpdates) {
++    buildConfig.publish = [
++      {
++        provider: "generic",
++        url: resolveMockUpdateServerUrl(mockUpdateServerPort),
++      },
++    ];
++  } else {
+     buildConfig.publish = null;
+-  } else if (!isDesktopPreviewVersion(version)) {
 -    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
 -    if (publishConfig) {
 -      buildConfig.publish = [publishConfig];
@@ -598,20 +678,10 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
 -        },
 -      ];
 -    }
-+  // The Reasoning build is private: no official update feed ever lands in
-+  // the package, even when CI-style env (GITHUB_REPOSITORY) is present. The
-+  // opt-in mock update server remains for local update testing.
-+  if (!isDesktopPreviewVersion(version) && mockUpdates) {
-+    buildConfig.publish = [
-+      {
-+        provider: "generic",
-+        url: resolveMockUpdateServerUrl(mockUpdateServerPort),
-+      },
-+    ];
    }
  
    if (platform === "mac") {
-@@ -2626,10 +2601,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2681,10 +2656,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
        target: target === "dmg" ? [target, "zip"] : [target],
        icon: "icon.icns",
        category: "public.app-category.developer-tools",
@@ -626,7 +696,7 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
          },
        ],
        ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-@@ -2668,21 +2645,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2723,21 +2700,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    if (platform === "linux") {
      buildConfig.linux = {
        target: [target],
@@ -654,7 +724,7 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
          },
        },
      };
-@@ -3657,13 +3635,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+@@ -3716,13 +3694,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
        ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
        : undefined;
    const stagePackageJson: StagePackageJson = {
@@ -672,7 +742,7 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..d462c8cf81387b6580e88961e95f4809
      build: yield* createBuildConfig(
 diff --git a/scripts/update-reasoning-mac-app.sh b/scripts/update-reasoning-mac-app.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..ea583477ba333d0bfa528a446f4807d66bfdc73c
+index 000000000..ea583477b
 --- /dev/null
 +++ b/scripts/update-reasoning-mac-app.sh
 @@ -0,0 +1,449 @@

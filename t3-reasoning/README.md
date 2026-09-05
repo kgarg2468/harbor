@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly, materialized as one of two build variants. `source.lock.json` pins
 upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, a catalog of ten checksummed patches, and
+`v0.0.39-nightly.20260905.1284`, a catalog of checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;
@@ -63,6 +63,9 @@ What this component does not do:
 - `patches/0006-thread-fork-backend.patch`: fork RPC, durable copied history and
   lineage, checkpoint worktrees, and fresh provider context on the first send.
   See `docs/thread-forks.md`; the desktop action is a separate UI patch.
+- `patches/0011-managed-release-presentation.patch`: managed version/channel
+  recognition, explicit build presentation, and disabled official update feeds.
+  See `docs/build-variants.md`; artifact installation remains separate work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a

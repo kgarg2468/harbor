@@ -1,0 +1,1355 @@
+diff --git a/apps/desktop/src/settings/DesktopClientSettings.test.ts b/apps/desktop/src/settings/DesktopClientSettings.test.ts
+index 0d9ddc8fd..52b04e3a2 100644
+--- a/apps/desktop/src/settings/DesktopClientSettings.test.ts
++++ b/apps/desktop/src/settings/DesktopClientSettings.test.ts
+@@ -47,6 +47,7 @@ const clientSettings: ClientSettings = {
+   panelAnimationDurationMs: 0,
+   planModeEnabled: false,
+   proactivePanelsEnabled: true,
++  preferredEnvironmentId: null,
+   showSkillsInSlashMenu: false,
+   providerModelPreferences: {},
+   sidebarProjectGroupingMode: "repository_path",
+diff --git a/apps/desktop/src/updates/updateChannels.test.ts b/apps/desktop/src/updates/updateChannels.test.ts
+new file mode 100644
+index 000000000..c44d8d03b
+--- /dev/null
++++ b/apps/desktop/src/updates/updateChannels.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { isNightlyDesktopVersion, resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
++
++describe("updateChannels", () => {
++  it("keeps upstream nightly and release versions on their existing channels", () => {
++    expect(resolveDefaultDesktopUpdateChannel("0.0.39-nightly.20260905.1284")).toBe("nightly");
++    expect(resolveDefaultDesktopUpdateChannel("0.0.39")).toBe("latest");
++    expect(resolveDefaultDesktopUpdateChannel("0.0.39-pr.8182.1")).toBe("latest");
++  });
++
++  it("recognizes the managed nightly prerelease suffix as nightly", () => {
++    expect(isNightlyDesktopVersion("0.0.39-nightly.20260905.1284.managed.1.p0123456789ab")).toBe(
++      true,
++    );
++    expect(
++      resolveDefaultDesktopUpdateChannel("0.0.39-nightly.20260905.1284.managed.17.pdeadbeefcafe"),
++    ).toBe("nightly");
++  });
++
++  it("rejects malformed managed suffixes instead of guessing a channel", () => {
++    for (const version of [
++      "0.0.39-nightly.20260905.1284.managed.0.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.01.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789a",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789abc",
++      "0.0.39-nightly.20260905.1284.managed.1.pXYZ456789abc",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab+meta",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab.extra",
++      "0.0.39-nightly.20260905.1284.managed",
++      "0.0.39-managed.1.p0123456789ab",
++    ]) {
++      expect(isNightlyDesktopVersion(version), version).toBe(false);
++      expect(resolveDefaultDesktopUpdateChannel(version), version).toBe("latest");
++    }
++  });
++});
+diff --git a/apps/desktop/src/updates/updateChannels.ts b/apps/desktop/src/updates/updateChannels.ts
+index 731910e44..6c649a21d 100644
+--- a/apps/desktop/src/updates/updateChannels.ts
++++ b/apps/desktop/src/updates/updateChannels.ts
+@@ -1,6 +1,10 @@
+ import type { DesktopUpdateChannel } from "@t3tools/contracts";
+ 
+-const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
++// Upstream nightlies end at `-nightly.<yyyymmdd>.<run>`. A managed release
++// appends `.managed.<releaseCounter>.p<12-hex digest>` to that prerelease so it
++// still sorts after the nightly it was cut from; it stays on the nightly
++// channel. Mirrors resolveDesktopUpdateChannel in scripts/build-desktop-artifact.ts.
++const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+(?:\.managed\.[1-9]\d*\.p[0-9a-f]{12})?$/;
+ 
+ export function isNightlyDesktopVersion(version: string): boolean {
+   return NIGHTLY_VERSION_PATTERN.test(version);
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 1c3563066..c179ab2fe 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -307,7 +307,7 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
+ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
+ import { ForkThreadDialog, ForkThreadLineage } from "./chat/ForkThreadDialog";
+ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
+-import { MessagesTimeline } from "./chat/MessagesTimeline";
++import { MessagesTimeline, REASONING_PRESENTATION_ENABLED } from "./chat/MessagesTimeline";
+ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
+ import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
+ import { resolveComposerTimelineInset } from "./composerFooterLayout";
+@@ -2343,7 +2343,10 @@ export default function ChatView(props: ChatViewProps) {
+   const pullRequestsCapabilityKnown = serverConfig !== null;
+   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+   // Absent on pre-fork servers, which hides the action instead of failing it.
+-  const supportsThreadFork = serverConfig?.environment.capabilities.threadFork === true;
++  // The build presentation gate hides it too; the capability itself stays
++  // decoded so either client understands the same server config.
++  const supportsThreadFork =
++    REASONING_PRESENTATION_ENABLED && serverConfig?.environment.capabilities.threadFork === true;
+   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
+   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
+   const supportsAttachmentUploads =
+@@ -7942,7 +7945,7 @@ export default function ChatView(props: ChatViewProps) {
+             </div>
+             {/* Messages Wrapper */}
+             <div className="relative flex min-h-0 flex-1 flex-col">
+-              {activeThread.forkedFrom ? (
++              {REASONING_PRESENTATION_ENABLED && activeThread.forkedFrom ? (
+                 <ForkThreadLineage
+                   environmentId={activeThread.environmentId}
+                   forkedFrom={activeThread.forkedFrom}
+@@ -8284,7 +8287,7 @@ export default function ChatView(props: ChatViewProps) {
+               />
+             ) : null}
+ 
+-            {forkDialogState && serverThread ? (
++            {REASONING_PRESENTATION_ENABLED && forkDialogState && serverThread ? (
+               <ForkThreadDialog
+                 key={forkDialogState.key}
+                 open
+diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
+index 988aa4d3b..9f1bc80b5 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
++++ b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
+@@ -97,6 +97,7 @@ describe("streaming row projection", () => {
+       timelineEntries: timeline.entries,
+       latestTurn: { turnId, state: "running", startedAt: time(5), completedAt: null },
+       runningTurnId: turnId,
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: time(5),
+       turnDiffSummaryByAssistantMessageId: new Map<MessageId, TurnDiffSummary>(),
+@@ -257,6 +258,7 @@ describe("streaming row projection", () => {
+           completedAt: initial.time(9),
+         },
+         runningTurnId: null,
++        reasoningPresentation: true,
+         isWorking: false,
+       };
+       const previous = deriveMessagesTimelineRowsWithState(input);
+@@ -312,6 +314,7 @@ describe("streaming row projection", () => {
+     check({
+       latestTurn: { ...initial.input.latestTurn, state: "completed", completedAt: initial.time(9) },
+       runningTurnId: null,
++      reasoningPresentation: true,
+       isWorking: false,
+     });
+     work = [
+@@ -519,6 +522,7 @@ describe("work entry labels", () => {
+             },
+           },
+         ],
++        reasoningPresentation: true,
+         isWorking: false,
+         activeTurnStartedAt: null,
+         turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -859,6 +863,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -922,6 +927,7 @@ describe("deriveMessagesTimelineRows", () => {
+         },
+       ],
+       expandedTurnIds: new Set(["turn-1" as never]),
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -976,6 +982,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:19Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1033,6 +1040,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map([
+@@ -1114,6 +1122,7 @@ describe("deriveMessagesTimelineRows", () => {
+ 
+     const collapsedRows = deriveMessagesTimelineRows({
+       timelineEntries,
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1137,6 +1146,7 @@ describe("deriveMessagesTimelineRows", () => {
+     const expandedRows = deriveMessagesTimelineRows({
+       timelineEntries,
+       expandedTurnIds: new Set(["turn-1" as never]),
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1207,6 +1217,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: "2026-01-01T00:00:10Z",
+       },
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1290,6 +1301,7 @@ describe("deriveMessagesTimelineRows", () => {
+ 
+     const rows = deriveMessagesTimelineRows({
+       timelineEntries,
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1358,6 +1370,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1403,6 +1416,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1459,6 +1473,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1512,6 +1527,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1605,6 +1621,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:05Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1654,6 +1671,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1711,6 +1729,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1771,6 +1790,7 @@ describe("deriveMessagesTimelineRows", () => {
+           },
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1876,6 +1896,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:14Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:14Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1913,6 +1934,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: "2026-01-01T00:00:47Z",
+       },
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -1981,6 +2003,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: "2026-01-01T00:00:22Z",
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:01:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2035,6 +2058,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2129,6 +2153,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:01:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:01:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2209,6 +2234,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2282,6 +2308,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2334,6 +2361,7 @@ describe("deriveMessagesTimelineRows", () => {
+         },
+       ],
+       expandedTurnIds: new Set([turnId]),
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2402,6 +2430,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2449,6 +2478,7 @@ describe("deriveMessagesTimelineRows", () => {
+         },
+       ],
+       latestTurn: null,
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:01:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2510,6 +2540,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2555,6 +2586,7 @@ describe("deriveMessagesTimelineRows", () => {
+           startedAt: "2026-01-01T00:00:00Z",
+           completedAt: null,
+         },
++        reasoningPresentation: true,
+         isWorking: true,
+         activeTurnStartedAt: "2026-01-01T00:00:00Z",
+         turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2603,6 +2635,7 @@ describe("deriveMessagesTimelineRows", () => {
+           startedAt: "2026-01-01T00:00:00Z",
+           completedAt: null,
+         },
++        reasoningPresentation: true,
+         isWorking: true,
+         activeTurnStartedAt: "2026-01-01T00:00:00Z",
+         turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2681,6 +2714,7 @@ describe("deriveMessagesTimelineRows", () => {
+         completedAt: "2026-01-01T00:00:25Z",
+       },
+       runningTurnId: "turn-2" as never,
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:01:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2741,6 +2775,7 @@ describe("deriveMessagesTimelineRows", () => {
+         },
+       ],
+       expandedTurnIds: new Set(["turn-1" as never]),
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2780,6 +2815,7 @@ describe("deriveMessagesTimelineRows", () => {
+         startedAt: "2026-01-01T00:00:00Z",
+         completedAt: null,
+       },
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: "2026-01-01T00:00:00Z",
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2844,6 +2880,7 @@ describe("deriveMessagesTimelineRows", () => {
+ 
+     const baseInput = {
+       timelineEntries,
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2938,6 +2975,7 @@ describe("deriveMessagesTimelineRows", () => {
+     ];
+     const [row] = deriveMessagesTimelineRows({
+       timelineEntries,
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -2978,6 +3016,7 @@ describe("deriveMessagesTimelineRows", () => {
+       const groupId = `work-group:tool:${turnId}:call-0`;
+       const input = {
+         timelineEntries,
++        reasoningPresentation: true,
+         isWorking,
+         expandedTurnIds: new Set([turnId]),
+         runningTurnId: isWorking ? turnId : null,
+@@ -3020,6 +3059,7 @@ describe("deriveMessagesTimelineRows", () => {
+ 
+     const rows = deriveMessagesTimelineRows({
+       timelineEntries,
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -3067,6 +3107,7 @@ describe("deriveMessagesTimelineRows", () => {
+ 
+       const rows = deriveMessagesTimelineRows({
+         timelineEntries,
++        reasoningPresentation: true,
+         isWorking: false,
+         activeTurnStartedAt: null,
+         turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -3090,6 +3131,204 @@ describe("deriveMessagesTimelineRows", () => {
+   );
+ });
+ 
++describe("deriveMessagesTimelineRows reasoning presentation gate", () => {
++  const userEntry = {
++    id: "user-entry",
++    kind: "message" as const,
++    createdAt: "2026-01-01T00:00:00Z",
++    message: {
++      id: "user-1" as never,
++      role: "user" as const,
++      text: "Explain",
++      turnId: null,
++      createdAt: "2026-01-01T00:00:00Z",
++      updatedAt: "2026-01-01T00:00:00Z",
++      streaming: false,
++    },
++  };
++  const reasoningEntry = (streaming: boolean, turnId: string | null = "turn-1") => ({
++    id: "reasoning-entry",
++    kind: "message" as const,
++    createdAt: "2026-01-01T00:00:01Z",
++    message: {
++      id: "reasoning-1" as never,
++      role: "assistant" as const,
++      channel: "reasoning" as const,
++      text: "Weighing the options",
++      turnId: turnId as never,
++      createdAt: "2026-01-01T00:00:01Z",
++      updatedAt: "2026-01-01T00:00:05Z",
++      streaming,
++    },
++  });
++  const answerEntry = {
++    id: "answer-entry",
++    kind: "message" as const,
++    createdAt: "2026-01-01T00:00:06Z",
++    message: {
++      id: "answer-1" as never,
++      role: "assistant" as const,
++      text: "Here is the answer.",
++      turnId: "turn-1" as never,
++      createdAt: "2026-01-01T00:00:06Z",
++      updatedAt: "2026-01-01T00:00:08Z",
++      streaming: false,
++    },
++  };
++  const workEntry = (id: string, createdAt: string) => ({
++    id: `${id}-entry`,
++    kind: "work" as const,
++    createdAt,
++    entry: {
++      id,
++      createdAt,
++      label: "Ran command",
++      tone: "tool" as const,
++      itemType: "command_execution" as const,
++      toolLifecycleStatus: "completed" as const,
++    },
++  });
++  const settledTurn = {
++    turnId: "turn-1" as never,
++    state: "completed" as const,
++    startedAt: "2026-01-01T00:00:00Z",
++    completedAt: "2026-01-01T00:00:08Z",
++  };
++  const settledInput = {
++    isWorking: false,
++    activeTurnStartedAt: null,
++    turnDiffSummaryByAssistantMessageId: new Map(),
++    revertTurnCountByUserMessageId: new Map(),
++  };
++  const messageRows = (rows: ReturnType<typeof deriveMessagesTimelineRows>) =>
++    rows.flatMap((row) => (row.kind === "message" ? [row] : []));
++
++  it("shows the reasoning disclosure with the presentation and hides it without", () => {
++    const input = {
++      timelineEntries: [userEntry, reasoningEntry(false), answerEntry],
++      latestTurn: settledTurn,
++      // Expanded so the settled turn's fold does not hide the leading thought.
++      expandedTurnIds: new Set(["turn-1" as never]),
++      ...settledInput,
++    };
++
++    const withPresentation = deriveMessagesTimelineRows({
++      ...input,
++      reasoningPresentation: true,
++    });
++    expect(withPresentation.some((row) => row.kind === "turn-fold")).toBe(true);
++    expect(messageRows(withPresentation).map((row) => row.message.id)).toEqual([
++      "user-1",
++      "reasoning-1",
++      "answer-1",
++    ]);
++
++    const withoutPresentation = deriveMessagesTimelineRows({
++      ...input,
++      reasoningPresentation: false,
++    });
++    expect(messageRows(withoutPresentation).map((row) => row.message.id)).toEqual([
++      "user-1",
++      "answer-1",
++    ]);
++    expect(withoutPresentation.some((row) => row.id === "reasoning-entry")).toBe(false);
++    // Nothing is left to fold once the thought is gone.
++    expect(withoutPresentation.some((row) => row.kind === "turn-fold")).toBe(false);
++  });
++
++  it("never promotes a hidden reasoning message to the turn's answer", () => {
++    // Without the presentation a turn whose only assistant message is reasoning
++    // has no answer at all: no assistant row, no copy button, no fold anchored
++    // at the thought, and no assistant meta row.
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [userEntry, reasoningEntry(false)],
++      latestTurn: settledTurn,
++      reasoningPresentation: false,
++      ...settledInput,
++    });
++
++    expect(rows.map((row) => row.kind)).toEqual(["message"]);
++    expect(rows[0]).toMatchObject({ message: { id: "user-1" } });
++    expect(rows.some((row) => row.kind === "assistant-meta")).toBe(false);
++    expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
++  });
++
++  it("keeps the terminal answer and its duration start when reasoning is hidden", () => {
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [userEntry, reasoningEntry(false), answerEntry],
++      latestTurn: settledTurn,
++      reasoningPresentation: false,
++      ...settledInput,
++    });
++    const answerRow = messageRows(rows).find((row) => row.message.id === "answer-1");
++
++    expect(answerRow).toMatchObject({
++      showAssistantCopyButton: true,
++      durationStart: userEntry.message.createdAt,
++    });
++  });
++
++  it("falls back to the generic Thinking row while reasoning streams without the presentation", () => {
++    const input = {
++      timelineEntries: [userEntry, reasoningEntry(true)],
++      latestTurn: {
++        turnId: "turn-1" as never,
++        state: "running" as const,
++        startedAt: "2026-01-01T00:00:00Z",
++        completedAt: null,
++      },
++      isWorking: true,
++      activeTurnStartedAt: "2026-01-01T00:00:00Z",
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    };
++
++    // With the presentation the streaming thought is the live disclosure, so the
++    // generic label stays suppressed.
++    const withPresentation = deriveMessagesTimelineRows({
++      ...input,
++      reasoningPresentation: true,
++    });
++    expect(withPresentation.some((row) => row.id === "reasoning-entry")).toBe(true);
++    expect(withPresentation.some((row) => row.kind === "thinking")).toBe(false);
++
++    const withoutPresentation = deriveMessagesTimelineRows({
++      ...input,
++      reasoningPresentation: false,
++    });
++    expect(withoutPresentation.some((row) => row.id === "reasoning-entry")).toBe(false);
++    expect(withoutPresentation.map((row) => row.kind)).toEqual(["message", "working", "thinking"]);
++  });
++
++  it("groups work across a hidden reasoning entry", () => {
++    const input = {
++      timelineEntries: [
++        workEntry("work-1", "2026-01-01T00:00:01Z"),
++        reasoningEntry(false, null),
++        workEntry("work-2", "2026-01-01T00:00:03Z"),
++      ],
++      ...settledInput,
++    };
++
++    const withPresentation = deriveMessagesTimelineRows({
++      ...input,
++      reasoningPresentation: true,
++    });
++    expect(withPresentation.map((row) => row.id)).toEqual([
++      "work-1-entry",
++      "reasoning-entry",
++      "work-2-entry",
++    ]);
++
++    const withoutPresentation = deriveMessagesTimelineRows({
++      ...input,
++      reasoningPresentation: false,
++    });
++    expect(withoutPresentation.map((row) => row.id)).toEqual(["work-toggle:work-1-entry"]);
++    expect(withoutPresentation[0]).toMatchObject({ kind: "work-toggle", hiddenCount: 2 });
++  });
++});
++
+ describe("computeStableMessagesTimelineRows", () => {
+   it("replaces a cached work toggle when its icon presentation changes", () => {
+     const initialRow: MessagesTimelineRow = {
+@@ -3124,6 +3363,7 @@ describe("computeStableMessagesTimelineRows", () => {
+     const turnId = TurnId.make("turn-1");
+     const input = {
+       runningTurnId: turnId,
++      reasoningPresentation: true,
+       isWorking: true,
+       activeTurnStartedAt: startedAt,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -3202,6 +3442,7 @@ describe("computeStableMessagesTimelineRows", () => {
+           message: secondUserMessage,
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -3251,6 +3492,7 @@ describe("computeStableMessagesTimelineRows", () => {
+             entry: secondWorkEntry,
+           },
+         ],
++        reasoningPresentation: true,
+         isWorking: false,
+         activeTurnStartedAt: null,
+         turnDiffSummaryByAssistantMessageId: new Map(),
+@@ -3307,6 +3549,7 @@ describe("computeStableMessagesTimelineRows", () => {
+           message: secondUserMessage,
+         },
+       ],
++      reasoningPresentation: true,
+       isWorking: false,
+       activeTurnStartedAt: null,
+       turnDiffSummaryByAssistantMessageId: new Map(),
+diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.ts b/apps/web/src/components/chat/MessagesTimeline.logic.ts
+index 28d58de7f..34a1adf91 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.logic.ts
++++ b/apps/web/src/components/chat/MessagesTimeline.logic.ts
+@@ -850,13 +850,25 @@ export function deriveMessagesTimelineRows(input: {
+   activeTurnStartedAt: string | null;
+   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
+   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
++  /**
++   * Whether this build shows reasoning messages. When false, every reasoning
++   * entry is dropped before any derivation so a hidden thought can never be
++   * mistaken for the turn's answer, and the generic Thinking row stands in
++   * for a streaming thought.
++   */
++  reasoningPresentation: boolean;
+ }): MessagesTimelineRow[] {
+   const nextRows: MessagesTimelineRow[] = [];
++  const presentedEntries = input.reasoningPresentation
++    ? input.timelineEntries
++    : input.timelineEntries.filter(
++        (entry) => !(entry.kind === "message" && isReasoningMessage(entry.message)),
++      );
+   // A whitespace-only completed reasoning message renders no row, so every
+   // derivation below (folds, forward/backward work-group scans, the row loop)
+   // must see the same list without it — otherwise an invisible entry breaks
+   // work-group adjacency.
+-  const timelineEntries = input.timelineEntries.filter(
++  const timelineEntries = presentedEntries.filter(
+     (entry) => !isEmptyCompletedReasoningEntry(entry),
+   );
+   const durationStartByMessageId = computeMessageDurationStart(
+@@ -868,7 +880,7 @@ export function deriveMessagesTimelineRows(input: {
+     input.runningTurnId ?? null,
+   );
+   const activeVisualResponseTurnIds = deriveActiveVisualResponseTurnIds({
+-    timelineEntries: input.timelineEntries,
++    timelineEntries: presentedEntries,
+     unsettledTurnId,
+     isWorking: input.isWorking,
+   });
+@@ -968,7 +980,7 @@ export function deriveMessagesTimelineRows(input: {
+     activeWorkRow !== null || latestToolFailed ? activeToolEntries.map((entry) => entry.id) : [],
+   );
+   const appendWorkingRow = () => {
+-    const latestUserMessage = input.timelineEntries[lastUserMessageIndex(input.timelineEntries)];
++    const latestUserMessage = presentedEntries[lastUserMessageIndex(presentedEntries)];
+     const visualResponseStartedAt =
+       activeVisualResponseTurnIds.size > 1 &&
+       latestUserMessage?.kind === "message" &&
+diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
+index 378d1b641..89b7d2e0e 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.tsx
++++ b/apps/web/src/components/chat/MessagesTimeline.tsx
+@@ -22,6 +22,16 @@ import {
+   formatSubagentTokenCount,
+ } from "@t3tools/client-runtime/state/subagentRuntime";
+ 
++/**
++ * Build-time product variant gate. Only visible Reasoning surfaces (reasoning
++ * disclosures, thread fork entry points and lineage) read it; contracts,
++ * reducers and transport stay common so any client decodes the same events.
++ * Vite inlines a boolean literal, but Vitest exposes the define as the string
++ * "true"/"false", so compare the stringified form.
++ */
++export const REASONING_PRESENTATION_ENABLED =
++  String(import.meta.env.VITE_T3CODE_REASONING_PRESENTATION) === "true";
++
+ const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
+ const NOOP_OPEN_AGENTS = () => {};
+ const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
+@@ -566,6 +576,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+         activeTurnStartedAt,
+         turnDiffSummaryByAssistantMessageId,
+         revertTurnCountByUserMessageId,
++        reasoningPresentation: REASONING_PRESENTATION_ENABLED,
+       },
+       previous?.threadKey === routeThreadKey && previous.workspaceRoot === workspaceRoot
+         ? previous.projection
+@@ -1217,7 +1228,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
+       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+       {row.kind === "message" && row.message.role === "assistant" ? (
+         isReasoningMessage(row.message) ? (
+-          <ReasoningTimelineRow row={row} />
++          // The row derivation already drops reasoning without the presentation;
++          // never fall through to the answer renderer for a hidden thought.
++          REASONING_PRESENTATION_ENABLED ? (
++            <ReasoningTimelineRow row={row} />
++          ) : null
+         ) : (
+           <AssistantTimelineRow row={row} />
+         )
+diff --git a/apps/web/src/vite-env.d.ts b/apps/web/src/vite-env.d.ts
+index 31260c8ae..863473c10 100644
+--- a/apps/web/src/vite-env.d.ts
++++ b/apps/web/src/vite-env.d.ts
+@@ -13,6 +13,8 @@ interface ImportMetaEnv {
+   readonly VITE_RELAY_OTLP_TRACES_URL: string;
+   readonly VITE_RELAY_OTLP_TRACES_DATASET: string;
+   readonly VITE_RELAY_OTLP_TRACES_TOKEN: string;
++  /** Build-time product variant gate: false only for an explicit managed Nightly build. */
++  readonly VITE_T3CODE_REASONING_PRESENTATION: boolean;
+   readonly APP_VERSION: string;
+ }
+ 
+diff --git a/apps/web/tsconfig.json b/apps/web/tsconfig.json
+index 65b04800e..14430fb86 100644
+--- a/apps/web/tsconfig.json
++++ b/apps/web/tsconfig.json
+@@ -32,6 +32,7 @@
+     "vercel.ts",
+     "test",
+     "scripts/warm-dep-cache.ts",
++    "../../scripts/lib/product-variant.ts",
+     "../../scripts/lib/public-config.ts"
+   ]
+ }
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 702c18840..7edc5e2b0 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -11,12 +11,24 @@ import pkg from "./package.json" with { type: "json" };
+ 
+ import { DEV_PROXIED_PATH_PREFIXES } from "@t3tools/shared/devProxy";
+ 
++import {
++  PRODUCT_VARIANT_ENV,
++  parseProductVariant,
++  resolveReasoningPresentation,
++} from "../../scripts/lib/product-variant";
+ import { loadRepoEnv } from "../../scripts/lib/public-config";
+ import { tailwindPlugins } from "./vite/tailwind";
+ 
+ const repoEnv = loadRepoEnv();
+ Object.assign(process.env, repoEnv);
+ 
++// Non-secret build identity, separate from the public Clerk/Connect values.
++// Unset keeps the Reasoning presentation for ordinary development; an invalid
++// value fails the build rather than silently picking a variant.
++const reasoningPresentation = resolveReasoningPresentation(
++  parseProductVariant(process.env[PRODUCT_VARIANT_ENV]),
++);
++
+ // Single-origin dev is signalled positively, because it cannot be inferred
+ // from the absence of VITE_HTTP_URL/VITE_WS_URL: the runner deletes those keys
+ // but `loadRepoEnv` merges `.env`/`.env.local` *underneath* the process env, so
+@@ -205,6 +217,8 @@ export default defineConfig(() => {
+       "import.meta.env.VITE_RELAY_OTLP_TRACES_TOKEN": JSON.stringify(configuredRelayTracingToken),
+       "import.meta.env.VITE_HOSTED_APP_URL": JSON.stringify(configuredHostedAppUrl ?? ""),
+       "import.meta.env.VITE_HOSTED_APP_CHANNEL": JSON.stringify(configuredHostedAppChannel),
++      // Inlined as a boolean literal; read via REASONING_PRESENTATION_ENABLED.
++      "import.meta.env.VITE_T3CODE_REASONING_PRESENTATION": JSON.stringify(reasoningPresentation),
+       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
+     },
+     resolve: {
+diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
+index affb83eb7..f9d9eb5a6 100644
+--- a/scripts/build-desktop-artifact.test.ts
++++ b/scripts/build-desktop-artifact.test.ts
+@@ -1,4 +1,5 @@
+ import * as NodeCrypto from "node:crypto";
++import * as NodeModule from "node:module";
+ 
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { assert, it } from "@effect/vitest";
+@@ -55,6 +56,8 @@ import {
+   resolveWindowsServerAsarIgnoreGlobs,
+   resourceMonitorExecutableName,
+   resolveGitHubPublishConfig,
++  InvalidProductVariantError,
++  MissingProductVariantError,
+   resolveMockUpdateServerPort,
+   resolveMockUpdateServerUrl,
+   resolvePackageManagerUserAgent,
+@@ -283,6 +286,93 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
+   });
+ 
++  it("keeps managed nightly versions on the nightly channel with nightly identity", () => {
++    const managedVersion = "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab";
++    assert.equal(resolveDesktopUpdateChannel(managedVersion), "nightly");
++    assert.equal(resolveDesktopProductName(managedVersion), "T3 Code (Nightly)");
++    assert.equal(resolveDesktopWebAssetBrand(managedVersion), "nightly");
++    assert.deepStrictEqual(resolveDesktopBuildIconAssets(managedVersion), {
++      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
++      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
++      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
++    });
++  });
++
++  it("rejects malformed managed suffixes instead of treating them as nightly", () => {
++    for (const version of [
++      "0.0.39-nightly.20260905.1284.managed.0.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.01.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789a",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789abc",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789AB",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab+meta",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab.extra",
++      "0.0.39-managed.1.p0123456789ab",
++    ]) {
++      assert.equal(resolveDesktopUpdateChannel(version), "latest", version);
++      assert.equal(resolveDesktopProductName(version), "T3 Code (Alpha)", version);
++    }
++  });
++
++  it.effect("never lets ambient repository config attach an update feed to managed builds", () =>
++    Effect.gen(function* () {
++      const managed = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab",
++        false,
++        false,
++        undefined,
++        undefined,
++      );
++      const managedWithMockUpdates = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab",
++        false,
++        true,
++        4100,
++        undefined,
++      );
++      const upstreamNightly = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        "0.0.39-nightly.20260905.1284",
++        false,
++        false,
++        undefined,
++        undefined,
++      );
++
++      assert.equal(managed.productName, "T3 Code (Nightly)");
++      // Explicit null, not an absent key: only null disables electron-builder's
++      // provider inference (JSON keeps null, so it survives the staged package.json).
++      assert.property(managed, "publish");
++      assert.strictEqual(managed.publish, null);
++      assert.strictEqual(managedWithMockUpdates.publish, null);
++      assert.deepStrictEqual(upstreamNightly.publish, [
++        {
++          provider: "github",
++          owner: "pingdotgg",
++          repo: "t3code",
++          releaseType: "prerelease",
++          channel: "nightly",
++        },
++      ]);
++    }).pipe(
++      Effect.provide(
++        ConfigProvider.layer(
++          ConfigProvider.fromEnv({
++            env: {
++              GITHUB_REPOSITORY: "pingdotgg/t3code",
++              T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
++            },
++          }),
++        ),
++      ),
++    ),
++  );
++
+   it.effect("resolves GitHub desktop publish config from Effect config", () =>
+     Effect.gen(function* () {
+       const latestConfig = yield* resolveGitHubPublishConfig("latest").pipe(
+@@ -363,6 +453,105 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     ),
+   );
+ 
++  it("proves against the installed electron-builder that only publish: null blocks feed inference", async () => {
++    // Load the exact app-builder-lib the desktop package resolves, so this
++    // asserts the real publish-resolution seam rather than our reading of it.
++    const desktopRequire = NodeModule.createRequire(
++      new URL("../apps/desktop/package.json", import.meta.url),
++    );
++    const electronBuilderRequire = NodeModule.createRequire(
++      desktopRequire.resolve("electron-builder/package.json"),
++    );
++    const publishManager = electronBuilderRequire(
++      "app-builder-lib/out/publish/PublishManager.js",
++    ) as {
++      getPublishConfigs: (
++        platformPackager: unknown,
++        targetSpecificOptions: unknown,
++        arch: unknown,
++        errorIfCannot: boolean,
++      ) => Promise<ReadonlyArray<Record<string, unknown>> | null>;
++      getPublishConfigsForUpdateInfo: (
++        packager: unknown,
++        publishConfigs: ReadonlyArray<Record<string, unknown>> | null,
++        arch: unknown,
++      ) => Promise<ReadonlyArray<Record<string, unknown>> | null>;
++    };
++    // Stand-in for the ambient CI repository that electron-builder's
++    // repositoryInfo resolves (TRAVIS_REPO_SLUG, APPVEYOR, CIRCLE, ...).
++    const ambientRepository = { type: "github", user: "t3tools", project: "t3code" };
++    const fakePackager = (publish: null | undefined) => {
++      const info = {
++        config: { publish, detectUpdateChannel: false },
++        repositoryInfo: Promise.resolve(ambientRepository),
++      };
++      return {
++        platformSpecificBuildOptions: {},
++        config: info.config,
++        info,
++        expandMacro: (value: string) => value,
++      };
++    };
++    const previousTokens = {
++      GH_TOKEN: process.env.GH_TOKEN,
++      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
++    };
++    process.env.GH_TOKEN = "inherited-ci-token";
++    delete process.env.GITHUB_TOKEN;
++    try {
++      // Absent publish + inherited token: electron-builder infers a GitHub feed
++      // for the ambient repository on its own.
++      const inferred = await publishManager.getPublishConfigs(
++        fakePackager(undefined),
++        null,
++        undefined,
++        false,
++      );
++      assert.isNotNull(inferred);
++      assert.equal(inferred!.length, 1);
++      assert.include(inferred![0], { provider: "github", owner: "t3tools", repo: "t3code" });
++
++      // Explicit null: no inference and no app-update.yml source.
++      const disabled = await publishManager.getPublishConfigs(
++        fakePackager(null),
++        null,
++        undefined,
++        false,
++      );
++      assert.strictEqual(disabled, null);
++      assert.strictEqual(
++        await publishManager.getPublishConfigsForUpdateInfo(
++          fakePackager(null),
++          disabled,
++          undefined,
++        ),
++        null,
++      );
++    } finally {
++      for (const [name, value] of Object.entries(previousTokens)) {
++        if (value === undefined) {
++          delete process.env[name];
++        } else {
++          process.env[name] = value;
++        }
++      }
++    }
++
++    // Even with no token at all, an empty publish list still lets the afterPack
++    // hook derive the update feed from the ambient repository.
++    const fromRepositoryInfo = await publishManager.getPublishConfigsForUpdateInfo(
++      fakePackager(undefined),
++      [],
++      undefined,
++    );
++    assert.isNotNull(fromRepositoryInfo);
++    assert.include(fromRepositoryInfo![0], {
++      provider: "github",
++      owner: "t3tools",
++      repo: "t3code",
++    });
++  });
++
+   it("omits bundled workspace packages from staged desktop dependencies", () => {
+     assert.deepStrictEqual(
+       resolveDesktopRuntimeDependencies(
+@@ -2162,6 +2351,60 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+       assert.equal(resolved.signed, false);
+       assert.equal(resolved.verbose, false);
+       assert.equal(resolved.mockUpdates, false);
++      assert.equal(resolved.productVariant, undefined);
++    }),
++  );
++
++  it.effect("requires the explicit product variant only for managed build versions", () =>
++    Effect.gen(function* () {
++      const managedVersion = "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab";
++      const input = (buildVersion: string | undefined) => ({
++        platform: Option.some("mac" as const),
++        target: Option.none(),
++        arch: Option.some("arm64" as const),
++        buildVersion: Option.fromNullishOr(buildVersion),
++        outputDir: Option.some("release-test"),
++        skipBuild: Option.none(),
++        keepStage: Option.none(),
++        signed: Option.none(),
++        verbose: Option.none(),
++        mockUpdates: Option.none(),
++        mockUpdateServerPort: Option.none(),
++        wslPrebuild: Option.none(),
++      });
++      const withEnv = (env: Record<string, string>) =>
++        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));
++
++      const missing = yield* Effect.flip(
++        resolveBuildOptions(input(managedVersion)).pipe(withEnv({})),
++      );
++      assert.instanceOf(missing, MissingProductVariantError);
++      assert.match(missing.message, /T3CODE_PRODUCT_VARIANT/);
++
++      const invalid = yield* Effect.flip(
++        resolveBuildOptions(input(managedVersion)).pipe(
++          withEnv({ T3CODE_PRODUCT_VARIANT: "nightly" }),
++        ),
++      );
++      assert.instanceOf(invalid, InvalidProductVariantError);
++
++      const managedNightly = yield* resolveBuildOptions(input(managedVersion)).pipe(
++        withEnv({ T3CODE_PRODUCT_VARIANT: "managed-nightly" }),
++      );
++      assert.equal(managedNightly.productVariant, "managed-nightly");
++
++      const reasoning = yield* resolveBuildOptions(input(managedVersion)).pipe(
++        withEnv({ T3CODE_PRODUCT_VARIANT: " reasoning " }),
++      );
++      assert.equal(reasoning.productVariant, "reasoning");
++
++      // Upstream nightly and release versions keep working without the input.
++      const upstreamNightly = yield* resolveBuildOptions(
++        input("0.0.39-nightly.20260905.1284"),
++      ).pipe(withEnv({}));
++      assert.equal(upstreamNightly.productVariant, undefined);
++      const release = yield* resolveBuildOptions(input("0.0.39")).pipe(withEnv({}));
++      assert.equal(release.productVariant, undefined);
+     }),
+   );
+ });
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index 32b090f7a..ed9fb7c3d 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -32,6 +32,13 @@ import {
+   findInlinedExternalPackages,
+   selectCliRuntimeExternalDependencies,
+ } from "./lib/cli-external-packages.ts";
++import {
++  PRODUCT_VARIANT_ENV,
++  PRODUCT_VARIANTS,
++  isManagedNightlyVersion,
++  isProductVariant,
++  type ProductVariant,
++} from "./lib/product-variant.ts";
+ import { loadRepoEnv } from "./lib/public-config.ts";
+ import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+ 
+@@ -256,6 +263,28 @@ export class UnsupportedDesktopBuildArchitectureError extends Schema.TaggedError
+   }
+ }
+ 
++export class InvalidProductVariantError extends Schema.TaggedErrorClass<InvalidProductVariantError>()(
++  "InvalidProductVariantError",
++  {
++    value: Schema.String,
++  },
++) {
++  override get message(): string {
++    return `Invalid ${PRODUCT_VARIANT_ENV} value '${this.value}'. Expected one of: ${PRODUCT_VARIANTS.join(", ")}.`;
++  }
++}
++
++export class MissingProductVariantError extends Schema.TaggedErrorClass<MissingProductVariantError>()(
++  "MissingProductVariantError",
++  {
++    version: Schema.String,
++  },
++) {
++  override get message(): string {
++    return `Managed build version '${this.version}' requires ${PRODUCT_VARIANT_ENV} to be set explicitly (${PRODUCT_VARIANTS.join(" or ")}).`;
++  }
++}
++
+ const InvalidMockUpdateServerPortReason = Schema.Literals([
+   "not-numeric",
+   "not-integer",
+@@ -932,6 +961,7 @@ interface ResolvedBuildOptions {
+   readonly mockUpdates: boolean;
+   readonly mockUpdateServerPort: number | undefined;
+   readonly wslPrebuild: string | undefined;
++  readonly productVariant: ProductVariant | undefined;
+ }
+ 
+ interface StagePackageJson {
+@@ -1572,6 +1602,9 @@ const BuildEnvConfig = Config.all({
+   // into the staged node-pty so the WSL backend ships a ready binary and never
+   // compiles on the user's machine.
+   wslPrebuild: Config.string("T3CODE_DESKTOP_WSL_PREBUILD").pipe(Config.option),
++  // The explicit managed release identity. Only this input decides it: a
++  // managed version without it fails instead of inferring from bundle names.
++  productVariant: Config.string(PRODUCT_VARIANT_ENV).pipe(Config.option),
+ });
+ 
+ const MockUpdateServerPortSchema = Schema.NumberFromString.check(
+@@ -1666,6 +1699,15 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
+   const wslPrebuild =
+     Option.getOrUndefined(input.wslPrebuild) ?? Option.getOrUndefined(env.wslPrebuild);
+ 
++  const rawProductVariant = Option.getOrUndefined(env.productVariant)?.trim() || undefined;
++  if (rawProductVariant !== undefined && !isProductVariant(rawProductVariant)) {
++    return yield* new InvalidProductVariantError({ value: rawProductVariant });
++  }
++  const productVariant = rawProductVariant;
++  if (version !== undefined && isManagedNightlyVersion(version) && productVariant === undefined) {
++    return yield* new MissingProductVariantError({ version });
++  }
++
+   return {
+     platform,
+     target,
+@@ -1679,6 +1721,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
+     mockUpdates,
+     mockUpdateServerPort,
+     wslPrebuild,
++    productVariant,
+   } satisfies ResolvedBuildOptions;
+ });
+ 
+@@ -2511,8 +2554,12 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
+   };
+ });
+ 
++// Mirrors isNightlyDesktopVersion in apps/desktop/src/updates/updateChannels.ts:
++// an upstream nightly, or a managed release cut from one, stays on nightly.
+ export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
+-  return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
++  return /-nightly\.\d{8}\.\d+$/.test(version) || isManagedNightlyVersion(version)
++    ? "nightly"
++    : "latest";
+ }
+ 
+ function isDesktopPreviewVersion(version: string): boolean {
+@@ -2605,7 +2652,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+     ],
+   };
+   const updateChannel = resolveDesktopUpdateChannel(version);
+-  if (!isDesktopPreviewVersion(version)) {
++  // A managed release never carries an Electron update feed; the managed
++  // installer owns updates. `publish: null` is the only value electron-builder
++  // treats as "disabled" (app-builder-lib PublishManager.getPublishConfigs):
++  // an absent key lets it infer GitHub from an inherited GH_TOKEN/GITHUB_TOKEN
++  // or from ambient CI repository variables, and its afterPack hook then
++  // embeds app-update.yml even under `--publish never`.
++  if (isManagedNightlyVersion(version)) {
++    buildConfig.publish = null;
++  } else if (!isDesktopPreviewVersion(version)) {
+     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
+     if (publishConfig) {
+       buildConfig.publish = [publishConfig];
+@@ -3429,6 +3484,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+   });
+ 
+   const appVersion = options.version ?? serverPackageJson.version;
++  // The stamped package version can be managed even without --build-version.
++  if (isManagedNightlyVersion(appVersion) && options.productVariant === undefined) {
++    return yield* new MissingProductVariantError({ version: appVersion });
++  }
+   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
+   const commitHash = yield* resolveGitCommitHash(repoRoot);
+   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
+diff --git a/scripts/lib/product-variant.test.ts b/scripts/lib/product-variant.test.ts
+new file mode 100644
+index 000000000..7d5737770
+--- /dev/null
++++ b/scripts/lib/product-variant.test.ts
+@@ -0,0 +1,50 @@
++import { assert, describe, it } from "@effect/vitest";
++
++import {
++  isManagedNightlyVersion,
++  parseProductVariant,
++  resolveReasoningPresentation,
++} from "./product-variant.ts";
++
++describe("product-variant", () => {
++  it("accepts the exact managed nightly prerelease suffix", () => {
++    assert.isTrue(isManagedNightlyVersion("0.0.39-nightly.20260905.1284.managed.1.p0123456789ab"));
++    assert.isTrue(isManagedNightlyVersion("0.0.39-nightly.20260905.1284.managed.42.pdeadbeefcafe"));
++  });
++
++  it("rejects malformed managed suffixes and plain nightly or release versions", () => {
++    for (const version of [
++      "0.0.39-nightly.20260905.1284",
++      "0.0.39",
++      "0.0.39-nightly.20260905.1284.managed.0.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.01.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789a",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789abc",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789AB",
++      "0.0.39-nightly.20260905.1284.managed.1.0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab+meta",
++      "0.0.39-managed.1.p0123456789ab",
++      "0.0.39-nightly.20260905.1284.managed.1.p0123456789ab.extra",
++    ]) {
++      assert.isFalse(isManagedNightlyVersion(version), version);
++    }
++  });
++
++  it("parses the explicit product variant input and treats blank as unconfigured", () => {
++    assert.equal(parseProductVariant("managed-nightly"), "managed-nightly");
++    assert.equal(parseProductVariant(" reasoning "), "reasoning");
++    assert.equal(parseProductVariant(undefined), undefined);
++    assert.equal(parseProductVariant("   "), undefined);
++  });
++
++  it("rejects unknown product variants", () => {
++    assert.throws(() => parseProductVariant("nightly"), /T3CODE_PRODUCT_VARIANT/);
++    assert.throws(() => parseProductVariant("Managed-Nightly"), /T3CODE_PRODUCT_VARIANT/);
++  });
++
++  it("keeps the Reasoning presentation unless the managed Nightly variant is explicit", () => {
++    assert.isTrue(resolveReasoningPresentation(undefined));
++    assert.isTrue(resolveReasoningPresentation("reasoning"));
++    assert.isFalse(resolveReasoningPresentation("managed-nightly"));
++  });
++});
+diff --git a/scripts/lib/product-variant.ts b/scripts/lib/product-variant.ts
+new file mode 100644
+index 000000000..dc598d25f
+--- /dev/null
++++ b/scripts/lib/product-variant.ts
+@@ -0,0 +1,45 @@
++// The managed release identity is one explicit, non-secret build input. It is
++// never inferred from a bundle name, package manifest, or ambient CI variable:
++// a managed build that forgot to set it must fail loudly rather than ship the
++// wrong renderer presentation or the upstream update feed.
++export const PRODUCT_VARIANT_ENV = "T3CODE_PRODUCT_VARIANT";
++export const PRODUCT_VARIANTS = ["managed-nightly", "reasoning"] as const;
++export type ProductVariant = (typeof PRODUCT_VARIANTS)[number];
++
++// Managed builds append `.managed.<releaseCounter>.p<12-hex digest>` to the
++// upstream nightly `-nightly.<yyyymmdd>.<run>` prerelease. The suffix stays in
++// the prerelease segment (never `+build` metadata) so exact-SemVer comparison
++// still orders it after the upstream nightly it was cut from.
++export const MANAGED_NIGHTLY_VERSION_PATTERN =
++  /-nightly\.\d{8}\.\d+\.managed\.[1-9]\d*\.p[0-9a-f]{12}$/;
++
++export function isManagedNightlyVersion(version: string): boolean {
++  return MANAGED_NIGHTLY_VERSION_PATTERN.test(version);
++}
++
++export function isProductVariant(value: string): value is ProductVariant {
++  return (PRODUCT_VARIANTS as ReadonlyArray<string>).includes(value);
++}
++
++/**
++ * Parse the raw `T3CODE_PRODUCT_VARIANT` value. Unset or blank means the build
++ * is unconfigured (ordinary development); anything else must be one of the
++ * known variants.
++ */
++export function parseProductVariant(raw: string | undefined): ProductVariant | undefined {
++  const value = raw?.trim();
++  if (!value) return undefined;
++  if (isProductVariant(value)) return value;
++  throw new Error(
++    `Invalid ${PRODUCT_VARIANT_ENV} value ${JSON.stringify(raw)}; expected one of ${PRODUCT_VARIANTS.join(", ")}.`,
++  );
++}
++
++/**
++ * Whether the renderer shows the Reasoning presentation (reasoning message
++ * disclosures and thread fork surfaces). Unconfigured development keeps the
++ * existing Reasoning presentation; only an explicit managed Nightly hides it.
++ */
++export function resolveReasoningPresentation(variant: ProductVariant | undefined): boolean {
++  return variant !== "managed-nightly";
++}

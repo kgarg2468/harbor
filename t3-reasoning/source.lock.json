@@ -49,9 +49,14 @@
       "sha256": "e4d5163ca0fa8d243d937596b14fb0ca78d31b4f747a6419bbad2514768bc9ad"
     },
     {
+      "id": "managed-release-presentation",
+      "path": "patches/0011-managed-release-presentation.patch",
+      "sha256": "1587a83fdc6afeffaebff72dbbe214bec75412259e58f91ad68e0edf803e1150"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
+      "sha256": "4d15e8a93b31137e94972a12f43a911ea70595d206465a230e1ff040f710a152"
     }
   ],
   "variants": {
@@ -64,7 +69,8 @@
       "thread-fork-backend",
       "thread-fork-ui",
       "shared-default",
-      "activity-wiring"
+      "activity-wiring",
+      "managed-release-presentation"
     ],
     "reasoning": [
       "reasoning-full",
@@ -76,6 +82,7 @@
       "thread-fork-ui",
       "shared-default",
       "activity-wiring",
+      "managed-release-presentation",
       "reasoning-identity"
     ]
   }

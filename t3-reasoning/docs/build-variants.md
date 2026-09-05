@@ -11,13 +11,14 @@ tree is a deployable release. The release shape it serves is described in
 
 Both desktop apps talk to one shared server. Their wire contracts, reducers,
 server projection, persistence, and provider ingestion must therefore be the
-same code. Only the desktop identity differs: the managed Nightly replaces the
+same code. The source trees differ in desktop identity: the managed Nightly replaces the
 stock Nightly install and keeps its bundle id, name, URL schemes, and state
 directory; the Reasoning app installs beside it under its own identity.
 
 That is why the whole `reasoning-full` patch is applied to **both** variants.
 Splitting the functional patch by feature would risk two clients decoding the
-same snapshots differently. The variants differ only by the identity patch.
+same snapshots differently. The variants differ only by the identity patch;
+an explicit build input selects which renderer presentation each app shows.
 
 ## Lock format, version 2
 
@@ -36,11 +37,12 @@ same snapshots differently. The variants differ only by the identity patch.
     { "id": "thread-fork-ui", "path": "patches/0007-thread-fork-ui.patch", "sha256": "..." },
     { "id": "shared-default", "path": "patches/0008-shared-default.patch", "sha256": "..." },
     { "id": "activity-wiring", "path": "patches/0009-activity-wiring.patch", "sha256": "..." },
+    { "id": "managed-release-presentation", "path": "patches/0011-managed-release-presentation.patch", "sha256": "..." },
     { "id": "reasoning-identity", "path": "patches/0002-reasoning-identity.patch", "sha256": "..." }
   ],
   "variants": {
-    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "activity-wiring"],
-    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "activity-wiring", "reasoning-identity"]
+    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "activity-wiring", "managed-release-presentation"],
+    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "thread-fork-ui", "shared-default", "activity-wiring", "managed-release-presentation", "reasoning-identity"]
   }
 }
 ```
@@ -94,6 +96,7 @@ can pick up the first variant's bundles.
 | `thread-fork-ui` | yes | yes | completed-turn fork dialog and lineage navigation in web/desktop |
 | `shared-default` | yes | yes | preferred environment persistence and protection against local work fallback |
 | `activity-wiring` | yes | yes | tracked command/event queues, reactor descendants and private provider delivery receipts |
+| `managed-release-presentation` | yes | yes | managed version/channel recognition, presentation gate, explicit disabled feed |
 | `reasoning-identity` | no | yes | Reasoning bundle id, name, scheme, state home, artifact name, disabled official feed, manual macOS updater |
 
 The `managed-nightly` tree keeps upstream's packaged identity: bundle id
@@ -147,26 +150,34 @@ After `0009`, the managed Nightly tree is
 `c711da6a16966c36187d4f20b5b21f44c10039f7`. The Reasoning tree matches the independently tested
 combined fork/activity source exactly.
 
+## Managed build inputs
+
+Set `T3CODE_PRODUCT_VARIANT=managed-nightly` or `reasoning` explicitly before
+building each tree. Managed versions use
+`<upstream-nightly>.managed.<positive-counter>.p<12-hex-input-digest>` and
+remain on the Nightly channel. The desktop builder rejects a managed version
+without the variant input. Ordinary unconfigured development retains the
+Reasoning presentation.
+
+Managed Nightly filters reasoning messages before timeline derivation and
+hides fork actions and lineage. Both variants retain the same contracts,
+reducers, server behavior, and preferred-environment selection. This is a
+presentation choice, not a separate data store.
+
+Managed builds set Electron's `publish` configuration to `null`. Omitting it
+would allow electron-builder to infer an official feed from inherited CI
+credentials; `--publish never` alone does not prevent embedding that feed.
+The managed installer will own updates. The refreshed identity suffix keeps
+this behavior while retaining the distinct Reasoning bundle and URL scheme.
+
 ## Not ready for deployment
 
 Both trees materialize, but neither is a release yet. The gaps are outside
 this component's preparer and are tracked here so the lock is not mistaken
 for a deployable configuration.
 
-- **Reasoning presentation is not gated.** `reasoning-full` is applied to
-  the managed Nightly, so its renderer currently shows the Reasoning timeline
-  just like the Reasoning app. The planned fix is a
-  compile-time presentation switch in a common source patch, as described in
-  the managed release design; it does not exist yet. Do not describe the
-  current managed Nightly UI as stock.
-- **Feed ownership is upstream's.** The managed Nightly keeps upstream's
-  `resolveGitHubPublishConfig`, which reads `T3CODE_DESKTOP_UPDATE_REPOSITORY`
-  or ambient `GITHUB_REPOSITORY`. A package built from this tree in a
-  CI-like environment would carry the official update feed and could later
-  be replaced by a stock build. A managed release patch must make the feed an
-  explicit managed repository, or omit it, before any managed Nightly is
-  installed. The Reasoning tree already omits the feed unless mock updates are
-  requested.
+- **No installed managed release.** The presentation and feed changes are
+  tested in prepared source; neither app nor shared runtime has been deployed.
 - **No release scripts.** Version stamping, artifact builders, manifest,
   installer, and the managed service identity described in the design are not
   part of this component yet.
