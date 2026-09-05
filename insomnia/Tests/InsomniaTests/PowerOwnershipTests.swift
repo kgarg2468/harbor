@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Insomnia
 
@@ -254,6 +255,35 @@ extension PowerOwnershipTests {
         XCTAssertEqual(try h.store.loadState(), .clean)
         XCTAssertFalse(m.cleanupPending)
         XCTAssertFalse(m.cleanupRetryScheduled)
+    }
+
+    func testCleanupRetryRearmsAfterRecoveryLeaseTimeout() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let clock = h.clock
+        let m = SessionManager(paths: h.home.paths, sleepGuard: h.guardFake,
+                               processControl: h.procs, backstop: h.backstop, clamshell: { false },
+                               clock: { clock.now }, recoveryLeaseTimeout: .milliseconds(20))
+        await m.start(duration: 3600)
+        h.guardFake.throwOn = ["disablesleep 0"]
+        await m.end(reason: .user)
+        XCTAssertTrue(m.cleanupRetryScheduled)
+        h.guardFake.throwOn = []
+        let fd = Darwin.open(h.home.paths.recoveryLock.path, O_RDWR)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = Darwin.close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        let schedules = h.backstop.scheduled.count
+        await m.makeCleanupRetryAction()()
+        XCTAssertTrue(m.cleanupPending)
+        XCTAssertTrue(m.cleanupRetryScheduled, "a consumed retry must rearm after lock contention")
+        XCTAssertEqual(h.backstop.scheduled.count, schedules, "do not mutate the backstop without the lease")
+        XCTAssertTrue(h.guardFake.sleepDisabled)
+        XCTAssertEqual(flock(fd, LOCK_UN), 0)
+        await m.makeCleanupRetryAction()()
+        XCTAssertFalse(m.cleanupPending)
+        XCTAssertFalse(m.cleanupRetryScheduled)
+        XCTAssertFalse(h.guardFake.sleepDisabled)
+        XCTAssertEqual(try h.store.loadState(), .clean)
     }
 
     func testSuccessfulStartCancelsPreviousCleanupRetry() async throws {
