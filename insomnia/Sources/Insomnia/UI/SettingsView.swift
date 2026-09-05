@@ -27,7 +27,7 @@ struct SettingsView: View {
     @State private var newTmuxTarget = ""
     @State private var hotspotPassword = ""
     @State private var hotspotSaved = false
-    @State private var loginItemError: String?
+    @State private var loginItemEnabled = false
 
     var body: some View {
         Form {
@@ -51,6 +51,7 @@ struct SettingsView: View {
         .frame(width: 520)
         .frame(minHeight: 560, idealHeight: 720)
         .onAppear {
+            loginItemEnabled = SMAppService.mainApp.status == .enabled
             do { hotspotPassword = try secrets.load() ?? ""; secretError = nil }
             catch { secretError = "Could not load hotspot password: \(error.localizedDescription)" }
         }
@@ -262,9 +263,6 @@ struct SettingsView: View {
     private var appSection: some View {
         Section("App") {
             Toggle("Launch at login", isOn: launchAtLogin)
-            if let loginItemError {
-                Text(loginItemError).font(.caption).foregroundStyle(.red)
-            }
             LabeledContent("Config") {
                 Text(manager.paths.configFile.path)
                     .font(.caption)
@@ -276,21 +274,15 @@ struct SettingsView: View {
 
     private var launchAtLogin: Binding<Bool> {
         Binding(
-            get: { manager.config.launchAtLogin },
+            get: { loginItemEnabled },
             set: { on in
-                do {
-                    if on {
+                loginItemEnabled = editor.setLaunchAtLogin(on, apply: { enabled in
+                    if enabled {
                         try SMAppService.mainApp.register()
                     } else {
                         try SMAppService.mainApp.unregister()
                     }
-                    loginItemError = nil
-                    // Persist only what macOS actually applied.
-                    update { $0.launchAtLogin = on }
-                } catch {
-                    loginItemError = "Login item: \(error.localizedDescription)"
-                    Log.error("launch at login \(on ? "register" : "unregister") failed: \(error.localizedDescription)")
-                }
+                }, isEnabled: { SMAppService.mainApp.status == .enabled })
             }
         )
     }
@@ -403,6 +395,24 @@ final class SettingsEditor {
     init(manager: SessionManager, reevaluateFloors: (() -> Void)? = nil) {
         self.manager = manager
         self.reevaluateFloors = reevaluateFloors ?? { manager.services?.reevaluateFloors() }
+    }
+
+    func setLaunchAtLogin(_ on: Bool, apply: (Bool) throws -> Void, isEnabled: () -> Bool) -> Bool {
+        do {
+            try apply(on)
+        } catch {
+            self.error = "Login item: \(error.localizedDescription)"
+            return isEnabled()
+        }
+        // Registration is external state. A failed config write must not make
+        // the control claim macOS rolled that change back.
+        let observed = isEnabled()
+        var next = manager.config
+        next.launchAtLogin = observed
+        if save(next), observed != on {
+            error = "macOS has not applied the requested login-item state. Check Login Items in System Settings."
+        }
+        return observed
     }
 
     @discardableResult
