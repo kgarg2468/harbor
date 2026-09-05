@@ -408,4 +408,20 @@ final class SessionLifecycleTests: XCTestCase {
         }
     }
 
+    func testIdenticalTimesReplacementCannotBeExtendedOrEndedByStaleManager() async throws {
+        let h = Harness(); defer { h.home.destroy() }
+        let m = h.makeManager(); await m.start(duration: 3600)
+        let original = try XCTUnwrap(try h.store.loadSession())
+        let replacement = Session(startedAt: original.startedAt, endsAt: original.endsAt, extensions: original.extensions)
+        try h.store.saveSession(replacement)
+        let calls = h.guardFake.calls
+        await m.extend(by: 600)
+        await m.end(reason: .user)
+        XCTAssertFalse(m.isActive)
+        XCTAssertEqual(try h.store.loadSession(), replacement)
+        XCTAssertEqual(h.backstop.scheduled.count, 1)
+        XCTAssertEqual(h.backstop.clears, 0)
+        XCTAssertEqual(h.guardFake.calls, calls)
+    }
+
 }
