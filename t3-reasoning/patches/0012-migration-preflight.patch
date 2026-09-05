@@ -1,0 +1,1526 @@
+diff --git a/apps/server/src/bin.ts b/apps/server/src/bin.ts
+index 0a2e40915..43ce870b2 100644
+--- a/apps/server/src/bin.ts
++++ b/apps/server/src/bin.ts
+@@ -14,6 +14,7 @@ import { pairCommand } from "./cli/pair.ts";
+ import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
+ import { sharedServerCommandFlags } from "./cli/config.ts";
+ import { isEntrypoint } from "./entrypoint.ts";
++import { migrationPreflightCommand } from "./cli/migrationPreflight.ts";
+ import { projectCommand } from "./cli/project.ts";
+ import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
+ import { serviceCommand } from "./cli/service.ts";
+@@ -60,6 +61,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
+       projectCommand,
+       serviceCommand,
+       servicePreflightCommand,
++      migrationPreflightCommand,
+       themeCommand,
+       triageCommand,
+       cloudEnabled ? connectCommand : connectUnavailableCommand,
+diff --git a/apps/server/src/cli/invocation.test.ts b/apps/server/src/cli/invocation.test.ts
+index c01a2caa4..c0bf7e1f9 100644
+--- a/apps/server/src/cli/invocation.test.ts
++++ b/apps/server/src/cli/invocation.test.ts
+@@ -1,5 +1,26 @@
++import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { assert, it } from "@effect/vitest";
++import * as NetService from "@t3tools/shared/Net";
++import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
++import * as ConfigProvider from "effect/ConfigProvider";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
++import * as TestConsole from "effect/testing/TestConsole";
++import { Command } from "effect/unstable/cli";
++import * as CliError from "effect/unstable/cli/CliError";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
+ 
++import packageJson from "../../package.json" with { type: "json" };
++import { makeCli } from "../bin.ts";
++import {
++  MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++  MIGRATION_PREFLIGHT_PROTOCOL,
++  MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME,
++} from "../cloud/migrationPreflight.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
++import { migrationManifest } from "../persistence/Migrations.ts";
+ import { detectCliRunner, formatCliCommand, suggestedPackageSpec } from "./invocation.ts";
+ 
+ it("detects package runners from their cache entry paths", () => {
+@@ -72,3 +93,135 @@ it("formats serve suggestions to match the launching command", () => {
+     "t3 serve",
+   );
+ });
++
++const runCli = (args: ReadonlyArray<string>) =>
++  Command.runWith(makeCli(), { version: "0.0.0" })(args).pipe(
++    Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer)),
++  );
++
++/**
++ * Runs a command and returns every stdout/stderr line the process would have
++ * printed. A fresh console per call: the shared test runtime would otherwise
++ * memoize one console across tests and accumulate their output.
++ */
++const captureCli = (args: ReadonlyArray<string>) =>
++  Effect.gen(function* () {
++    yield* runCli(args);
++    return {
++      stdout: yield* TestConsole.logLines,
++      stderr: yield* TestConsole.errorLines,
++    };
++  }).pipe(Effect.provide(Layer.fresh(TestConsole.layer)));
++
++const migrationCount = (filename: string) =>
++  Effect.gen(function* () {
++    const sql = yield* SqlClient.SqlClient;
++    const rows = yield* sql<{ readonly count: number }>`
++      SELECT count(*) AS count FROM effect_sql_migrations
++    `;
++    return rows[0]?.count ?? 0;
++  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename, readonly: true })));
++
++/** A snapshot with a schema-less database, so the candidate has every migration to run and log. */
++const stageUnmigratedSnapshot = Effect.gen(function* () {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const directory = yield* fs
++    .makeTempDirectoryScoped({ prefix: MIGRATION_PREFLIGHT_DIRECTORY_PREFIX })
++    .pipe(Effect.flatMap((created) => fs.realPath(created)));
++  const snapshotPath = path.join(directory, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++  yield* Effect.gen(function* () {
++    const sql = yield* SqlClient.SqlClient;
++    yield* sql`CREATE TABLE placeholder (id INTEGER PRIMARY KEY)`;
++  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })));
++  return { directory, snapshotPath };
++});
++
++it.layer(NodeServices.layer)("__migration-preflight routing", (it) => {
++  it.effect("prints exactly one JSON result and never resolves a T3 home", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const { directory, snapshotPath } = yield* stageUnmigratedSnapshot;
++      // A home override the handler must never use to resolve ServerConfig or create state.
++      const untouchedHome = path.join(directory, "never-created-home");
++      const args = [
++        "__migration-preflight",
++        "--snapshot-path",
++        snapshotPath,
++        "--launcher-protocol",
++        String(SERVICE_LAUNCHER_PROTOCOL),
++      ];
++
++      const { stdout, stderr } = yield* captureCli(args).pipe(
++        Effect.provide(
++          ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_HOME: untouchedHome } })),
++        ),
++      );
++
++      assert.deepStrictEqual(stderr, []);
++      assert.equal(stdout.length, 1);
++      assert.equal(typeof stdout[0], "string");
++      // @effect-diagnostics-next-line preferSchemaOverJson:off - The test asserts the raw wire document.
++      assert.deepStrictEqual(JSON.parse(stdout[0] as string), {
++        preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL,
++        version: packageJson.version,
++        launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++        status: "ready",
++      });
++      assert.equal(yield* migrationCount(snapshotPath), migrationManifest.length);
++      assert.isFalse(yield* fs.exists(untouchedHome));
++
++      // The command declares no data-directory flag at all.
++      const error = yield* captureCli([...args, "--base-dir", untouchedHome]).pipe(Effect.flip);
++      assert.isTrue(CliError.isCliError(error) && error._tag === "ShowHelp");
++      assert.isFalse(yield* fs.exists(untouchedHome));
++    }),
++  );
++
++  it.effect("prints a blocked result, never ready, when the snapshot cannot be migrated", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const directory = yield* fs
++        .makeTempDirectoryScoped({ prefix: MIGRATION_PREFLIGHT_DIRECTORY_PREFIX })
++        .pipe(Effect.flatMap((created) => fs.realPath(created)));
++      const snapshotPath = path.join(directory, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++      yield* fs.writeFile(snapshotPath, new Uint8Array(4096).fill(0x5a));
++
++      const { stdout } = yield* captureCli([
++        "__migration-preflight",
++        "--snapshot-path",
++        snapshotPath,
++        "--launcher-protocol",
++        String(SERVICE_LAUNCHER_PROTOCOL),
++      ]);
++
++      assert.equal(stdout.length, 1);
++      // @effect-diagnostics-next-line preferSchemaOverJson:off - The test asserts the raw wire document.
++      const result = JSON.parse(stdout[0] as string) as { status: string; reason?: string };
++      assert.equal(result.status, "blocked");
++      assert.match(result.reason ?? "", /^Migrating the database snapshot failed: /);
++    }),
++  );
++
++  it.effect("keeps the legacy service preflight protocol-only", () =>
++    Effect.gen(function* () {
++      const { stdout } = yield* captureCli([
++        "__service-preflight",
++        "--database-path",
++        "/missing/state.sqlite",
++        "--launcher-protocol",
++        String(SERVICE_LAUNCHER_PROTOCOL),
++      ]);
++
++      assert.equal(stdout.length, 1);
++      // @effect-diagnostics-next-line preferSchemaOverJson:off - The test asserts the raw wire document.
++      assert.deepStrictEqual(JSON.parse(stdout[0] as string), {
++        status: "ready",
++        version: packageJson.version,
++        launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++      });
++    }),
++  );
++});
+diff --git a/apps/server/src/cli/migrationPreflight.ts b/apps/server/src/cli/migrationPreflight.ts
+new file mode 100644
+index 000000000..d5611c767
+--- /dev/null
++++ b/apps/server/src/cli/migrationPreflight.ts
+@@ -0,0 +1,24 @@
++import * as Console from "effect/Console";
++import * as Effect from "effect/Effect";
++import { Command, Flag } from "effect/unstable/cli";
++
++import { runMigrationPreflight } from "../cloud/migrationPreflight.ts";
++
++/**
++ * Hidden candidate command run by the managed update stager. It takes only the
++ * disposable snapshot path and the launcher protocol: no database alias, home
++ * override, or server settings, and it never resolves ServerConfig or starts
++ * the server. Stdout is exactly one JSON result document.
++ */
++export const migrationPreflightCommand = Command.make("__migration-preflight", {
++  snapshotPath: Flag.string("snapshot-path"),
++  launcherProtocol: Flag.integer("launcher-protocol"),
++}).pipe(
++  Command.withHidden,
++  Command.withHandler(({ snapshotPath, launcherProtocol }) =>
++    runMigrationPreflight({ snapshotPath, launcherProtocol }).pipe(
++      Effect.flatMap((result) => Console.log(JSON.stringify(result))),
++      Effect.asVoid,
++    ),
++  ),
++);
+diff --git a/apps/server/src/cloud/managedMigrationPreflight.test.ts b/apps/server/src/cloud/managedMigrationPreflight.test.ts
+new file mode 100644
+index 000000000..b207242d1
+--- /dev/null
++++ b/apps/server/src/cloud/managedMigrationPreflight.test.ts
+@@ -0,0 +1,357 @@
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { assert, describe, expect, it } from "@effect/vitest";
++import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
++import * as Cause from "effect/Cause";
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
++
++import {
++  acceptMigrationPreflightOutput,
++  migrationPreflightCandidateArgs,
++  MigrationSnapshotError,
++  withMigrationSnapshot,
++} from "./managedMigrationPreflight.ts";
++import {
++  MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++  MIGRATION_PREFLIGHT_PROTOCOL,
++  MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME,
++} from "./migrationPreflight.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++class UseFailed extends Schema.TaggedErrorClass<UseFailed>()("UseFailed", {}) {}
++
++/** Opens a connection in the current scope; the writer connections stay open on purpose. */
++const openDatabase = (filename: string, readonly = false) =>
++  Layer.build(NodeSqliteClient.layer({ filename, readonly })).pipe(
++    Effect.map((context) => Context.get(context, SqlClient.SqlClient)),
++  );
++
++const countRows = (sql: SqlClient.SqlClient, table: string) =>
++  sql
++    .unsafe<{ readonly count: number }>(`SELECT count(*) AS count FROM ${table}`)
++    .pipe(Effect.map((rows) => rows[0]?.count ?? 0));
++
++const ledger = (sql: SqlClient.SqlClient) =>
++  sql<{ readonly migration_id: number; readonly name: string }>`
++    SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC
++  `.pipe(Effect.map((rows) => rows.map((row) => [row.migration_id, row.name] as const)));
++
++/**
++ * Every connection open on a WAL database holds a shared lock on it, so leaving
++ * WAL mode fails with SQLITE_BUSY while any other connection exists and
++ * succeeds once the last one closed. Returns to WAL when the switch succeeded.
++ */
++const noOtherConnectionsOpen = (writer: SqlClient.SqlClient) =>
++  writer`PRAGMA journal_mode = DELETE`.pipe(
++    Effect.andThen(writer`PRAGMA journal_mode = WAL`),
++    Effect.as(true),
++    Effect.orElseSucceed(() => false),
++  );
++
++const seedWalDatabase = Effect.fn("test.seedWalDatabase")(function* (filename: string) {
++  const sql = yield* openDatabase(filename);
++  yield* sql`PRAGMA journal_mode = WAL`;
++  // Keep every write in the WAL so the main file alone lacks the committed rows.
++  yield* sql`PRAGMA wal_autocheckpoint = 0`;
++  yield* sql`CREATE TABLE effect_sql_migrations (migration_id INTEGER PRIMARY KEY, name TEXT NOT NULL)`;
++  yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (1, 'One'), (2, 'Two')`;
++  yield* sql`CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)`;
++  for (let index = 0; index < 25; index += 1) {
++    yield* sql`INSERT INTO items (name) VALUES (${`item-${index}`})`;
++  }
++  return sql;
++});
++
++it.layer(NodeServices.layer)("withMigrationSnapshot", (it) => {
++  it.effect("snapshots committed WAL content through a readonly copy and cleans up after use", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-snapshot-test-" });
++      const source = path.join(root, "state.sqlite");
++      const writer = yield* seedWalDatabase(source);
++      const walPath = `${source}-wal`;
++      const walSizeBefore = Number((yield* fs.stat(walPath)).size);
++      assert.ok(walSizeBefore > 0);
++
++      // The main file by itself has none of the committed schema or rows yet.
++      const mainOnly = path.join(root, "main-only.sqlite");
++      yield* fs.copyFile(source, mainOnly);
++      const mainOnlyTables = yield* Effect.scoped(
++        openDatabase(mainOnly, true).pipe(Effect.flatMap((sql) => countRows(sql, "sqlite_master"))),
++      );
++      assert.equal(mainOnlyTables, 0);
++
++      const ledgerBefore = yield* ledger(writer);
++
++      let seen: string | undefined;
++      let snapshotDirectory: string | undefined;
++      const rows = yield* withMigrationSnapshot({
++        liveDatabasePath: source,
++        use: (snapshotPath) =>
++          Effect.gen(function* () {
++            seen = snapshotPath;
++            snapshotDirectory = path.dirname(snapshotPath);
++            assert.notEqual(snapshotPath, source);
++            assert.equal(path.basename(snapshotPath), MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++            assert.ok(
++              path.basename(snapshotDirectory).startsWith(MIGRATION_PREFLIGHT_DIRECTORY_PREFIX),
++            );
++            assert.equal(snapshotDirectory, yield* fs.realPath(snapshotDirectory));
++            const directoryInfo = yield* fs.stat(snapshotDirectory);
++            assert.equal(directoryInfo.mode & 0o777, 0o700);
++
++            // Simulate the candidate's disposable journal files next to the snapshot.
++            yield* fs.writeFileString(`${snapshotPath}-wal`, "");
++            yield* fs.writeFileString(`${snapshotPath}-shm`, "");
++
++            return yield* Effect.scoped(
++              openDatabase(snapshotPath, true).pipe(
++                Effect.flatMap((sql) =>
++                  Effect.all({
++                    items: countRows(sql, "items"),
++                    ledger: ledger(sql),
++                  }),
++                ),
++              ),
++            );
++          }),
++      });
++
++      assert.equal(rows.items, 25);
++      assert.deepStrictEqual(rows.ledger, ledgerBefore);
++      assert.ok(seen !== undefined && snapshotDirectory !== undefined);
++      assert.isFalse(yield* fs.exists(snapshotDirectory));
++
++      // The live database was only read: same ledger, still WAL, WAL not checkpointed.
++      assert.deepStrictEqual(yield* ledger(writer), ledgerBefore);
++      const mode = yield* writer<{ readonly journal_mode: string }>`PRAGMA journal_mode`;
++      assert.equal(mode[0]?.journal_mode, "wal");
++      assert.equal(Number((yield* fs.stat(walPath)).size), walSizeBefore);
++      assert.equal(yield* countRows(writer, "items"), 25);
++    }),
++  );
++
++  it.effect("closes the readonly source connection before use runs", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-snapshot-test-" });
++      const source = path.join(root, "state.sqlite");
++      const writer = yield* seedWalDatabase(source);
++
++      // Control: the probe does see a reader that, like the snapshot copy, has read the database.
++      const leaked = yield* Effect.gen(function* () {
++        const reader = yield* openDatabase(source, true);
++        yield* countRows(reader, "items");
++        return yield* noOtherConnectionsOpen(writer);
++      }).pipe(Effect.scoped);
++      assert.isFalse(leaked);
++      assert.isTrue(yield* noOtherConnectionsOpen(writer));
++
++      const duringUse = yield* withMigrationSnapshot({
++        liveDatabasePath: source,
++        use: () => noOtherConnectionsOpen(writer),
++      });
++      assert.isTrue(duringUse);
++    }),
++  );
++
++  it.effect("keeps the source handle readonly", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-snapshot-test-" });
++      const source = path.join(root, "state.sqlite");
++      yield* Effect.scoped(seedWalDatabase(source));
++
++      const error = yield* Effect.scoped(
++        openDatabase(source, true).pipe(
++          Effect.flatMap((sql) => sql`INSERT INTO items (name) VALUES ('nope')`),
++        ),
++      ).pipe(Effect.flip);
++      assert.equal(error._tag, "SqlError");
++    }),
++  );
++
++  it.effect("handles a quote in the source path and fails on a missing source", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-snapshot-test-" });
++      const quoted = path.join(root, "o'brien");
++      yield* fs.makeDirectory(quoted);
++      const source = path.join(quoted, "state.sqlite");
++      yield* Effect.scoped(seedWalDatabase(source));
++
++      const items = yield* withMigrationSnapshot({
++        liveDatabasePath: source,
++        use: (snapshotPath) =>
++          Effect.scoped(
++            openDatabase(snapshotPath, true).pipe(Effect.flatMap((sql) => countRows(sql, "items"))),
++          ),
++      });
++      assert.equal(items, 25);
++
++      let used = false;
++      const missing = yield* withMigrationSnapshot({
++        liveDatabasePath: path.join(root, "absent.sqlite"),
++        use: () => Effect.sync(() => void (used = true)),
++      }).pipe(Effect.flip);
++      assert.instanceOf(missing, MigrationSnapshotError);
++      assert.equal(missing.step, "resolving the live database");
++      assert.isFalse(used);
++
++      const directory = yield* withMigrationSnapshot({
++        liveDatabasePath: quoted,
++        use: () => Effect.sync(() => void (used = true)),
++      }).pipe(Effect.flip);
++      assert.instanceOf(directory, MigrationSnapshotError);
++      assert.isFalse(used);
++    }),
++  );
++
++  it.effect("removes the snapshot directory after a failed candidate", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-snapshot-test-" });
++      const source = path.join(root, "state.sqlite");
++      yield* Effect.scoped(seedWalDatabase(source));
++
++      let snapshotDirectory: string | undefined;
++      const error = yield* withMigrationSnapshot({
++        liveDatabasePath: source,
++        use: (snapshotPath) =>
++          Effect.gen(function* () {
++            snapshotDirectory = path.dirname(snapshotPath);
++            yield* fs.writeFileString(`${snapshotPath}-wal`, "");
++            return yield* new UseFailed();
++          }),
++      }).pipe(Effect.flip);
++      assert.instanceOf(error, UseFailed);
++      assert.ok(snapshotDirectory !== undefined);
++      assert.isFalse(yield* fs.exists(snapshotDirectory));
++    }),
++  );
++
++  it.effect("removes the snapshot directory only after a cancelled candidate exits", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-snapshot-test-" });
++      const source = path.join(root, "state.sqlite");
++      yield* Effect.scoped(seedWalDatabase(source));
++
++      const entered = yield* Deferred.make<string>();
++      const released = yield* Deferred.make<void>();
++      const fiber = yield* withMigrationSnapshot({
++        liveDatabasePath: source,
++        use: (snapshotPath) =>
++          Deferred.succeed(entered, snapshotPath).pipe(
++            Effect.andThen(Effect.never),
++            // The candidate process is still winding down while interruption lands.
++            Effect.onInterrupt(() =>
++              Effect.gen(function* () {
++                assert.isTrue(yield* fs.exists(snapshotPath));
++                yield* Deferred.succeed(released, undefined);
++              }),
++            ),
++          ),
++      }).pipe(Effect.forkChild);
++
++      const snapshotPath = yield* Deferred.await(entered);
++      assert.isTrue(yield* fs.exists(snapshotPath));
++      yield* Fiber.interrupt(fiber);
++      const exit = yield* Fiber.await(fiber);
++      assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
++      yield* Deferred.await(released);
++      assert.isFalse(yield* fs.exists(path.dirname(snapshotPath)));
++    }),
++  );
++});
++
++describe("acceptMigrationPreflightOutput", () => {
++  const ready = {
++    preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL,
++    version: "1.2.3",
++    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++    status: "ready",
++  };
++  const output = (stdout: string, code: number | null = 0) => ({
++    code,
++    stdout,
++    stdoutTruncated: false,
++    timedOut: false,
++  });
++  const accept = (candidate: ReturnType<typeof output>) =>
++    acceptMigrationPreflightOutput({
++      output: candidate,
++      expectedVersion: "1.2.3",
++      expectedLauncherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++    });
++
++  it("authorizes only an exact ready result", () => {
++    expect(accept(output(`${JSON.stringify(ready)}\n`))).toEqual({
++      accepted: true,
++      result: ready,
++    });
++  });
++
++  it("declines every mismatch and malformed output", () => {
++    const declined = [
++      output(JSON.stringify({ ...ready, version: "1.2.4" })),
++      output(JSON.stringify({ ...ready, preflightProtocol: 2 })),
++      output(JSON.stringify({ ...ready, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL + 1 })),
++      output(JSON.stringify(ready), 1),
++      output(JSON.stringify(ready), null),
++      output("not json"),
++      output(`Migrations ran successfully\n${JSON.stringify(ready)}`),
++      output(`${JSON.stringify(ready)}\n${JSON.stringify(ready)}`),
++      output(JSON.stringify({ ...ready, status: "blocked", reason: "needs a newer launcher" })),
++      // The legacy service preflight shape lacks the preflight protocol.
++      output(
++        JSON.stringify({
++          status: "ready",
++          version: "1.2.3",
++          launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++        }),
++      ),
++      // A legacy candidate without the hidden command prints help and exits nonzero.
++      output("Unknown subcommand: __migration-preflight\n\nUSAGE: t3 <subcommand>", 1),
++      { ...output(JSON.stringify(ready)), stdoutTruncated: true },
++      { ...output("", null), timedOut: true },
++    ];
++    for (const candidate of declined) {
++      expect(accept(candidate)).toMatchObject({ accepted: false });
++    }
++    expect(
++      accept(
++        output(JSON.stringify({ ...ready, status: "blocked", reason: "needs a newer launcher" })),
++      ),
++    ).toEqual({ accepted: false, reason: "needs a newer launcher" });
++  });
++
++  it("spawns the candidate with only the snapshot path and launcher protocol", () => {
++    expect(
++      migrationPreflightCandidateArgs({
++        snapshotPath: "/private/tmp/t3-migration-preflight-abc/snapshot.sqlite",
++        launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++      }),
++    ).toEqual([
++      "__migration-preflight",
++      "--snapshot-path",
++      "/private/tmp/t3-migration-preflight-abc/snapshot.sqlite",
++      "--launcher-protocol",
++      String(SERVICE_LAUNCHER_PROTOCOL),
++    ]);
++  });
++});
+diff --git a/apps/server/src/cloud/managedMigrationPreflight.ts b/apps/server/src/cloud/managedMigrationPreflight.ts
+new file mode 100644
+index 000000000..a4e2bdbd0
+--- /dev/null
++++ b/apps/server/src/cloud/managedMigrationPreflight.ts
+@@ -0,0 +1,217 @@
++import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
++import * as Context from "effect/Context";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
++
++import {
++  decodeMigrationPreflightResult,
++  MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++  MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME,
++  type MigrationPreflightResult,
++} from "./migrationPreflight.ts";
++
++/**
++ * Parent-side preparation for the isolated migration preflight. The running
++ * server snapshots its live database into a private temp directory and hands
++ * only that snapshot to the staged candidate. The candidate's process must have
++ * exited before `use` returns: the directory, including the candidate's -wal
++ * and -shm files, is removed when the callback scope closes.
++ */
++
++export class MigrationSnapshotError extends Schema.TaggedErrorClass<MigrationSnapshotError>()(
++  "MigrationSnapshotError",
++  {
++    step: Schema.String,
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    return `Preparing the migration preflight snapshot failed while ${this.step}.`;
++  }
++}
++
++const failWhile =
++  (step: string) =>
++  (cause: unknown): MigrationSnapshotError =>
++    new MigrationSnapshotError({ step, cause });
++
++/**
++ * A separate readonly connection makes the copy. `VACUUM INTO` writes one
++ * coherent snapshot of everything committed at the start of its read, including
++ * WAL content not yet checkpointed into the main file, without touching the live
++ * database's journal mode, ledger, or WAL. The destination is a bound
++ * parameter, never interpolated into SQL.
++ */
++const copyDatabase = Effect.fn("copyMigrationSnapshotDatabase")(function* (
++  sourcePath: string,
++  destinationPath: string,
++) {
++  const context = yield* Layer.build(
++    NodeSqliteClient.layer({ filename: sourcePath, readonly: true }),
++  );
++  const sql = Context.get(context, SqlClient.SqlClient);
++  // The server writes from this process too; wait rather than fail with SQLITE_BUSY.
++  yield* sql`PRAGMA busy_timeout = 5000`;
++  yield* sql`VACUUM INTO ${destinationPath}`;
++}, Effect.scoped);
++
++const verifySnapshot = Effect.fn("verifyMigrationSnapshot")(function* (snapshotPath: string) {
++  const fs = yield* FileSystem.FileSystem;
++  const isLink = yield* fs.readLink(snapshotPath).pipe(
++    Effect.as(true),
++    Effect.orElseSucceed(() => false),
++  );
++  if (isLink) {
++    return yield* new MigrationSnapshotError({ step: "verifying the snapshot is not a symlink" });
++  }
++  const info = yield* fs
++    .stat(snapshotPath)
++    .pipe(Effect.mapError(failWhile("verifying the snapshot file")));
++  if (info.type !== "File") {
++    return yield* new MigrationSnapshotError({ step: "verifying the snapshot is a regular file" });
++  }
++  if (Number(info.size) === 0) {
++    return yield* new MigrationSnapshotError({ step: "verifying the snapshot is not empty" });
++  }
++  if (Option.isNone(info.nlink) || info.nlink.value !== 1) {
++    return yield* new MigrationSnapshotError({ step: "verifying the snapshot has one link" });
++  }
++});
++
++export const withMigrationSnapshot = <A, E, R>(input: {
++  readonly liveDatabasePath: string;
++  readonly use: (snapshotPath: string) => Effect.Effect<A, E, R>;
++}): Effect.Effect<A, E | MigrationSnapshotError, R | FileSystem.FileSystem | Path.Path> =>
++  Effect.gen(function* () {
++    const fs = yield* FileSystem.FileSystem;
++    const path = yield* Path.Path;
++
++    // A missing or unreadable live database is a failed preparation, never an
++    // empty-database preflight.
++    const sourceInfo = yield* fs
++      .stat(input.liveDatabasePath)
++      .pipe(Effect.mapError(failWhile("resolving the live database")));
++    if (sourceInfo.type !== "File") {
++      return yield* new MigrationSnapshotError({
++        step: "resolving the live database to a regular file",
++      });
++    }
++
++    // mkdtemp creates the directory with mode 0700 and an unpredictable suffix.
++    // Scoped removal is recursive, so the candidate's -wal/-shm files go too.
++    const tempDirectory = yield* fs
++      .makeTempDirectoryScoped({ prefix: MIGRATION_PREFLIGHT_DIRECTORY_PREFIX })
++      .pipe(Effect.mapError(failWhile("creating the private snapshot directory")));
++    const snapshotDirectory = yield* fs
++      .realPath(tempDirectory)
++      .pipe(Effect.mapError(failWhile("resolving the private snapshot directory")));
++    const snapshotPath = path.join(snapshotDirectory, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++    if (yield* fs.exists(snapshotPath).pipe(Effect.orElseSucceed(() => true))) {
++      return yield* new MigrationSnapshotError({
++        step: "reserving a fresh snapshot path",
++      });
++    }
++
++    // The readonly source handle lives in its own scope and is closed here,
++    // before the candidate ever runs.
++    yield* copyDatabase(input.liveDatabasePath, snapshotPath).pipe(
++      Effect.mapError(failWhile("snapshotting the live database")),
++    );
++    yield* verifySnapshot(snapshotPath);
++
++    return yield* input.use(snapshotPath);
++  }).pipe(Effect.scoped, Effect.withSpan("withMigrationSnapshot"));
++
++/** The only two values a parent may pass to the staged candidate. */
++export interface MigrationPreflightCandidateRequest {
++  readonly snapshotPath: string;
++  readonly launcherProtocol: number;
++}
++
++/** Argument array for spawning `<candidate bin> __migration-preflight ...` without a shell. */
++export function migrationPreflightCandidateArgs(
++  request: MigrationPreflightCandidateRequest,
++): ReadonlyArray<string> {
++  return [
++    "__migration-preflight",
++    "--snapshot-path",
++    request.snapshotPath,
++    "--launcher-protocol",
++    String(request.launcherProtocol),
++  ];
++}
++
++export interface MigrationPreflightCandidateOutput {
++  readonly code: number | null;
++  readonly stdout: string;
++  readonly stdoutTruncated: boolean;
++  readonly timedOut: boolean;
++}
++
++export type MigrationPreflightAcceptance =
++  | {
++      readonly accepted: true;
++      readonly result: MigrationPreflightResult & { readonly status: "ready" };
++    }
++  | { readonly accepted: false; readonly reason: string };
++
++/**
++ * Pure acceptance check for a finished candidate run. Only a clean exit whose
++ * complete stdout is exactly one result document, reporting the already
++ * selected artifact version and the expected launcher protocol, with status
++ * ready, authorizes staging. A legacy candidate without the hidden command
++ * exits nonzero or prints help and is declined the same way.
++ */
++export function acceptMigrationPreflightOutput(input: {
++  readonly output: MigrationPreflightCandidateOutput;
++  readonly expectedVersion: string;
++  readonly expectedLauncherProtocol: number;
++}): MigrationPreflightAcceptance {
++  const { output } = input;
++  if (output.timedOut) {
++    return { accepted: false, reason: "The migration preflight timed out." };
++  }
++  if (output.code !== 0) {
++    return {
++      accepted: false,
++      reason: `The migration preflight exited with code ${output.code ?? "null"}.`,
++    };
++  }
++  if (output.stdoutTruncated) {
++    return { accepted: false, reason: "The migration preflight output was truncated." };
++  }
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(output.stdout.trim());
++  } catch {
++    return { accepted: false, reason: "The migration preflight output was not a JSON document." };
++  }
++  const result = decodeMigrationPreflightResult(parsed);
++  if (result === undefined) {
++    return {
++      accepted: false,
++      reason: "The migration preflight output did not match the preflight protocol.",
++    };
++  }
++  if (result.version !== input.expectedVersion) {
++    return {
++      accepted: false,
++      reason: `The migration preflight reported version ${result.version}, expected ${input.expectedVersion}.`,
++    };
++  }
++  if (result.launcherProtocol !== input.expectedLauncherProtocol) {
++    return {
++      accepted: false,
++      reason: `The migration preflight reported launcher protocol ${result.launcherProtocol}, expected ${input.expectedLauncherProtocol}.`,
++    };
++  }
++  if (result.status === "blocked") {
++    return { accepted: false, reason: result.reason };
++  }
++  return { accepted: true, result };
++}
+diff --git a/apps/server/src/cloud/migrationPreflight.test.ts b/apps/server/src/cloud/migrationPreflight.test.ts
+new file mode 100644
+index 000000000..8a3a83492
+--- /dev/null
++++ b/apps/server/src/cloud/migrationPreflight.test.ts
+@@ -0,0 +1,492 @@
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { assert, describe, expect, it } from "@effect/vitest";
++import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
++import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
++import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
++import * as Cause from "effect/Cause";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as FileSystem from "effect/FileSystem";
++import * as Path from "effect/Path";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
++
++import packageJson from "../../package.json" with { type: "json" };
++import { FORK_SCHEMA_COLUMNS } from "../persistence/ForkSchema.ts";
++import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
++import {
++  LEGACY_REASONING_MIGRATION_ID,
++  LEGACY_REASONING_MIGRATION_NAME,
++} from "../persistence/ReasoningSchema.ts";
++import {
++  decodeMigrationPreflightResult,
++  MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++  MIGRATION_PREFLIGHT_PROTOCOL,
++  MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME,
++  runMigrationPreflight,
++} from "./migrationPreflight.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++const UPSTREAM_MIGRATION_NAME = "ClearAutomaticProjectModelDefaults";
++const MANIFEST_IDS = migrationManifest.map(([id]) => id);
++
++const expectedBase = {
++  preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL,
++  version: packageJson.version,
++  launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++} as const;
++
++/** Runs against a plain file-backed connection that closes when the effect ends. */
++const withDatabase = <A, E>(filename: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
++  effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename })));
++
++const withReadonlyDatabase = <A, E>(
++  filename: string,
++  effect: Effect.Effect<A, E, SqlClient.SqlClient>,
++) => effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename, readonly: true })));
++
++/** Upstream through 43 plus the channel column recorded as legacy migration 44. */
++const seedLegacyReasoningFixture = (filename: string) =>
++  withDatabase(
++    filename,
++    Effect.gen(function* () {
++      const sql = yield* SqlClient.SqlClient;
++      yield* runMigrations({ toMigrationInclusive: LEGACY_REASONING_MIGRATION_ID - 1 });
++      yield* sql`ALTER TABLE projection_thread_messages ADD COLUMN channel TEXT`;
++      yield* sql`
++        INSERT INTO effect_sql_migrations (migration_id, name)
++        VALUES (${LEGACY_REASONING_MIGRATION_ID}, ${LEGACY_REASONING_MIGRATION_NAME})
++      `;
++      yield* sql`
++        INSERT INTO projection_thread_messages (
++          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at, channel
++        )
++        VALUES
++          ('reasoning-1', 'thread-1', 'turn-1', 'assistant', 'Thinking', 0, '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z', 'reasoning'),
++          ('answer-1', 'thread-1', 'turn-1', 'assistant', 'Done', 0, '2026-06-01T00:00:01.000Z', '2026-06-01T00:00:01.000Z', NULL)
++      `;
++    }),
++  );
++
++const seedCurrentFixture = (filename: string) =>
++  withDatabase(filename, runMigrations().pipe(Effect.asVoid));
++
++/** Migration 44 recorded under a name the repair refuses to guess at. */
++const seedUnknownMigration44Fixture = (filename: string) =>
++  withDatabase(
++    filename,
++    Effect.gen(function* () {
++      const sql = yield* SqlClient.SqlClient;
++      yield* runMigrations({ toMigrationInclusive: LEGACY_REASONING_MIGRATION_ID - 1 });
++      yield* sql`
++        INSERT INTO effect_sql_migrations (migration_id, name)
++        VALUES (${LEGACY_REASONING_MIGRATION_ID}, 'SomeOtherForkMigration')
++      `;
++    }),
++  );
++
++interface SchemaState {
++  readonly ledger: ReadonlyArray<readonly [number, string]>;
++  readonly channelColumn: boolean;
++  readonly forkColumns: ReadonlyArray<string>;
++  readonly channels: ReadonlyArray<readonly [string, string | null]>;
++}
++
++const readSchemaState = (filename: string) =>
++  withReadonlyDatabase(
++    filename,
++    Effect.gen(function* () {
++      const sql = yield* SqlClient.SqlClient;
++      const ledger = yield* sql<{ readonly migration_id: number; readonly name: string }>`
++        SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC
++      `;
++      const messageColumns = yield* sql<{ readonly name: string }>`
++        PRAGMA table_info(projection_thread_messages)
++      `;
++      const threadColumns = yield* sql<{ readonly name: string }>`
++        PRAGMA table_info(projection_threads)
++      `;
++      const channelColumn = messageColumns.some((column) => column.name === "channel");
++      const messages = channelColumn
++        ? yield* sql<{ readonly message_id: string; readonly channel: string | null }>`
++            SELECT message_id, channel FROM projection_thread_messages ORDER BY message_id ASC
++          `
++        : [];
++      const state: SchemaState = {
++        ledger: ledger.map((row) => [row.migration_id, row.name] as const),
++        channelColumn,
++        forkColumns: threadColumns
++          .map((column) => column.name)
++          .filter((name) => (FORK_SCHEMA_COLUMNS as ReadonlyArray<string>).includes(name)),
++        channels: messages.map((row) => [row.message_id, row.channel] as const),
++      };
++      return state;
++    }),
++  );
++
++/**
++ * A fresh parent-style private directory. Returns both the path as created
++ * (which on macOS goes through the symlinked temp root) and its canonical form.
++ */
++const makeSnapshotDirectory = Effect.gen(function* () {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const created = yield* fs.makeTempDirectoryScoped({
++    prefix: MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++  });
++  const canonical = yield* fs.realPath(created);
++  return {
++    created,
++    canonical,
++    snapshotPath: path.join(created, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME),
++    canonicalSnapshotPath: path.join(canonical, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME),
++  };
++});
++
++const preflight = (snapshotPath: string, launcherProtocol: number = SERVICE_LAUNCHER_PROTOCOL) =>
++  runMigrationPreflight({ snapshotPath, launcherProtocol });
++
++/** Sibling files SQLite creates as soon as it writes; their absence shows the file was never opened for writing. */
++const journalFilesExist = (snapshotPath: string) =>
++  Effect.gen(function* () {
++    const fs = yield* FileSystem.FileSystem;
++    const wal = yield* fs.exists(`${snapshotPath}-wal`);
++    const journal = yield* fs.exists(`${snapshotPath}-journal`);
++    return wal || journal;
++  });
++
++it.layer(NodeServices.layer)("runMigrationPreflight", (it) => {
++  it.effect(
++    "migrates a legacy Reasoning snapshot through the full chain and leaves the fixture alone",
++    () =>
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++        const fixture = path.join(root, "state.sqlite");
++        yield* seedLegacyReasoningFixture(fixture);
++        const fixtureBytes = yield* fs.readFile(fixture);
++        const fixtureBefore = yield* readSchemaState(fixture);
++        assert.equal(fixtureBefore.ledger.at(-1)?.[1], LEGACY_REASONING_MIGRATION_NAME);
++        assert.deepStrictEqual(fixtureBefore.forkColumns, []);
++
++        const directory = yield* makeSnapshotDirectory;
++        yield* fs.copyFile(fixture, directory.snapshotPath);
++
++        // The path as the parent created it: on macOS an alias through /var -> /private/var.
++        const result = yield* preflight(directory.snapshotPath);
++        assert.deepStrictEqual(result, { ...expectedBase, status: "ready" });
++
++        const migrated = yield* readSchemaState(directory.canonicalSnapshotPath);
++        assert.deepStrictEqual(
++          migrated.ledger.map(([id]) => id),
++          MANIFEST_IDS,
++        );
++        assert.equal(
++          migrated.ledger.find(([id]) => id === LEGACY_REASONING_MIGRATION_ID)?.[1],
++          UPSTREAM_MIGRATION_NAME,
++        );
++        assert.isTrue(migrated.channelColumn);
++        assert.deepStrictEqual([...migrated.forkColumns].sort(), [...FORK_SCHEMA_COLUMNS].sort());
++        assert.deepStrictEqual(migrated.channels, [
++          ["answer-1", null],
++          ["reasoning-1", "reasoning"],
++        ]);
++
++        // Only the snapshot changed.
++        assert.deepStrictEqual(yield* fs.readFile(fixture), fixtureBytes);
++        assert.deepStrictEqual(yield* readSchemaState(fixture), fixtureBefore);
++        assert.isFalse(yield* journalFilesExist(fixture));
++      }),
++  );
++
++  it.effect("reports ready for an already-current snapshot without changing its ledger", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++      const fixture = path.join(root, "state.sqlite");
++      yield* seedCurrentFixture(fixture);
++      const before = yield* readSchemaState(fixture);
++      assert.deepStrictEqual(
++        before.ledger.map(([id]) => id),
++        MANIFEST_IDS,
++      );
++
++      const directory = yield* makeSnapshotDirectory;
++      yield* fs.copyFile(fixture, directory.snapshotPath);
++
++      const result = yield* preflight(directory.canonicalSnapshotPath);
++      assert.deepStrictEqual(result, { ...expectedBase, status: "ready" });
++      assert.deepStrictEqual(yield* readSchemaState(directory.canonicalSnapshotPath), before);
++    }),
++  );
++
++  it.effect("blocks on a corrupt snapshot", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const directory = yield* makeSnapshotDirectory;
++      yield* fs.writeFile(directory.snapshotPath, new Uint8Array(4096).fill(0x5a));
++
++      const result = yield* preflight(directory.canonicalSnapshotPath);
++      assert.equal(result.status, "blocked");
++      assert.match(
++        result.status === "blocked" ? result.reason : "",
++        /^Migrating the database snapshot failed: /,
++      );
++    }),
++  );
++
++  it.effect("blocks when a migration fails and never reports ready", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++      const fixture = path.join(root, "state.sqlite");
++      yield* seedUnknownMigration44Fixture(fixture);
++      const directory = yield* makeSnapshotDirectory;
++      yield* fs.copyFile(fixture, directory.snapshotPath);
++
++      const result = yield* preflight(directory.canonicalSnapshotPath);
++      assert.equal(result.status, "blocked");
++      assert.match(result.status === "blocked" ? result.reason : "", /SomeOtherForkMigration/);
++
++      // The refused record stays put and nothing past it ran.
++      const after = yield* readSchemaState(directory.canonicalSnapshotPath);
++      assert.deepStrictEqual(after.ledger.at(-1), [
++        LEGACY_REASONING_MIGRATION_ID,
++        "SomeOtherForkMigration",
++      ]);
++      assert.isFalse(after.channelColumn);
++      assert.deepStrictEqual(after.forkColumns, []);
++    }),
++  );
++
++  it.effect("refuses the wrong launcher protocol before touching the snapshot", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++      const fixture = path.join(root, "state.sqlite");
++      yield* seedLegacyReasoningFixture(fixture);
++      const directory = yield* makeSnapshotDirectory;
++      yield* fs.copyFile(fixture, directory.snapshotPath);
++      const bytes = yield* fs.readFile(directory.canonicalSnapshotPath);
++
++      const result = yield* preflight(
++        directory.canonicalSnapshotPath,
++        SERVICE_LAUNCHER_PROTOCOL - 1,
++      );
++      assert.deepStrictEqual(result, {
++        ...expectedBase,
++        status: "blocked",
++        reason:
++          "This release requires a newer T3 Code service launcher. Update it on the server machine.",
++      });
++      assert.deepStrictEqual(yield* fs.readFile(directory.canonicalSnapshotPath), bytes);
++      assert.isFalse(yield* journalFilesExist(directory.canonicalSnapshotPath));
++    }),
++  );
++
++  it.effect("refuses mistaken snapshot paths before opening anything", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++      const fixture = path.join(root, "state.sqlite");
++      yield* seedLegacyReasoningFixture(fixture);
++      const fixtureBytes = yield* fs.readFile(fixture);
++      const directory = yield* makeSnapshotDirectory;
++
++      const wrongBasename = path.join(directory.canonical, "state.sqlite");
++      yield* fs.copyFile(fixture, wrongBasename);
++      const plainParent = path.join(root, "plain");
++      yield* fs.makeDirectory(plainParent);
++      const outsidePrefix = path.join(plainParent, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++      yield* fs.copyFile(fixture, outsidePrefix);
++      const emptyDirectory = yield* makeSnapshotDirectory;
++      yield* fs.writeFile(emptyDirectory.snapshotPath, new Uint8Array(0));
++      const directoryAsSnapshot = yield* makeSnapshotDirectory;
++      yield* fs.makeDirectory(directoryAsSnapshot.snapshotPath);
++      const hardLinked = yield* makeSnapshotDirectory;
++      yield* fs.link(fixture, hardLinked.snapshotPath);
++
++      const cases: ReadonlyArray<readonly [string, RegExp]> = [
++        [MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME, /must be absolute/],
++        [wrongBasename, /must be named snapshot\.sqlite/],
++        [outsidePrefix, /must live in a t3-migration-preflight-\* directory/],
++        [
++          path.join(
++            root,
++            `${MIGRATION_PREFLIGHT_DIRECTORY_PREFIX}absent`,
++            MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME,
++          ),
++          /directory is missing/,
++        ],
++        [directory.canonicalSnapshotPath, /snapshot is missing/],
++        [emptyDirectory.canonicalSnapshotPath, /snapshot is empty/],
++        [directoryAsSnapshot.canonicalSnapshotPath, /not a regular file/],
++        [hardLinked.canonicalSnapshotPath, /hard-linked/],
++      ];
++      for (const [snapshotPath, reason] of cases) {
++        const result = yield* preflight(snapshotPath);
++        assert.equal(result.status, "blocked", snapshotPath);
++        assert.match(result.status === "blocked" ? result.reason : "", reason, snapshotPath);
++      }
++
++      for (const candidate of [wrongBasename, outsidePrefix, hardLinked.canonicalSnapshotPath]) {
++        assert.deepStrictEqual(yield* fs.readFile(candidate), fixtureBytes, candidate);
++        assert.isFalse(yield* journalFilesExist(candidate), candidate);
++      }
++      assert.deepStrictEqual(yield* fs.readFile(fixture), fixtureBytes);
++    }),
++  );
++
++  it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
++    "refuses a snapshot directory that is not owner-only before opening anything",
++    () =>
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++        const fixture = path.join(root, "state.sqlite");
++        yield* seedLegacyReasoningFixture(fixture);
++        const fixtureBytes = yield* fs.readFile(fixture);
++        const before = yield* readSchemaState(fixture);
++
++        const directory = yield* makeSnapshotDirectory;
++        yield* fs.copyFile(fixture, directory.snapshotPath);
++        yield* fs.chmod(directory.canonical, 0o777);
++
++        for (const snapshotPath of [directory.snapshotPath, directory.canonicalSnapshotPath]) {
++          const result = yield* preflight(snapshotPath);
++          assert.deepStrictEqual(
++            result,
++            {
++              ...expectedBase,
++              status: "blocked",
++              reason: "The migration preflight snapshot directory is not private.",
++            },
++            snapshotPath,
++          );
++        }
++        assert.deepStrictEqual(yield* fs.readFile(directory.canonicalSnapshotPath), fixtureBytes);
++        assert.deepStrictEqual(yield* readSchemaState(directory.canonicalSnapshotPath), before);
++        assert.isFalse(yield* journalFilesExist(directory.canonicalSnapshotPath));
++
++        // Restoring the parent's private mode is all it takes to be accepted again.
++        yield* fs.chmod(directory.canonical, 0o700);
++        assert.deepStrictEqual(yield* preflight(directory.canonicalSnapshotPath), {
++          ...expectedBase,
++          status: "ready",
++        });
++      }),
++  );
++
++  it.effect.skipIf(!symlinksSupported)(
++    "rejects a symlinked snapshot or snapshot directory but accepts an aliased ancestor",
++    () =>
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++        const fixture = path.join(root, "state.sqlite");
++        yield* seedLegacyReasoningFixture(fixture);
++        const fixtureBytes = yield* fs.readFile(fixture);
++
++        const linkedFile = yield* makeSnapshotDirectory;
++        yield* fs.symlink(fixture, linkedFile.snapshotPath);
++        const viaLinkedFile = yield* preflight(linkedFile.canonicalSnapshotPath);
++        assert.deepStrictEqual(viaLinkedFile, {
++          ...expectedBase,
++          status: "blocked",
++          reason: "The migration preflight snapshot is a symlink.",
++        });
++
++        const real = yield* fs.makeTempDirectoryScoped({
++          directory: root,
++          prefix: MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++        });
++        yield* fs.copyFile(fixture, path.join(real, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME));
++        const linkedDirectory = path.join(root, `${MIGRATION_PREFLIGHT_DIRECTORY_PREFIX}link`);
++        yield* fs.symlink(real, linkedDirectory);
++        const viaLinkedDirectory = yield* preflight(
++          path.join(linkedDirectory, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME),
++        );
++        assert.deepStrictEqual(viaLinkedDirectory, {
++          ...expectedBase,
++          status: "blocked",
++          reason: "The migration preflight snapshot directory is a symlink.",
++        });
++        assert.deepStrictEqual(yield* fs.readFile(fixture), fixtureBytes);
++        assert.isFalse(yield* journalFilesExist(fixture));
++
++        // An alias higher up, like macOS's /tmp, is an ordinary way to reach the real directory.
++        const rootAlias = path.join(
++          yield* fs.makeTempDirectoryScoped({ prefix: "t3-alias-" }),
++          "root",
++        );
++        yield* fs.symlink(root, rootAlias);
++        const viaAliasedAncestor = yield* preflight(
++          path.join(rootAlias, path.basename(real), MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME),
++        );
++        assert.deepStrictEqual(viaAliasedAncestor, { ...expectedBase, status: "ready" });
++        const migrated = yield* readSchemaState(
++          path.join(real, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME),
++        );
++        assert.deepStrictEqual(
++          migrated.ledger.map(([id]) => id),
++          MANIFEST_IDS,
++        );
++      }),
++  );
++
++  it.effect("stays interrupted rather than reporting a result", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preflight-test-" });
++      const fixture = path.join(root, "state.sqlite");
++      yield* seedLegacyReasoningFixture(fixture);
++      const directory = yield* makeSnapshotDirectory;
++      yield* fs.copyFile(fixture, directory.snapshotPath);
++      const bytes = yield* fs.readFile(directory.canonicalSnapshotPath);
++
++      const fiber = yield* Effect.forkChild(preflight(directory.canonicalSnapshotPath));
++      yield* Fiber.interrupt(fiber);
++      const exit = yield* Fiber.await(fiber);
++      assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
++      assert.deepStrictEqual(yield* fs.readFile(directory.canonicalSnapshotPath), bytes);
++    }),
++  );
++});
++
++describe("decodeMigrationPreflightResult", () => {
++  const ready = { ...expectedBase, status: "ready" };
++
++  it("decodes exact ready and blocked documents", () => {
++    expect(decodeMigrationPreflightResult(ready)).toEqual(ready);
++    expect(decodeMigrationPreflightResult({ ...ready, status: "blocked", reason: "why" })).toEqual({
++      ...expectedBase,
++      status: "blocked",
++      reason: "why",
++    });
++  });
++
++  it("rejects other shapes", () => {
++    const rejected: ReadonlyArray<unknown> = [
++      undefined,
++      null,
++      "ready",
++      { status: "ready", version: "1.2.3", launcherProtocol: SERVICE_LAUNCHER_PROTOCOL },
++      { ...ready, preflightProtocol: 2 },
++      { ...ready, launcherProtocol: "2" },
++      { ...ready, version: 1 },
++      { ...ready, status: "blocked" },
++      { ...ready, status: "done" },
++    ];
++    for (const value of rejected) {
++      expect(decodeMigrationPreflightResult(value), JSON.stringify(value)).toBeUndefined();
++    }
++  });
++});
+diff --git a/apps/server/src/cloud/migrationPreflight.ts b/apps/server/src/cloud/migrationPreflight.ts
+new file mode 100644
+index 000000000..620f64033
+--- /dev/null
++++ b/apps/server/src/cloud/migrationPreflight.ts
+@@ -0,0 +1,219 @@
++import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Logger from "effect/Logger";
++import * as Option from "effect/Option";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++
++import packageJson from "../../package.json" with { type: "json" };
++import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++/**
++ * Isolated migration preflight run by a staged candidate release.
++ *
++ * Unlike `__service-preflight`, which stays protocol-only because its callers
++ * hand it the live database path, this command migrates a disposable snapshot
++ * that the parent created with `withMigrationSnapshot`. The snapshot proves the
++ * candidate can migrate a coherent point-in-time copy; it is never installed
++ * over the live database.
++ */
++
++export const MIGRATION_PREFLIGHT_PROTOCOL = 1 as const;
++/** Parent-created private temp directories carry this prefix; the candidate accepts nothing else. */
++export const MIGRATION_PREFLIGHT_DIRECTORY_PREFIX = "t3-migration-preflight-";
++export const MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME = "snapshot.sqlite";
++
++export type MigrationPreflightResult = {
++  readonly preflightProtocol: typeof MIGRATION_PREFLIGHT_PROTOCOL;
++  readonly version: string;
++  readonly launcherProtocol: number;
++} & ({ readonly status: "ready" } | { readonly status: "blocked"; readonly reason: string });
++
++const MigrationPreflightResultJson = Schema.Union([
++  Schema.Struct({
++    preflightProtocol: Schema.Literal(MIGRATION_PREFLIGHT_PROTOCOL),
++    version: Schema.String,
++    launcherProtocol: Schema.Int,
++    status: Schema.Literal("ready"),
++  }),
++  Schema.Struct({
++    preflightProtocol: Schema.Literal(MIGRATION_PREFLIGHT_PROTOCOL),
++    version: Schema.String,
++    launcherProtocol: Schema.Int,
++    status: Schema.Literal("blocked"),
++    reason: Schema.String,
++  }),
++]);
++
++const decodeResultJson = Schema.decodeUnknownOption(MigrationPreflightResultJson);
++
++export function decodeMigrationPreflightResult(
++  value: unknown,
++): MigrationPreflightResult | undefined {
++  const decoded = decodeResultJson(value);
++  if (Option.isNone(decoded)) {
++    return undefined;
++  }
++  const result = decoded.value;
++  const base = {
++    preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL,
++    version: result.version,
++    launcherProtocol: result.launcherProtocol,
++  } as const;
++  return result.status === "ready"
++    ? { ...base, status: "ready" }
++    : { ...base, status: "blocked", reason: result.reason };
++}
++
++class SnapshotRejectedError extends Schema.TaggedErrorClass<SnapshotRejectedError>()(
++  "SnapshotRejectedError",
++  { reason: Schema.String },
++) {
++  override get message(): string {
++    return this.reason;
++  }
++}
++
++const reject = (reason: string) => new SnapshotRejectedError({ reason });
++
++/**
++ * `mkdtemp` creates the parent with exactly these permission bits. Anything
++ * else is not the private directory the parent made, so it is refused on the
++ * platforms where mode bits carry meaning. Windows stat modes are synthetic
++ * and are not checked.
++ */
++const PRIVATE_DIRECTORY_MODE = 0o700;
++const PERMISSION_BITS = 0o777;
++
++/**
++ * Accepts only the file `withMigrationSnapshot` produces: an absolute path with
++ * the fixed basename whose parent is a real (non-symlink) directory carrying the
++ * preflight prefix with owner-only permissions, resolving to an existing,
++ * nonempty, unlinked regular file. Ancestors may be ordinary aliases such as
++ * macOS's symlinked temp root. These checks catch mistaken paths, link aliases,
++ * and shared directories before SQLite opens anything.
++ */
++const resolveSnapshotPath = Effect.fn("resolveMigrationPreflightSnapshotPath")(function* (
++  snapshotPath: string,
++) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++
++  if (!path.isAbsolute(snapshotPath)) {
++    return yield* reject("The migration preflight snapshot path must be absolute.");
++  }
++  if (path.basename(snapshotPath) !== MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME) {
++    return yield* reject(
++      `The migration preflight snapshot must be named ${MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME}.`,
++    );
++  }
++  const parent = path.dirname(snapshotPath);
++  if (!path.basename(parent).startsWith(MIGRATION_PREFLIGHT_DIRECTORY_PREFIX)) {
++    return yield* reject(
++      `The migration preflight snapshot must live in a ${MIGRATION_PREFLIGHT_DIRECTORY_PREFIX}* directory.`,
++    );
++  }
++  if (yield* isSymbolicLink(fs, parent)) {
++    return yield* reject("The migration preflight snapshot directory is a symlink.");
++  }
++  const parentInfo = yield* fs
++    .stat(parent)
++    .pipe(Effect.mapError(() => reject("The migration preflight snapshot directory is missing.")));
++  if (parentInfo.type !== "Directory") {
++    return yield* reject("The migration preflight snapshot directory is not a directory.");
++  }
++  const canonicalParent = yield* fs
++    .realPath(parent)
++    .pipe(
++      Effect.mapError(() =>
++        reject("The migration preflight snapshot directory could not be resolved."),
++      ),
++    );
++  if (!path.basename(canonicalParent).startsWith(MIGRATION_PREFLIGHT_DIRECTORY_PREFIX)) {
++    return yield* reject(
++      `The migration preflight snapshot must live in a ${MIGRATION_PREFLIGHT_DIRECTORY_PREFIX}* directory.`,
++    );
++  }
++  // `parent` is not a symlink and resolves to `canonicalParent`, so this is the canonical directory's mode.
++  const platform = yield* HostProcessPlatform;
++  if (platform !== "win32" && (parentInfo.mode & PERMISSION_BITS) !== PRIVATE_DIRECTORY_MODE) {
++    return yield* reject("The migration preflight snapshot directory is not private.");
++  }
++  const canonicalPath = path.join(canonicalParent, MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++  if (yield* isSymbolicLink(fs, canonicalPath)) {
++    return yield* reject("The migration preflight snapshot is a symlink.");
++  }
++  const info = yield* fs
++    .stat(canonicalPath)
++    .pipe(Effect.mapError(() => reject("The migration preflight snapshot is missing.")));
++  if (info.type !== "File") {
++    return yield* reject("The migration preflight snapshot is not a regular file.");
++  }
++  if (Number(info.size) === 0) {
++    return yield* reject("The migration preflight snapshot is empty.");
++  }
++  if (Option.isNone(info.nlink) || info.nlink.value !== 1) {
++    return yield* reject("The migration preflight snapshot is hard-linked.");
++  }
++  return canonicalPath;
++});
++
++/** `readLink` succeeds only for symlinks; any failure (missing, not a link) means "not a symlink" here. */
++const isSymbolicLink = (fs: FileSystem.FileSystem, target: string) =>
++  fs.readLink(target).pipe(
++    Effect.as(true),
++    Effect.orElseSucceed(() => false),
++  );
++
++/**
++ * Builds and closes the full production persistence layer against the
++ * snapshot: same pragmas, the legacy Reasoning repair, every upstream
++ * migration, then the Reasoning and fork schema. Migration logs are silenced so
++ * the command's stdout carries exactly one JSON document.
++ */
++const migrateSnapshot = Effect.fn("migrateMigrationPreflightSnapshot")(
++  function* (snapshotPath: string) {
++    yield* Layer.build(makeSqlitePersistenceLive(snapshotPath));
++  },
++  Effect.scoped,
++  Effect.provide(Logger.layer([], { mergeWithExisting: false })),
++);
++
++export const runMigrationPreflight = Effect.fn("runMigrationPreflight")(function* (input: {
++  readonly snapshotPath: string;
++  readonly launcherProtocol: number;
++}): Effect.fn.Return<MigrationPreflightResult, never, FileSystem.FileSystem | Path.Path> {
++  const base = {
++    preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL,
++    version: packageJson.version,
++    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++  } as const;
++  const blocked = (reason: string): MigrationPreflightResult => ({
++    ...base,
++    status: "blocked",
++    reason,
++  });
++
++  if (input.launcherProtocol !== SERVICE_LAUNCHER_PROTOCOL) {
++    return blocked(
++      "This release requires a newer T3 Code service launcher. Update it on the server machine.",
++    );
++  }
++
++  return yield* resolveSnapshotPath(input.snapshotPath).pipe(
++    Effect.flatMap(migrateSnapshot),
++    Effect.as<MigrationPreflightResult>({ ...base, status: "ready" }),
++    Effect.catch((error) =>
++      Effect.succeed(
++        blocked(
++          error._tag === "SnapshotRejectedError"
++            ? error.message
++            : `Migrating the database snapshot failed: ${error.message}`,
++        ),
++      ),
++    ),
++  );
++});
