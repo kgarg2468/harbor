@@ -108,17 +108,26 @@ extension OwnedRecoveryTests {
         defer { flock(descriptor, LOCK_UN); close(descriptor) }
         XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
         try JournalLock.withLock(at: home.paths.recoveryLock) {
-            let process = Process()
-            process.executableURL = binary
-            process.arguments = ["--recover-owned", stage.path]
-            process.environment = ProcessInfo.processInfo.environment.merging(["INSOMNIA_HOME": home.root.path]) { _, new in new }
-            process.standardError = Pipe()
-            try process.run()
-            let deadline = Date().addingTimeInterval(5)
-            while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
-            if process.isRunning { process.terminate(); XCTFail("Headless recovery blocked on a GUI or journal lock") }
-            process.waitUntilExit()
-            XCTAssertEqual(process.terminationStatus, 0)
+            for (arguments, status) in [
+                (["--recover-owned", stage.path], Int32(0)),
+                (["--validate-recovery-state", stage.path], 0),
+                (["--maintenance-protocol"], 0),
+                (["--maintenance-uninstall", "--purge"], 1), // Loose helper cannot unregister an app.
+                (["--unknown-maintenance"], 2),
+                (["--maintenance-uninstall", "--unknown"], 2)
+            ] {
+                let process = Process()
+                process.executableURL = binary
+                process.arguments = arguments
+                process.environment = ProcessInfo.processInfo.environment.merging(["INSOMNIA_HOME": home.root.path]) { _, new in new }
+                process.standardError = Pipe()
+                try process.run()
+                let deadline = Date().addingTimeInterval(5)
+                while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+                if process.isRunning { process.terminate(); XCTFail("Headless recovery blocked on a GUI or journal lock") }
+                process.waitUntilExit()
+                XCTAssertEqual(process.terminationStatus, status, arguments.joined(separator: " "))
+            }
         }
     }
 }

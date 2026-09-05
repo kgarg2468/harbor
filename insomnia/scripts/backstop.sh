@@ -1,132 +1,168 @@
 #!/bin/bash
-# Insomnia backstop: restore the machine from the JSON journal alone.
-# Runs from launchd (RunAtLoad + a calendar trigger at the session deadline)
-# and from uninstall.sh. Needs no Insomnia process and no Swift.
-#
-# If session.json is missing, unreadable, or its endsAt is in the past:
-#   - pmset -a disablesleep 0             (sudoers-allowed)
-#   - pmset -b lowpowermode 0             (only if state.json says we set it)
-#   - kill -CONT every pid in frozenPids  (errors ignored)
-#   - delete session.json; clear only the state.json entries that were
-#     actually restored, so a failed pmset stays journaled and is retried by
-#     the next run or by the app's reconcile
-# Otherwise do nothing and exit 0. Safe to run repeatedly.
-#
-# --force: treat the session as expired even if endsAt is in the future
-# (used by install.sh / uninstall.sh to end a stale session deliberately).
-#
-# Honours INSOMNIA_HOME with the same layout as the app (see Paths.swift).
+# Recovery holds the persistent BSD flock inode shared with the app journal.
 set -euo pipefail
-
+umask 077
+APP_SUPPORT="${INSOMNIA_HOME:-$HOME/Library/Application Support/Insomnia}"
+LOG_DIR="${INSOMNIA_HOME:+$INSOMNIA_HOME/Logs}"
+LOG_DIR="${LOG_DIR:-$HOME/Library/Logs/Insomnia}"
+HELPER="$APP_SUPPORT/InsomniaRecovery"
+original_args=("$@")
 force=0
-[[ "${1:-}" == "--force" ]] && force=1
-
-if [[ -n "${INSOMNIA_HOME:-}" ]]; then
-  APP_SUPPORT="$INSOMNIA_HOME"
-  LOG_DIR="$INSOMNIA_HOME/Logs"
-else
-  APP_SUPPORT="$HOME/Library/Application Support/Insomnia"
-  LOG_DIR="$HOME/Library/Logs/Insomnia"
-fi
+locked=0
+while (( $# )); do
+  case "$1" in
+    --force) force=1 ;;
+    --locked) locked=1 ;;
+    --helper) [[ $# -ge 2 && "$2" == /* ]] || exit 2; HELPER="$2"; shift ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 SESSION="$APP_SUPPORT/session.json"
 STATE="$APP_SUPPORT/state.json"
-LOG="$LOG_DIR/insomnia.log"
-PMSET=/usr/bin/pmset
-SUDO=/usr/bin/sudo
 PLUTIL=/usr/bin/plutil
-
+if [[ -n "${INSOMNIA_HOME:-}" ]]; then
+  # A custom root is caller-selected: never repair a shared directory's modes.
+  [[ ! -L "$APP_SUPPORT" && ( ! -e "$APP_SUPPORT" || -d "$APP_SUPPORT" ) ]] || exit 1
+  # umask 077 creates the new root and any missing parents with mode 0700.
+  if [[ ! -d "$APP_SUPPORT" ]]; then /bin/mkdir -p "$APP_SUPPORT"; fi
+  [[ ! -L "$APP_SUPPORT" && -d "$APP_SUPPORT" ]] || exit 1
+  metadata="$(/usr/bin/stat -f '%u %Lp' "$APP_SUPPORT")" || exit 1
+  read -r owner permissions <<< "$metadata"
+  if [[ "$owner" != "$(/usr/bin/id -u)" || ! "$permissions" =~ ^[0-7]{3,4}$ ]] ||
+     (( (8#$permissions & 077) != 0 )); then
+    echo "INSOMNIA_HOME must be a private directory owned by the current account." >&2
+    exit 1
+  fi
+else
+  /bin/mkdir -p "$APP_SUPPORT"
+  /bin/chmod 700 "$APP_SUPPORT"
+fi
+if (( locked == 0 )); then
+  # -k retains the inode for existing waiters. The child inherits INSOMNIA_HOME.
+  exec /usr/bin/lockf -k -t 30 "$APP_SUPPORT/recovery.lock" /bin/bash "$0" --locked ${original_args[@]+"${original_args[@]}"}
+fi
 log() {
-  mkdir -p "$LOG_DIR"
-  printf '%s [%s] backstop: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$LOG"
-}
-
-# plutil -extract <key> raw prints the scalar; returns non-zero if missing.
-extract() { # file key
-  "$PLUTIL" -extract "$2" raw -o - "$1" 2>/dev/null
-}
-
-# Decide whether the session is still valid.
-valid=0
-if [[ -f "$SESSION" ]]; then
-  ends_at="$(extract "$SESSION" endsAt || true)"
-  if [[ -n "$ends_at" ]]; then
-    # Store.swift writes ISO 8601 UTC without fractional seconds.
-    ends_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$ends_at" +%s 2>/dev/null || true)"
-    now_epoch="$(date -u +%s)"
-    if [[ -n "$ends_epoch" ]] && (( ends_epoch > now_epoch )); then
-      valid=1
+  # Logging is bounded and private, and every failure is independent of recovery.
+  (
+    # Never open a FIFO/device or follow a link while holding the recovery lease.
+    [[ ! -L "$LOG_DIR" && ( ! -e "$LOG_DIR" || -d "$LOG_DIR" ) ]] || exit 0
+    /bin/mkdir -p "$LOG_DIR" || exit 0
+    /bin/chmod 700 "$LOG_DIR" || exit 0
+    file="$LOG_DIR/insomnia.log"
+    for candidate in "$file" "$file.1"; do
+      [[ ! -L "$candidate" && ( ! -e "$candidate" || -f "$candidate" ) ]] || exit 0
+    done
+    [[ ! -e "$file" ]] || /bin/chmod 600 "$file" || exit 0
+    record="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ) backstop: $*"
+    size=0
+    [[ ! -f "$file" ]] || size="$(/usr/bin/wc -c < "$file")" || exit 0
+    if (( size + ${#record} + 1 > 262144 )); then
+      archive="$(/usr/bin/mktemp "$LOG_DIR/.backstop-log.XXXXXX")" || exit 0
+      trap '/bin/rm -f "$archive"' EXIT
+      if (( size > 262144 )); then
+        /usr/bin/tail -c 262144 "$file" | /usr/bin/sed '1d' > "$archive" || exit 0
+      else /bin/cp "$file" "$archive" || exit 0; fi
+      /bin/chmod 600 "$archive" || exit 0
+      /bin/mv -f "$archive" "$file.1" || exit 0
+      : > "$file" || exit 0
     fi
-  fi
+    if [[ -f "$file.1" ]]; then
+      /bin/chmod 600 "$file.1" || exit 0
+      backup_size="$(/usr/bin/wc -c < "$file.1")" || exit 0
+      if (( backup_size > 262144 )); then
+        archive="$(/usr/bin/mktemp "$LOG_DIR/.backstop-log.XXXXXX")" || exit 0
+        trap '/bin/rm -f "$archive"' EXIT
+        /usr/bin/tail -c 262144 "$file.1" | /usr/bin/sed '1d' > "$archive" || exit 0
+        /bin/chmod 600 "$archive" || exit 0
+        /bin/mv -f "$archive" "$file.1" || exit 0
+      fi
+    fi
+    printf '%s\n' "$record" >> "$file" || exit 0
+    /bin/chmod 600 "$file" || exit 0
+  ) 2>/dev/null || true
+}
+extract() { "$PLUTIL" -extract "$2" raw -o - "$1" 2>/dev/null; }
+if (( force == 0 )) && [[ -f "$SESSION" ]]; then
+  ends_at="$(extract "$SESSION" endsAt || true)"
+  ends_epoch="$(/bin/date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$ends_at" +%s 2>/dev/null || true)"
+  if [[ "$ends_epoch" =~ ^[0-9]+$ ]] && (( ends_epoch > $(/bin/date -u +%s) )); then exit 0; fi
 fi
-
-if (( valid == 1 && force == 0 )); then
-  exit 0
+failed=0
+/bin/rm -f "$SESSION" || failed=1
+[[ -e "$STATE" ]] || exit "$failed"
+log "restoring expired or ended session"
+tmp="$(/usr/bin/mktemp "$APP_SUPPORT/.state.XXXXXX")"
+trap '/bin/rm -f "$tmp"' EXIT
+if ! "$PLUTIL" -convert json -o "$tmp" "$STATE" >/dev/null 2>&1; then
+  log "unreadable state retained; recovery incomplete"; exit 1
 fi
-
-# --- Restore -----------------------------------------------------------------
-
-if (( force == 1 )) && [[ -f "$SESSION" ]]; then
-  log info "forced end of session (endsAt=${ends_at:-?}); restoring"
-elif [[ -f "$SESSION" ]]; then
-  log info "session expired or unreadable (endsAt=${ends_at:-?}); restoring"
-else
-  log info "no session; restoring"
-fi
-
-low_power="$(extract "$STATE" lowPowerSetByUs 2>/dev/null || echo false)"
-pids="$("$PLUTIL" -extract frozenPids json -o - "$STATE" 2>/dev/null | tr -c '0-9' ' ' || true)"
-
-sleep_ok=0
-if "$SUDO" -n "$PMSET" -a disablesleep 0 2>/dev/null; then
-  log info "pmset -a disablesleep 0 ok"
-  sleep_ok=1
-else
-  log error "pmset -a disablesleep 0 failed (sudoers rule missing? run install.sh); keeping journal entry for retry"
-fi
-
-low_ok=1
-if [[ "$low_power" == "true" ]]; then
-  if "$SUDO" -n "$PMSET" -b lowpowermode 0 2>/dev/null; then
-    log info "pmset -b lowpowermode 0 ok"
-  else
-    log error "pmset -b lowpowermode 0 failed; keeping journal entry for retry"
-    low_ok=0
-  fi
-fi
-
-resumed=0
-for pid in $pids; do
-  if kill -CONT "$pid" 2>/dev/null; then
-    resumed=$((resumed + 1))
+IFS= read -r -n 1 root_kind < "$tmp"
+[[ "$root_kind" == '{' ]] || exit 1
+# Power restoration is independent of the native helper. Never infer booleans
+# from strings/numbers/null, and never signal or discard native ownership here.
+for key in sleepDisabledByUs lowPowerSetByUs originalSleepDisabled originalBatteryLowPowerMode; do
+  kind="$("$PLUTIL" -type "$key" "$tmp" 2>/dev/null || true)"
+  if [[ -n "$kind" && "$kind" != bool ]]; then log "unsupported power state retained"; exit 1; fi
+done
+for spec in frozenPids:array frozenProcesses:array dockerFrozen:bool savedOutputVolume:float savedMuted:bool savedOutputDeviceUID:string; do
+  key="${spec%%:*}"; expected="${spec#*:}"
+  kind="$("$PLUTIL" -type "$key" "$tmp" 2>/dev/null || true)"
+  if [[ -n "$kind" && "$kind" != "$expected" && ! ( "$expected" == float && "$kind" == integer ) ]]; then
+    log "unsupported owned state retained"; exit 1
   fi
 done
-if [[ -n "${pids// /}" ]]; then
-  read -r -a pid_list <<< "$pids"
-  log info "SIGCONT sent to $resumed pid(s) of: ${pid_list[*]}"
+# A hash-bound marker prevents accidentally launching an old GUI binary.
+digest=''
+marker=''
+if [[ ! -L "$HELPER" && -f "$HELPER" && -x "$HELPER" &&
+      ! -L "$HELPER.protocol" && -f "$HELPER.protocol" ]]; then
+  helper_size="$(/usr/bin/stat -f %z "$HELPER" 2>/dev/null || true)"
+  marker_size="$(/usr/bin/stat -f %z "$HELPER.protocol" 2>/dev/null || true)"
+  # v1 + space + SHA-256 + newline is exactly 89 bytes; match the app verifier.
+  if [[ "$helper_size" =~ ^[0-9]+$ && "$marker_size" == 89 ]] &&
+     (( helper_size > 0 && helper_size <= 67108864 )); then
+    digest="$(/usr/bin/shasum -a 256 "$HELPER" 2>/dev/null || true)"
+    marker="$(/bin/cat "$HELPER.protocol" 2>/dev/null || true)"
+  fi
 fi
-
-rm -f "$SESSION"
-mkdir -p "$APP_SUPPORT"
-# plutil -lint rejects JSON; -convert is the reliable validity check. Seed a
-# full clean object rather than "{}" (which plutil reads as OpenStep and
-# refuses to edit).
-if [[ ! -f "$STATE" ]] || ! "$PLUTIL" -convert json -o /dev/null "$STATE" >/dev/null 2>&1; then
-  printf '{"sleepDisabledByUs":false,"lowPowerSetByUs":false,"frozenPids":[],"dockerFrozen":false}\n' > "$STATE"
-fi
-
-# Edit state.json in place so keys we do not own (saved audio, PR2 fields)
-# survive. A key stays true only if its restore failed.
-set_bool() { # key value
-  "$PLUTIL" -replace "$1" -bool "$2" "$STATE" >/dev/null 2>&1 || true
-}
-if (( sleep_ok == 1 )); then set_bool sleepDisabledByUs false; else set_bool sleepDisabledByUs true; fi
-if (( low_ok == 1 )); then set_bool lowPowerSetByUs false; fi
-set_bool dockerFrozen false
-"$PLUTIL" -replace frozenPids -json '[]' "$STATE" >/dev/null 2>&1 || true
-
-if (( sleep_ok == 1 && low_ok == 1 )); then
-  log info "journal cleared"
+if [[ -x "$HELPER" && -n "$digest" && "$marker" == "insomnia-maintenance-v1 ${digest%% *}" ]]; then
+  "$HELPER" --validate-recovery-state "$tmp" || exit 1
+  # The helper never takes another lease. Import successful partial work even
+  # when it returns nonzero for remaining process/device/legacy ownership.
+  "$HELPER" --recover-owned "$tmp" || failed=1
+  "$HELPER" --validate-recovery-state "$tmp" || exit 1
 else
-  log error "journal kept dirty; rerun after fixing sudoers"
+  for key in frozenPids frozenProcesses; do
+    entries="$("$PLUTIL" -extract "$key" json -o - "$tmp" 2>/dev/null | /usr/bin/tr -d '[:space:]' || true)"
+    if [[ -n "$entries" && "$entries" != '[]' ]]; then failed=1; fi
+  done
+  [[ "$(extract "$tmp" dockerFrozen || echo false)" != true ]] || failed=1
+  for key in savedOutputVolume savedMuted savedOutputDeviceUID; do
+    if "$PLUTIL" -type "$key" "$tmp" >/dev/null 2>&1; then failed=1; fi
+  done
+  if (( failed != 0 )); then
+    log "compatible native helper unavailable; owned entries retained"
+    echo "Native recovery requires a compatible InsomniaRecovery helper; rerun the current installer." >&2
+  fi
 fi
-exit 0
+restore_power() {
+  flag="$1"; original="$2"; scope="$3"; setting="$4"
+  owned="$(extract "$tmp" "$flag" || echo false)"
+  prior="$(extract "$tmp" "$original" || true)"
+  if [[ "$owned" == true || -n "$prior" ]]; then
+    value=0
+    [[ "$prior" != true ]] || value=1
+    if /usr/bin/sudo -n /usr/bin/pmset "$scope" "$setting" "$value"; then
+      # Keep the original journal if either staged metadata update fails.
+      "$PLUTIL" -replace "$flag" -bool false "$tmp" >/dev/null || exit 1
+      if [[ -n "$prior" ]]; then "$PLUTIL" -remove "$original" "$tmp" >/dev/null || exit 1; fi
+    else failed=1; fi
+  fi
+}
+restore_power sleepDisabledByUs originalSleepDisabled -a disablesleep
+restore_power lowPowerSetByUs originalBatteryLowPowerMode -b lowpowermode
+/bin/chmod 600 "$tmp"
+/bin/mv -f "$tmp" "$STATE"
+if (( failed == 0 )); then log "recovery complete"; else log "recovery incomplete; retained journal requires retry"; fi
+exit "$failed"

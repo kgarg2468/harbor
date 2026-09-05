@@ -15,6 +15,10 @@ struct BackstopError: LocalizedError {
 }
 
 struct LaunchdBackstop: BackstopScheduling {
+    typealias Runner = @Sendable (String, [String]) async throws -> ShellResult
+    private let runner: Runner
+    private let environment: [String: String]
+
     static let launchctl = "/bin/launchctl"
 
     let plistURL: URL
@@ -22,7 +26,9 @@ struct LaunchdBackstop: BackstopScheduling {
     let label: String
     let uid: uid_t
 
-    init(paths: Paths, label: String = Paths.backstopLabel, uid: uid_t = getuid()) {
+    init(paths: Paths, label: String = Paths.backstopLabel, uid: uid_t = getuid(), runner: @escaping Runner = { try await Shell.run($0, $1, timeout: 15) }) {
+        self.runner = runner
+        self.environment = paths == .standard ? [:] : [Paths.environmentKey: paths.appSupport.path]
         self.plistURL = paths.backstopPlist
         self.scriptPath = paths.backstopScript.path
         self.label = label
@@ -30,13 +36,11 @@ struct LaunchdBackstop: BackstopScheduling {
     }
 
     func schedule(endsAt: Date) async throws {
-        try writePlist(endsAt: endsAt)
-        try await reload()
+        try await replace(endsAt: endsAt)
     }
 
     func clear() async throws {
-        try writePlist(endsAt: nil)
-        try await reload()
+        try await replace(endsAt: nil)
     }
 
     // MARK: Plist
@@ -49,6 +53,8 @@ struct LaunchdBackstop: BackstopScheduling {
             "Label": label,
             "ProgramArguments": ["/bin/bash", scriptPath],
             "RunAtLoad": true,
+            "KeepAlive": ["SuccessfulExit": false],
+            "ThrottleInterval": 60,
         ]
         if let endsAt {
             let fire = endsAt.addingTimeInterval(60)
@@ -64,10 +70,39 @@ struct LaunchdBackstop: BackstopScheduling {
     }
 
     func writePlist(endsAt: Date?) throws {
-        let dict = Self.plistDictionary(label: label, scriptPath: scriptPath, endsAt: endsAt)
+        var dict = Self.plistDictionary(label: label, scriptPath: scriptPath, endsAt: endsAt)
+        if !environment.isEmpty { dict["EnvironmentVariables"] = environment }
         let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: plistURL, options: .atomic)
+    }
+
+    /// Restore both disk and loaded job if replacing a deadline fails. Callers
+    /// must still fail closed when rollback itself cannot restore protection.
+    private func replace(endsAt: Date?) async throws {
+        guard FileManager.default.fileExists(atPath: scriptPath) else {
+            throw BackstopError(message: "backstop.sh not installed at \(scriptPath); run scripts/install.sh")
+        }
+        let previous = FileManager.default.fileExists(atPath: plistURL.path)
+            ? try Data(contentsOf: plistURL) : nil
+        try writePlist(endsAt: endsAt)
+        do {
+            try await reload()
+        } catch {
+            let failure = error
+            do {
+                if let previous {
+                    try previous.write(to: plistURL, options: .atomic)
+                    try await reload()
+                } else {
+                    _ = try await runner(Self.launchctl, ["bootout", "gui/\(uid)", plistURL.path])
+                    try FileManager.default.removeItem(at: plistURL)
+                }
+            } catch {
+                throw BackstopError(message: "\(failure.localizedDescription); recovery rollback also failed: \(error.localizedDescription)")
+            }
+            throw failure
+        }
     }
 
     // MARK: launchctl
@@ -83,8 +118,8 @@ struct LaunchdBackstop: BackstopScheduling {
             throw BackstopError(message: "backstop.sh not installed at \(scriptPath); run scripts/install.sh")
         }
         let domain = "gui/\(uid)"
-        _ = try await Shell.run(Self.launchctl, ["bootout", domain, plistURL.path])
-        let r = try await Shell.run(Self.launchctl, ["bootstrap", domain, plistURL.path])
+        _ = try await runner(Self.launchctl, ["bootout", domain, plistURL.path])
+        let r = try await runner(Self.launchctl, ["bootstrap", domain, plistURL.path])
         if !r.succeeded {
             throw BackstopError(message: "launchctl bootstrap failed (\(r.status)): \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
