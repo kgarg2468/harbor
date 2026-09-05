@@ -18,14 +18,18 @@ struct TmuxNudge: Sendable {
     func nudge(targets: [String]) async -> Int {
         var count = 0
         for target in targets where !target.isEmpty {
+            guard !Task.isCancelled else { break }
             do {
-                if try await run(target) {
+                let accepted = try await run(target)
+                guard !Task.isCancelled else { break }
+                if accepted {
                     count += 1
                     Log.info("tmux nudge sent to \(target)")
                 } else {
                     Log.error("tmux nudge to \(target) rejected")
                 }
             } catch {
+                guard !Task.isCancelled else { break }
                 Log.error("tmux nudge to \(target) failed: \(error.localizedDescription)")
             }
         }
