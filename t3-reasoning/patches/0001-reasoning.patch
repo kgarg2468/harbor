@@ -1,0 +1,4760 @@
+diff --git a/apps/mobile/src/lib/threadActivity.test.ts b/apps/mobile/src/lib/threadActivity.test.ts
+index df3dd3197d0d09b3edca0f6c51a61f7443f832a1..1889e374d064c15b4b5f307a9a4f079ae92159d9 100644
+--- a/apps/mobile/src/lib/threadActivity.test.ts
++++ b/apps/mobile/src/lib/threadActivity.test.ts
+@@ -2652,4 +2652,26 @@ describe("quiet timeline: nested agents", () => {
+       { type: "activity-group", id: "nested-done" },
+     ]);
+   });
++
++  it("filters reasoning messages at thread-feed derivation entry", () => {
++    const thread = makeThread({
++      id: ThreadId.make("thread-reasoning"),
++      projectId: ProjectId.make("project-1"),
++      title: "Reasoning",
++      messages: [
++        {
++          id: MessageId.make("reasoning-1"),
++          role: "assistant",
++          channel: "reasoning",
++          text: "Private reasoning",
++          turnId: TurnId.make("turn-1"),
++          streaming: false,
++          createdAt: "2026-04-01T00:00:01.000Z",
++          updatedAt: "2026-04-01T00:00:01.000Z",
++        },
++      ],
++    });
++
++    expect(buildThreadFeed(thread)).toEqual([]);
++  });
+ });
+diff --git a/apps/mobile/src/lib/threadActivity.ts b/apps/mobile/src/lib/threadActivity.ts
+index ef75fce56af49044f1d2e82bc8d9e958c41d988b..35306cb6008b80fe688aa2049078ddea4cc8d274 100644
+--- a/apps/mobile/src/lib/threadActivity.ts
++++ b/apps/mobile/src/lib/threadActivity.ts
+@@ -1,5 +1,6 @@
+ import {
+   ApprovalRequestId,
++  isReasoningMessage,
+   isToolLifecycleItemType,
+   ProviderApprovalOption,
+   ProviderRequestKind,
+@@ -2002,12 +2003,13 @@ export function buildThreadFeed(
+     readonly localMessages?: ReadonlyArray<OrchestrationThread["messages"][number]>;
+   },
+ ): ThreadFeedEntry[] {
+-  const loadedMessages = options?.loadedMessages ?? thread.messages;
++  const sourceMessages = options?.loadedMessages ?? thread.messages;
++  const loadedMessages = sourceMessages.filter((message) => !isReasoningMessage(message));
+   const messages = options?.localMessages
+     ? [...loadedMessages, ...options.localMessages]
+     : loadedMessages;
+   const oldestLoadedMessageCreatedAt =
+-    options?.loadedMessages !== undefined ? (loadedMessages[0]?.createdAt ?? null) : null;
++    options?.loadedMessages !== undefined ? (sourceMessages[0]?.createdAt ?? null) : null;
+   const activityEntries = getThreadFeedActivityEntries(thread.activities);
+   const entries = Arr.sortWith(
+     [
+diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
+index 2f2c4b30525b6a4bbe58f9dd08468fa3e7d33248..dcb319af2844f545ecf4322b7697fc7eecddaaef 100644
+--- a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
++++ b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
+@@ -528,6 +528,26 @@ describe("CheckpointReactor", () => {
+         checkpointTurnCount: 0,
+       });
+ 
++      yield* harness.engine.dispatch({
++        type: "thread.message.assistant.complete",
++        commandId: CommandId.make("cmd-checkpoint-answer-complete"),
++        threadId: ThreadId.make("thread-1"),
++        messageId: MessageId.make("answer-1"),
++        turnId: asTurnId("turn-1"),
++        createdAt: "2026-01-01T00:00:00.200Z",
++      });
++      // A later reasoning message must not displace the answer as the
++      // checkpoint's assistant message.
++      yield* harness.engine.dispatch({
++        type: "thread.message.assistant.complete",
++        commandId: CommandId.make("cmd-checkpoint-reasoning-complete"),
++        threadId: ThreadId.make("thread-1"),
++        messageId: MessageId.make("reasoning-1"),
++        channel: "reasoning",
++        turnId: asTurnId("turn-1"),
++        createdAt: "2026-01-01T00:00:00.400Z",
++      });
++
+       NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
+       const largeFileLineCount = 25_000;
+       NodeFS.writeFileSync(
+@@ -556,6 +576,7 @@ describe("CheckpointReactor", () => {
+       );
+       expect(thread?.checkpoints[0]).toMatchObject({
+         checkpointTurnCount: 1,
++        assistantMessageId: MessageId.make("answer-1"),
+         files: [
+           { path: "large.txt", kind: "modified", additions: largeFileLineCount, deletions: 0 },
+           { path: "README.md", kind: "modified", additions: 1, deletions: 1 },
+diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
+index 108abd5d06bbee3f9006500fcca8a2580850eb5a..1ba50d5e0da381c38f8903e0ba387b4b20cf991f 100644
+--- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
++++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
+@@ -3,10 +3,12 @@ import {
+   type CheckpointRef,
+   EventId,
+   MessageId,
++  isReasoningMessage,
+   type ProjectId,
+   ThreadId,
+   TurnId,
+   type OrchestrationEvent,
++  type OrchestrationMessageChannel,
+   type ProviderRuntimeEvent,
+   type VcsStatusLocalResult,
+ } from "@t3tools/contracts";
+@@ -226,6 +228,7 @@ const make = Effect.gen(function* () {
+       readonly messages: ReadonlyArray<{
+         readonly id: MessageId;
+         readonly role: string;
++        readonly channel?: OrchestrationMessageChannel | undefined;
+         readonly turnId: TurnId | null;
+       }>;
+     };
+@@ -300,7 +303,12 @@ const make = Effect.gen(function* () {
+       input.assistantMessageId ??
+       input.thread.messages
+         .toReversed()
+-        .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
++        .find(
++          (entry) =>
++            entry.role === "assistant" &&
++            !isReasoningMessage(entry) &&
++            entry.turnId === input.turnId,
++        )?.id ??
+       MessageId.make(`assistant:${input.turnId}`);
+ 
+     yield* orchestrationEngine.dispatch({
+diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
+index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd51716cac6178 100644
+--- a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
++++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
+@@ -177,8 +177,9 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+           threadId: ThreadId.make("thread-1"),
+           messageId: MessageId.make("message-1"),
+           role: "assistant",
++          channel: "reasoning",
+           text: "hello",
+-          turnId: null,
++          turnId: TurnId.make("turn-1"),
+           streaming: false,
+           createdAt: now,
+           updatedAt: now,
+@@ -205,13 +206,21 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+       const messageRows = yield* sql<{
+         readonly messageId: string;
+         readonly text: string;
++        readonly channel: string | null;
+       }>`
+         SELECT
+           message_id AS "messageId",
+-          text
++          text,
++          channel
+         FROM projection_thread_messages
+       `;
+-      assert.deepEqual(messageRows, [{ messageId: "message-1", text: "hello" }]);
++      assert.deepEqual(messageRows, [
++        { messageId: "message-1", text: "hello", channel: "reasoning" },
++      ]);
++      const turnRows = yield* sql<{ readonly assistantMessageId: string | null }>`
++        SELECT assistant_message_id AS "assistantMessageId" FROM projection_turns
++      `;
++      assert.deepEqual(turnRows, []);
+ 
+       const stateRows = yield* sql<{
+         readonly projector: string;
+@@ -3171,7 +3180,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+     }),
+   );
+ 
+-  it.effect("does not fallback-retain messages whose turnId is removed by revert", () =>
++  it.effect("removes reasoning messages whose turnId is removed by revert", () =>
+     Effect.gen(function* () {
+       const projectionPipeline = yield* OrchestrationProjectionPipeline;
+       const eventStore = yield* OrchestrationEventStore;
+@@ -3330,6 +3339,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+           threadId: ThreadId.make("thread-revert"),
+           messageId: MessageId.make("assistant-remove"),
+           role: "assistant",
++          channel: "reasoning",
+           text: "removed",
+           turnId: TurnId.make("turn-2"),
+           streaming: false,
+@@ -3378,6 +3388,485 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+   );
+ });
+ 
++it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-revert-reasoning-")))(
++  "OrchestrationProjectionPipeline revert reasoning retention",
++  (it) => {
++    // Regression: retainProjectionMessagesAfterRevert counts a kept turn's
++    // channel=reasoning row as the turn's assistant, so the turnless
++    // substantive assistant is never recovered through the fallback scan and
++    // is dropped by the revert.
++    it.effect(
++      "reasoning on a kept turn does not satisfy the substantive assistant count on revert",
++      () =>
++        Effect.gen(function* () {
++          const projectionPipeline = yield* OrchestrationProjectionPipeline;
++          const eventStore = yield* OrchestrationEventStore;
++          const sql = yield* SqlClient.SqlClient;
++          const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
++            eventStore
++              .append(event)
++              .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
++
++          yield* appendAndProject({
++            type: "project.created",
++            eventId: EventId.make("evt-rrcount-1"),
++            aggregateKind: "project",
++            aggregateId: ProjectId.make("project-reason-count"),
++            occurredAt: "2026-02-27T12:00:00.000Z",
++            commandId: CommandId.make("cmd-rrcount-1"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-1"),
++            metadata: {},
++            payload: {
++              projectId: ProjectId.make("project-reason-count"),
++              title: "Project Reason Count",
++              workspaceRoot: "/tmp/project-reason-count",
++              defaultModelSelection: null,
++              scripts: [],
++              createdAt: "2026-02-27T12:00:00.000Z",
++              updatedAt: "2026-02-27T12:00:00.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.created",
++            eventId: EventId.make("evt-rrcount-2"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:01.000Z",
++            commandId: CommandId.make("cmd-rrcount-2"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-2"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              projectId: ProjectId.make("project-reason-count"),
++              title: "Thread Reason Count",
++              modelSelection: {
++                instanceId: ProviderInstanceId.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt: "2026-02-27T12:00:01.000Z",
++              updatedAt: "2026-02-27T12:00:01.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrcount-3"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:01.500Z",
++            commandId: CommandId.make("cmd-rrcount-3"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-3"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              messageId: MessageId.make("user-count-1"),
++              role: "user",
++              text: "first prompt",
++              turnId: TurnId.make("turn-count-1"),
++              streaming: false,
++              createdAt: "2026-02-27T12:00:01.500Z",
++              updatedAt: "2026-02-27T12:00:01.500Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrcount-4"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:01.600Z",
++            commandId: CommandId.make("cmd-rrcount-4"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-4"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              messageId: MessageId.make("reasoning-count-1"),
++              role: "assistant",
++              channel: "reasoning",
++              text: "thinking about the first prompt",
++              turnId: TurnId.make("turn-count-1"),
++              streaming: false,
++              createdAt: "2026-02-27T12:00:01.600Z",
++              updatedAt: "2026-02-27T12:00:01.600Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrcount-5"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:01.700Z",
++            commandId: CommandId.make("cmd-rrcount-5"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-5"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              messageId: MessageId.make("assistant-count-1"),
++              role: "assistant",
++              text: "substantive first answer",
++              turnId: null,
++              streaming: false,
++              createdAt: "2026-02-27T12:00:01.700Z",
++              updatedAt: "2026-02-27T12:00:01.700Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.turn-diff-completed",
++            eventId: EventId.make("evt-rrcount-6"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:02.000Z",
++            commandId: CommandId.make("cmd-rrcount-6"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-6"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              turnId: TurnId.make("turn-count-1"),
++              checkpointTurnCount: 1,
++              checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-reason-count/turn/1"),
++              status: "ready",
++              files: [],
++              assistantMessageId: null,
++              completedAt: "2026-02-27T12:00:02.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrcount-7"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:02.500Z",
++            commandId: CommandId.make("cmd-rrcount-7"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-7"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              messageId: MessageId.make("user-count-2"),
++              role: "user",
++              text: "second prompt",
++              turnId: TurnId.make("turn-count-2"),
++              streaming: false,
++              createdAt: "2026-02-27T12:00:02.500Z",
++              updatedAt: "2026-02-27T12:00:02.500Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrcount-8"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:02.600Z",
++            commandId: CommandId.make("cmd-rrcount-8"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-8"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              messageId: MessageId.make("assistant-count-2"),
++              role: "assistant",
++              text: "second answer",
++              turnId: TurnId.make("turn-count-2"),
++              streaming: false,
++              createdAt: "2026-02-27T12:00:02.600Z",
++              updatedAt: "2026-02-27T12:00:02.600Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.turn-diff-completed",
++            eventId: EventId.make("evt-rrcount-9"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:03.000Z",
++            commandId: CommandId.make("cmd-rrcount-9"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-9"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              turnId: TurnId.make("turn-count-2"),
++              checkpointTurnCount: 2,
++              checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-reason-count/turn/2"),
++              status: "ready",
++              files: [],
++              assistantMessageId: MessageId.make("assistant-count-2"),
++              completedAt: "2026-02-27T12:00:03.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.reverted",
++            eventId: EventId.make("evt-rrcount-10"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-count"),
++            occurredAt: "2026-02-27T12:00:04.000Z",
++            commandId: CommandId.make("cmd-rrcount-10"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrcount-10"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-count"),
++              turnCount: 1,
++            },
++          });
++
++          const messageRows = yield* sql<{
++            readonly messageId: string;
++            readonly turnId: string | null;
++            readonly role: string;
++            readonly channel: string | null;
++          }>`
++            SELECT
++              message_id AS "messageId",
++              turn_id AS "turnId",
++              role,
++              channel
++            FROM projection_thread_messages
++            WHERE thread_id = 'thread-reason-count'
++            ORDER BY created_at ASC, message_id ASC
++          `;
++          assert.deepEqual(messageRows, [
++            {
++              messageId: "user-count-1",
++              turnId: "turn-count-1",
++              role: "user",
++              channel: null,
++            },
++            {
++              messageId: "reasoning-count-1",
++              turnId: "turn-count-1",
++              role: "assistant",
++              channel: "reasoning",
++            },
++            {
++              messageId: "assistant-count-1",
++              turnId: null,
++              role: "assistant",
++              channel: null,
++            },
++          ]);
++        }),
++    );
++
++    // Regression: the fallback assistant scan treats every role=assistant row
++    // as eligible, so a turnless channel=reasoning row left over from
++    // discarded later work is selected as the kept turn's assistant and
++    // survives the revert while the substantive assistant is dropped.
++    it.effect(
++      "turnless reasoning from discarded work is never selected as a fallback assistant on revert",
++      () =>
++        Effect.gen(function* () {
++          const projectionPipeline = yield* OrchestrationProjectionPipeline;
++          const eventStore = yield* OrchestrationEventStore;
++          const sql = yield* SqlClient.SqlClient;
++          const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
++            eventStore
++              .append(event)
++              .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
++
++          yield* appendAndProject({
++            type: "project.created",
++            eventId: EventId.make("evt-rrfall-1"),
++            aggregateKind: "project",
++            aggregateId: ProjectId.make("project-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:00.000Z",
++            commandId: CommandId.make("cmd-rrfall-1"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-1"),
++            metadata: {},
++            payload: {
++              projectId: ProjectId.make("project-reason-fallback"),
++              title: "Project Reason Fallback",
++              workspaceRoot: "/tmp/project-reason-fallback",
++              defaultModelSelection: null,
++              scripts: [],
++              createdAt: "2026-02-27T12:10:00.000Z",
++              updatedAt: "2026-02-27T12:10:00.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.created",
++            eventId: EventId.make("evt-rrfall-2"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:01.000Z",
++            commandId: CommandId.make("cmd-rrfall-2"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-2"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-fallback"),
++              projectId: ProjectId.make("project-reason-fallback"),
++              title: "Thread Reason Fallback",
++              modelSelection: {
++                instanceId: ProviderInstanceId.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt: "2026-02-27T12:10:01.000Z",
++              updatedAt: "2026-02-27T12:10:01.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrfall-3"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:01.500Z",
++            commandId: CommandId.make("cmd-rrfall-3"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-3"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-fallback"),
++              messageId: MessageId.make("user-fallback-1"),
++              role: "user",
++              text: "kept prompt",
++              turnId: TurnId.make("turn-fallback-1"),
++              streaming: false,
++              createdAt: "2026-02-27T12:10:01.500Z",
++              updatedAt: "2026-02-27T12:10:01.500Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.turn-diff-completed",
++            eventId: EventId.make("evt-rrfall-4"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:02.000Z",
++            commandId: CommandId.make("cmd-rrfall-4"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-4"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-fallback"),
++              turnId: TurnId.make("turn-fallback-1"),
++              checkpointTurnCount: 1,
++              checkpointRef: CheckpointRef.make(
++                "refs/t3/checkpoints/thread-reason-fallback/turn/1",
++              ),
++              status: "ready",
++              files: [],
++              assistantMessageId: null,
++              completedAt: "2026-02-27T12:10:02.000Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrfall-5"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:02.100Z",
++            commandId: CommandId.make("cmd-rrfall-5"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-5"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-fallback"),
++              messageId: MessageId.make("reasoning-discarded"),
++              role: "assistant",
++              channel: "reasoning",
++              text: "planning work that gets reverted away",
++              turnId: null,
++              streaming: false,
++              createdAt: "2026-02-27T12:10:02.100Z",
++              updatedAt: "2026-02-27T12:10:02.100Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.message-sent",
++            eventId: EventId.make("evt-rrfall-6"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:02.200Z",
++            commandId: CommandId.make("cmd-rrfall-6"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-6"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-fallback"),
++              messageId: MessageId.make("assistant-recovered"),
++              role: "assistant",
++              text: "substantive answer for the kept turn",
++              turnId: null,
++              streaming: false,
++              createdAt: "2026-02-27T12:10:02.200Z",
++              updatedAt: "2026-02-27T12:10:02.200Z",
++            },
++          });
++
++          yield* appendAndProject({
++            type: "thread.reverted",
++            eventId: EventId.make("evt-rrfall-7"),
++            aggregateKind: "thread",
++            aggregateId: ThreadId.make("thread-reason-fallback"),
++            occurredAt: "2026-02-27T12:10:03.000Z",
++            commandId: CommandId.make("cmd-rrfall-7"),
++            causationEventId: null,
++            correlationId: CorrelationId.make("cmd-rrfall-7"),
++            metadata: {},
++            payload: {
++              threadId: ThreadId.make("thread-reason-fallback"),
++              turnCount: 1,
++            },
++          });
++
++          const messageRows = yield* sql<{
++            readonly messageId: string;
++            readonly turnId: string | null;
++            readonly role: string;
++            readonly channel: string | null;
++          }>`
++            SELECT
++              message_id AS "messageId",
++              turn_id AS "turnId",
++              role,
++              channel
++            FROM projection_thread_messages
++            WHERE thread_id = 'thread-reason-fallback'
++            ORDER BY created_at ASC, message_id ASC
++          `;
++          assert.deepEqual(messageRows, [
++            {
++              messageId: "user-fallback-1",
++              turnId: "turn-fallback-1",
++              role: "user",
++              channel: null,
++            },
++            {
++              messageId: "assistant-recovered",
++              turnId: null,
++              role: "assistant",
++              channel: null,
++            },
++          ]);
++        }),
++    );
++  },
++);
++
+ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(
+   "OrchestrationProjectionPipeline pending turn cleanup",
+   (it) => {
+diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
+index 77dfb5e3b88dafad77176aca8c628938da417e93..447e60c8b321f9c3450aa6486419745a326b2a53 100644
+--- a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
++++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
+@@ -3,6 +3,7 @@ import {
+   type ChatAttachment,
+   type OrchestrationEvent,
+   type OrchestrationSessionStatus,
++  isReasoningMessage,
+   ThreadId,
+ } from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
+@@ -281,7 +282,10 @@ function retainProjectionMessagesAfterRevert(
+   }
+ 
+   const retainedAssistantCount = messages.filter(
+-    (message) => message.role === "assistant" && retainedMessageIds.has(message.messageId),
++    (message) =>
++      message.role === "assistant" &&
++      message.channel !== "reasoning" &&
++      retainedMessageIds.has(message.messageId),
+   ).length;
+   const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
+   if (missingAssistantCount > 0) {
+@@ -289,6 +293,7 @@ function retainProjectionMessagesAfterRevert(
+       .filter(
+         (message) =>
+           message.role === "assistant" &&
++          message.channel !== "reasoning" &&
+           !retainedMessageIds.has(message.messageId) &&
+           (message.turnId === null || retainedTurnIds.has(message.turnId)),
+       )
+@@ -1032,6 +1037,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+               threadId: event.payload.threadId,
+               turnId: event.payload.turnId,
+               role: event.payload.role,
++              ...(event.payload.channel !== undefined ? { channel: event.payload.channel } : {}),
+               text: event.payload.text,
+               ...(attachments !== undefined ? { attachments: [...attachments] } : {}),
+               createdAt: event.payload.createdAt,
+@@ -1060,6 +1066,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+             threadId: event.payload.threadId,
+             turnId: event.payload.turnId,
+             role: event.payload.role,
++            ...(event.payload.channel !== undefined ? { channel: event.payload.channel } : {}),
+             text: nextText,
+             ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
+             isStreaming: false,
+@@ -1453,7 +1460,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+         }
+ 
+         case "thread.message-sent": {
+-          if (event.payload.turnId === null || event.payload.role !== "assistant") {
++          if (
++            event.payload.turnId === null ||
++            event.payload.role !== "assistant" ||
++            isReasoningMessage(event.payload)
++          ) {
+             return;
+           }
+           // A completed assistant message only settles the turn once the
+diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
+index 6330c38ca0c337fa7c6da68158fb472b09e64feb..c43c43698bdc9729a09880bd4ac11902908585bd 100644
+--- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
++++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
+@@ -125,21 +125,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+           thread_id,
+           turn_id,
+           role,
++          channel,
+           text,
+           is_streaming,
+           created_at,
+           updated_at
+         )
+-        VALUES (
+-          'message-1',
+-          'thread-1',
+-          'turn-1',
+-          'assistant',
+-          'hello from projection',
+-          0,
+-          '2026-02-24T00:00:04.000Z',
+-          '2026-02-24T00:00:05.000Z'
+-        )
++        VALUES
++          (
++            'reasoning-1',
++            'thread-1',
++            'turn-1',
++            'assistant',
++            'reasoning',
++            'thinking before answer',
++            0,
++            '2026-02-24T00:00:03.500Z',
++            '2026-02-24T00:00:03.600Z'
++          ),
++          (
++            'message-1',
++            'thread-1',
++            'turn-1',
++            'assistant',
++            NULL,
++            'hello from projection',
++            0,
++            '2026-02-24T00:00:04.000Z',
++            '2026-02-24T00:00:05.000Z'
++          )
+       `;
+ 
+       yield* sql`
+@@ -341,6 +355,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+           titleRegeneration: null,
+           deletedAt: null,
+           messages: [
++            {
++              id: asMessageId("reasoning-1"),
++              role: "assistant",
++              channel: "reasoning",
++              text: "thinking before answer",
++              turnId: asTurnId("turn-1"),
++              streaming: false,
++              createdAt: "2026-02-24T00:00:03.500Z",
++              updatedAt: "2026-02-24T00:00:03.600Z",
++            },
+             {
+               id: asMessageId("message-1"),
+               role: "assistant",
+diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
+index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990b629ea3a 100644
+--- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
++++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
+@@ -6,6 +6,7 @@ import {
+   MessageId,
+   NonNegativeInt,
+   OrchestrationCheckpointFile,
++  OrchestrationMessageChannel,
+   OrchestrationProposedPlanId,
+   OrchestrationReadModel,
+   OrchestrationThreadSearchSource,
+@@ -93,6 +94,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
+ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
+   Struct.assign({
+     isStreaming: Schema.Number,
++    channel: Schema.NullOr(OrchestrationMessageChannel),
+     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+   }),
+ );
+@@ -590,6 +592,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+           thread_id AS "threadId",
+           turn_id AS "turnId",
+           role,
++          channel,
+           text,
+           attachments_json AS "attachments",
+           is_streaming AS "isStreaming",
+@@ -1087,6 +1090,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+           thread_id AS "threadId",
+           turn_id AS "turnId",
+           role,
++          channel,
+           text,
+           attachments_json AS "attachments",
+           is_streaming AS "isStreaming",
+@@ -1444,6 +1448,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+           thread_id AS "threadId",
+           turn_id AS "turnId",
+           role,
++          channel,
+           text,
+           attachments_json AS "attachments",
+           is_streaming AS "isStreaming",
+@@ -1843,6 +1848,7 @@ pending_approval_requests AS (
+                 threadMessages.push({
+                   id: row.messageId,
+                   role: row.role,
++                  ...(row.channel !== null ? { channel: row.channel } : {}),
+                   text: row.text,
+                   ...(row.attachments !== null ? { attachments: row.attachments } : {}),
+                   turnId: row.turnId,
+@@ -3051,6 +3057,7 @@ pending_approval_requests AS (
+           const message = {
+             id: row.messageId,
+             role: row.role,
++            ...(row.channel !== null ? { channel: row.channel } : {}),
+             text: row.text,
+             turnId: row.turnId,
+             streaming: row.isStreaming === 1,
+diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
+index 4d35c5b04dd47ecb831587b44b220a32390c02e5..2433ebc05301253bbe9e00363ce714ec4f2a3ee3 100644
+--- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
++++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
+@@ -1440,6 +1440,17 @@ describe("ProviderCommandReactor", () => {
+         createdAt: now,
+       }),
+     );
++    await harness.runEffect(
++      harness.engine.dispatch({
++        type: "thread.message.assistant.delta",
++        commandId: CommandId.make("cmd-reasoning-before-title-regeneration"),
++        threadId: ThreadId.make("thread-1"),
++        messageId: asMessageId("reasoning-before-title-regeneration"),
++        delta: "Internal reasoning must not appear in title context.",
++        channel: "reasoning",
++        createdAt: "2026-01-01T00:00:00.500Z",
++      }),
++    );
+     await harness.runEffect(
+       harness.engine.dispatch({
+         type: "thread.message.assistant.delta",
+diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
+index b8e457e34ebbd6a67a68916e2d9e1c9229bf4322..a0024e695bbdd3a2c59c9ea04e5c6dad07e51e26 100644
+--- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
++++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
+@@ -1,5 +1,7 @@
+ import {
+   type ChatAttachment,
++  type OrchestrationMessageChannel,
++  isReasoningMessage,
+   CommandId,
+   EventId,
+   type ModelSelection,
+@@ -116,12 +118,13 @@ const FIRST_USER_CONTEXT_TRUNCATION_MARKER = "\n[First user message truncated]";
+ 
+ type ThreadTitleMessage = {
+   readonly role: "user" | "assistant" | "system";
++  readonly channel?: OrchestrationMessageChannel | undefined;
+   readonly text: string;
+   readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+ };
+ 
+ function formatThreadTitleSection(message: ThreadTitleMessage): string | undefined {
+-  if (message.role === "system") {
++  if (message.role === "system" || isReasoningMessage(message)) {
+     return undefined;
+   }
+   const text = assistantCitationsToPlainText(message.text).trim();
+diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
+index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97e25f907f 100644
+--- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
++++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
+@@ -22,6 +22,7 @@ import {
+   ProviderItemId,
+   RuntimeRequestId,
+   type ServerSettings,
++  type ServerSettingsPatch,
+   ThreadId,
+   TurnId,
+ } from "@t3tools/contracts";
+@@ -234,7 +235,10 @@ async function waitForThread(
+ 
+ describe("ProviderRuntimeIngestion", () => {
+   let runtime: ManagedRuntime.ManagedRuntime<
+-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
++    | OrchestrationEngineService
++    | ProviderRuntimeIngestionService
++    | ProjectionSnapshotQuery
++    | ServerSettingsService,
+     unknown
+   > | null = null;
+   let scope: Scope.Closeable | null = null;
+@@ -286,7 +290,8 @@ describe("ProviderRuntimeIngestion", () => {
+       Layer.provide(RepositoryIdentityResolver.layer),
+       Layer.provide(SqlitePersistenceMemory),
+     );
+-    const layer = ProviderRuntimeIngestionLive.pipe(
++    const serverSettingsLayer = makeTestServerSettingsLayer(options?.serverSettings);
++    const ingestionLayer = ProviderRuntimeIngestionLive.pipe(
+       Layer.provideMerge(orchestrationLayer),
+       Layer.provideMerge(projectionSnapshotLayer),
+       // Single shared liveness instance across ingestion (writer), the
+@@ -295,18 +300,20 @@ describe("ProviderRuntimeIngestion", () => {
+       Layer.provideMerge(ThreadPlanProgress.layer),
+       Layer.provideMerge(SqlitePersistenceMemory),
+       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+-      Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
++      Layer.provideMerge(serverSettingsLayer),
+       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
+       Layer.provideMerge(VcsProcess.layer),
+       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+       Layer.provideMerge(NodeServices.layer),
+       Layer.provideMerge(Layer.succeed(Tracer.Tracer, sqlCounter.tracer)),
+     );
++    const layer = Layer.merge(ingestionLayer, serverSettingsLayer);
+     const testRuntime = ManagedRuntime.make(layer);
+     runtime = testRuntime;
+     const engine = await testRuntime.runPromise(Effect.service(OrchestrationEngineService));
+     const snapshotQuery = await testRuntime.runPromise(Effect.service(ProjectionSnapshotQuery));
+     const ingestion = await testRuntime.runPromise(Effect.service(ProviderRuntimeIngestionService));
++    const serverSettings = await testRuntime.runPromise(Effect.service(ServerSettingsService));
+     scope = await Effect.runPromise(Scope.make("sequential"));
+     await testRuntime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
+     const drain = () => testRuntime.runPromise(ingestion.drain);
+@@ -384,6 +391,8 @@ describe("ProviderRuntimeIngestion", () => {
+       emitAndDrain,
+       sqlCount: sqlCounter.count,
+       setProviderSession: provider.setSession,
++      updateServerSettings: (patch: ServerSettingsPatch) =>
++        testRuntime.runPromise(serverSettings.updateSettings(patch)),
+       drain,
+     };
+   }
+@@ -1228,7 +1237,7 @@ describe("ProviderRuntimeIngestion", () => {
+     const harness = await createHarness();
+     const initial = await harness.readModel();
+ 
+-    for (const streamKind of ["reasoning_text", "command_output", "file_change_output"] as const) {
++    for (const streamKind of ["command_output", "file_change_output"] as const) {
+       harness.emit({
+         type: "content.delta",
+         eventId: asEventId(`evt-ignored-${streamKind}`),
+@@ -4217,4 +4226,870 @@ describe("ProviderRuntimeIngestion", () => {
+     expect(thread.session?.status).toBe("error");
+     expect(thread.session?.lastError).toBe("runtime still processed");
+   });
++
++  it("segments buffered reasoning around answers with monotonic message stamps", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-buffered");
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-summary"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_summary_text", delta: "Inspecting files" },
++    });
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-answer-after-reasoning"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      itemId: asItemId("answer-after-reasoning"),
++      payload: { streamKind: "assistant_text", delta: "Answer" },
++    });
++    harness.emit({
++      type: "item.completed",
++      eventId: asEventId("evt-answer-after-reasoning-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      itemId: asItemId("answer-after-reasoning"),
++      payload: { itemType: "assistant_message", status: "completed" },
++    });
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-second-segment"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "Checking results" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-aborted"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { reason: "cancelled" },
++    });
++
++    const thread = await waitForThread(harness.readModel, (entry) => {
++      const reasoning = entry.messages.filter((message) => message.channel === "reasoning");
++      return reasoning.length === 2 && reasoning.every((message) => !message.streaming);
++    });
++    expect(thread.messages.map((message) => [message.channel, message.text])).toEqual([
++      ["reasoning", "Inspecting files"],
++      [undefined, "Answer"],
++      ["reasoning", "Checking results"],
++    ]);
++
++    const events = await Effect.runPromise(
++      Stream.runCollect(harness.engine.readEvents(0)).pipe(
++        Effect.map((chunk) => Array.from(chunk)),
++      ),
++    );
++    const messageEvents = events.filter(
++      (event): event is Extract<(typeof events)[number], { type: "thread.message-sent" }> =>
++        event.type === "thread.message-sent" && event.payload.threadId === "thread-1",
++    );
++    const messageTimes = messageEvents.map((event) => Date.parse(event.payload.createdAt));
++    expect(
++      messageTimes.every((time, index) => index === 0 || time > messageTimes[index - 1]!),
++    ).toBe(true);
++  });
++
++  it("preserves buffered reasoning duration through finalization", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-duration");
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-duration-start"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "Thinking for a while" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-duration-end"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.find((message) => message.channel === "reasoning");
++
++    expect(reasoning?.createdAt).toBe("2026-05-01T00:00:00.000Z");
++    expect(reasoning?.updatedAt).toBe("2026-05-01T00:00:03.000Z");
++  });
++
++  it("finalizes turnless reasoning when a named turn completes", async () => {
++    const harness = await createHarness();
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-turnless"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      payload: { streamKind: "reasoning_text", delta: "Reasoning before turn binding" },
++    });
++    harness.emit({
++      type: "turn.completed",
++      eventId: asEventId("evt-reasoning-turnless-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: asTurnId("turn-reasoning-late-bound"),
++      status: "completed",
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++
++    expect(reasoning).toEqual([
++      expect.objectContaining({
++        id: "reasoning:thread-1:turnless:segment:0",
++        streaming: false,
++        text: "Reasoning before turn binding",
++      }),
++    ]);
++  });
++
++  it("continues reasoning segment numbering after session cleanup", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-resumed");
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-before-cleanup"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "Before cleanup" },
++    });
++    harness.emit({
++      type: "session.exited",
++      eventId: asEventId("evt-reasoning-session-cleanup"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      payload: {},
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-after-cleanup"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "After cleanup" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-after-cleanup-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++
++    expect(reasoning?.map((message) => [message.id, message.text])).toEqual([
++      ["reasoning:thread-1:turn-reasoning-resumed:segment:0", "Before cleanup"],
++      ["reasoning:thread-1:turn-reasoning-resumed:segment:1", "After cleanup"],
++    ]);
++  });
++
++  it("preserves reasoning chunk order when delivery mode changes mid-segment", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-mode-change");
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-buffered-before-mode-change"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "A" },
++    });
++    await harness.drain();
++    await harness.updateServerSettings({ enableLegacyTokenStreaming: true });
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-streaming-after-mode-change"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "B" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-mode-change-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.find((message) => message.channel === "reasoning");
++
++    expect(reasoning?.text).toBe("AB");
++    expect(reasoning?.streaming).toBe(false);
++  });
++
++  it("keeps active-turn reasoning open after a stale runtime error", async () => {
++    const harness = await createHarness();
++    const activeTurnId = asTurnId("turn-reasoning-active");
++
++    harness.emit({
++      type: "turn.started",
++      eventId: asEventId("evt-reasoning-active-started"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-before-stale-error"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++      payload: { streamKind: "reasoning_text", delta: "Before " },
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "runtime.error",
++      eventId: asEventId("evt-reasoning-stale-error"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: asTurnId("turn-reasoning-superseded"),
++      payload: { message: "stale turn failed" },
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-after-stale-error"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++      payload: { streamKind: "reasoning_text", delta: "after" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-active-aborted"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:04.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++
++    expect(reasoning?.map((message) => message.text)).toEqual(["Before after"]);
++    expect(reasoning?.every((message) => !message.streaming)).toBe(true);
++  });
++
++  it("keeps active-turn reasoning open after a rejected conflicting turn start", async () => {
++    const harness = await createHarness();
++    const activeTurnId = asTurnId("turn-reasoning-active-start");
++
++    harness.emit({
++      type: "turn.started",
++      eventId: asEventId("evt-reasoning-current-turn-started"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-before-stale-start"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++      payload: { streamKind: "reasoning_text", delta: "Before " },
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "turn.started",
++      eventId: asEventId("evt-reasoning-conflicting-turn-started"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: asTurnId("turn-reasoning-stale-start"),
++    });
++    await harness.drain();
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-after-stale-start"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++      payload: { streamKind: "reasoning_text", delta: "after" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-current-turn-aborted"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-01T00:00:04.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: activeTurnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++
++    expect(reasoning?.map((message) => message.text)).toEqual(["Before after"]);
++    expect(reasoning?.every((message) => !message.streaming)).toBe(true);
++  });
++
++  it("streams both reasoning delta kinds live and finalizes them on session exit", async () => {
++    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
++    const turnId = asTurnId("turn-reasoning-streaming");
++    for (const [index, streamKind, delta] of [
++      [1, "reasoning_summary_text", "Plan "],
++      [2, "reasoning_text", "details"],
++    ] as const) {
++      harness.emit({
++        type: "content.delta",
++        eventId: asEventId(`evt-reasoning-live-${index}`),
++        provider: ProviderDriverKind.make("codex"),
++        createdAt: "2026-05-02T00:00:00.000Z",
++        threadId: asThreadId("thread-1"),
++        turnId,
++        payload: { streamKind, delta },
++      });
++    }
++
++    await waitForThread(harness.readModel, (entry) =>
++      entry.messages.some(
++        (message) =>
++          message.channel === "reasoning" && message.streaming && message.text === "Plan details",
++      ),
++    );
++    harness.emit({
++      type: "session.exited",
++      eventId: asEventId("evt-reasoning-session-exit"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-02T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      payload: {},
++    });
++
++    const thread = await waitForThread(harness.readModel, (entry) =>
++      entry.messages.some(
++        (message) =>
++          message.channel === "reasoning" && !message.streaming && message.text === "Plan details",
++      ),
++    );
++    expect(thread.messages.filter((message) => message.channel === "reasoning")).toHaveLength(1);
++  });
++
++  it("finalizes reasoning before a different turn, superseding turn, and visible activity", async () => {
++    const harness = await createHarness();
++    const emitReasoning = (turnId: TurnId, eventId: string, createdAt: string, delta: string) =>
++      harness.emit({
++        type: "content.delta",
++        eventId: asEventId(eventId),
++        provider: ProviderDriverKind.make("opencode"),
++        createdAt,
++        threadId: asThreadId("thread-1"),
++        turnId,
++        payload: { streamKind: "reasoning_text", delta },
++      });
++
++    emitReasoning(
++      asTurnId("turn-reasoning-old"),
++      "evt-reasoning-old",
++      "2026-05-03T00:00:00.000Z",
++      "old turn",
++    );
++    emitReasoning(
++      asTurnId("turn-reasoning-next"),
++      "evt-reasoning-next",
++      "2026-05-03T00:00:01.000Z",
++      "next turn",
++    );
++    harness.emit({
++      type: "turn.started",
++      eventId: asEventId("evt-reasoning-superseded"),
++      provider: ProviderDriverKind.make("opencode"),
++      createdAt: "2026-05-03T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: asTurnId("turn-reasoning-final"),
++    });
++    emitReasoning(
++      asTurnId("turn-reasoning-final"),
++      "evt-reasoning-final",
++      "2026-05-03T00:00:03.000Z",
++      "before tool",
++    );
++    harness.emit({
++      type: "task.started",
++      eventId: asEventId("evt-task-after-reasoning"),
++      provider: ProviderDriverKind.make("opencode"),
++      createdAt: "2026-05-03T00:00:04.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: asTurnId("turn-reasoning-final"),
++      payload: { taskId: "task-after-reasoning", description: "Run checks" },
++    });
++
++    const thread = await waitForThread(harness.readModel, (entry) => {
++      const reasoning = entry.messages.filter((message) => message.channel === "reasoning");
++      return (
++        reasoning.length === 3 &&
++        reasoning.every((message) => !message.streaming) &&
++        entry.activities.some((activity) => activity.id === "evt-task-after-reasoning")
++      );
++    });
++    expect(
++      thread.messages
++        .filter((message) => message.channel === "reasoning")
++        .map((message) => message.text),
++    ).toEqual(["old turn", "next turn", "before tool"]);
++
++    const events = await Effect.runPromise(
++      Stream.runCollect(harness.engine.readEvents(0)).pipe(
++        Effect.map((chunk) => Array.from(chunk)),
++      ),
++    );
++    const finalReasoningComplete = events.find(
++      (event) =>
++        event.type === "thread.message-sent" &&
++        event.payload.channel === "reasoning" &&
++        event.payload.text === "" &&
++        event.payload.turnId === "turn-reasoning-final",
++    );
++    const activity = events.find(
++      (event) =>
++        event.type === "thread.activity-appended" &&
++        event.payload.activity.id === "evt-task-after-reasoning",
++    );
++    expect(finalReasoningComplete?.sequence).toBeLessThan(activity?.sequence ?? 0);
++  });
++
++  it("completes a persisted streaming reasoning message after in-memory segment loss", async () => {
++    const harness = await createHarness();
++    const recoveredTurnId = asTurnId("turn-reasoning-recovered");
++
++    // Seed projected streaming rows directly through the engine so the
++    // ingestion caches never learn about them, modeling a server restart or
++    // cache eviction between streaming and turn settlement.
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-recovered-reasoning"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("reasoning:thread-1:turn-reasoning-recovered:segment:0"),
++      delta: "Recovered thinking",
++      channel: "reasoning",
++      turnId: recoveredTurnId,
++      createdAt: "2026-05-05T00:00:00.000Z",
++    });
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-unrelated-reasoning"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("reasoning:thread-1:turn-reasoning-unrelated:segment:0"),
++      delta: "Unrelated thinking",
++      channel: "reasoning",
++      turnId: asTurnId("turn-reasoning-unrelated"),
++      createdAt: "2026-05-05T00:00:01.000Z",
++    });
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-substantive-assistant"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("assistant:item-reasoning-recovered"),
++      delta: "Streaming answer",
++      turnId: recoveredTurnId,
++      createdAt: "2026-05-05T00:00:02.000Z",
++    });
++
++    harness.emit({
++      type: "turn.completed",
++      eventId: asEventId("evt-reasoning-recovered-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-05T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: recoveredTurnId,
++      status: "completed",
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const messages = readModel.threads.find((entry) => entry.id === "thread-1")?.messages ?? [];
++    const byId = new Map(messages.map((message) => [message.id, message]));
++
++    const recovered = byId.get(
++      asMessageId("reasoning:thread-1:turn-reasoning-recovered:segment:0"),
++    );
++    expect(recovered?.streaming).toBe(false);
++    expect(recovered?.text).toBe("Recovered thinking");
++    expect(recovered?.updatedAt).toBe("2026-05-05T00:00:03.000Z");
++    // Reasoning owned by another turn and substantive assistant output stay
++    // untouched by the recovery.
++    expect(
++      byId.get(asMessageId("reasoning:thread-1:turn-reasoning-unrelated:segment:0"))?.streaming,
++    ).toBe(true);
++    expect(byId.get(asMessageId("assistant:item-reasoning-recovered"))?.streaming).toBe(true);
++  });
++
++  it("recovers an orphaned streaming reasoning segment when a delta creates its replacement", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-replaced");
++
++    // Seed projected streaming rows directly through the engine so the
++    // ingestion caches never learn about them, modeling a server restart or
++    // cache eviction between streaming and the next reasoning delta.
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-orphaned-reasoning"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("reasoning:thread-1:turn-reasoning-replaced:segment:0"),
++      delta: "Orphaned thinking",
++      channel: "reasoning",
++      turnId,
++      createdAt: "2026-05-08T00:00:00.000Z",
++    });
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-other-turn-reasoning"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("reasoning:thread-1:turn-reasoning-other:segment:0"),
++      delta: "Unrelated thinking",
++      channel: "reasoning",
++      turnId: asTurnId("turn-reasoning-other"),
++      createdAt: "2026-05-08T00:00:01.000Z",
++    });
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-substantive-assistant-replaced"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("assistant:item-reasoning-replaced"),
++      delta: "Streaming answer",
++      turnId,
++      createdAt: "2026-05-08T00:00:02.000Z",
++    });
++
++    // The new delta creates a replacement segment and repopulates the cache,
++    // so the terminal boundary no longer sees a wholly absent state; the
++    // orphaned row must still settle.
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-replacement-delta"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-08T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "Replacement thinking" },
++    });
++    harness.emit({
++      type: "turn.completed",
++      eventId: asEventId("evt-reasoning-replaced-turn-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-08T00:00:04.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      status: "completed",
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const messages = readModel.threads.find((entry) => entry.id === "thread-1")?.messages ?? [];
++    const byId = new Map(messages.map((message) => [message.id, message]));
++
++    // The orphan settles at the replacement delta, not the turn boundary, so
++    // its duration does not absorb the rest of the turn.
++    const orphan = byId.get(asMessageId("reasoning:thread-1:turn-reasoning-replaced:segment:0"));
++    expect(orphan?.streaming).toBe(false);
++    expect(orphan?.text).toBe("Orphaned thinking");
++    expect(orphan?.updatedAt).toBe("2026-05-08T00:00:03.000Z");
++
++    const replacement = byId.get(
++      asMessageId("reasoning:thread-1:turn-reasoning-replaced:segment:1"),
++    );
++    expect(replacement?.streaming).toBe(false);
++    expect(replacement?.text).toBe("Replacement thinking");
++
++    expect(
++      messages.filter((message) => message.channel === "reasoning" && message.turnId === turnId),
++    ).toHaveLength(2);
++    // Reasoning owned by another turn and substantive assistant output stay
++    // untouched by the recovery.
++    expect(
++      byId.get(asMessageId("reasoning:thread-1:turn-reasoning-other:segment:0"))?.streaming,
++    ).toBe(true);
++    expect(byId.get(asMessageId("assistant:item-reasoning-replaced"))?.streaming).toBe(true);
++  });
++
++  it("scopes turnless replacement-delta recovery to turnless reasoning rows", async () => {
++    // Streaming mode projects the replacement delta immediately, so the
++    // mid-stream state right after recovery is observable.
++    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
++
++    // Seed projected streaming rows the ingestion caches never learn about: a
++    // turnless orphan and a named-turn row that must survive the recovery.
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-turnless-orphan-reasoning"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("reasoning:thread-1:turnless:segment:0"),
++      delta: "Orphaned turnless thinking",
++      channel: "reasoning",
++      createdAt: "2026-05-09T00:00:00.000Z",
++    });
++    await harness.dispatch({
++      type: "thread.message.assistant.delta",
++      commandId: CommandId.make("cmd-seed-named-turn-reasoning"),
++      threadId: asThreadId("thread-1"),
++      messageId: asMessageId("reasoning:thread-1:turn-reasoning-named:segment:0"),
++      delta: "Named-turn thinking",
++      channel: "reasoning",
++      turnId: asTurnId("turn-reasoning-named"),
++      createdAt: "2026-05-09T00:00:01.000Z",
++    });
++
++    // A turnless delta on the cold path must settle only the turnless orphan,
++    // never sweep the named turn's row.
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-turnless-replacement-delta"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-09T00:00:02.000Z",
++      threadId: asThreadId("thread-1"),
++      payload: { streamKind: "reasoning_text", delta: "Turnless replacement thinking" },
++    });
++    harness.emit({
++      type: "turn.completed",
++      eventId: asEventId("evt-turnless-replacement-turn-complete"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-09T00:00:03.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId: asTurnId("turn-turnless-late-bound"),
++      status: "completed",
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const messages = readModel.threads.find((entry) => entry.id === "thread-1")?.messages ?? [];
++    const byId = new Map(messages.map((message) => [message.id, message]));
++
++    const orphan = byId.get(asMessageId("reasoning:thread-1:turnless:segment:0"));
++    expect(orphan?.streaming).toBe(false);
++    expect(orphan?.text).toBe("Orphaned turnless thinking");
++    expect(orphan?.updatedAt).toBe("2026-05-09T00:00:02.000Z");
++
++    const replacement = byId.get(asMessageId("reasoning:thread-1:turnless:segment:1"));
++    expect(replacement?.streaming).toBe(false);
++    expect(replacement?.text).toBe("Turnless replacement thinking");
++
++    expect(
++      byId.get(asMessageId("reasoning:thread-1:turn-reasoning-named:segment:0"))?.streaming,
++    ).toBe(true);
++  });
++
++  it("finalizes active reasoning when a tool user-input request opens", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-tool-input");
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-before-tool-input"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-06T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "Considering the question" },
++    });
++    harness.emit({
++      type: "request.opened",
++      eventId: asEventId("evt-tool-input-request-opened"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-06T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      requestId: ApprovalRequestId.make("req-tool-input"),
++      payload: { requestType: "tool_user_input", detail: "Pick one" },
++    });
++    await harness.drain();
++
++    const pausedModel = await harness.readModel();
++    const pausedReasoning = pausedModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++    expect(pausedReasoning).toEqual([
++      expect.objectContaining({
++        id: "reasoning:thread-1:turn-reasoning-tool-input:segment:0",
++        streaming: false,
++        text: "Considering the question",
++        updatedAt: "2026-05-06T00:00:01.000Z",
++      }),
++    ]);
++
++    // Reasoning after the human answers lands in a new segment instead of
++    // extending the paused one with wait time.
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-after-tool-input"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-06T00:05:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "After the answer" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-tool-input-aborted"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-06T00:05:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++    expect(reasoning?.map((message) => [message.id, message.text])).toEqual([
++      ["reasoning:thread-1:turn-reasoning-tool-input:segment:0", "Considering the question"],
++      ["reasoning:thread-1:turn-reasoning-tool-input:segment:1", "After the answer"],
++    ]);
++  });
++
++  it("finalizes active reasoning when user input is requested", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-user-input");
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-before-user-input"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-07T00:00:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "Weighing options" },
++    });
++    harness.emit({
++      type: "user-input.requested",
++      eventId: asEventId("evt-reasoning-user-input-requested"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-07T00:00:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      requestId: ApprovalRequestId.make("req-reasoning-user-input"),
++      payload: {
++        questions: [
++          {
++            id: "choice",
++            header: "Choice",
++            question: "Pick one",
++            options: [{ label: "A", description: "Option A" }],
++          },
++        ],
++      },
++    });
++    await harness.drain();
++
++    const pausedModel = await harness.readModel();
++    const pausedReasoning = pausedModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++    expect(pausedReasoning).toEqual([
++      expect.objectContaining({
++        id: "reasoning:thread-1:turn-reasoning-user-input:segment:0",
++        streaming: false,
++        text: "Weighing options",
++        updatedAt: "2026-05-07T00:00:01.000Z",
++      }),
++    ]);
++
++    harness.emit({
++      type: "content.delta",
++      eventId: asEventId("evt-reasoning-after-user-input"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-07T00:10:00.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { streamKind: "reasoning_text", delta: "After the reply" },
++    });
++    harness.emit({
++      type: "turn.aborted",
++      eventId: asEventId("evt-reasoning-user-input-aborted"),
++      provider: ProviderDriverKind.make("codex"),
++      createdAt: "2026-05-07T00:10:01.000Z",
++      threadId: asThreadId("thread-1"),
++      turnId,
++      payload: { reason: "cancelled" },
++    });
++
++    await harness.drain();
++    const readModel = await harness.readModel();
++    const reasoning = readModel.threads
++      .find((entry) => entry.id === "thread-1")
++      ?.messages.filter((message) => message.channel === "reasoning");
++    expect(reasoning?.map((message) => [message.id, message.text])).toEqual([
++      ["reasoning:thread-1:turn-reasoning-user-input:segment:0", "Weighing options"],
++      ["reasoning:thread-1:turn-reasoning-user-input:segment:1", "After the reply"],
++    ]);
++  });
+ });
+diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
+index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486e8334867 100644
+--- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
++++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
+@@ -9,6 +9,7 @@ import {
+   CheckpointRef,
+   classifyTaskAgentKind,
+   EventId,
++  isReasoningMessage,
+   isToolLifecycleItemType,
+   ThreadId,
+   type ThreadTokenUsageSnapshot,
+@@ -97,6 +98,17 @@ interface AssistantSegmentState {
+   activeMessageId: MessageId | null;
+ }
+ 
++interface ReasoningSegmentState {
++  turnId: TurnId | null;
++  nextSegmentIndex: number;
++  active: {
++    messageId: MessageId;
++    firstDeltaAt: string;
++    hasProjectedMessage: boolean;
++    deliveryMode: AssistantDeliveryMode;
++  } | null;
++}
++
+ const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
+ const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
+ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
+@@ -148,7 +160,7 @@ function hasAssistantMessageForTurn(
+     if (!message) {
+       continue;
+     }
+-    if (message.role !== "assistant" || message.turnId !== turnId) {
++    if (message.role !== "assistant" || isReasoningMessage(message) || message.turnId !== turnId) {
+       continue;
+     }
+     if (options?.streamingOnly === true && !message.streaming) {
+@@ -172,6 +184,25 @@ function findMessageById(
+   return undefined;
+ }
+ 
++function nextReasoningSegmentIndex(
++  messages: ReadonlyArray<OrchestrationMessage>,
++  threadId: ThreadId,
++  turnId: TurnId | null,
++): number {
++  const prefix = `reasoning:${threadId}:${turnId ?? "turnless"}:segment:`;
++  let nextIndex = 0;
++  for (const message of messages) {
++    if (!isReasoningMessage(message) || !message.id.startsWith(prefix)) {
++      continue;
++    }
++    const segmentIndex = Number(message.id.slice(prefix.length));
++    if (Number.isSafeInteger(segmentIndex) && segmentIndex >= nextIndex) {
++      nextIndex = segmentIndex + 1;
++    }
++  }
++  return nextIndex;
++}
++
+ function findProposedPlanById(
+   proposedPlans: ReadonlyArray<
+     Pick<OrchestrationProposedPlan, "id" | "createdAt" | "implementedAt" | "implementationThreadId">
+@@ -965,6 +996,11 @@ const make = Effect.gen(function* () {
+       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
+     );
+ 
++  // Read per event: the setting can change between turns.
++  const getAssistantDeliveryMode = Effect.map(serverSettingsService.getSettings, (settings) =>
++    settings.enableLegacyTokenStreaming ? "streaming" : "buffered",
++  );
++
+   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
+     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
+     timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
+@@ -986,6 +1022,16 @@ const make = Effect.gen(function* () {
+       ),
+   });
+ 
++  const reasoningSegmentByThreadId = yield* Cache.make<ThreadId, ReasoningSegmentState>({
++    capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
++    timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
++    lookup: () =>
++      Effect.die(
++        new Error("reasoning segment state should be read through getOption before initialization"),
++      ),
++  });
++  const lastMessageStampMsByThreadId = new Map<ThreadId, number>();
++
+   const bufferedProposedPlanById = yield* Cache.make<string, { text: string; createdAt: string }>({
+     capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
+     timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
+@@ -1030,6 +1076,25 @@ const make = Effect.gen(function* () {
+       .pipe(Effect.map(Option.getOrUndefined));
+   });
+ 
++  const nextMessageStamp = Effect.fn("nextMessageStamp")(function* (
++    threadId: ThreadId,
++    intendedAt: string,
++  ) {
++    let lastStampMs = lastMessageStampMsByThreadId.get(threadId);
++    if (lastStampMs === undefined) {
++      const thread = yield* resolveThreadDetail(threadId);
++      lastStampMs = thread?.messages.reduce(
++        (latest, message) =>
++          Math.max(latest, DateTime.toEpochMillis(DateTime.makeUnsafe(message.createdAt))),
++        Number.NEGATIVE_INFINITY,
++      );
++    }
++    const intendedMs = DateTime.toEpochMillis(DateTime.makeUnsafe(intendedAt));
++    const nextStampMs = Math.max(intendedMs, (lastStampMs ?? Number.NEGATIVE_INFINITY) + 1);
++    lastMessageStampMsByThreadId.set(threadId, nextStampMs);
++    return DateTime.formatIso(DateTime.makeUnsafe(nextStampMs));
++  });
++
+   const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
+     Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
+       Effect.flatMap((existingIds) =>
+@@ -1231,7 +1296,7 @@ const make = Effect.gen(function* () {
+         messageId: input.messageId,
+         delta: bufferedText,
+         ...(input.turnId ? { turnId: input.turnId } : {}),
+-        createdAt: input.createdAt,
++        createdAt: yield* nextMessageStamp(input.threadId, input.createdAt),
+       });
+       return true;
+     });
+@@ -1298,7 +1363,7 @@ const make = Effect.gen(function* () {
+           messageId: input.messageId,
+           delta: text,
+           ...(input.turnId ? { turnId: input.turnId } : {}),
+-          createdAt: input.createdAt,
++          createdAt: yield* nextMessageStamp(input.threadId, input.createdAt),
+         });
+       }
+ 
+@@ -1309,7 +1374,7 @@ const make = Effect.gen(function* () {
+           threadId: input.threadId,
+           messageId: input.messageId,
+           ...(input.turnId ? { turnId: input.turnId } : {}),
+-          createdAt: input.createdAt,
++          createdAt: yield* nextMessageStamp(input.threadId, input.createdAt),
+         });
+       }
+       yield* clearAssistantMessageState(input.messageId);
+@@ -1357,6 +1422,139 @@ const make = Effect.gen(function* () {
+       }
+     });
+ 
++  const getReasoningSegmentState = (threadId: ThreadId) =>
++    Cache.getOption(reasoningSegmentByThreadId, threadId).pipe(Effect.map(Option.getOrUndefined));
++
++  // A thread has at most one open reasoning segment. The active path stays in
++  // memory; a cold/new turn derives its next index from projected messages so
++  // cache eviction and session cleanup cannot reuse a durable message id.
++  const getOrCreateReasoningSegment = (input: {
++    threadId: ThreadId;
++    turnId: TurnId | null;
++    firstDeltaAt: string;
++    deliveryMode: AssistantDeliveryMode;
++  }) =>
++    Effect.gen(function* () {
++      const existing = yield* getReasoningSegmentState(input.threadId);
++      const sameTurn = existing !== undefined && existing.turnId === input.turnId;
++      if (sameTurn && existing.active !== null) {
++        return { ...existing, active: existing.active };
++      }
++
++      const segmentIndex = sameTurn
++        ? existing.nextSegmentIndex
++        : nextReasoningSegmentIndex(
++            (yield* resolveThreadDetail(input.threadId))?.messages ?? [],
++            input.threadId,
++            input.turnId,
++          );
++      const state = {
++        turnId: input.turnId,
++        nextSegmentIndex: segmentIndex + 1,
++        active: {
++          messageId: MessageId.make(
++            `reasoning:${input.threadId}:${input.turnId ?? "turnless"}:segment:${segmentIndex}`,
++          ),
++          firstDeltaAt: input.firstDeltaAt,
++          hasProjectedMessage: false,
++          deliveryMode: input.deliveryMode,
++        },
++      } satisfies ReasoningSegmentState;
++      yield* Cache.set(reasoningSegmentByThreadId, input.threadId, state);
++      return state;
++    });
++
++  // Durable complement to the in-memory reasoning segment: after a restart or
++  // cache eviction a projected reasoning row can still be streaming with no
++  // state left to close it, so settle it straight from the projection. The
++  // turn guard mirrors finalizeActiveReasoningSegment: a named turn closes
++  // its own and turnless rows, never another turn's; `null` closes turnless
++  // rows only; omitting `turnId` is the deliberate unscoped terminal/session
++  // sweep that closes everything.
++  const completeProjectedStreamingReasoning = (input: {
++    event: ProviderRuntimeEvent;
++    threadId: ThreadId;
++    turnId?: TurnId | null;
++  }) =>
++    Effect.gen(function* () {
++      const messages = (yield* resolveThreadDetail(input.threadId))?.messages ?? [];
++      for (const message of messages) {
++        if (!isReasoningMessage(message) || !message.streaming) {
++          continue;
++        }
++        if (
++          input.turnId !== undefined &&
++          message.turnId !== null &&
++          message.turnId !== input.turnId
++        ) {
++          continue;
++        }
++        yield* orchestrationEngine.dispatch({
++          type: "thread.message.assistant.complete",
++          commandId: yield* providerCommandId(input.event, "reasoning-recover-complete"),
++          threadId: input.threadId,
++          messageId: message.id,
++          channel: "reasoning",
++          ...(message.turnId !== null ? { turnId: message.turnId } : {}),
++          createdAt: yield* nextMessageStamp(input.threadId, input.event.createdAt),
++        });
++      }
++    });
++
++  // Closes the thread's open reasoning segment; `turnId` limits the close to a
++  // segment opened by that turn. `recoverProjected` also settles reasoning
++  // rows left streaming in the projection when the in-memory state was lost
++  // (restart, TTL, capacity eviction); only terminal/pause boundaries pass it
++  // so hot paths never load thread detail.
++  const finalizeActiveReasoningSegment = (input: {
++    event: ProviderRuntimeEvent;
++    threadId: ThreadId;
++    turnId?: TurnId;
++    recoverProjected?: boolean;
++  }) =>
++    Effect.gen(function* () {
++      const state = yield* getReasoningSegmentState(input.threadId);
++      if (state === undefined && input.recoverProjected === true) {
++        yield* completeProjectedStreamingReasoning(input);
++        return;
++      }
++      const active = state?.active ?? null;
++      if (
++        state === undefined ||
++        active === null ||
++        (input.turnId !== undefined && state.turnId !== null && state.turnId !== input.turnId)
++      ) {
++        return;
++      }
++
++      const bufferedText = yield* takeBufferedAssistantText(active.messageId);
++      const hasText = hasRenderableAssistantText(bufferedText);
++      if (hasText) {
++        yield* orchestrationEngine.dispatch({
++          type: "thread.message.assistant.delta",
++          commandId: yield* providerCommandId(input.event, "reasoning-finalize-delta"),
++          threadId: input.threadId,
++          messageId: active.messageId,
++          delta: bufferedText,
++          channel: "reasoning",
++          ...(state.turnId !== null ? { turnId: state.turnId } : {}),
++          createdAt: yield* nextMessageStamp(input.threadId, active.firstDeltaAt),
++        });
++      }
++      if (active.hasProjectedMessage || hasText) {
++        yield* orchestrationEngine.dispatch({
++          type: "thread.message.assistant.complete",
++          commandId: yield* providerCommandId(input.event, "reasoning-finalize-complete"),
++          threadId: input.threadId,
++          messageId: active.messageId,
++          channel: "reasoning",
++          ...(state.turnId !== null ? { turnId: state.turnId } : {}),
++          createdAt: yield* nextMessageStamp(input.threadId, input.event.createdAt),
++        });
++      }
++      yield* Cache.set(reasoningSegmentByThreadId, input.threadId, { ...state, active: null });
++    });
++
+   const upsertProposedPlan = (input: {
+     event: ProviderRuntimeEvent;
+     threadId: ThreadId;
+@@ -1470,6 +1668,9 @@ const make = Effect.gen(function* () {
+             : Effect.void,
+         { concurrency: 1 },
+       ).pipe(Effect.asVoid);
++      // The reasoning segment is already finalized by the session.exited trigger.
++      yield* Cache.invalidate(reasoningSegmentByThreadId, threadId);
++      lastMessageStampMsByThreadId.delete(threadId);
+       yield* Effect.forEach(
+         proposedPlanKeys,
+         (key) =>
+@@ -1564,7 +1765,12 @@ const make = Effect.gen(function* () {
+ 
+   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
+     Effect.gen(function* () {
+-      if (event.type === "content.delta" && event.payload.streamKind !== "assistant_text") {
++      if (
++        event.type === "content.delta" &&
++        event.payload.streamKind !== "assistant_text" &&
++        event.payload.streamKind !== "reasoning_text" &&
++        event.payload.streamKind !== "reasoning_summary_text"
++      ) {
+         return;
+       }
+ 
+@@ -1652,6 +1858,31 @@ const make = Effect.gen(function* () {
+           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
+           : null;
+ 
++      const terminalSessionState =
++        event.type === "session.state.changed" &&
++        !sessionStatusAllowsActiveTurn(
++          orchestrationSessionStatusFromRuntimeState(event.payload.state),
++        );
++      if (
++        (event.type === "turn.started" && shouldApplyThreadLifecycle) ||
++        (event.type === "runtime.error" && !conflictsWithActiveTurn) ||
++        event.type === "session.exited" ||
++        terminalSessionState
++      ) {
++        yield* finalizeActiveReasoningSegment({
++          event,
++          threadId: thread.id,
++          recoverProjected: true,
++        });
++      } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
++        yield* finalizeActiveReasoningSegment({
++          event,
++          threadId: thread.id,
++          ...(eventTurnId !== undefined ? { turnId: eventTurnId } : {}),
++          recoverProjected: true,
++        });
++      }
++
+       if (
+         event.type === "session.started" ||
+         event.type === "session.state.changed" ||
+@@ -1686,14 +1917,9 @@ const make = Effect.gen(function* () {
+         const nextActiveTurnId =
+           event.type === "turn.started"
+             ? (eventTurnId ?? null)
+-            : isTerminalTurn || event.type === "session.exited"
++            : isTerminalTurn || event.type === "session.exited" || terminalSessionState
+               ? null
+-              : event.type === "session.state.changed" &&
+-                  !sessionStatusAllowsActiveTurn(
+-                    orchestrationSessionStatusFromRuntimeState(event.payload.state),
+-                  )
+-                ? null
+-                : activeTurnId;
++              : activeTurnId;
+         const lastError =
+           event.type === "session.state.changed" && event.payload.state === "error"
+             ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
+@@ -1750,11 +1976,22 @@ const make = Effect.gen(function* () {
+         event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+           ? event.payload.delta
+           : undefined;
++      const reasoningDelta =
++        event.type === "content.delta" &&
++        (event.payload.streamKind === "reasoning_text" ||
++          event.payload.streamKind === "reasoning_summary_text")
++          ? event.payload.delta
++          : undefined;
+       const proposedPlanDelta =
+         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
+ 
+       if (assistantDelta && assistantDelta.length > 0) {
+         const turnId = toTurnId(event.turnId);
++        yield* finalizeActiveReasoningSegment({
++          event,
++          threadId: thread.id,
++          ...(turnId !== undefined ? { turnId } : {}),
++        });
+         const assistantMessageId = yield* getOrCreateAssistantMessageId({
+           threadId: thread.id,
+           event,
+@@ -1764,10 +2001,7 @@ const make = Effect.gen(function* () {
+           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
+         }
+ 
+-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
+-          serverSettingsService.getSettings,
+-          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
+-        );
++        const assistantDeliveryMode = yield* getAssistantDeliveryMode;
+         if (assistantDeliveryMode === "buffered") {
+           const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
+           if (spillChunk.length > 0) {
+@@ -1778,7 +2012,7 @@ const make = Effect.gen(function* () {
+               messageId: assistantMessageId,
+               delta: spillChunk,
+               ...(turnId ? { turnId } : {}),
+-              createdAt: now,
++              createdAt: yield* nextMessageStamp(thread.id, now),
+             });
+           }
+         } else {
+@@ -1789,22 +2023,84 @@ const make = Effect.gen(function* () {
+             messageId: assistantMessageId,
+             delta: assistantDelta,
+             ...(turnId ? { turnId } : {}),
+-            createdAt: now,
++            createdAt: yield* nextMessageStamp(thread.id, now),
+           });
+         }
+       }
+ 
++      if (reasoningDelta && reasoningDelta.length > 0) {
++        const turnId = toTurnId(event.turnId) ?? activeTurnId;
++        const openSegment = yield* getReasoningSegmentState(thread.id);
++        // Reasoning from another turn closes the segment the previous turn opened.
++        if (openSegment?.active && openSegment.turnId !== turnId) {
++          yield* finalizeActiveReasoningSegment({ event, threadId: thread.id });
++        }
++        // Wholly absent state means a projected row left streaming is an
++        // orphan (restart, TTL, capacity eviction). Settle it before the
++        // replacement below repopulates the cache — after that the terminal
++        // recoverProjected path can no longer see the loss. This scans the
++        // projection only on the cold path, which loads thread detail anyway.
++        if (openSegment === undefined) {
++          yield* completeProjectedStreamingReasoning({
++            event,
++            threadId: thread.id,
++            turnId,
++          });
++        }
++        const deliveryMode = yield* getAssistantDeliveryMode;
++        const reasoningState = yield* getOrCreateReasoningSegment({
++          threadId: thread.id,
++          turnId,
++          firstDeltaAt: now,
++          deliveryMode,
++        });
++        const active = reasoningState.active;
++        const buffered = active.deliveryMode === "buffered";
++        // Buffered mode only projects when the buffer spills; streaming projects every delta.
++        const projectedDelta = buffered
++          ? yield* appendBufferedAssistantText(active.messageId, reasoningDelta)
++          : reasoningDelta;
++        if (projectedDelta.length > 0) {
++          yield* orchestrationEngine.dispatch({
++            type: "thread.message.assistant.delta",
++            commandId: yield* providerCommandId(
++              event,
++              buffered ? "reasoning-delta-buffer-spill" : "reasoning-delta",
++            ),
++            threadId: thread.id,
++            messageId: active.messageId,
++            delta: projectedDelta,
++            channel: "reasoning",
++            ...(turnId !== null ? { turnId } : {}),
++            createdAt: yield* nextMessageStamp(thread.id, buffered ? active.firstDeltaAt : now),
++          });
++          // A projected segment gets a completion even when its text is whitespace only.
++          if (!active.hasProjectedMessage) {
++            yield* Cache.set(reasoningSegmentByThreadId, thread.id, {
++              ...reasoningState,
++              active: { ...active, hasProjectedMessage: true },
++            });
++          }
++        }
++      }
++
+       const pauseForUserTurnId =
+         event.type === "request.opened" ||
+         (event.type === "user-input.requested" && event.payload.responseMode !== "message")
+           ? toTurnId(event.turnId)
+           : undefined;
+       if (pauseForUserTurnId) {
++        // A user-facing pause also settles in-flight reasoning so it does not
++        // stay "Thinking" or absorb human wait time; tool_user_input requests
++        // emit no activity, so nothing later would close it.
++        yield* finalizeActiveReasoningSegment({
++          event,
++          threadId: thread.id,
++          turnId: pauseForUserTurnId,
++          recoverProjected: true,
++        });
+         const detailedThread = yield* getLoadedThreadDetail();
+-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
+-          serverSettingsService.getSettings,
+-          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
+-        );
++        const assistantDeliveryMode = yield* getAssistantDeliveryMode;
+         const flushedMessageIds =
+           assistantDeliveryMode === "buffered"
+             ? yield* flushBufferedAssistantMessagesForTurn({
+@@ -1864,6 +2160,12 @@ const make = Effect.gen(function* () {
+           : undefined;
+ 
+       if (assistantCompletion) {
++        const completionTurnId = toTurnId(event.turnId);
++        yield* finalizeActiveReasoningSegment({
++          event,
++          threadId: thread.id,
++          ...(completionTurnId !== undefined ? { turnId: completionTurnId } : {}),
++        });
+         const detailedThread = yield* getLoadedThreadDetail();
+         const messages = detailedThread?.messages ?? [];
+         const turnId = toTurnId(event.turnId);
+@@ -2210,6 +2512,13 @@ const make = Effect.gen(function* () {
+       }
+ 
+       const activities = runtimeEventToActivities(activityEvent, taskTitle);
++      if (activities.length > 0) {
++        yield* finalizeActiveReasoningSegment({
++          event,
++          threadId: thread.id,
++          ...(eventTurnId !== undefined ? { turnId: eventTurnId } : {}),
++        });
++      }
+       yield* Effect.forEach(activities, (activity) =>
+         providerCommandId(event, "thread-activity-append").pipe(
+           Effect.flatMap((commandId) =>
+@@ -2223,6 +2532,10 @@ const make = Effect.gen(function* () {
+           ),
+         ),
+       ).pipe(Effect.asVoid);
++
++      if (event.type === "turn.completed" || event.type === "turn.aborted") {
++        lastMessageStampMsByThreadId.delete(thread.id);
++      }
+     });
+ 
+   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
+index b336053ac9e1de0542abe304e50ac63bbafd9517..a9bbc51e5daae8fd9804fe4593797870ab4f2ef0 100644
+--- a/apps/server/src/orchestration/decider.ts
++++ b/apps/server/src/orchestration/decider.ts
+@@ -1289,6 +1289,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+           threadId: command.threadId,
+           messageId: command.messageId,
+           role: "assistant",
++          ...(command.channel !== undefined ? { channel: command.channel } : {}),
+           text: command.delta,
+           turnId: command.turnId ?? null,
+           streaming: true,
+@@ -1316,6 +1317,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+           threadId: command.threadId,
+           messageId: command.messageId,
+           role: "assistant",
++          ...(command.channel !== undefined ? { channel: command.channel } : {}),
+           text: "",
+           turnId: command.turnId ?? null,
+           streaming: false,
+diff --git a/apps/server/src/orchestration/projector.test.ts b/apps/server/src/orchestration/projector.test.ts
+index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e96afcc42 100644
+--- a/apps/server/src/orchestration/projector.test.ts
++++ b/apps/server/src/orchestration/projector.test.ts
+@@ -1,3 +1,4 @@
++import { it as effectIt } from "@effect/vitest";
+ import {
+   CommandId,
+   EventId,
+@@ -448,6 +449,7 @@ describe("orchestration projector", () => {
+             threadId: "thread-1",
+             messageId: "assistant:msg-1",
+             role: "assistant",
++            channel: "reasoning",
+             text: "hello",
+             turnId: "turn-1",
+             streaming: true,
+@@ -472,6 +474,7 @@ describe("orchestration projector", () => {
+             threadId: "thread-1",
+             messageId: "assistant:msg-1",
+             role: "assistant",
++            channel: "reasoning",
+             text: "",
+             turnId: "turn-1",
+             streaming: false,
+@@ -484,12 +487,13 @@ describe("orchestration projector", () => {
+ 
+     const message = afterComplete.threads[0]?.messages[0];
+     expect(message?.id).toBe("assistant:msg-1");
++    expect(message?.channel).toBe("reasoning");
+     expect(message?.text).toBe("hello");
+     expect(message?.streaming).toBe(false);
+     expect(message?.updatedAt).toBe(completeAt);
+   });
+ 
+-  it("prunes reverted turn messages from in-memory thread snapshot", async () => {
++  it("prunes reverted reasoning messages from in-memory thread snapshot", async () => {
+     const createdAt = "2026-02-23T10:00:00.000Z";
+     const model = createEmptyReadModel(createdAt);
+ 
+@@ -625,6 +629,7 @@ describe("orchestration projector", () => {
+           threadId: "thread-1",
+           messageId: "assistant-msg-2",
+           role: "assistant",
++          channel: "reasoning",
+           text: "Updated README to v3.\n",
+           turnId: "turn-2",
+           streaming: false,
+@@ -857,6 +862,356 @@ describe("orchestration projector", () => {
+     ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
+   });
+ 
++  // Regression: retainThreadMessagesAfterRevert counts a kept turn's
++  // channel=reasoning message as the turn's assistant, so the turnless
++  // substantive assistant is never recovered through the fallback scan and
++  // is dropped by the revert.
++  effectIt.effect(
++    "reasoning on a kept turn does not satisfy the substantive assistant count on revert",
++    () =>
++      Effect.gen(function* () {
++        const createdAt = "2026-02-27T12:00:00.000Z";
++        const model = createEmptyReadModel(createdAt);
++
++        const afterCreate = yield* projectEvent(
++          model,
++          makeEvent({
++            sequence: 1,
++            type: "thread.created",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: createdAt,
++            commandId: "cmd-rrcount-create",
++            payload: {
++              threadId: "thread-reason-count",
++              projectId: "project-1",
++              title: "demo",
++              modelSelection: {
++                provider: ProviderDriverKind.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt,
++              updatedAt: createdAt,
++            },
++          }),
++        );
++
++        const events: ReadonlyArray<OrchestrationEvent> = [
++          makeEvent({
++            sequence: 2,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:01.500Z",
++            commandId: "cmd-rrcount-user-1",
++            payload: {
++              threadId: "thread-reason-count",
++              messageId: "user-count-1",
++              role: "user",
++              text: "first prompt",
++              turnId: "turn-count-1",
++              streaming: false,
++              createdAt: "2026-02-27T12:00:01.500Z",
++              updatedAt: "2026-02-27T12:00:01.500Z",
++            },
++          }),
++          makeEvent({
++            sequence: 3,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:01.600Z",
++            commandId: "cmd-rrcount-reasoning-1",
++            payload: {
++              threadId: "thread-reason-count",
++              messageId: "reasoning-count-1",
++              role: "assistant",
++              channel: "reasoning",
++              text: "thinking about the first prompt",
++              turnId: "turn-count-1",
++              streaming: false,
++              createdAt: "2026-02-27T12:00:01.600Z",
++              updatedAt: "2026-02-27T12:00:01.600Z",
++            },
++          }),
++          makeEvent({
++            sequence: 4,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:01.700Z",
++            commandId: "cmd-rrcount-assistant-1",
++            payload: {
++              threadId: "thread-reason-count",
++              messageId: "assistant-count-1",
++              role: "assistant",
++              text: "substantive first answer",
++              turnId: null,
++              streaming: false,
++              createdAt: "2026-02-27T12:00:01.700Z",
++              updatedAt: "2026-02-27T12:00:01.700Z",
++            },
++          }),
++          makeEvent({
++            sequence: 5,
++            type: "thread.turn-diff-completed",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:02.000Z",
++            commandId: "cmd-rrcount-turn-1",
++            payload: {
++              threadId: "thread-reason-count",
++              turnId: "turn-count-1",
++              checkpointTurnCount: 1,
++              checkpointRef: "refs/t3/checkpoints/thread-reason-count/turn/1",
++              status: "ready",
++              files: [],
++              assistantMessageId: null,
++              completedAt: "2026-02-27T12:00:02.000Z",
++            },
++          }),
++          makeEvent({
++            sequence: 6,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:02.500Z",
++            commandId: "cmd-rrcount-user-2",
++            payload: {
++              threadId: "thread-reason-count",
++              messageId: "user-count-2",
++              role: "user",
++              text: "second prompt",
++              turnId: "turn-count-2",
++              streaming: false,
++              createdAt: "2026-02-27T12:00:02.500Z",
++              updatedAt: "2026-02-27T12:00:02.500Z",
++            },
++          }),
++          makeEvent({
++            sequence: 7,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:02.600Z",
++            commandId: "cmd-rrcount-assistant-2",
++            payload: {
++              threadId: "thread-reason-count",
++              messageId: "assistant-count-2",
++              role: "assistant",
++              text: "second answer",
++              turnId: "turn-count-2",
++              streaming: false,
++              createdAt: "2026-02-27T12:00:02.600Z",
++              updatedAt: "2026-02-27T12:00:02.600Z",
++            },
++          }),
++          makeEvent({
++            sequence: 8,
++            type: "thread.turn-diff-completed",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:03.000Z",
++            commandId: "cmd-rrcount-turn-2",
++            payload: {
++              threadId: "thread-reason-count",
++              turnId: "turn-count-2",
++              checkpointTurnCount: 2,
++              checkpointRef: "refs/t3/checkpoints/thread-reason-count/turn/2",
++              status: "ready",
++              files: [],
++              assistantMessageId: "assistant-count-2",
++              completedAt: "2026-02-27T12:00:03.000Z",
++            },
++          }),
++          makeEvent({
++            sequence: 9,
++            type: "thread.reverted",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-count",
++            occurredAt: "2026-02-27T12:00:04.000Z",
++            commandId: "cmd-rrcount-revert",
++            payload: {
++              threadId: "thread-reason-count",
++              turnCount: 1,
++            },
++          }),
++        ];
++
++        let afterRevert = afterCreate;
++        for (const event of events) {
++          afterRevert = yield* projectEvent(afterRevert, event);
++        }
++
++        const thread = afterRevert.threads[0];
++        expect(
++          thread?.messages.map((message) => ({
++            id: message.id,
++            role: message.role,
++            channel: message.channel ?? null,
++            turnId: message.turnId,
++          })),
++        ).toEqual([
++          { id: "user-count-1", role: "user", channel: null, turnId: "turn-count-1" },
++          {
++            id: "reasoning-count-1",
++            role: "assistant",
++            channel: "reasoning",
++            turnId: "turn-count-1",
++          },
++          { id: "assistant-count-1", role: "assistant", channel: null, turnId: null },
++        ]);
++      }),
++  );
++
++  // Regression: the fallback assistant scan treats every role=assistant
++  // message as eligible, so a turnless channel=reasoning message left over
++  // from discarded later work is selected as the kept turn's assistant and
++  // survives the revert while the substantive assistant is dropped.
++  effectIt.effect(
++    "turnless reasoning from discarded work is never selected as a fallback assistant on revert",
++    () =>
++      Effect.gen(function* () {
++        const createdAt = "2026-02-27T12:10:00.000Z";
++        const model = createEmptyReadModel(createdAt);
++
++        const afterCreate = yield* projectEvent(
++          model,
++          makeEvent({
++            sequence: 1,
++            type: "thread.created",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-fallback",
++            occurredAt: createdAt,
++            commandId: "cmd-rrfall-create",
++            payload: {
++              threadId: "thread-reason-fallback",
++              projectId: "project-1",
++              title: "demo",
++              modelSelection: {
++                provider: ProviderDriverKind.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt,
++              updatedAt: createdAt,
++            },
++          }),
++        );
++
++        const events: ReadonlyArray<OrchestrationEvent> = [
++          makeEvent({
++            sequence: 2,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-fallback",
++            occurredAt: "2026-02-27T12:10:01.500Z",
++            commandId: "cmd-rrfall-user-1",
++            payload: {
++              threadId: "thread-reason-fallback",
++              messageId: "user-fallback-1",
++              role: "user",
++              text: "kept prompt",
++              turnId: "turn-fallback-1",
++              streaming: false,
++              createdAt: "2026-02-27T12:10:01.500Z",
++              updatedAt: "2026-02-27T12:10:01.500Z",
++            },
++          }),
++          makeEvent({
++            sequence: 3,
++            type: "thread.turn-diff-completed",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-fallback",
++            occurredAt: "2026-02-27T12:10:02.000Z",
++            commandId: "cmd-rrfall-turn-1",
++            payload: {
++              threadId: "thread-reason-fallback",
++              turnId: "turn-fallback-1",
++              checkpointTurnCount: 1,
++              checkpointRef: "refs/t3/checkpoints/thread-reason-fallback/turn/1",
++              status: "ready",
++              files: [],
++              assistantMessageId: null,
++              completedAt: "2026-02-27T12:10:02.000Z",
++            },
++          }),
++          makeEvent({
++            sequence: 4,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-fallback",
++            occurredAt: "2026-02-27T12:10:02.100Z",
++            commandId: "cmd-rrfall-reasoning",
++            payload: {
++              threadId: "thread-reason-fallback",
++              messageId: "reasoning-discarded",
++              role: "assistant",
++              channel: "reasoning",
++              text: "planning work that gets reverted away",
++              turnId: null,
++              streaming: false,
++              createdAt: "2026-02-27T12:10:02.100Z",
++              updatedAt: "2026-02-27T12:10:02.100Z",
++            },
++          }),
++          makeEvent({
++            sequence: 5,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-fallback",
++            occurredAt: "2026-02-27T12:10:02.200Z",
++            commandId: "cmd-rrfall-assistant",
++            payload: {
++              threadId: "thread-reason-fallback",
++              messageId: "assistant-recovered",
++              role: "assistant",
++              text: "substantive answer for the kept turn",
++              turnId: null,
++              streaming: false,
++              createdAt: "2026-02-27T12:10:02.200Z",
++              updatedAt: "2026-02-27T12:10:02.200Z",
++            },
++          }),
++          makeEvent({
++            sequence: 6,
++            type: "thread.reverted",
++            aggregateKind: "thread",
++            aggregateId: "thread-reason-fallback",
++            occurredAt: "2026-02-27T12:10:03.000Z",
++            commandId: "cmd-rrfall-revert",
++            payload: {
++              threadId: "thread-reason-fallback",
++              turnCount: 1,
++            },
++          }),
++        ];
++
++        let afterRevert = afterCreate;
++        for (const event of events) {
++          afterRevert = yield* projectEvent(afterRevert, event);
++        }
++
++        const thread = afterRevert.threads[0];
++        expect(
++          thread?.messages.map((message) => ({
++            id: message.id,
++            role: message.role,
++            channel: message.channel ?? null,
++            turnId: message.turnId,
++          })),
++        ).toEqual([
++          { id: "user-fallback-1", role: "user", channel: null, turnId: "turn-fallback-1" },
++          { id: "assistant-recovered", role: "assistant", channel: null, turnId: null },
++        ]);
++      }),
++  );
++
+   it("caps message and checkpoint retention for long-lived threads", async () => {
+     const createdAt = "2026-03-01T10:00:00.000Z";
+     const model = createEmptyReadModel(createdAt);
+diff --git a/apps/server/src/orchestration/projector.ts b/apps/server/src/orchestration/projector.ts
+index 3cea194bbb446caa2bf44e69742fd44bc0c3297f..2e73bdad23a72e1bc4e0a3b87ea5dd48c47b1952 100644
+--- a/apps/server/src/orchestration/projector.ts
++++ b/apps/server/src/orchestration/projector.ts
+@@ -149,7 +149,10 @@ function retainThreadMessagesAfterRevert(
+   }
+ 
+   const retainedAssistantCount = messages.filter(
+-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
++    (message) =>
++      message.role === "assistant" &&
++      message.channel !== "reasoning" &&
++      retainedMessageIds.has(message.id),
+   ).length;
+   const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
+   if (missingAssistantCount > 0) {
+@@ -157,6 +160,7 @@ function retainThreadMessagesAfterRevert(
+       .filter(
+         (message) =>
+           message.role === "assistant" &&
++          message.channel !== "reasoning" &&
+           !retainedMessageIds.has(message.id) &&
+           (message.turnId === null || retainedTurnIds.has(message.turnId)),
+       )
+@@ -550,6 +554,7 @@ export function projectEvent(
+           {
+             id: payload.messageId,
+             role: payload.role,
++            ...(payload.channel !== undefined ? { channel: payload.channel } : {}),
+             text: payload.text,
+             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
+             turnId: payload.turnId,
+@@ -575,6 +580,7 @@ export function projectEvent(
+                     streaming: message.streaming,
+                     updatedAt: message.updatedAt,
+                     turnId: message.turnId,
++                    ...(message.channel !== undefined ? { channel: message.channel } : {}),
+                     ...(message.attachments !== undefined
+                       ? { attachments: message.attachments }
+                       : {}),
+diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
+index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c506d58ce8 100644
+--- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
++++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
+@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
+ import * as Struct from "effect/Struct";
+-import { ChatAttachment } from "@t3tools/contracts";
++import { ChatAttachment, OrchestrationMessageChannel } from "@t3tools/contracts";
+ 
+ import { toPersistenceSqlError } from "../Errors.ts";
+ import {
+@@ -21,6 +21,7 @@ import {
+ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
+   Struct.assign({
+     isStreaming: Schema.Number,
++    channel: Schema.NullOr(OrchestrationMessageChannel),
+     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+   }),
+ );
+@@ -33,6 +34,7 @@ function toProjectionThreadMessage(
+     threadId: row.threadId,
+     turnId: row.turnId,
+     role: row.role,
++    ...(row.channel !== null ? { channel: row.channel } : {}),
+     text: row.text,
+     isStreaming: row.isStreaming === 1,
+     createdAt: row.createdAt,
+@@ -55,6 +57,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           thread_id,
+           turn_id,
+           role,
++          channel,
+           text,
+           attachments_json,
+           is_streaming,
+@@ -66,6 +69,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           ${row.threadId},
+           ${row.turnId},
+           ${row.role},
++          ${row.channel ?? null},
+           ${row.text},
+           COALESCE(
+             ${nextAttachmentsJson},
+@@ -84,6 +88,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           thread_id = excluded.thread_id,
+           turn_id = excluded.turn_id,
+           role = excluded.role,
++          channel = COALESCE(excluded.channel, projection_thread_messages.channel),
+           text = excluded.text,
+           attachments_json = COALESCE(
+             excluded.attachments_json,
+@@ -107,6 +112,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           thread_id,
+           turn_id,
+           role,
++          channel,
+           text,
+           attachments_json,
+           is_streaming,
+@@ -118,6 +124,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           ${row.threadId},
+           ${row.turnId},
+           ${row.role},
++          ${row.channel ?? null},
+           ${row.text},
+           ${nextAttachmentsJson},
+           1,
+@@ -129,6 +136,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           thread_id = excluded.thread_id,
+           turn_id = excluded.turn_id,
+           role = excluded.role,
++          channel = COALESCE(excluded.channel, projection_thread_messages.channel),
+           text = projection_thread_messages.text || excluded.text,
+           attachments_json = COALESCE(
+             excluded.attachments_json,
+@@ -150,6 +158,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           thread_id AS "threadId",
+           turn_id AS "turnId",
+           role,
++          channel,
+           text,
+           attachments_json AS "attachments",
+           is_streaming AS "isStreaming",
+@@ -171,6 +180,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           thread_id AS "threadId",
+           turn_id AS "turnId",
+           role,
++          channel,
+           text,
+           attachments_json AS "attachments",
+           is_streaming AS "isStreaming",
+diff --git a/apps/server/src/persistence/Migrations.ts b/apps/server/src/persistence/Migrations.ts
+index 92dc18291057bd692f390a6b994ecc34a8ba7975..dd8f7d18d470d2a113791a485b8966798cb70df0 100644
+--- a/apps/server/src/persistence/Migrations.ts
++++ b/apps/server/src/persistence/Migrations.ts
+@@ -11,6 +11,12 @@
+ import * as Migrator from "effect/unstable/sql/Migrator";
+ import * as Effect from "effect/Effect";
+ 
++import {
++  ensureReasoningSchema,
++  LEGACY_REASONING_MIGRATION_ID,
++  repairLegacyReasoningMigration,
++} from "./ReasoningSchema.ts";
++
+ // Import all migrations statically
+ import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
+ import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
+@@ -149,15 +155,41 @@ export interface RunMigrationsOptions {
+  *
+  * Returns array of [id, name] tuples for migrations that were run.
+  *
++ * A full run (no `toMigrationInclusive`) also repairs databases migrated by a
++ * legacy Reasoning build and then applies the Reasoning schema on top of the
++ * upstream manifest. Partial runs stop at the requested upstream migration so
++ * migration tests observe the stock schema.
++ *
+  * @returns Effect containing array of executed migrations
+  */
+ export const runMigrations = Effect.fn("runMigrations")(function* ({
+   toMigrationInclusive,
+ }: RunMigrationsOptions = {}) {
++  const fullRun = toMigrationInclusive === undefined;
++  if (fullRun) {
++    const upstreamMigrationName = "ClearAutomaticProjectModelDefaults";
++    const repaired = yield* repairLegacyReasoningMigration({
++      upstreamMigrationName,
++      upstreamMigration: Migration0044,
++    });
++    if (repaired) {
++      yield* Effect.log("Repaired legacy Reasoning migration record").pipe(
++        Effect.annotateLogs({
++          migration: `${LEGACY_REASONING_MIGRATION_ID}_${upstreamMigrationName}`,
++        }),
++      );
++    }
++  }
+   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
+   yield* migrations.length === 0
+     ? Effect.logDebug("Database schema is current")
+     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
++  if (fullRun) {
++    const added = yield* ensureReasoningSchema();
++    if (added) {
++      yield* Effect.log("Reasoning schema applied");
++    }
++  }
+   return executedMigrations;
+ });
+diff --git a/apps/server/src/persistence/ReasoningSchema.test.ts b/apps/server/src/persistence/ReasoningSchema.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..45ddbaa4b041f84c95f1ffe0d06a3b6e154d2bfd
+--- /dev/null
++++ b/apps/server/src/persistence/ReasoningSchema.test.ts
+@@ -0,0 +1,264 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as Effect from "effect/Effect";
++import * as Migrator from "effect/unstable/sql/Migrator";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
++import { SqlError, UnknownError } from "effect/unstable/sql/SqlError";
++
++import { migrationManifest, runMigrations } from "./Migrations.ts";
++import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
++import {
++  ensureReasoningSchema,
++  LEGACY_REASONING_MIGRATION_ID,
++  LEGACY_REASONING_MIGRATION_NAME,
++  repairLegacyReasoningMigration,
++} from "./ReasoningSchema.ts";
++
++// Each test gets its own in-memory database; a shared layer would leak the
++// schema from one scenario into the next.
++const withFreshDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
++  effect.pipe(Effect.provide(NodeSqliteClient.layerMemory()));
++
++const UPSTREAM_MIGRATION_NAME = "ClearAutomaticProjectModelDefaults";
++const LATEST_UPSTREAM_MIGRATION_ID = migrationManifest.at(-1)![0];
++const MODEL_SELECTION = '{"instanceId":"codex","model":"gpt-5.6-sol"}';
++
++const channelColumns = Effect.gen(function* () {
++  const sql = yield* SqlClient.SqlClient;
++  const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
++    PRAGMA table_info(projection_thread_messages)
++  `;
++  return columns.filter((column) => column.name === "channel");
++});
++
++const migrationRecords = Effect.gen(function* () {
++  const sql = yield* SqlClient.SqlClient;
++  return yield* sql<{ readonly migration_id: number; readonly name: string }>`
++    SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC
++  `;
++});
++
++/**
++ * Rebuilds what a database migrated by a legacy Reasoning build looks like:
++ * upstream through 43, the channel column shipped as custom migration 44, and
++ * data both migrations care about.
++ */
++const seedLegacyReasoningDatabase = Effect.gen(function* () {
++  const sql = yield* SqlClient.SqlClient;
++  yield* runMigrations({ toMigrationInclusive: LEGACY_REASONING_MIGRATION_ID - 1 });
++  yield* sql`ALTER TABLE projection_thread_messages ADD COLUMN channel TEXT`;
++  yield* sql`
++    INSERT INTO effect_sql_migrations (migration_id, name)
++    VALUES (${LEGACY_REASONING_MIGRATION_ID}, ${LEGACY_REASONING_MIGRATION_NAME})
++  `;
++
++  yield* sql`
++    INSERT INTO orchestration_events (
++      event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
++      actor_kind, payload_json, metadata_json
++    )
++    VALUES
++      (
++        'event-auto', 'project', 'project-auto', 1, 'project.created', '2026-05-01T00:00:00.000Z',
++        'user', ${`{"id":"project-auto","defaultModelSelection":${MODEL_SELECTION}}`}, '{}'
++      ),
++      (
++        'event-manual', 'project', 'project-manual', 1, 'project.created', '2026-05-01T00:00:00.000Z',
++        'user', ${`{"id":"project-manual","defaultModelSelection":${MODEL_SELECTION}}`}, '{}'
++      ),
++      (
++        'event-manual-meta', 'project', 'project-manual', 2, 'project.meta-updated', '2026-05-02T00:00:00.000Z',
++        'user', ${`{"defaultModelSelection":${MODEL_SELECTION}}`}, '{}'
++      )
++  `;
++  yield* sql`
++    INSERT INTO projection_projects (
++      project_id, title, workspace_root, scripts_json, default_model_selection_json, created_at, updated_at
++    )
++    VALUES
++      ('project-auto', 'Automatic', '/tmp/auto', '[]', ${MODEL_SELECTION}, '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z'),
++      ('project-manual', 'Manual', '/tmp/manual', '[]', ${MODEL_SELECTION}, '2026-05-01T00:00:00.000Z', '2026-05-02T00:00:00.000Z')
++  `;
++  yield* sql`
++    INSERT INTO projection_thread_messages (
++      message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at, channel
++    )
++    VALUES
++      ('reasoning-1', 'thread-1', 'turn-1', 'assistant', 'Thinking it through', 0, '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z', 'reasoning'),
++      ('answer-1', 'thread-1', 'turn-1', 'assistant', 'Done', 0, '2026-06-01T00:00:01.000Z', '2026-06-01T00:00:01.000Z', NULL)
++  `;
++});
++
++describe("ReasoningSchema", () => {
++  it.effect("adds the channel column on a fresh database and stays idempotent", () =>
++    withFreshDatabase(
++      Effect.gen(function* () {
++        const executed = yield* runMigrations();
++        assert.deepStrictEqual(
++          executed.map(([id]) => id),
++          migrationManifest.map(([id]) => id),
++        );
++
++        const columns = yield* channelColumns;
++        assert.equal(columns.length, 1);
++        assert.equal(columns[0]?.notnull, 0);
++
++        const executedAgain = yield* runMigrations();
++        assert.deepStrictEqual(executedAgain, []);
++        assert.equal((yield* channelColumns).length, 1);
++        assert.equal(yield* ensureReasoningSchema(), false);
++      }),
++    ),
++  );
++
++  it.effect("keeps partial upstream runs on the stock schema", () =>
++    withFreshDatabase(
++      Effect.gen(function* () {
++        yield* runMigrations({ toMigrationInclusive: LATEST_UPSTREAM_MIGRATION_ID });
++        assert.equal((yield* channelColumns).length, 0);
++
++        assert.equal(yield* ensureReasoningSchema(), true);
++        assert.equal((yield* channelColumns).length, 1);
++        assert.equal(yield* ensureReasoningSchema(), false);
++        assert.equal((yield* channelColumns).length, 1);
++      }),
++    ),
++  );
++
++  it.effect("does nothing before the migrations table exists", () =>
++    withFreshDatabase(
++      Effect.gen(function* () {
++        const repaired = yield* repairLegacyReasoningMigration({
++          upstreamMigrationName: UPSTREAM_MIGRATION_NAME,
++          upstreamMigration: Effect.die("must not run"),
++        });
++        assert.equal(repaired, false);
++        assert.equal(yield* ensureReasoningSchema(), false);
++      }),
++    ),
++  );
++
++  it.effect("repairs a database migrated by a legacy Reasoning build", () =>
++    withFreshDatabase(
++      Effect.gen(function* () {
++        const sql = yield* SqlClient.SqlClient;
++        yield* seedLegacyReasoningDatabase;
++
++        const executed = yield* runMigrations();
++        assert.deepStrictEqual(
++          executed.map(([id]) => id),
++          migrationManifest.map(([id]) => id).filter((id) => id > LEGACY_REASONING_MIGRATION_ID),
++        );
++
++        const records = yield* migrationRecords;
++        assert.deepStrictEqual(
++          records.map((record) => record.migration_id),
++          migrationManifest.map(([id]) => id),
++        );
++        assert.equal(
++          records.find((record) => record.migration_id === LEGACY_REASONING_MIGRATION_ID)?.name,
++          UPSTREAM_MIGRATION_NAME,
++        );
++
++        // Upstream 44 ran: automatically seeded defaults are cleared, manual ones stay.
++        const projects = yield* sql<{
++          readonly project_id: string;
++          readonly default_model_selection_json: string | null;
++        }>`
++        SELECT project_id, default_model_selection_json
++        FROM projection_projects
++        ORDER BY project_id ASC
++      `;
++        assert.deepStrictEqual(
++          projects.map((project) => [project.project_id, project.default_model_selection_json]),
++          [
++            ["project-auto", null],
++            ["project-manual", MODEL_SELECTION],
++          ],
++        );
++        const createdEvents = yield* sql<{
++          readonly stream_id: string;
++          readonly default_model_selection: string;
++        }>`
++        SELECT stream_id, json_type(payload_json, '$.defaultModelSelection') AS default_model_selection
++        FROM orchestration_events
++        WHERE event_type = 'project.created'
++        ORDER BY stream_id ASC
++      `;
++        assert.deepStrictEqual(
++          createdEvents.map((event) => [event.stream_id, event.default_model_selection]),
++          [
++            ["project-auto", "null"],
++            ["project-manual", "object"],
++          ],
++        );
++
++        // The legacy channel column and its rows survive untouched.
++        assert.equal((yield* channelColumns).length, 1);
++        const messages = yield* sql<{
++          readonly message_id: string;
++          readonly channel: string | null;
++        }>`
++        SELECT message_id, channel FROM projection_thread_messages ORDER BY message_id ASC
++      `;
++        assert.deepStrictEqual(
++          messages.map((message) => [message.message_id, message.channel]),
++          [
++            ["answer-1", null],
++            ["reasoning-1", "reasoning"],
++          ],
++        );
++
++        // A second start finds a stock database plus the Reasoning schema.
++        assert.deepStrictEqual(yield* runMigrations(), []);
++        assert.equal((yield* channelColumns).length, 1);
++      }),
++    ),
++  );
++
++  it.effect("rolls the repair back when upstream 44 fails", () =>
++    withFreshDatabase(
++      Effect.gen(function* () {
++        yield* seedLegacyReasoningDatabase;
++
++        const error = yield* repairLegacyReasoningMigration({
++          upstreamMigrationName: UPSTREAM_MIGRATION_NAME,
++          upstreamMigration: Effect.fail(
++            new SqlError({ reason: new UnknownError({ cause: new Error("boom") }) }),
++          ),
++        }).pipe(Effect.flip);
++        assert.instanceOf(error, Migrator.MigrationError);
++        assert.equal(error.kind, "Failed");
++
++        const records = yield* migrationRecords;
++        assert.equal(
++          records.find((record) => record.migration_id === LEGACY_REASONING_MIGRATION_ID)?.name,
++          LEGACY_REASONING_MIGRATION_NAME,
++        );
++      }),
++    ),
++  );
++
++  it.effect("refuses to guess an unknown migration 44 identity", () =>
++    withFreshDatabase(
++      Effect.gen(function* () {
++        const sql = yield* SqlClient.SqlClient;
++        yield* runMigrations({ toMigrationInclusive: LEGACY_REASONING_MIGRATION_ID - 1 });
++        yield* sql`
++        INSERT INTO effect_sql_migrations (migration_id, name)
++        VALUES (${LEGACY_REASONING_MIGRATION_ID}, 'SomeOtherForkMigration')
++      `;
++
++        const error = yield* runMigrations().pipe(Effect.flip);
++        assert.instanceOf(error, Migrator.MigrationError);
++        assert.equal(error.kind, "BadState");
++        assert.match(error.message, /SomeOtherForkMigration/);
++
++        // Nothing past 43 ran and the record is untouched.
++        const records = yield* migrationRecords;
++        assert.equal(records.at(-1)?.migration_id, LEGACY_REASONING_MIGRATION_ID);
++        assert.equal(records.at(-1)?.name, "SomeOtherForkMigration");
++        assert.equal((yield* channelColumns).length, 0);
++      }),
++    ),
++  );
++});
+diff --git a/apps/server/src/persistence/ReasoningSchema.ts b/apps/server/src/persistence/ReasoningSchema.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d953ba2f3ea0287f8c004a769af5d5611c50b225
+--- /dev/null
++++ b/apps/server/src/persistence/ReasoningSchema.ts
+@@ -0,0 +1,109 @@
++/**
++ * Reasoning schema for the projection tables.
++ *
++ * Reasoning is a maintained feature patch on top of upstream T3 Code. Its
++ * schema deliberately lives outside the numbered migration manifest: a
++ * numbered entry would collide with whichever migration upstream adds next,
++ * on every nightly rebase. `runMigrations` runs the upstream manifest first
++ * and then calls `ensureReasoningSchema`, which is idempotent and cheap.
++ */
++
++import * as Effect from "effect/Effect";
++import * as Migrator from "effect/unstable/sql/Migrator";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
++import type { SqlError } from "effect/unstable/sql/SqlError";
++
++const MIGRATIONS_TABLE = "effect_sql_migrations";
++
++/**
++ * Earlier Reasoning builds shipped the channel column as migration 44, an id
++ * upstream later assigned to `ClearAutomaticProjectModelDefaults`.
++ */
++export const LEGACY_REASONING_MIGRATION_ID = 44;
++export const LEGACY_REASONING_MIGRATION_NAME = "ProjectionThreadMessagesChannel";
++
++/**
++ * On a database migrated by a legacy Reasoning build the migrator sees id 44
++ * as already applied and would skip upstream's 44 forever. When the record
++ * carries exactly the legacy name, run upstream's 44 body and rename the
++ * record inside one transaction so the manifest matches upstream again. The
++ * channel column and the rows written under it are left untouched; the
++ * ensure phase later finds the column and does nothing.
++ *
++ * Any other unexpected name at id 44 is reported as a migrator `BadState`
++ * error rather than guessed at.
++ */
++export const repairLegacyReasoningMigration = Effect.fn("repairLegacyReasoningMigration")(
++  function* (input: {
++    readonly upstreamMigrationName: string;
++    readonly upstreamMigration: Effect.Effect<void, SqlError, SqlClient.SqlClient>;
++  }) {
++    const sql = yield* SqlClient.SqlClient;
++    const tables = yield* sql<{ readonly name: string }>`
++      SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${MIGRATIONS_TABLE}
++    `;
++    if (tables.length === 0) {
++      return false;
++    }
++    const records = yield* sql<{ readonly name: string }>`
++      SELECT name FROM effect_sql_migrations WHERE migration_id = ${LEGACY_REASONING_MIGRATION_ID}
++    `;
++    const recordedName = records[0]?.name;
++    if (recordedName === undefined || recordedName === input.upstreamMigrationName) {
++      return false;
++    }
++    if (recordedName !== LEGACY_REASONING_MIGRATION_NAME) {
++      return yield* new Migrator.MigrationError({
++        kind: "BadState",
++        message:
++          `Migration ${LEGACY_REASONING_MIGRATION_ID} is recorded as "${recordedName}"; ` +
++          `expected "${input.upstreamMigrationName}" or the legacy Reasoning ` +
++          `"${LEGACY_REASONING_MIGRATION_NAME}". Refusing to guess its identity.`,
++      });
++    }
++
++    yield* sql
++      .withTransaction(
++        Effect.gen(function* () {
++          yield* input.upstreamMigration;
++          yield* sql`
++          UPDATE effect_sql_migrations
++          SET name = ${input.upstreamMigrationName}
++          WHERE migration_id = ${LEGACY_REASONING_MIGRATION_ID}
++            AND name = ${LEGACY_REASONING_MIGRATION_NAME}
++        `;
++        }),
++      )
++      .pipe(
++        Effect.mapError(
++          (cause) =>
++            new Migrator.MigrationError({
++              kind: "Failed",
++              cause,
++              message: `Repairing legacy Reasoning migration ${LEGACY_REASONING_MIGRATION_ID} failed`,
++            }),
++        ),
++      );
++    return true;
++  },
++);
++
++/**
++ * Adds the nullable `channel` column to message projections when it is
++ * missing. Runs after the upstream manifest on every startup; a database that
++ * already has the column is left alone.
++ */
++export const ensureReasoningSchema = Effect.fn("ensureReasoningSchema")(function* () {
++  const sql = yield* SqlClient.SqlClient;
++  const columns = yield* sql<{ readonly name: string }>`
++    PRAGMA table_info(projection_thread_messages)
++  `;
++  if (columns.length === 0 || columns.some((column) => column.name === "channel")) {
++    return false;
++  }
++  yield* sql`
++    ALTER TABLE projection_thread_messages
++    ADD COLUMN channel TEXT
++  `;
++  return true;
++});
+diff --git a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
+index a41737564382c9bc47700a510bed7f77312457d0..34ebf8b74e4b5d180dc7597dbdbc5a99c39b1282 100644
+--- a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
++++ b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
+@@ -10,6 +10,7 @@ import {
+   ChatAttachment,
+   MessageId,
+   OrchestrationMessageRole,
++  OrchestrationMessageChannel,
+   ThreadId,
+   TurnId,
+   IsoDateTime,
+@@ -27,6 +28,7 @@ export const ProjectionThreadMessage = Schema.Struct({
+   threadId: ThreadId,
+   turnId: Schema.NullOr(TurnId),
+   role: OrchestrationMessageRole,
++  channel: Schema.optional(OrchestrationMessageChannel),
+   text: Schema.String,
+   attachments: Schema.optional(Schema.Array(ChatAttachment)),
+   isStreaming: Schema.Boolean,
+diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
+index 84cc03b75a6ddb3e7f017b50ed1acacf18e4fc46..3c9bef6a6e497d10356e8ca83fa7aa2e35ba0713 100644
+--- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
++++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
+@@ -574,6 +574,50 @@ describe("ClaudeAdapterLive", () => {
+     );
+   });
+ 
++  it.effect("requests summarized thinking display by default", () => {
++    const harness = makeHarness();
++    return Effect.gen(function* () {
++      const adapter = yield* ClaudeAdapter;
++      yield* adapter.startSession({
++        threadId: THREAD_ID,
++        provider: ProviderDriverKind.make("claudeAgent"),
++        runtimeMode: "full-access",
++      });
++
++      const createInput = harness.getLastCreateQueryInput();
++      assert.deepEqual(createInput?.options.thinking, {
++        type: "adaptive",
++        display: "summarized",
++      });
++    }).pipe(
++      Effect.provideService(Random.Random, makeDeterministicRandomService()),
++      Effect.provide(harness.layer),
++    );
++  });
++
++  it.effect("omits thinking query options when the Claude thinking toggle is off", () => {
++    const harness = makeHarness();
++    return Effect.gen(function* () {
++      const adapter = yield* ClaudeAdapter;
++      yield* adapter.startSession({
++        threadId: THREAD_ID,
++        provider: ProviderDriverKind.make("claudeAgent"),
++        modelSelection: createModelSelection(
++          ProviderInstanceId.make("claudeAgent"),
++          SYNTHETIC_CLAUDE_THINKING_MODEL,
++          [{ id: "thinking", value: false }],
++        ),
++        runtimeMode: "full-access",
++      });
++
++      const createInput = harness.getLastCreateQueryInput();
++      assert.equal(Object.hasOwn(createInput?.options ?? {}, "thinking"), false);
++    }).pipe(
++      Effect.provideService(Random.Random, makeDeterministicRandomService()),
++      Effect.provide(harness.layer),
++    );
++  });
++
+   it.effect("forwards claude fast mode into SDK settings", () => {
+     const harness = makeHarness();
+     return Effect.gen(function* () {
+diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
+index a005f583066f88e386a2f4e6c6841c8ece7f1e35..8df6ef494d0025d42d0b6748b2d4c3e38c016eaa 100644
+--- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
++++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
+@@ -4678,6 +4678,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
+         ...(newSessionId ? { sessionId: newSessionId } : {}),
+         includePartialMessages: true,
++        // Claude otherwise streams only redacted thinking token estimates.
++        ...(thinking === false ? {} : { thinking: { type: "adaptive", display: "summarized" } }),
+         canUseTool,
+         onUserDialog,
+         supportedDialogKinds: ["resume_return"],
+diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+index fd4d66dd497b59e20ffdf466ae49adc6373d61c2..0698c77a19aba446e5fdb00f685390dfc19bf2ef 100644
+--- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
++++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+@@ -120,6 +120,7 @@ describe("buildTurnStartParams", () => {
+       ],
+       model: "gpt-5.3-codex",
+       effort: "medium",
++      summary: "detailed",
+       collaborationMode: {
+         mode: "plan",
+         settings: {
+@@ -169,6 +170,7 @@ describe("buildTurnStartParams", () => {
+         },
+       ],
+       model: "gpt-5.3-codex",
++      summary: "detailed",
+       collaborationMode: {
+         mode: "default",
+         settings: {
+@@ -220,6 +222,7 @@ describe("buildTurnStartParams", () => {
+             text: "Ship it",
+           },
+         ],
++        summary: "detailed",
+       });
+     }),
+   );
+@@ -246,6 +249,7 @@ describe("buildTurnStartParams", () => {
+           text: "Review",
+         },
+       ],
++      summary: "detailed",
+     });
+   });
+ });
+diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
+index 4b88b7ce01c0f4c9d95d19f80402d0141406364a..95b619f20117304cd08e2cae70b105013ded041e 100644
+--- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
++++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
+@@ -636,6 +636,8 @@ export function buildTurnStartParams(input: {
+     ...(input.model ? { model: input.model } : {}),
+     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+     ...(input.effort ? { effort: input.effort } : {}),
++    // Readable reasoning summaries; without this Codex emits empty reasoning items.
++    summary: "detailed",
+     ...(collaborationMode ? { collaborationMode } : {}),
+   }).pipe(
+     Effect.mapError((cause) =>
+diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
+index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e30badb859 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
++++ b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
+@@ -7,10 +7,12 @@ import {
+   deriveMessagesTimelineRowsWithState,
+   liveWorkEntryLabel,
+   normalizeCompactToolLabel,
++  resolveReasoningDisclosureExpanded,
+   resolveAssistantMessageCopyState,
+   resolveWorkGroupScrollIndex,
+   shouldFollowWorkGroupAppend,
+   shouldPreserveAssistantLineBreaks,
++  toggleReasoningDisclosureExpansion,
+   type MessagesTimelineRow,
+   workEntryDisplayLabel,
+ } from "./MessagesTimeline.logic";
+@@ -531,6 +533,29 @@ describe("work entry labels", () => {
+   );
+ });
+ 
++describe("reasoning disclosure expansion", () => {
++  it("defaults to the message streaming state when the user has not toggled it", () => {
++    const overrides = new Map();
++    const messageId = "reasoning-1" as never;
++
++    expect(resolveReasoningDisclosureExpanded(overrides, messageId, true)).toBe(true);
++    expect(resolveReasoningDisclosureExpanded(overrides, messageId, false)).toBe(false);
++  });
++
++  it("persists an explicit toggle across virtualization and stream completion", () => {
++    const messageId = "reasoning-1" as never;
++    const initial = new Map();
++    const collapsed = toggleReasoningDisclosureExpansion(initial, messageId, true);
++
++    expect(collapsed).not.toBe(initial);
++    expect(resolveReasoningDisclosureExpanded(initial, messageId, true)).toBe(true);
++    expect(resolveReasoningDisclosureExpanded(collapsed, messageId, true)).toBe(false);
++
++    const expanded = toggleReasoningDisclosureExpansion(collapsed, messageId, true);
++    expect(resolveReasoningDisclosureExpanded(expanded, messageId, false)).toBe(true);
++  });
++});
++
+ describe("shouldPreserveAssistantLineBreaks", () => {
+   it("preserves Claude insight formatting without changing regular markdown", () => {
+     expect(
+@@ -616,7 +641,10 @@ describe("computeMessageDurationStart", () => {
+     );
+   });
+ 
+-  it("does not advance the boundary for a streaming message", () => {
++  it.each([
++    { label: "streaming", streaming: true },
++    { label: "completed reasoning", streaming: false, channel: "reasoning" as const },
++  ])("does not advance the boundary for a $label message", ({ streaming, channel }) => {
+     const result = computeMessageDurationStart([
+       {
+         id: "u1",
+@@ -628,9 +656,10 @@ describe("computeMessageDurationStart", () => {
+       {
+         id: "a1",
+         role: "assistant",
++        ...(channel ? { channel } : {}),
+         createdAt: "2026-01-01T00:00:30Z",
+         updatedAt: "2026-01-01T00:00:40Z",
+-        streaming: true,
++        streaming,
+       },
+       {
+         id: "a2",
+@@ -1269,6 +1298,489 @@ describe("deriveMessagesTimelineRows", () => {
+     expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-1", "assistant-final-entry"]);
+   });
+ 
++  it("anchors the turn fold at leading reasoning and folds it with the rest of the turn", () => {
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "reasoning-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:01Z",
++          message: {
++            id: "reasoning" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "Thinking",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:01Z",
++            updatedAt: "2026-01-01T00:00:02Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "assistant-first-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:03Z",
++          message: {
++            id: "assistant-first" as never,
++            role: "assistant",
++            text: "I am checking the implementation.",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:03Z",
++            updatedAt: "2026-01-01T00:00:04Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "work-entry",
++          kind: "work",
++          createdAt: "2026-01-01T00:00:05Z",
++          entry: {
++            id: "work-1",
++            createdAt: "2026-01-01T00:00:05Z",
++            turnId: "turn-1" as never,
++            label: "Read files",
++            tone: "tool",
++          },
++        },
++        {
++          id: "assistant-final-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:06Z",
++          message: {
++            id: "assistant-final" as never,
++            role: "assistant",
++            text: "Done",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:06Z",
++            updatedAt: "2026-01-01T00:00:07Z",
++            streaming: false,
++          },
++        },
++      ],
++      isWorking: false,
++      activeTurnStartedAt: null,
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-1", "assistant-final-entry"]);
++    expect(rows.find((row) => row.kind === "turn-fold")).toMatchObject({
++      createdAt: "2026-01-01T00:00:01Z",
++    });
++  });
++
++  it("does not create a turn fold for an empty completed reasoning message", () => {
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "assistant-final-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:05Z",
++          message: {
++            id: "assistant-final" as never,
++            role: "assistant",
++            text: "Done",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:05Z",
++            updatedAt: "2026-01-01T00:00:06Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "reasoning-empty-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:07Z",
++          message: {
++            id: "reasoning-empty" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:07Z",
++            updatedAt: "2026-01-01T00:00:08Z",
++            streaming: false,
++          },
++        },
++      ],
++      isWorking: false,
++      activeTurnStartedAt: null,
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    expect(rows.map((row) => row.id)).toEqual(["assistant-final-entry"]);
++  });
++
++  it("groups work across an invisible empty completed reasoning entry", () => {
++    // A whitespace-only completed reasoning message renders no row, so it must
++    // not split adjacent work entries into two work-toggle groups either.
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "work-entry-1",
++          kind: "work",
++          createdAt: "2026-01-01T00:00:01Z",
++          entry: {
++            id: "work-1",
++            createdAt: "2026-01-01T00:00:01Z",
++            label: "Ran command",
++            tone: "tool" as const,
++            itemType: "command_execution" as const,
++            toolLifecycleStatus: "completed" as const,
++          },
++        },
++        {
++          id: "reasoning-empty-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:02Z",
++          message: {
++            id: "reasoning-empty" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "  ",
++            turnId: null,
++            createdAt: "2026-01-01T00:00:02Z",
++            updatedAt: "2026-01-01T00:00:02Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "work-entry-2",
++          kind: "work",
++          createdAt: "2026-01-01T00:00:03Z",
++          entry: {
++            id: "work-2",
++            createdAt: "2026-01-01T00:00:03Z",
++            label: "Ran command",
++            tone: "tool" as const,
++            itemType: "command_execution" as const,
++            toolLifecycleStatus: "completed" as const,
++          },
++        },
++      ],
++      isWorking: false,
++      activeTurnStartedAt: null,
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    expect(rows.map((row) => row.id)).toEqual(["work-toggle:work-entry-1"]);
++    expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({
++      hiddenCount: 2,
++      summary: "Ran 2 commands",
++    });
++  });
++
++  it("keeps the live work group when an empty completed reasoning entry trails it", () => {
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "latest-command-entry",
++          kind: "work",
++          createdAt: "2026-01-01T00:00:05Z",
++          entry: {
++            id: "latest-command",
++            createdAt: "2026-01-01T00:00:05Z",
++            turnId: "turn-1" as never,
++            label: "Ran rg",
++            command: "rg toolCall",
++            requestKind: "command",
++            tone: "tool" as const,
++            toolLifecycleStatus: "completed" as const,
++          },
++        },
++        {
++          id: "reasoning-empty-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:06Z",
++          message: {
++            id: "reasoning-empty" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "  ",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:06Z",
++            updatedAt: "2026-01-01T00:00:06Z",
++            streaming: false,
++          },
++        },
++      ],
++      latestTurn: {
++        turnId: "turn-1" as never,
++        state: "running",
++        startedAt: "2026-01-01T00:00:00Z",
++        completedAt: null,
++      },
++      isWorking: true,
++      activeTurnStartedAt: "2026-01-01T00:00:00Z",
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    expect(rows.map((row) => row.kind)).toEqual(["working", "work-live"]);
++    expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
++      entry: { id: "latest-command" },
++      groupedEntries: [{ id: "latest-command" }],
++    });
++  });
++
++  it("keeps the Thinking label when filtered empty reasoning precedes the active-turn header", () => {
++    // Empty completed reasoning entries are filtered before indices are
++    // computed, so they must not shift active-turn membership onto prior-turn
++    // entries and hide the Thinking label.
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "reasoning-empty-entry-1",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:01Z",
++          message: {
++            id: "reasoning-empty-1" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "",
++            turnId: "turn-0" as never,
++            createdAt: "2026-01-01T00:00:01Z",
++            updatedAt: "2026-01-01T00:00:01Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "reasoning-empty-entry-2",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:02Z",
++          message: {
++            id: "reasoning-empty-2" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "  ",
++            turnId: "turn-0" as never,
++            createdAt: "2026-01-01T00:00:02Z",
++            updatedAt: "2026-01-01T00:00:02Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "assistant-prior-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:03Z",
++          message: {
++            id: "assistant-prior" as never,
++            role: "assistant",
++            text: "Earlier answer",
++            turnId: "turn-0" as never,
++            createdAt: "2026-01-01T00:00:03Z",
++            updatedAt: "2026-01-01T00:00:04Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "user-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:05Z",
++          message: {
++            id: "user-1" as never,
++            role: "user",
++            text: "Next question",
++            turnId: null,
++            createdAt: "2026-01-01T00:00:05Z",
++            updatedAt: "2026-01-01T00:00:05Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "reasoning-streaming-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:06Z",
++          message: {
++            id: "reasoning-streaming" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "",
++            turnId: null,
++            createdAt: "2026-01-01T00:00:06Z",
++            updatedAt: "2026-01-01T00:00:06Z",
++            streaming: true,
++          },
++        },
++      ],
++      isWorking: true,
++      activeTurnStartedAt: "2026-01-01T00:00:05Z",
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    expect(rows.some((row) => row.kind === "working")).toBe(true);
++    expect(rows.at(-1)).toMatchObject({ kind: "thinking" });
++  });
++
++  it("shows the working indicator when trailing filtered empty reasoning ends the timeline", () => {
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "user-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:00Z",
++          message: {
++            id: "user-1" as never,
++            role: "user",
++            text: "Go",
++            turnId: null,
++            createdAt: "2026-01-01T00:00:00Z",
++            updatedAt: "2026-01-01T00:00:00Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "reasoning-empty-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:01Z",
++          message: {
++            id: "reasoning-empty" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:01Z",
++            updatedAt: "2026-01-01T00:00:01Z",
++            streaming: false,
++          },
++        },
++      ],
++      latestTurn: {
++        turnId: "turn-1" as never,
++        state: "running",
++        startedAt: "2026-01-01T00:00:00Z",
++        completedAt: null,
++      },
++      isWorking: true,
++      activeTurnStartedAt: "2026-01-01T00:00:00Z",
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    expect(rows.map((row) => row.id)).toEqual([
++      "user-entry",
++      "working-indicator-row",
++      "live-activity-row",
++    ]);
++    expect(rows.at(-1)).toMatchObject({ kind: "thinking" });
++  });
++
++  it("restores the Thinking row once the active turn's only reasoning message completes", () => {
++    // A streaming reasoning message is itself the live "Thinking..." signal,
++    // so the generic thinking row stays hidden. Once the thought finishes and
++    // the turn has no substantive assistant text and no in-progress tool, the
++    // thinking row is the only signal the agent is still busy.
++    const makeInput = (reasoningStreaming: boolean) => ({
++      timelineEntries: [
++        {
++          id: "user-entry",
++          kind: "message" as const,
++          createdAt: "2026-01-01T00:00:00Z",
++          message: {
++            id: "user-1" as never,
++            role: "user" as const,
++            text: "Go",
++            turnId: null,
++            createdAt: "2026-01-01T00:00:00Z",
++            updatedAt: "2026-01-01T00:00:00Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "reasoning-entry",
++          kind: "message" as const,
++          createdAt: "2026-01-01T00:00:01Z",
++          message: {
++            id: "reasoning-1" as never,
++            role: "assistant" as const,
++            channel: "reasoning" as const,
++            text: "Weighing the options",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:01Z",
++            updatedAt: "2026-01-01T00:00:01Z",
++            streaming: reasoningStreaming,
++          },
++        },
++      ],
++      latestTurn: {
++        turnId: "turn-1" as never,
++        state: "running" as const,
++        startedAt: "2026-01-01T00:00:00Z",
++        completedAt: null,
++      },
++      isWorking: true,
++      activeTurnStartedAt: "2026-01-01T00:00:00Z",
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    // While the reasoning text still streams it is itself a live Thinking
++    // disclosure, so the redundant generic label stays suppressed.
++    const streamingRows = deriveMessagesTimelineRows(makeInput(true));
++    expect(streamingRows.some((row) => row.kind === "thinking")).toBe(false);
++
++    const completedRows = deriveMessagesTimelineRows(makeInput(false));
++    expect(completedRows.at(-1)).toMatchObject({ kind: "thinking" });
++  });
++
++  it("still splits work groups on a non-empty completed reasoning entry", () => {
++    const rows = deriveMessagesTimelineRows({
++      timelineEntries: [
++        {
++          id: "work-entry-1",
++          kind: "work",
++          createdAt: "2026-01-01T00:00:01Z",
++          entry: {
++            id: "work-1",
++            createdAt: "2026-01-01T00:00:01Z",
++            label: "Ran command",
++            tone: "tool" as const,
++            itemType: "command_execution" as const,
++            toolLifecycleStatus: "completed" as const,
++          },
++        },
++        {
++          id: "reasoning-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:02Z",
++          message: {
++            id: "reasoning" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "Weighing the next step.",
++            turnId: null,
++            createdAt: "2026-01-01T00:00:02Z",
++            updatedAt: "2026-01-01T00:00:02Z",
++            streaming: false,
++          },
++        },
++        {
++          id: "work-entry-2",
++          kind: "work",
++          createdAt: "2026-01-01T00:00:03Z",
++          entry: {
++            id: "work-2",
++            createdAt: "2026-01-01T00:00:03Z",
++            label: "Ran command",
++            tone: "tool" as const,
++            itemType: "command_execution" as const,
++            toolLifecycleStatus: "completed" as const,
++          },
++        },
++      ],
++      isWorking: false,
++      activeTurnStartedAt: null,
++      turnDiffSummaryByAssistantMessageId: new Map(),
++      revertTurnCountByUserMessageId: new Map(),
++    });
++
++    // Each side of the reasoning row keeps its own single-tool work row instead
++    // of collapsing into one two-entry group.
++    expect(rows.map((row) => row.id)).toEqual(["work-entry-1", "reasoning-entry", "work-entry-2"]);
++  });
++
+   it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
+     // A steer ends the previous turn early: its only message completes the
+     // instant it is created, and trailing work entries land after it. The
+@@ -2211,6 +2723,21 @@ describe("deriveMessagesTimelineRows", () => {
+             streaming: false,
+           },
+         },
++        {
++          id: "reasoning-tail-entry",
++          kind: "message",
++          createdAt: "2026-01-01T00:00:40Z",
++          message: {
++            id: "reasoning-tail" as never,
++            role: "assistant",
++            channel: "reasoning",
++            text: "Considering a follow-up.",
++            turnId: "turn-1" as never,
++            createdAt: "2026-01-01T00:00:40Z",
++            updatedAt: "2026-01-01T00:00:45Z",
++            streaming: false,
++          },
++        },
+       ],
+       expandedTurnIds: new Set(["turn-1" as never]),
+       isWorking: false,
+@@ -2224,7 +2751,8 @@ describe("deriveMessagesTimelineRows", () => {
+         row.kind === "message" && row.message.role === "assistant",
+     );
+ 
+-    expect(assistantRows.map((row) => row.showAssistantMeta)).toEqual([false, true]);
++    expect(assistantRows.map((row) => row.showAssistantMeta)).toEqual([false, true, false]);
++    expect(assistantRows.map((row) => row.showAssistantCopyButton)).toEqual([false, true, false]);
+   });
+ 
+   it("withholds assistant metadata while the active turn is still in progress", () => {
+diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.ts b/apps/web/src/components/chat/MessagesTimeline.logic.ts
+index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbdaca7dc578 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.logic.ts
++++ b/apps/web/src/components/chat/MessagesTimeline.logic.ts
+@@ -29,7 +29,13 @@ import {
+   type WorkLogEntry,
+ } from "../../session-logic";
+ import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
+-import { type MessageId, type OrchestrationLatestTurn, type TurnId } from "@t3tools/contracts";
++import {
++  isReasoningMessage,
++  type MessageId,
++  type OrchestrationLatestTurn,
++  type OrchestrationMessageChannel,
++  type TurnId,
++} from "@t3tools/contracts";
+ import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+ 
+ export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
+@@ -169,6 +175,24 @@ export function shouldPreserveAssistantLineBreaks(text: string): boolean {
+   return /^★ Insight(?:\s|─)/mu.test(text);
+ }
+ 
++export function resolveReasoningDisclosureExpanded(
++  overrides: ReadonlyMap<MessageId, boolean>,
++  messageId: MessageId,
++  streaming: boolean,
++): boolean {
++  return overrides.get(messageId) ?? streaming;
++}
++
++export function toggleReasoningDisclosureExpansion(
++  overrides: ReadonlyMap<MessageId, boolean>,
++  messageId: MessageId,
++  defaultExpanded: boolean,
++): ReadonlyMap<MessageId, boolean> {
++  const next = new Map(overrides);
++  next.set(messageId, !(overrides.get(messageId) ?? defaultExpanded));
++  return next;
++}
++
+ export function resolveTimelineMinimapHeightStyle(itemCount: number): string {
+   const naturalHeight = Math.max(1, (itemCount - 1) * TIMELINE_MINIMAP_ITEM_SPACING);
+   return `min(${naturalHeight}px, ${TIMELINE_MINIMAP_MAX_HEIGHT_CSS})`;
+@@ -267,6 +291,7 @@ function maxIsoTimestamp(a: string | null, b: string | null): string | null {
+ export interface TimelineDurationMessage {
+   id: string;
+   role: "user" | "assistant" | "system";
++  channel?: OrchestrationMessageChannel | undefined;
+   createdAt: string;
+   updatedAt: string;
+   streaming: boolean;
+@@ -380,7 +405,7 @@ export function computeMessageDurationStart(
+       lastBoundary = message.createdAt;
+     }
+     result.set(message.id, lastBoundary ?? message.createdAt);
+-    if (message.role === "assistant" && !message.streaming) {
++    if (message.role === "assistant" && !isReasoningMessage(message) && !message.streaming) {
+       lastBoundary = message.updatedAt;
+     }
+   }
+@@ -442,7 +467,7 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
+       nullTurnResponseIndex += 1;
+       continue;
+     }
+-    if (message.role !== "assistant") {
++    if (message.role !== "assistant" || isReasoningMessage(message)) {
+       continue;
+     }
+ 
+@@ -501,6 +526,15 @@ function timelineEntryTurnId(entry: TimelineEntry): TurnId | null {
+   return entry.kind === "work" ? (entry.entry.turnId ?? null) : null;
+ }
+ 
++function isEmptyCompletedReasoningEntry(entry: TimelineEntry): boolean {
++  return (
++    entry.kind === "message" &&
++    isReasoningMessage(entry.message) &&
++    !entry.message.streaming &&
++    entry.message.text.trim().length === 0
++  );
++}
++
+ /**
+  * A promptless provider restart replaces the native turn without adding a
+  * user message. Keep every provider turn since the latest user message in one
+@@ -790,10 +824,17 @@ export function deriveMessagesTimelineRows(input: {
+   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
+ }): MessagesTimelineRow[] {
+   const nextRows: MessagesTimelineRow[] = [];
++  // A whitespace-only completed reasoning message renders no row, so every
++  // derivation below (folds, forward/backward work-group scans, the row loop)
++  // must see the same list without it — otherwise an invisible entry breaks
++  // work-group adjacency.
++  const timelineEntries = input.timelineEntries.filter(
++    (entry) => !isEmptyCompletedReasoningEntry(entry),
++  );
+   const durationStartByMessageId = computeMessageDurationStart(
+-    input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
++    timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+   );
+-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
++  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(timelineEntries);
+   const unsettledTurnId = deriveUnsettledTurnId(
+     input.latestTurn ?? null,
+     input.runningTurnId ?? null,
+@@ -804,7 +845,7 @@ export function deriveMessagesTimelineRows(input: {
+     isWorking: input.isWorking,
+   });
+   const foldsByAnchorEntryId = deriveTurnFolds({
+-    timelineEntries: input.timelineEntries,
++    timelineEntries,
+     terminalAssistantMessageIds,
+     latestTurn: input.latestTurn ?? null,
+     unfoldedTurnIds: activeVisualResponseTurnIds,
+@@ -818,9 +859,9 @@ export function deriveMessagesTimelineRows(input: {
+     }
+   }
+ 
+-  let activeTurnHeaderIndex = input.timelineEntries.length;
++  let activeTurnHeaderIndex = timelineEntries.length;
+   if (input.isWorking) {
+-    const latestUserMessageIndex = lastUserMessageIndex(input.timelineEntries);
++    const latestUserMessageIndex = lastUserMessageIndex(timelineEntries);
+     activeTurnHeaderIndex = latestUserMessageIndex + 1;
+   }
+   const entryBelongsToActiveTurn = (entry: TimelineEntry, index: number) =>
+@@ -832,9 +873,21 @@ export function deriveMessagesTimelineRows(input: {
+     unsettledTurnId !== null &&
+     entry.toolLifecycleStatus === "inProgress" &&
+     entry.turnId === unsettledTurnId;
++  // A streaming reasoning row is itself the live "Thinking..." disclosure, so
++  // the trailing generic thinking row stays hidden until the thought settles.
++  const activeTurnHasStreamingReasoning =
++    input.isWorking &&
++    timelineEntries.some(
++      (entry, index) =>
++        entryBelongsToActiveTurn(entry, index) &&
++        entry.kind === "message" &&
++        isReasoningMessage(entry.message) &&
++        entry.message.streaming &&
++        entry.message.text.trim().length > 0,
++    );
+   const activeToolEntries: Array<Extract<TimelineEntry, { kind: "work" }>> = [];
+-  for (let index = input.timelineEntries.length - 1; index >= activeTurnHeaderIndex; index -= 1) {
+-    const entry = input.timelineEntries[index]!;
++  for (let index = timelineEntries.length - 1; index >= activeTurnHeaderIndex; index -= 1) {
++    const entry = timelineEntries[index]!;
+     if (
+       !entryBelongsToActiveTurn(entry, index) ||
+       entry.kind !== "work" ||
+@@ -915,8 +968,8 @@ export function deriveMessagesTimelineRows(input: {
+     );
+   };
+ 
+-  for (let index = 0; index < input.timelineEntries.length; index += 1) {
+-    const timelineEntry = input.timelineEntries[index];
++  for (let index = 0; index < timelineEntries.length; index += 1) {
++    const timelineEntry = timelineEntries[index];
+     if (!timelineEntry) {
+       continue;
+     }
+@@ -975,8 +1028,8 @@ export function deriveMessagesTimelineRows(input: {
+       }
+       const groupedEntries = [timelineEntry.entry];
+       let cursor = index + 1;
+-      while (cursor < input.timelineEntries.length) {
+-        const nextEntry = input.timelineEntries[cursor];
++      while (cursor < timelineEntries.length) {
++        const nextEntry = timelineEntries[cursor];
+         if (
+           !nextEntry ||
+           nextEntry.kind !== "work" ||
+@@ -1145,10 +1198,14 @@ export function deriveMessagesTimelineRows(input: {
+     });
+   }
+ 
+-  if (input.isWorking && activeTurnHeaderIndex === input.timelineEntries.length) {
++  if (input.isWorking && activeTurnHeaderIndex === timelineEntries.length) {
+     appendWorkingRow();
+   }
+-  if (input.isWorking && (!hasActivityRow || latestToolFailed)) {
++  if (
++    input.isWorking &&
++    !activeTurnHasStreamingReasoning &&
++    (!hasActivityRow || latestToolFailed)
++  ) {
+     nextRows.push({
+       kind: "thinking",
+       id: LIVE_ACTIVITY_ROW_ID,
+diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
+index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf88906c11 100644
+--- a/apps/web/src/components/chat/MessagesTimeline.tsx
++++ b/apps/web/src/components/chat/MessagesTimeline.tsx
+@@ -1,4 +1,5 @@
+ import {
++  isReasoningMessage,
+   type AssistantCitation,
+   type EnvironmentId,
+   type MessageId,
+@@ -55,6 +56,7 @@ import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
+ import {
+   createMessageAttachmentPreviewProjector,
+   deriveTimelineEntries,
++  formatDuration,
+   selectMessageImageResources,
+   workEntryDisplayIndicatesToolFailure,
+   workEntrySignalsSevereFailure,
+@@ -129,6 +131,7 @@ import {
+   type MessagesTimelineRowsProjection,
+   liveWorkEntryLabel,
+   resolveAssistantMessageCopyState,
++  resolveReasoningDisclosureExpanded,
+   resolveTimelineIsAtEnd,
+   resolveTimelineMinimapHasPersistentGutter,
+   resolveTimelineMinimapHeightStyle,
+@@ -139,6 +142,7 @@ import {
+   resolveWorkGroupScrollIndex,
+   shouldFollowWorkGroupAppend,
+   shouldPreserveAssistantLineBreaks,
++  toggleReasoningDisclosureExpansion,
+   toolGroupAction,
+   workEntryDisplayLabel,
+   workEntryIsVisibleInGroup,
+@@ -209,6 +213,12 @@ interface TimelineRowSharedState {
+   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
+   onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
+   workGroupViewState: WorkGroupViewState;
++  reasoningExpansionOverrides: ReadonlyMap<MessageId, boolean>;
++  onToggleReasoningDisclosure: (
++    messageId: MessageId,
++    defaultExpanded: boolean,
++    anchorKey: string,
++  ) => void;
+   agentPanelModel: AgentPanelModel;
+   onOpenAgents: () => void;
+ }
+@@ -400,6 +410,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+     () => ({ scrollPositions: new Map(), expandedEntries: new Set() }),
+     [routeThreadKey],
+   );
++  const [reasoningExpansionOverrides, setReasoningExpansionOverrides] = useState<
++    ReadonlyMap<MessageId, boolean>
++  >(new Map());
+   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
+   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
+   const disclosureAnchorKeyRef = useRef<string | null>(null);
+@@ -487,6 +500,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+     },
+     [expandedWorkGroupIds, suspendEndScrollMaintenanceForDisclosure],
+   );
++  const onToggleReasoningDisclosure = useCallback(
++    (messageId: MessageId, defaultExpanded: boolean, anchorKey: string) => {
++      suspendEndScrollMaintenanceForDisclosure(anchorKey);
++      setReasoningExpansionOverrides((existing) =>
++        toggleReasoningDisclosureExpansion(existing, messageId, defaultExpanded),
++      );
++    },
++    [suspendEndScrollMaintenanceForDisclosure],
++  );
+ 
+   // An in-session interrupt leaves its turn expanded so the user keeps their
+   // place; the next turn (or a reload, since this is local state) folds it.
+@@ -684,6 +706,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+       onToggleWorkGroup,
+       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
+       workGroupViewState,
++      reasoningExpansionOverrides,
++      onToggleReasoningDisclosure,
+       agentPanelModel,
+       onOpenAgents,
+     }),
+@@ -708,6 +732,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+       onToggleWorkGroup,
+       suspendEndScrollMaintenanceForDisclosure,
+       workGroupViewState,
++      reasoningExpansionOverrides,
++      onToggleReasoningDisclosure,
+       agentPanelModel,
+       onOpenAgents,
+     ],
+@@ -832,7 +858,9 @@ function keyExtractor(item: MessagesTimelineRow) {
+ }
+ 
+ function getItemType(item: MessagesTimelineRow) {
+-  return item.kind === "message" ? `message:${item.message.role}` : item.kind;
++  return item.kind === "message"
++    ? `message:${isReasoningMessage(item.message) ? "reasoning" : item.message.role}`
++    : item.kind;
+ }
+ 
+ interface TimelineMinimapItem {
+@@ -883,7 +911,7 @@ function resolveFinalAssistantTextForTurn(
+     if (row.message.role === "user") {
+       break;
+     }
+-    if (row.message.role === "assistant") {
++    if (row.message.role === "assistant" && !isReasoningMessage(row.message)) {
+       finalAssistantText = row.message.text ?? null;
+     }
+   }
+@@ -1167,7 +1195,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
+       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
+       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+       {row.kind === "message" && row.message.role === "assistant" ? (
+-        <AssistantTimelineRow row={row} />
++        isReasoningMessage(row.message) ? (
++          <ReasoningTimelineRow row={row} />
++        ) : (
++          <AssistantTimelineRow row={row} />
++        )
+       ) : null}
+       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
+@@ -1498,6 +1530,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
+   );
+ }
+ 
++function ReasoningTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
++  const ctx = use(TimelineRowCtx);
++  const streaming = row.message.streaming;
++  const expanded = resolveReasoningDisclosureExpanded(
++    ctx.reasoningExpansionOverrides,
++    row.message.id,
++    streaming,
++  );
++  const Icon = expanded ? ChevronDownIcon : ChevronRightIcon;
++  const durationMs = Date.parse(row.message.updatedAt) - Date.parse(row.message.createdAt);
++  const label = streaming
++    ? "Thinking..."
++    : Number.isFinite(durationMs) && durationMs >= 1_000
++      ? `Thought for ${formatDuration(durationMs)}`
++      : "Thought";
++  const text = row.message.text;
++
++  return (
++    <div className="min-w-0 px-1 py-0.5">
++      <button
++        type="button"
++        aria-expanded={expanded}
++        data-scroll-anchor-ignore
++        onClick={() => ctx.onToggleReasoningDisclosure(row.message.id, streaming, row.id)}
++        className="flex cursor-pointer select-none items-center gap-1 rounded-md text-sm leading-relaxed text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
++      >
++        <span>{label}</span>
++        <Icon className="size-3.5" />
++      </button>
++      {expanded ? (
++        <div className="mt-1 whitespace-pre-wrap wrap-break-word border-l-2 border-border/60 pl-3 text-sm leading-relaxed text-muted-foreground">
++          {text}
++        </div>
++      ) : null}
++    </div>
++  );
++}
++
+ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+   const ctx = use(TimelineRowCtx);
+   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+diff --git a/docs/README.md b/docs/README.md
+index 4e6f82bfb82655293965a492db6c86889cc6efd7..9cf8ea1a5c9f1e02899303e5f0efcc393029788a 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -5,6 +5,7 @@
+ - [Install T3 Code](./user/install.md)
+ - [Messages and context](./user/composer.md)
+ - [Working with threads](./user/thread-sidebar.md)
++- [Reasoning in a thread](./user/reasoning.md)
+ - [Permission modes](./user/permission-modes.md)
+ - [Terminal history](./user/terminal.md)
+ - [Source control](./user/source-control.md)
+diff --git a/docs/internals/glossary.md b/docs/internals/glossary.md
+index f7cb61259c0e3423a0a1aae69f5a730d70b3fa5e..589fb38bc8e265cf0171d5ba38c34f287a8de31f 100644
+--- a/docs/internals/glossary.md
++++ b/docs/internals/glossary.md
+@@ -5,17 +5,18 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
+ 
+ ## Workspace and conversation
+ 
+-| Term           | Meaning                                                                                           |
+-| -------------- | ------------------------------------------------------------------------------------------------- |
+-| Environment    | One running server and the machine, credentials, workspace access, and state it owns.             |
+-| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server. |
+-| Project        | An environment-local workspace record rooted at a directory.                                      |
+-| Workspace root | The project's base filesystem directory on the environment.                                       |
+-| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
+-| Thread         | The durable conversation and work history for a project. It survives provider process exits.      |
+-| Turn           | One user-to-agent work cycle. Provider work can finish before checkpoint and diff work settles.   |
+-| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |
+-| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.             |
++| Term           | Meaning                                                                                                                                                                                     |
++| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
++| Environment    | One running server and the machine, credentials, workspace access, and state it owns.                                                                                                       |
++| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server.                                                                                           |
++| Project        | An environment-local workspace record rooted at a directory.                                                                                                                                |
++| Workspace root | The project's base filesystem directory on the environment.                                                                                                                                 |
++| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                                                                                                            |
++| Thread         | The durable conversation and work history for a project. It survives provider process exits.                                                                                                |
++| Turn           | One user-to-agent work cycle. Provider work can finish before checkpoint and diff work settles.                                                                                             |
++| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                                                                                                                   |
++| Reasoning      | An assistant message with `channel: "reasoning"`, one burst of provider thinking. It never settles a turn, binds a checkpoint, or seeds a thread title; check it with `isReasoningMessage`. |
++| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.                                                                                                       |
+ 
+ ## Orchestration
+ 
+diff --git a/docs/user/providers-claude.md b/docs/user/providers-claude.md
+index b43b58e5262761f7caa18d40bac3d27d608a3412..d8d4cb60e0b38f599e380a0dda47f1be53c8cd46 100644
+--- a/docs/user/providers-claude.md
++++ b/docs/user/providers-claude.md
+@@ -49,6 +49,12 @@ You can also send `/compact` in an existing conversation. Web and desktop offer
+ a large older thread. See [commands and skills](./composer.md#commands-and-skills)
+ for using composer commands.
+ 
++## Thinking
++
++Claude's thinking appears in the thread timeline as **Thought** rows. Recent Claude
++Code versions do not hand out raw thinking, so T3 Code asks for the summarized form
++and that summary is what you read. See [reasoning in a thread](./reasoning.md).
++
+ ## Usage limits
+ 
+ If your Claude subscription runs out of usage mid-turn, the thread shows which
+diff --git a/docs/user/reasoning.md b/docs/user/reasoning.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..64a8d2fa4bc47dddf8b9df852f6a9f4b7839b07e
+--- /dev/null
++++ b/docs/user/reasoning.md
+@@ -0,0 +1,23 @@
++# Reasoning in a thread
++
++Some providers report the thinking they do before answering. Each burst of it becomes one
++collapsible row in the thread timeline, tucked under the turn's **Worked for …** group with the
++tools the agent ran. The row reads **Thinking…** while it arrives and **Thought for 4s** once it
++finishes. It collapses on its own when the thinking ends, so the answer stays the thing you see.
++Click the row to read it.
++
++Delivery follows the same setting as assistant text. With **Stream token by token (legacy)** on in
++**Settings → General**, thinking streams in as it is produced. With it off, which is the default,
++each thought appears as one finished block.
++
++Reasoning never changes the outcome of a turn. It does not keep a turn from settling, it is not
++part of checkpoints or turn diffs, it never becomes a thread title, and thread search and the
++timeline's jump markers skip it.
++
++## Where it shows up
++
++Claude, Codex, OpenCode, and Antigravity report reasoning. Cursor and Grok do not, and their
++threads look the same as before. Thoughts appear on web and desktop. The mobile app does not show them yet.
++
++For Claude, what you read is a summary of the thinking rather than the model's raw words. Recent
++Claude Code versions do not hand out raw thinking, so T3 Code asks for the summarized form.
+diff --git a/packages/client-runtime/src/state/threadReducer.test.ts b/packages/client-runtime/src/state/threadReducer.test.ts
+index 401980997663b48b61937319943241186ae752c9..59b64eccd756eda31c0fab23b754caecf42ec982 100644
+--- a/packages/client-runtime/src/state/threadReducer.test.ts
++++ b/packages/client-runtime/src/state/threadReducer.test.ts
+@@ -630,6 +630,58 @@ describe("applyThreadDetailEvent", () => {
+         expect(result.thread.checkpoints[0]?.assistantMessageId).toBe("msg-2");
+       }
+     });
++
++    it("stores reasoning messages without rebinding answer or checkpoint semantics", () => {
++      const turnId = TurnId.make("turn-1");
++      const thread: OrchestrationThread = {
++        ...baseThread,
++        latestTurn: {
++          turnId,
++          state: "running",
++          requestedAt: "2026-04-01T06:59:00.000Z",
++          startedAt: "2026-04-01T06:59:00.000Z",
++          completedAt: null,
++          assistantMessageId: MessageId.make("answer-1"),
++        },
++        checkpoints: [
++          {
++            turnId,
++            checkpointTurnCount: 1,
++            checkpointRef: CheckpointRef.make("ref-1"),
++            status: "ready",
++            files: [],
++            assistantMessageId: MessageId.make("answer-1"),
++            completedAt: "2026-04-01T07:00:00.000Z",
++          },
++        ],
++      };
++      const result = applyThreadDetailEvent(thread, {
++        ...baseEventFields,
++        sequence: 9,
++        occurredAt: "2026-04-01T07:01:00.000Z",
++        aggregateKind: "thread",
++        aggregateId: ThreadId.make("thread-1"),
++        type: "thread.message-sent",
++        payload: {
++          threadId: ThreadId.make("thread-1"),
++          messageId: MessageId.make("reasoning-1"),
++          role: "assistant",
++          channel: "reasoning",
++          text: "Thinking",
++          turnId,
++          streaming: false,
++          createdAt: "2026-04-01T07:01:00.000Z",
++          updatedAt: "2026-04-01T07:01:00.000Z",
++        },
++      });
++
++      expect(result.kind).toBe("updated");
++      if (result.kind === "updated") {
++        expect(result.thread.messages.at(-1)?.channel).toBe("reasoning");
++        expect(result.thread.latestTurn?.assistantMessageId).toBe("answer-1");
++        expect(result.thread.checkpoints[0]?.assistantMessageId).toBe("answer-1");
++      }
++    });
+   });
+ 
+   describe("thread.session-set", () => {
+diff --git a/packages/client-runtime/src/state/threadReducer.ts b/packages/client-runtime/src/state/threadReducer.ts
+index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de4d3584c6 100644
+--- a/packages/client-runtime/src/state/threadReducer.ts
++++ b/packages/client-runtime/src/state/threadReducer.ts
+@@ -1,16 +1,17 @@
+ import { pipe } from "effect/Function";
+ import * as Arr from "effect/Array";
+ import * as O from "effect/Order";
+-import type {
+-  MessageId,
+-  OrchestrationCheckpointSummary,
+-  OrchestrationEvent,
+-  OrchestrationLatestTurn,
+-  OrchestrationMessage,
+-  OrchestrationSession,
+-  OrchestrationThread,
+-  OrchestrationThreadActivity,
+-  TurnId,
++import {
++  isReasoningMessage,
++  type MessageId,
++  type OrchestrationCheckpointSummary,
++  type OrchestrationEvent,
++  type OrchestrationLatestTurn,
++  type OrchestrationMessage,
++  type OrchestrationSession,
++  type OrchestrationThread,
++  type OrchestrationThreadActivity,
++  type TurnId,
+ } from "@t3tools/contracts";
+ 
+ export type ThreadDetailReducerResult =
+@@ -305,6 +306,7 @@ export function applyThreadDetailEvent(
+       const message: OrchestrationMessage = {
+         id: event.payload.messageId,
+         role: event.payload.role,
++        ...(event.payload.channel !== undefined ? { channel: event.payload.channel } : {}),
+         text: event.payload.text,
+         ...(event.payload.attachments !== undefined
+           ? { attachments: event.payload.attachments }
+@@ -328,6 +330,7 @@ export function applyThreadDetailEvent(
+                       ? message.text
+                       : entry.text,
+                   streaming: message.streaming,
++                  ...(message.channel !== undefined ? { channel: message.channel } : {}),
+                   ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
+                   ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
+                   ...(message.attachments !== undefined
+@@ -350,6 +353,7 @@ export function applyThreadDetailEvent(
+       const latestTurn = reuseLatestTurn(
+         thread.latestTurn,
+         event.payload.role === "assistant" &&
++          !isReasoningMessage(event.payload) &&
+           event.payload.turnId !== null &&
+           (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
+           ? {
+@@ -382,7 +386,9 @@ export function applyThreadDetailEvent(
+       // Rebind checkpoint assistant message IDs for assistant messages. The
+       // helper hands back the same array when the entry is already bound.
+       const checkpoints =
+-        event.payload.role === "assistant" && event.payload.turnId !== null
++        event.payload.role === "assistant" &&
++        !isReasoningMessage(event.payload) &&
++        event.payload.turnId !== null
+           ? rebindCheckpointAssistantMessage(
+               thread.checkpoints,
+               event.payload.turnId,
+diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
+index 17cadc6d1d7f935d2bcb0756e9bb7ef67eda8769..4486d3058e6377fb59e58f02e7f65b54baf3459f 100644
+--- a/packages/contracts/src/orchestration.ts
++++ b/packages/contracts/src/orchestration.ts
+@@ -351,9 +351,13 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
+ export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
+ export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
+ 
++export const OrchestrationMessageChannel = Schema.Literal("reasoning");
++export type OrchestrationMessageChannel = typeof OrchestrationMessageChannel.Type;
++
+ export const OrchestrationMessage = Schema.Struct({
+   id: MessageId,
+   role: OrchestrationMessageRole,
++  channel: Schema.optional(OrchestrationMessageChannel),
+   text: Schema.String,
+   attachments: Schema.optional(Schema.Array(ChatAttachment)),
+   turnId: Schema.NullOr(TurnId),
+@@ -363,6 +367,12 @@ export const OrchestrationMessage = Schema.Struct({
+ });
+ export type OrchestrationMessage = typeof OrchestrationMessage.Type;
+ 
++export function isReasoningMessage(message: {
++  readonly channel?: OrchestrationMessageChannel | undefined;
++}): boolean {
++  return message.channel === "reasoning";
++}
++
+ export const OrchestrationProposedPlanId = TrimmedNonEmptyString;
+ export type OrchestrationProposedPlanId = typeof OrchestrationProposedPlanId.Type;
+ 
+@@ -1109,6 +1119,7 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
+   threadId: ThreadId,
+   messageId: MessageId,
+   delta: Schema.String,
++  channel: Schema.optional(OrchestrationMessageChannel),
+   turnId: Schema.optional(TurnId),
+   createdAt: IsoDateTime,
+ });
+@@ -1118,6 +1129,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
+   commandId: CommandId,
+   threadId: ThreadId,
+   messageId: MessageId,
++  channel: Schema.optional(OrchestrationMessageChannel),
+   turnId: Schema.optional(TurnId),
+   createdAt: IsoDateTime,
+ });
+@@ -1372,6 +1384,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
+   threadId: ThreadId,
+   messageId: MessageId,
+   role: OrchestrationMessageRole,
++  channel: Schema.optional(OrchestrationMessageChannel),
+   text: Schema.String,
+   attachments: Schema.optional(Schema.Array(ChatAttachment)),
+   turnId: Schema.NullOr(TurnId),
