@@ -1,0 +1,2005 @@
+diff --git a/apps/server/src/cloud/queuedUpdate.ts b/apps/server/src/cloud/queuedUpdate.ts
+new file mode 100644
+index 000000000..301609c9c
+--- /dev/null
++++ b/apps/server/src/cloud/queuedUpdate.ts
+@@ -0,0 +1,620 @@
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import type * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Option from "effect/Option";
++import * as Path from "effect/Path";
++import * as Schedule from "effect/Schedule";
++import * as Schema from "effect/Schema";
++import * as Semaphore from "effect/Semaphore";
++
++import { isExactServiceVersion } from "./serviceProtocol.ts";
++
++/**
++ * Stages, in order. `updating` is the point of no return for commands: an
++ * activation attempt is running, so `cancel`, `retry`, and a different
++ * `queue` target are rejected until the attempt answers. A decline moves back
++ * to `queued` and re-enables them; a handoff keeps `updating` forever.
++ */
++export const QueuedUpdateStage = Schema.Literals([
++  "downloading",
++  "queued",
++  "updating",
++  "current",
++  "failed",
++]);
++export type QueuedUpdateStage = typeof QueuedUpdateStage.Type;
++
++/** Exact SemVer only, so a dist-tag or range can never reach disk, the stager, or the launcher. */
++const ExactVersion = Schema.String.check(
++  Schema.makeFilter(isExactServiceVersion, { expected: "an exact t3 version" }),
++);
++
++/**
++ * Identity of a prepared runtime as the stager reports it. `artifactId` is
++ * whatever the stager can re-resolve (a pinned runtime directory, a package
++ * hash); it is never a client-supplied path.
++ */
++export const StagedArtifact = Schema.Struct({
++  version: ExactVersion,
++  artifactId: Schema.String.check(
++    Schema.makeFilter((id) => id.trim() !== "", { expected: "a non-empty artifact id" }),
++  ),
++});
++export type StagedArtifact = typeof StagedArtifact.Type;
++const isStagedArtifact = Schema.is(StagedArtifact);
++
++const PersistedQueuedUpdate = Schema.Struct({
++  version: Schema.Literal(1),
++  stage: QueuedUpdateStage,
++  targetVersion: ExactVersion,
++  staged: Schema.optional(StagedArtifact),
++  reason: Schema.optional(Schema.String),
++});
++type PersistedQueuedUpdate = typeof PersistedQueuedUpdate.Type;
++
++const PersistedQueuedUpdateJson = Schema.fromJsonString(PersistedQueuedUpdate);
++const decodePersistedQueuedUpdate = Schema.decodeUnknownEffect(PersistedQueuedUpdateJson);
++const encodePersistedQueuedUpdate = Schema.encodeSync(PersistedQueuedUpdateJson);
++
++/** The durable state file could not be read, decoded, or written. Decode failures are fatal on boot: the controller refuses to guess. */
++export class QueuedUpdateStateError extends Schema.TaggedErrorClass<QueuedUpdateStateError>()(
++  "QueuedUpdateStateError",
++  {
++    operation: Schema.Literals(["read", "decode", "persist"]),
++    statePath: Schema.String,
++    cause: Schema.Defect(),
++  },
++) {
++  override get message(): string {
++    return this.operation === "decode"
++      ? `Queued update state at ${this.statePath} is unreadable; refusing to install or reset it. Fix or remove the file: ${String(this.cause)}`
++      : `Failed to ${this.operation} queued update state at ${this.statePath}.`;
++  }
++}
++
++/** Typed failure from the injected stage or activation step. */
++export class QueuedUpdateStepError extends Schema.TaggedErrorClass<QueuedUpdateStepError>()(
++  "QueuedUpdateStepError",
++  {
++    step: Schema.Literals(["stage", "activate"]),
++    reason: Schema.String,
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    return this.reason;
++  }
++}
++
++export class QueuedUpdateRejectedError extends Schema.TaggedErrorClass<QueuedUpdateRejectedError>()(
++  "QueuedUpdateRejectedError",
++  {
++    reason: Schema.Literals([
++      "invalid-version",
++      "handoff-accepted",
++      "activation-in-progress",
++      "already-installed",
++      "nothing-to-retry",
++    ]),
++  },
++) {
++  override get message(): string {
++    switch (this.reason) {
++      case "invalid-version":
++        return "Updates need an exact t3 version such as 1.2.3.";
++      case "handoff-accepted":
++        return "The update has been handed off; the server is restarting.";
++      case "activation-in-progress":
++        return "The update is being activated; wait for it to finish or be declined.";
++      case "already-installed":
++        return "That version is already installed.";
++      case "nothing-to-retry":
++        return "There is no failed update to retry.";
++    }
++  }
++}
++
++/** Activation was not performed. The success channel carries only declines: nothing here ever grants permission to install. */
++export interface ActivationDeclined {
++  readonly status: "busy" | "unknown";
++  readonly reason: string;
++}
++
++export interface QueuedUpdateDependencies {
++  /** File owned exclusively by this controller. */
++  readonly statePath: string;
++  /** The version this process is running. Authoritative over anything on disk. */
++  readonly installedVersion: string;
++  /** How long to wait after a decline before asking again. */
++  readonly pollInterval: Duration.Input;
++  /** Downloads and verifies the exact version. May run while agents are busy. */
++  readonly stage: (targetVersion: string) => Effect.Effect<StagedArtifact, QueuedUpdateStepError>;
++  /**
++   * Owns the admission gate and the real activity check. Returns a decline
++   * without activating, fails with a typed error, or runs `onHandoffAccepted`
++   * once the process is committed to restart and then never returns. The
++   * controller never interrupts it and rejects every command while it runs, so
++   * it must answer promptly when the environment is known busy (check activity
++   * before closing admissions) rather than wait for idleness.
++   */
++  readonly tryActivate: (
++    staged: StagedArtifact,
++    onHandoffAccepted: Effect.Effect<void>,
++  ) => Effect.Effect<ActivationDeclined, QueuedUpdateStepError>;
++}
++
++export interface QueuedUpdateState {
++  readonly stage: QueuedUpdateStage;
++  readonly installedVersion: string;
++  readonly targetVersion: string;
++  readonly staged: StagedArtifact | undefined;
++  readonly reason: string | undefined;
++  readonly handoffAccepted: boolean;
++  /**
++   * False while the state names what a just-renamed file says but its
++   * directory barrier has not landed: no command has been acknowledged for it
++   * and a restart may still find the previous state. Commands and `awaitState`
++   * only act on or report durable state; `getState` reports either.
++   */
++  readonly durable: boolean;
++}
++
++export type QueuedUpdateCommandError = QueuedUpdateRejectedError | QueuedUpdateStateError;
++
++export interface QueuedUpdateShape {
++  /**
++   * Records the intent durably and returns; staging and activation happen in
++   * the background. Rejects inexact versions before touching disk, and a
++   * different target while `updating`. The same target is idempotent.
++   */
++  readonly queue: (
++    targetVersion: string,
++  ) => Effect.Effect<QueuedUpdateState, QueuedUpdateCommandError>;
++  /** Drops the pending target and interrupts staging or waiting. Rejected while `updating`. */
++  readonly cancel: Effect.Effect<QueuedUpdateState, QueuedUpdateCommandError>;
++  /** Re-stages a failed target. Rejected while `updating`. */
++  readonly retry: Effect.Effect<QueuedUpdateState, QueuedUpdateCommandError>;
++  readonly getState: Effect.Effect<QueuedUpdateState>;
++  /** Resolves with the first state (current included) satisfying `predicate`. */
++  readonly awaitState: (
++    predicate: (state: QueuedUpdateState) => boolean,
++  ) => Effect.Effect<QueuedUpdateState>;
++}
++
++export class QueuedUpdate extends Context.Service<QueuedUpdate, QueuedUpdateShape>()(
++  "t3/cloud/queuedUpdate",
++) {}
++
++interface Failed {
++  readonly _tag: "failed";
++  readonly reason: string;
++}
++interface Woken {
++  readonly _tag: "woken";
++}
++type Declined = ActivationDeclined & { readonly _tag: "declined" };
++const WOKEN: Woken = { _tag: "woken" };
++
++const isRejected = Schema.is(QueuedUpdateRejectedError);
++
++/** Turns a step's typed failure or defect into a value so the worker loop never dies. */
++const settle = <A, O>(
++  effect: Effect.Effect<A, QueuedUpdateStepError>,
++  onSuccess: (value: A) => O,
++): Effect.Effect<O | Failed> =>
++  effect.pipe(
++    Effect.map((value): O | Failed => onSuccess(value)),
++    Effect.catch((error) => Effect.succeed<Failed>({ _tag: "failed", reason: error.reason })),
++    Effect.catchDefect((defect) =>
++      Effect.succeed<Failed>({
++        _tag: "failed",
++        reason: defect instanceof Error ? defect.message : String(defect),
++      }),
++    ),
++  );
++
++export const make = Effect.fn("queuedUpdate.make")(function* (deps: QueuedUpdateDependencies) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const { statePath, installedVersion } = deps;
++  const stateError = (operation: QueuedUpdateStateError["operation"], cause: unknown) =>
++    new QueuedUpdateStateError({ operation, statePath, cause });
++
++  const stateDirectory = path.dirname(statePath);
++  const tempPath = `${statePath}.tmp`;
++  const encoder = new TextEncoder();
++
++  const syncDirectory = (directory: string) =>
++    Effect.scoped(fs.open(directory, { flag: "r" }).pipe(Effect.flatMap((handle) => handle.sync)));
++
++  /**
++   * A directory created for the state file is an entry in its parent, and that
++   * entry is only durable once the parent has been fsynced. A previous process
++   * may have created part of the path and died before proving it, leaving
++   * directories that exist but that a power loss can still forget, so nothing
++   * on disk can tell this controller which entries are owed a sync. Before its
++   * first replacement it therefore creates whatever is missing and syncs every
++   * ancestor from the state directory's parent up to the filesystem root,
++   * deepest first. A failure part-way repeats the whole chain next time. Once
++   * proven, later replacements only need the leaf to still exist; if it went
++   * missing, the chain is proven again.
++   */
++  let ancestryProven = false;
++  const ensureStateDirectory = Effect.gen(function* () {
++    if (ancestryProven && (yield* fs.exists(stateDirectory))) return;
++    yield* fs.makeDirectory(stateDirectory, { recursive: true, mode: 0o700 });
++    for (let ancestor = path.dirname(stateDirectory); ; ancestor = path.dirname(ancestor)) {
++      yield* syncDirectory(ancestor);
++      if (path.dirname(ancestor) === ancestor) break;
++    }
++    ancestryProven = true;
++  });
++
++  /**
++   * Writes and fsyncs a sibling temp file, then renames it over the state
++   * file. Until the rename returns, the old state is untouched on disk.
++   */
++  const replace = Effect.fn("queuedUpdate.replace")(
++    function* (next: PersistedQueuedUpdate) {
++      yield* ensureStateDirectory;
++      yield* Effect.scoped(
++        Effect.gen(function* () {
++          const file = yield* fs.open(tempPath, { flag: "w", mode: 0o600 });
++          yield* file.writeAll(encoder.encode(`${encodePersistedQueuedUpdate(next)}\n`));
++          yield* file.sync;
++        }),
++      );
++      yield* fs.rename(tempPath, statePath);
++    },
++    Effect.mapError((cause) => stateError("persist", cause)),
++  );
++
++  /**
++   * The durability barrier: fsyncs the parent directory so the rename itself
++   * survives power loss. Nothing is acknowledged until this has landed.
++   */
++  const barrier = syncDirectory(stateDirectory).pipe(
++    Effect.mapError((cause) => stateError("persist", cause)),
++  );
++
++  const persist = (next: PersistedQueuedUpdate) => replace(next).pipe(Effect.andThen(barrier));
++
++  const load = fs.readFileString(statePath).pipe(
++    Effect.map(Option.some),
++    Effect.catch((error) =>
++      error.reason._tag === "NotFound"
++        ? Effect.succeed(Option.none<string>())
++        : Effect.fail(stateError("read", error)),
++    ),
++    Effect.flatMap(
++      Option.match({
++        onNone: () => Effect.succeed(Option.none<PersistedQueuedUpdate>()),
++        onSome: (raw) =>
++          decodePersistedQueuedUpdate(raw).pipe(
++            Effect.map(Option.some),
++            Effect.mapError((cause) => stateError("decode", cause)),
++          ),
++      }),
++    ),
++  );
++
++  const currentInstalled: PersistedQueuedUpdate = {
++    version: 1,
++    stage: "current",
++    targetVersion: installedVersion,
++  };
++  // The previous process may have died anywhere between staging and
++  // activation. Only the exact target survives a boot; the artifact is
++  // re-staged rather than trusted.
++  const reconcile = (prior: PersistedQueuedUpdate): PersistedQueuedUpdate => {
++    if (prior.targetVersion === installedVersion || prior.stage === "current") {
++      return currentInstalled;
++    }
++    if (prior.stage === "failed") return prior;
++    return { version: 1, stage: "downloading", targetVersion: prior.targetVersion };
++  };
++  const prior = yield* load;
++  let current = Option.isNone(prior) ? currentInstalled : reconcile(prior.value);
++  if (Option.isSome(prior) && current !== prior.value) {
++    yield* persist(current);
++  }
++
++  /**
++   * `current` mirrors the pathname on disk from the moment a rename returns,
++   * whether or not that rename would survive power loss; `getState` reports it
++   * as such. `durable` says the barrier has landed on top of it. Until it has,
++   * no command is acknowledged (each first re-runs the barrier under the
++   * mutex), `awaitState` waiters are not told, and the worker neither stages
++   * nor reserves, so nothing acts on state the disk may still forget.
++   */
++  let durable = true;
++  let handoffAccepted = false;
++  let wake = Deferred.makeUnsafe<void>();
++  const waiters = new Set<{
++    readonly predicate: (state: QueuedUpdateState) => boolean;
++    readonly deferred: Deferred.Deferred<QueuedUpdateState>;
++  }>();
++  const mutex = yield* Semaphore.make(1);
++
++  const snapshot = (): QueuedUpdateState => ({
++    stage: current.stage,
++    installedVersion,
++    targetVersion: current.targetVersion,
++    staged: current.staged,
++    reason: current.reason,
++    handoffAccepted,
++    durable,
++  });
++
++  const notify = () => {
++    const state = snapshot();
++    for (const waiter of waiters) {
++      if (waiter.predicate(state)) {
++        waiters.delete(waiter);
++        Deferred.doneUnsafe(waiter.deferred, Effect.succeed(state));
++      }
++    }
++  };
++
++  /**
++   * The only writer. Decides under the mutex against the latest durable state,
++   * persists before acknowledging, and cannot be interrupted in between.
++   * `wake` interrupts whatever the worker is staging or waiting on. Because
++   * every command is refused while `updating`, no command persist can be in
++   * flight when an attempt accepts the handoff.
++   *
++   * A persist failure before the rename leaves both disk and memory as they
++   * were. One after the rename (the barrier) still fails the caller, but the
++   * new state is already what the pathname names, so memory follows it and the
++   * next commit must prove it durable before deciding anything on top of it.
++   */
++  const commit = (
++    decide: (
++      state: PersistedQueuedUpdate,
++    ) => PersistedQueuedUpdate | QueuedUpdateRejectedError | undefined,
++    options: { readonly wake: boolean },
++  ): Effect.Effect<QueuedUpdateState, QueuedUpdateCommandError> =>
++    mutex.withPermits(1)(
++      Effect.uninterruptible(
++        Effect.gen(function* () {
++          if (!durable) {
++            yield* barrier;
++            durable = true;
++            notify();
++          }
++          const next = decide(current);
++          if (next === undefined) return snapshot();
++          if (isRejected(next)) return yield* next;
++          yield* replace(next);
++          current = next;
++          durable = false;
++          // Waiters and the worker learn of the state once its barrier has
++          // landed, so nothing observed through the service can be forgotten
++          // by the disk. On failure the worker still wakes, to retry it.
++          // `durable` is settled before the wake because the woken fiber may
++          // run before this one resumes.
++          yield* barrier.pipe(
++            Effect.tap(() =>
++              Effect.sync(() => {
++                durable = true;
++                notify();
++              }),
++            ),
++            Effect.ensuring(
++              Effect.sync(() => {
++                if (options.wake) Deferred.doneUnsafe(wake, Effect.void);
++              }),
++            ),
++          );
++          return snapshot();
++        }),
++      ),
++    );
++
++  /**
++   * For decisions that become no-ops once applied: keeps trying on the poll
++   * interval until the disk accepts the transition and its barrier. Cannot
++   * fail: these decisions never reject, and state errors are retried forever.
++   */
++  const commitDurably = (
++    decide: (state: PersistedQueuedUpdate) => PersistedQueuedUpdate | undefined,
++  ) =>
++    commit(decide, { wake: false }).pipe(
++      Effect.tapError((error) => Effect.logWarning(error.message, { cause: error })),
++      Effect.retry({
++        schedule: Schedule.spaced(deps.pollInterval),
++        while: (error) => error._tag === "QueuedUpdateStateError",
++      }),
++      Effect.orDie,
++    );
++
++  const matches = (state: PersistedQueuedUpdate, stage: QueuedUpdateStage, targetVersion: string) =>
++    state.stage === stage && state.targetVersion === targetVersion;
++
++  const untilWoken = <O>(
++    effect: Effect.Effect<O>,
++    signal: Deferred.Deferred<void>,
++  ): Effect.Effect<O | Woken> =>
++    Effect.raceFirst(effect, Deferred.await(signal).pipe(Effect.as(WOKEN)));
++
++  const acceptHandoff = Effect.sync(() => {
++    handoffAccepted = true;
++    notify();
++  });
++
++  const stageStep = Effect.fn("queuedUpdate.stageStep")(function* (
++    targetVersion: string,
++    signal: Deferred.Deferred<void>,
++  ) {
++    const outcome = yield* untilWoken(
++      settle(deps.stage(targetVersion), (staged) => ({ _tag: "staged" as const, staged })),
++      signal,
++    );
++    if (outcome._tag === "woken") return;
++    const next: PersistedQueuedUpdate =
++      outcome._tag === "failed"
++        ? { version: 1, stage: "failed", targetVersion, reason: outcome.reason }
++        : isStagedArtifact(outcome.staged) && outcome.staged.version === targetVersion
++          ? { version: 1, stage: "queued", targetVersion, staged: outcome.staged }
++          : {
++              version: 1,
++              stage: "failed",
++              targetVersion,
++              reason: `The stager returned an invalid artifact for t3@${targetVersion}.`,
++            };
++    yield* commit((state) => (matches(state, "downloading", targetVersion) ? next : undefined), {
++      wake: false,
++    });
++  });
++
++  const activateStep = Effect.fn("queuedUpdate.activateStep")(function* (
++    targetVersion: string,
++    staged: StagedArtifact,
++    signal: Deferred.Deferred<void>,
++  ) {
++    // Retried so a reservation whose rename landed without its barrier is
++    // proven durable rather than abandoned; activation waits for that proof.
++    const updating = yield* commitDurably((state) =>
++      matches(state, "queued", targetVersion)
++        ? { version: 1, stage: "updating", targetVersion, staged }
++        : undefined,
++    );
++    if (updating.stage !== "updating" || updating.targetVersion !== targetVersion) return;
++
++    // Persisted `updating` means no command can change the target until the
++    // attempt answers, so nothing here needs to be interruptible or fenced.
++    // Only the owning scope closing can interrupt the attempt.
++    const outcome = yield* settle(
++      deps.tryActivate(staged, acceptHandoff),
++      (declined): Declined => ({ _tag: "declined", ...declined }),
++    );
++    // The callback promised never to return after acceptance. Hold `updating`
++    // rather than record an answer that would contradict the restart.
++    if (handoffAccepted) return yield* Effect.never;
++
++    const next: PersistedQueuedUpdate =
++      outcome._tag === "failed"
++        ? { version: 1, stage: "failed", targetVersion, staged, reason: outcome.reason }
++        : {
++            version: 1,
++            stage: "queued",
++            targetVersion,
++            staged,
++            reason: `${outcome.status}: ${outcome.reason}`,
++          };
++    // The answer is known and no handoff happened, so all that is left is
++    // making it durable. A transient persist failure must not drop the answer,
++    // re-ask, or release the reservation: hold `updating` (commands keep being
++    // rejected) and retry the write on the poll interval until it lands.
++    const after = yield* commitDurably((state) =>
++      matches(state, "updating", targetVersion) ? next : undefined,
++    );
++    if (
++      next.stage === "queued" &&
++      after.stage === "queued" &&
++      after.targetVersion === targetVersion
++    ) {
++      yield* untilWoken(Effect.sleep(deps.pollInterval), signal);
++    }
++  });
++
++  const iteration = Effect.fn("queuedUpdate.iteration")(function* (
++    signal: Deferred.Deferred<void>,
++  ) {
++    // Never stage or reserve on a rename the disk may still forget.
++    if (!durable) {
++      const settled = yield* untilWoken(
++        commitDurably(() => undefined),
++        signal,
++      );
++      if (settled === WOKEN) return;
++    }
++    const state = current;
++    if (state.stage === "current" || state.stage === "failed") {
++      yield* Deferred.await(signal);
++    } else if (state.stage === "downloading") {
++      yield* stageStep(state.targetVersion, signal);
++    } else if (state.stage === "queued" && state.staged !== undefined) {
++      yield* activateStep(state.targetVersion, state.staged, signal);
++    } else {
++      yield* commit(
++        (latest) =>
++          latest === state
++            ? { version: 1, stage: "downloading", targetVersion: state.targetVersion }
++            : undefined,
++        { wake: false },
++      );
++    }
++  });
++
++  const worker = Effect.gen(function* () {
++    while (true) {
++      wake = Deferred.makeUnsafe<void>();
++      const signal = wake;
++      yield* iteration(signal).pipe(
++        // A rename that landed without its barrier is retried by the next
++        // iteration; any other persist failure waits for a command.
++        Effect.catchTag("QueuedUpdateStateError", (error) =>
++          Effect.logError(error.message, { cause: error }).pipe(
++            Effect.andThen(Effect.suspend(() => (durable ? Deferred.await(signal) : Effect.void))),
++          ),
++        ),
++      );
++    }
++  });
++  yield* Effect.forkScoped(worker);
++
++  const reject = (reason: QueuedUpdateRejectedError["reason"]) =>
++    new QueuedUpdateRejectedError({ reason });
++  // Decided under the mutex before any persist, so a command can never be
++  // half-applied while an attempt runs or hands off.
++  const blockedByAttempt = (state: PersistedQueuedUpdate) =>
++    handoffAccepted
++      ? reject("handoff-accepted")
++      : state.stage === "updating"
++        ? reject("activation-in-progress")
++        : undefined;
++
++  const queue: QueuedUpdateShape["queue"] = (targetVersion) =>
++    commit(
++      (state) => {
++        if (!isExactServiceVersion(targetVersion)) return reject("invalid-version");
++        if (targetVersion === installedVersion) return reject("already-installed");
++        if (state.targetVersion === targetVersion && state.stage !== "failed") return undefined;
++        return blockedByAttempt(state) ?? { version: 1, stage: "downloading", targetVersion };
++      },
++      { wake: true },
++    );
++
++  const cancel: QueuedUpdateShape["cancel"] = commit(
++    (state) =>
++      state.stage === "current" ? undefined : (blockedByAttempt(state) ?? currentInstalled),
++    { wake: true },
++  );
++
++  const retry: QueuedUpdateShape["retry"] = commit(
++    (state) =>
++      blockedByAttempt(state) ??
++      (state.stage === "failed"
++        ? { version: 1, stage: "downloading", targetVersion: state.targetVersion }
++        : reject("nothing-to-retry")),
++    { wake: true },
++  );
++
++  const awaitState: QueuedUpdateShape["awaitState"] = (predicate) =>
++    Effect.suspend(() => {
++      const state = snapshot();
++      // A match on undurable state waits for its barrier like any other
++      // observer; `notify` runs again once it lands.
++      if (state.durable && predicate(state)) return Effect.succeed(state);
++      const waiter = { predicate, deferred: Deferred.makeUnsafe<QueuedUpdateState>() };
++      waiters.add(waiter);
++      return Deferred.await(waiter.deferred).pipe(
++        Effect.onInterrupt(() => Effect.sync(() => waiters.delete(waiter))),
++      );
++    });
++
++  return QueuedUpdate.of({ queue, cancel, retry, getState: Effect.sync(snapshot), awaitState });
++});
+diff --git a/apps/server/src/cloud/queuedUpdate.test.ts b/apps/server/src/cloud/queuedUpdate.test.ts
+new file mode 100644
+index 000000000..aed766968
+--- /dev/null
++++ b/apps/server/src/cloud/queuedUpdate.test.ts
+@@ -0,0 +1,1373 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import * as Deferred from "effect/Deferred";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as FileSystem from "effect/FileSystem";
++import * as Path from "effect/Path";
++import * as PlatformError from "effect/PlatformError";
++import * as Schema from "effect/Schema";
++import * as Scope from "effect/Scope";
++import { TestClock } from "effect/testing";
++
++import {
++  make,
++  QueuedUpdateRejectedError,
++  QueuedUpdateStateError,
++  QueuedUpdateStepError,
++  type ActivationDeclined,
++  type QueuedUpdateCommandError,
++  type QueuedUpdateDependencies,
++  type QueuedUpdateShape,
++  type StagedArtifact,
++} from "./queuedUpdate.ts";
++
++const INSTALLED = "1.1.0";
++const TARGET = "1.2.0";
++const NEWER = "1.3.0";
++const POLL = Duration.minutes(5);
++
++type Activate = QueuedUpdateDependencies["tryActivate"];
++type Stage = QueuedUpdateDependencies["stage"];
++
++const UnknownJson = Schema.fromJsonString(Schema.Unknown);
++const decodeJson = Schema.decodeUnknownEffect(UnknownJson);
++const encodeJson = Schema.encodeSync(UnknownJson);
++const isRejected = Schema.is(QueuedUpdateRejectedError);
++
++const artifactFor = (version: string): StagedArtifact => ({
++  version,
++  artifactId: `artifact-${version}`,
++});
++
++const declined =
++  (status: ActivationDeclined["status"], reason: string): Activate =>
++  () =>
++    Effect.succeed({ status, reason });
++
++const rejectedReason = (error: QueuedUpdateCommandError) =>
++  error._tag === "QueuedUpdateRejectedError"
++    ? error.reason
++    : assert.fail(`expected a rejection, got ${error._tag}`);
++
++/** Staging that blocks until interrupted, reporting when it is actually running and when it was interrupted. */
++const blockedStaging = Effect.fn("blockedStaging")(function* () {
++  const started = yield* Deferred.make<void>();
++  const interrupted = yield* Deferred.make<void>();
++  const stage: Stage = () =>
++    Deferred.succeed(started, undefined).pipe(
++      Effect.andThen(Effect.never),
++      Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
++    );
++  return { stage, started, interrupted };
++});
++
++/**
++ * Fake stager/activator with swappable behavior plus call logs and the state
++ * file contents observed at each call, so tests can prove intent was durable
++ * before the side effect started.
++ */
++const makeFakes = Effect.fn("makeFakes")(function* (statePath: string) {
++  const fs = yield* FileSystem.FileSystem;
++  const readState = fs.readFileString(statePath).pipe(Effect.flatMap(decodeJson));
++  const stageCalls: Array<string> = [];
++  const activateCalls: Array<StagedArtifact> = [];
++  const stateAtStage: Array<unknown> = [];
++  const stateAtActivate: Array<unknown> = [];
++  const fakes = {
++    stageCalls,
++    activateCalls,
++    stateAtStage,
++    stateAtActivate,
++    readState,
++    stage: ((version) => Effect.succeed(artifactFor(version))) as Stage,
++    activate: declined("busy", "agent running") as Activate,
++  };
++  const deps = {
++    stage: (version: string) =>
++      Effect.gen(function* () {
++        stageCalls.push(version);
++        stateAtStage.push(yield* readState.pipe(Effect.orDie));
++        return yield* fakes.stage(version);
++      }),
++    tryActivate: (staged: StagedArtifact, onHandoffAccepted: Effect.Effect<void>) =>
++      Effect.gen(function* () {
++        activateCalls.push(staged);
++        stateAtActivate.push(yield* readState.pipe(Effect.orDie));
++        return yield* fakes.activate(staged, onHandoffAccepted);
++      }),
++  };
++  return { fakes, deps };
++});
++
++/** Directories are labelled `directory` for the state file's own, else by their path under the temp root (`.` for the root). */
++type PersistOp =
++  | "mkdir"
++  | "open:file"
++  | "write:file"
++  | "sync:file"
++  | "rename"
++  | `open:directory${string}`
++  | `sync:directory${string}`;
++
++/**
++ * The real filesystem with the persist path made observable: records the
++ * order of the durability-relevant calls for the state file, fails one chosen
++ * call (once, or until cleared) with a PlatformError, and lets a test wait for
++ * the next injected failure or the next landed directory sync.
++ */
++type Disk = Effect.Success<ReturnType<typeof observedFileSystem>>;
++
++const observedFileSystem = Effect.fn("observedFileSystem")(function* (
++  root: string,
++  statePath: string,
++) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const directory = path.dirname(statePath);
++  const labelFor = (target: string): "directory" | "file" | `directory:${string}` =>
++    target === directory
++      ? "directory"
++      : target === `${statePath}.tmp`
++        ? "file"
++        : `directory:${path.relative(root, target) || "."}`;
++  const ops: Array<PersistOp> = [];
++  let failing: { readonly op: PersistOp; readonly once: boolean } | undefined;
++  type Event = "failure" | "sync:directory";
++  const waiters = new Set<{
++    readonly event: Event;
++    remaining: number;
++    readonly deferred: Deferred.Deferred<void>;
++  }>();
++  const emit = (event: Event) => {
++    for (const waiter of waiters) {
++      if (waiter.event === event && --waiter.remaining === 0) {
++        waiters.delete(waiter);
++        Deferred.doneUnsafe(waiter.deferred, Effect.void);
++      }
++    }
++  };
++  /** Resolves once `event` has happened `count` more times. Register it before triggering the event. */
++  const next = (event: Event, count = 1) => {
++    const waiter = { event, remaining: count, deferred: Deferred.makeUnsafe<void>() };
++    waiters.add(waiter);
++    return Deferred.await(waiter.deferred);
++  };
++  const observe = <A, E, R>(
++    op: PersistOp,
++    effect: Effect.Effect<A, E, R>,
++  ): Effect.Effect<A, E | PlatformError.PlatformError, R> =>
++    Effect.suspend((): Effect.Effect<A, E | PlatformError.PlatformError, R> => {
++      ops.push(op);
++      if (failing?.op !== op) {
++        return op === "sync:directory"
++          ? effect.pipe(Effect.tap(() => Effect.sync(() => emit("sync:directory"))))
++          : effect;
++      }
++      if (failing.once) failing = undefined;
++      emit("failure");
++      return Effect.fail(
++        PlatformError.systemError({
++          _tag: "Unknown",
++          module: "FileSystem",
++          method: op,
++          description: `injected ${op} failure`,
++        }),
++      );
++    });
++  const fileSystem = FileSystem.FileSystem.of({
++    ...fs,
++    open: (target, options) => {
++      const label = labelFor(target);
++      return observe(
++        `open:${label}`,
++        fs.open(target, options).pipe(
++          Effect.map((file): FileSystem.File => ({
++            ...file,
++            sync: observe(`sync:${label}`, file.sync),
++            writeAll: (buffer) => observe("write:file", file.writeAll(buffer)),
++          })),
++        ),
++      );
++    },
++    makeDirectory: (target, options) => observe("mkdir", fs.makeDirectory(target, options)),
++    rename: (from, to) => observe("rename", fs.rename(from, to)),
++  });
++  return {
++    fileSystem,
++    ops,
++    next,
++    fail: (op: PersistOp, mode: "once" | "until-cleared") => {
++      failing = { op, once: mode === "once" };
++    },
++    clear: () => {
++      failing = undefined;
++    },
++  };
++});
++
++const setup = Effect.fn("setup")(function* (options?: {
++  readonly installedVersion?: string;
++  readonly statePath?: string;
++  readonly scope?: Scope.Scope;
++  /** Run the controller on `observedFileSystem` instead of the real one. */
++  readonly observed?: boolean;
++  /** Put the state file two absent directories deeper than usual. */
++  readonly nested?: boolean;
++  /** Reuse another controller's observed filesystem and state path, as a restart would. */
++  readonly restartOf?: { readonly root: string; readonly statePath: string; readonly disk: Disk };
++}) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const root =
++    options?.restartOf?.root ??
++    (yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" }));
++  const statePath =
++    options?.restartOf?.statePath ??
++    options?.statePath ??
++    path.join(root, ...(options?.nested ? ["a", "b"] : []), "runtime", "queued-update.json");
++  const { fakes, deps } = yield* makeFakes(statePath);
++  const disk = options?.restartOf?.disk ?? (yield* observedFileSystem(root, statePath));
++  const controller = yield* make({
++    statePath,
++    installedVersion: options?.installedVersion ?? INSTALLED,
++    pollInterval: POLL,
++    ...deps,
++  }).pipe(
++    options?.scope ? Scope.provide(options.scope) : (effect) => effect,
++    options?.observed
++      ? Effect.provideService(FileSystem.FileSystem, disk.fileSystem)
++      : (effect) => effect,
++  );
++  return { controller, fakes, statePath, disk, root };
++});
++
++/** The open/sync pairs the controller records while proving `labels` (directory labels, deepest first). */
++const chain = (labels: ReadonlyArray<string>): Array<PersistOp> =>
++  labels.flatMap((label): Array<PersistOp> => [
++    `open:directory:${label}`,
++    `sync:directory:${label}`,
++  ]);
++
++/** Labels of every directory above the temp root, up to and including the filesystem root. */
++const ancestorsAbove = (root: string) =>
++  Effect.map(Path.Path, (path) => {
++    const labels: Array<string> = [];
++    for (let ancestor = path.dirname(root); ; ancestor = path.dirname(ancestor)) {
++      labels.push(path.relative(root, ancestor));
++      if (path.dirname(ancestor) === ancestor) return labels;
++    }
++  });
++
++/**
++ * Activation answers definitively (busy or a typed failure) but the durable
++ * transition out of `updating` fails once. The reservation must hold until the
++ * answer is durable, then recover on the poll interval without re-asking.
++ */
++const persistFailureRecovers = (answer: "busy" | "failure") =>
++  provide(
++    Effect.gen(function* () {
++      const { controller, fakes, disk } = yield* setup({ observed: true });
++      const asked = yield* Deferred.make<void>();
++      const release = yield* Deferred.make<void>();
++      fakes.activate = () =>
++        Deferred.succeed(asked, undefined).pipe(
++          Effect.andThen(Deferred.await(release)),
++          Effect.andThen(
++            answer === "busy"
++              ? Effect.succeed({ status: "busy" as const, reason: "agent running" })
++              : Effect.fail(
++                  new QueuedUpdateStepError({ step: "activate", reason: "launcher rejected" }),
++                ),
++          ),
++        );
++      const reserved = {
++        version: 1,
++        stage: "updating",
++        targetVersion: TARGET,
++        staged: artifactFor(TARGET),
++      };
++
++      yield* controller.queue(TARGET);
++      yield* Deferred.await(asked);
++      disk.fail("rename", "once");
++      const failed = disk.next("failure");
++      yield* Deferred.succeed(release, undefined);
++      yield* failed;
++
++      assert.equal((yield* controller.getState).stage, "updating");
++      assert.deepStrictEqual(yield* fakes.readState, reserved);
++      assert.equal(
++        rejectedReason(yield* controller.cancel.pipe(Effect.flip)),
++        "activation-in-progress",
++      );
++
++      yield* Effect.yieldNow;
++      yield* TestClock.adjust(POLL);
++      const expectedStage = answer === "busy" ? "queued" : "failed";
++      const expectedReason = answer === "busy" ? "busy: agent running" : "launcher rejected";
++      const recovered = yield* awaitStage(controller, expectedStage);
++      assert.equal(recovered.reason, expectedReason);
++      assert.deepStrictEqual(yield* fakes.readState, {
++        ...reserved,
++        stage: expectedStage,
++        reason: expectedReason,
++      });
++      assert.equal(fakes.activateCalls.length, 1);
++      assert.equal((yield* controller.cancel).stage, "current");
++    }),
++  );
++
++const awaitStage = (controller: QueuedUpdateShape, stage: string, targetVersion?: string) =>
++  controller.awaitState(
++    (state) =>
++      state.stage === stage &&
++      (targetVersion === undefined || state.targetVersion === targetVersion),
++  );
++
++const provide = <A, E>(
++  effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path | Scope.Scope>,
++) => effect.pipe(Effect.scoped, Effect.provide(NodeServices.layer));
++
++describe("queuedUpdate", () => {
++  it.effect("starts current without touching the filesystem when no state exists", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const { controller, statePath } = yield* setup();
++        assert.deepStrictEqual(yield* controller.getState, {
++          stage: "current",
++          installedVersion: INSTALLED,
++          targetVersion: INSTALLED,
++          staged: undefined,
++          reason: undefined,
++          handoffAccepted: false,
++          durable: true,
++        });
++        assert.isFalse(yield* fs.exists(statePath));
++      }),
++    ),
++  );
++
++  it.effect("persists intent before staging and updating before activation", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const { controller, fakes, statePath } = yield* setup();
++        const activationStarted = yield* Deferred.make<void>();
++        fakes.activate = () =>
++          Deferred.succeed(activationStarted, undefined).pipe(Effect.andThen(Effect.never));
++
++        const queued = yield* controller.queue(TARGET);
++        assert.equal(queued.stage, "downloading");
++        assert.equal(queued.targetVersion, TARGET);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "downloading",
++          targetVersion: TARGET,
++        });
++
++        yield* Deferred.await(activationStarted);
++        const updating = yield* awaitStage(controller, "updating");
++        assert.deepStrictEqual(updating.staged, artifactFor(TARGET));
++        assert.deepStrictEqual(fakes.stateAtStage, [
++          { version: 1, stage: "downloading", targetVersion: TARGET },
++        ]);
++        assert.deepStrictEqual(fakes.stateAtActivate, [
++          { version: 1, stage: "updating", targetVersion: TARGET, staged: artifactFor(TARGET) },
++        ]);
++        assert.deepStrictEqual(fakes.activateCalls, [artifactFor(TARGET)]);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "updating",
++          targetVersion: TARGET,
++          staged: artifactFor(TARGET),
++        });
++        const info = yield* fs.stat(statePath);
++        assert.equal(Number(info.mode) & 0o777, 0o600);
++      }),
++    ),
++  );
++
++  it.effect("a busy environment keeps the update queued and re-asks after the poll interval", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        const secondAsk = yield* Deferred.make<void>();
++        fakes.activate = (staged, onHandoffAccepted) =>
++          fakes.activateCalls.length >= 2
++            ? Deferred.succeed(secondAsk, undefined).pipe(
++                Effect.andThen(declined("busy", "agent running")(staged, onHandoffAccepted)),
++              )
++            : declined("busy", "agent running")(staged, onHandoffAccepted);
++
++        yield* controller.queue(TARGET);
++        const waiting = yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.equal(waiting.reason, "busy: agent running");
++        assert.equal(fakes.activateCalls.length, 1);
++
++        yield* TestClock.adjust(Duration.subtract(POLL, Duration.seconds(1)));
++        assert.equal(fakes.activateCalls.length, 1);
++        yield* TestClock.adjust(Duration.seconds(1));
++        yield* Deferred.await(secondAsk);
++        const again = yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.equal(again.handoffAccepted, false);
++        assert.equal(fakes.stageCalls.length, 1);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "queued",
++          targetVersion: TARGET,
++          staged: artifactFor(TARGET),
++          reason: "busy: agent running",
++        });
++      }),
++    ),
++  );
++
++  it.effect("an unknown activity answer never activates", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        fakes.activate = declined("unknown", "activity source offline");
++
++        yield* controller.queue(TARGET);
++        const waiting = yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.equal(waiting.reason, "unknown: activity source offline");
++        assert.isFalse(waiting.handoffAccepted);
++        yield* TestClock.adjust(POLL);
++        const state = yield* controller.getState;
++        assert.notEqual(state.stage, "current");
++        assert.isFalse(state.handoffAccepted);
++      }),
++    ),
++  );
++
++  it.effect("the same target queued twice is idempotent", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        yield* controller.queue(TARGET);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        const repeat = yield* controller.queue(TARGET);
++        assert.equal(repeat.stage, "queued");
++        assert.deepStrictEqual(repeat.staged, artifactFor(TARGET));
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET]);
++      }),
++    ),
++  );
++
++  it.effect("queueing the installed version is rejected", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller } = yield* setup();
++        const error = yield* controller.queue(INSTALLED).pipe(Effect.flip);
++        assert.isTrue(isRejected(error));
++        assert.equal(rejectedReason(error), "already-installed");
++        assert.equal((yield* controller.getState).stage, "current");
++      }),
++    ),
++  );
++
++  it.effect("a newer target replaces an older one that is still waiting", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        yield* controller.queue(TARGET);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++
++        const replaced = yield* controller.queue(NEWER);
++        assert.deepStrictEqual(
++          [replaced.stage, replaced.targetVersion, replaced.staged],
++          ["downloading", NEWER, undefined],
++        );
++        const waiting = yield* controller.awaitState(
++          (state) =>
++            state.stage === "queued" && state.targetVersion === NEWER && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(waiting.staged, artifactFor(NEWER));
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET, NEWER]);
++        assert.deepStrictEqual(fakes.activateCalls.at(-1), artifactFor(NEWER));
++      }),
++    ),
++  );
++
++  it.effect("a newer target interrupts staging of the older one", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        const olderInterrupted = yield* Deferred.make<void>();
++        const gate = yield* Deferred.make<void>();
++        fakes.stage = (version) =>
++          version === TARGET
++            ? Deferred.await(gate).pipe(
++                Effect.as(artifactFor(version)),
++                Effect.onInterrupt(() => Deferred.succeed(olderInterrupted, undefined)),
++              )
++            : Effect.succeed(artifactFor(version));
++
++        yield* controller.queue(TARGET);
++        yield* controller.queue(NEWER);
++        yield* Deferred.await(olderInterrupted);
++        const waiting = yield* awaitStage(controller, "queued", NEWER);
++        assert.deepStrictEqual(waiting.staged, artifactFor(NEWER));
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET, NEWER]);
++        assert.notDeepEqual(fakes.activateCalls, [artifactFor(TARGET)]);
++      }),
++    ),
++  );
++
++  it.effect("cancel during staging interrupts it and records current", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        const staging = yield* blockedStaging();
++        fakes.stage = staging.stage;
++
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(staging.started);
++        const cancelled = yield* controller.cancel;
++        assert.equal(cancelled.stage, "current");
++        assert.equal(cancelled.targetVersion, INSTALLED);
++        yield* Deferred.await(staging.interrupted);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "current",
++          targetVersion: INSTALLED,
++        });
++        assert.deepStrictEqual(fakes.activateCalls, []);
++      }),
++    ),
++  );
++
++  it.effect("cancel while queued means the next attempt never starts", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        yield* controller.queue(TARGET);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++
++        assert.equal((yield* controller.cancel).stage, "current");
++        yield* TestClock.adjust(POLL);
++        yield* TestClock.adjust(POLL);
++        assert.equal(fakes.activateCalls.length, 1);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "current",
++          targetVersion: INSTALLED,
++        });
++        assert.equal((yield* controller.cancel).stage, "current");
++      }),
++    ),
++  );
++
++  it.effect(
++    "while an activation attempt is in progress, cancel, retarget and retry are rejected",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const { controller, fakes } = yield* setup();
++          const asked = yield* Deferred.make<void>();
++          const answer = yield* Deferred.make<void>();
++          fakes.activate = () =>
++            Deferred.succeed(asked, undefined).pipe(
++              Effect.andThen(Deferred.await(answer)),
++              Effect.as({ status: "busy" as const, reason: "agent running" }),
++            );
++
++          yield* controller.queue(TARGET);
++          yield* Deferred.await(asked);
++          const updating = yield* awaitStage(controller, "updating");
++          assert.isFalse(updating.handoffAccepted);
++          const persisted = {
++            version: 1,
++            stage: "updating",
++            targetVersion: TARGET,
++            staged: artifactFor(TARGET),
++          };
++
++          assert.equal(
++            rejectedReason(yield* controller.cancel.pipe(Effect.flip)),
++            "activation-in-progress",
++          );
++          assert.equal(
++            rejectedReason(yield* controller.queue(NEWER).pipe(Effect.flip)),
++            "activation-in-progress",
++          );
++          assert.equal(
++            rejectedReason(yield* controller.retry.pipe(Effect.flip)),
++            "activation-in-progress",
++          );
++          const same = yield* controller.queue(TARGET);
++          assert.equal(same.stage, "updating");
++          assert.deepStrictEqual(yield* fakes.readState, persisted);
++          assert.deepStrictEqual(yield* controller.getState, updating);
++
++          yield* Deferred.succeed(answer, undefined);
++          const queued = yield* controller.awaitState(
++            (state) => state.stage === "queued" && state.reason !== undefined,
++          );
++          assert.equal(queued.reason, "busy: agent running");
++          assert.equal((yield* controller.cancel).stage, "current");
++          assert.equal(fakes.activateCalls.length, 1);
++        }),
++      ),
++  );
++
++  it.effect("a failed persist after a busy answer keeps the reservation and recovers", () =>
++    persistFailureRecovers("busy"),
++  );
++
++  it.effect("a failed persist after an activation failure keeps the reservation and recovers", () =>
++    persistFailureRecovers("failure"),
++  );
++
++  it.effect("persist syncs the temp file before the rename and the directory after it", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk, root } = yield* setup({ observed: true });
++        fakes.stage = (yield* blockedStaging()).stage;
++
++        yield* controller.queue(TARGET);
++        assert.deepStrictEqual(disk.ops, [
++          "mkdir",
++          ...chain([".", ...(yield* ancestorsAbove(root))]),
++          "open:file",
++          "write:file",
++          "sync:file",
++          "rename",
++          "open:directory",
++          "sync:directory",
++        ]);
++      }),
++    ),
++  );
++
++  it.effect("the whole ancestry is synced, deepest first, before the first write", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk, root } = yield* setup({ observed: true, nested: true });
++        fakes.stage = (yield* blockedStaging()).stage;
++
++        yield* controller.queue(TARGET);
++        const ancestry = chain(["a/b", "a", ".", ...(yield* ancestorsAbove(root))]);
++        assert.deepStrictEqual(disk.ops.slice(0, ancestry.length + 2), [
++          "mkdir",
++          ...ancestry,
++          "open:file",
++        ]);
++        disk.ops.length = 0;
++
++        // Once durable, later replacements do not revisit the parents.
++        yield* controller.queue(NEWER);
++        assert.equal(disk.ops.includes("mkdir"), false);
++        assert.equal(disk.ops[0], "open:file");
++      }),
++    ),
++  );
++
++  it.effect("a partial ancestry sync failure is retried in full before any state is written", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const { controller, fakes, disk, statePath, root } = yield* setup({
++          observed: true,
++          nested: true,
++        });
++        const ancestry = chain(["a/b", "a", ".", ...(yield* ancestorsAbove(root))]);
++
++        disk.fail("sync:directory:a", "once");
++        const error = yield* controller.queue(TARGET).pipe(Effect.flip);
++        assert.equal(error._tag, "QueuedUpdateStateError");
++        assert.deepStrictEqual(disk.ops, ["mkdir", ...chain(["a/b", "a"])]);
++        assert.equal(yield* fs.exists(statePath), false);
++        assert.equal((yield* controller.getState).stage, "current");
++        assert.deepStrictEqual(fakes.stageCalls, []);
++        disk.ops.length = 0;
++
++        // The directories exist now, but none of the owed syncs may be skipped.
++        yield* controller.queue(TARGET);
++        assert.deepStrictEqual(disk.ops.slice(0, ancestry.length + 2), [
++          "mkdir",
++          ...ancestry,
++          "open:file",
++        ]);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stateAtStage, [
++          { version: 1, stage: "downloading", targetVersion: TARGET },
++        ]);
++        assert.equal(fakes.activateCalls.length, 1);
++      }),
++    ),
++  );
++
++  it.effect(
++    "a restart after an unproven creation proves the whole ancestry before acknowledging",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const path = yield* Path.Path;
++          const firstScope = yield* Scope.make();
++          const first = yield* setup({ observed: true, nested: true, scope: firstScope });
++          const { disk, statePath, root } = first;
++          const ancestry = chain(["a/b", "a", ".", ...(yield* ancestorsAbove(root))]);
++
++          // The first process creates the path, fails part-way through proving
++          // it, and dies. Nothing on disk records which entries were synced.
++          disk.fail("sync:directory:a", "once");
++          assert.equal(
++            (yield* first.controller.queue(TARGET).pipe(Effect.flip))._tag,
++            "QueuedUpdateStateError",
++          );
++          yield* Scope.close(firstScope, Exit.void);
++          assert.equal(yield* fs.exists(path.dirname(statePath)), true);
++          assert.equal(yield* fs.exists(statePath), false);
++          disk.ops.length = 0;
++
++          // The next process finds the directories but must not trust them: its
++          // first replacement proves every ancestor, and cannot acknowledge or
++          // stage until all of them land.
++          const second = yield* setup({ observed: true, restartOf: { root, statePath, disk } });
++          disk.fail("sync:directory:.", "once");
++          assert.equal(
++            (yield* second.controller.queue(TARGET).pipe(Effect.flip))._tag,
++            "QueuedUpdateStateError",
++          );
++          assert.deepStrictEqual(disk.ops, ["mkdir", ...chain(["a/b", "a", "."])]);
++          assert.equal(yield* fs.exists(statePath), false);
++          assert.deepStrictEqual(second.fakes.stageCalls, []);
++          disk.ops.length = 0;
++
++          yield* second.controller.queue(TARGET);
++          assert.deepStrictEqual(disk.ops.slice(0, ancestry.length + 2), [
++            "mkdir",
++            ...ancestry,
++            "open:file",
++          ]);
++          yield* second.controller.awaitState(
++            (state) => state.stage === "queued" && state.reason !== undefined,
++          );
++          assert.deepStrictEqual(second.fakes.stateAtStage, [
++            { version: 1, stage: "downloading", targetVersion: TARGET },
++          ]);
++          assert.equal(second.fakes.activateCalls.length, 1);
++        }),
++      ),
++  );
++
++  it.effect(
++    "a file sync failure before the rename leaves the old state and fails the command",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const { controller, fakes, disk } = yield* setup({ observed: true });
++          fakes.stage = (yield* blockedStaging()).stage;
++          yield* controller.queue(TARGET);
++          const before = { version: 1, stage: "downloading", targetVersion: TARGET };
++          disk.ops.length = 0;
++
++          disk.fail("sync:file", "once");
++          const error = yield* controller.queue(NEWER).pipe(Effect.flip);
++          assert.equal(error._tag, "QueuedUpdateStateError");
++          assert.deepStrictEqual(disk.ops, ["open:file", "write:file", "sync:file"]);
++          assert.equal((yield* controller.getState).targetVersion, TARGET);
++          assert.deepStrictEqual(yield* fakes.readState, before);
++
++          assert.equal((yield* controller.queue(NEWER)).targetVersion, NEWER);
++          assert.deepStrictEqual(yield* fakes.readState, { ...before, targetVersion: NEWER });
++        }),
++      ),
++  );
++
++  it.effect(
++    "a directory sync failure after the rename is retried before anything is acknowledged",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const { controller, fakes, disk } = yield* setup({ observed: true });
++          yield* controller.queue(TARGET);
++          yield* controller.awaitState(
++            (state) => state.stage === "queued" && state.reason !== undefined,
++          );
++          const current = { version: 1, stage: "current", targetVersion: INSTALLED };
++          const observer = yield* Effect.forkChild(awaitStage(controller, "current"));
++
++          // The rename lands but its barrier does not: the pathname already names
++          // `current`, so memory follows it, but the cancel is not acknowledged and
++          // nobody waiting on the state is told. The woken worker fails the same
++          // barrier and parks on the poll interval.
++          disk.fail("sync:directory", "until-cleared");
++          const bothFailed = disk.next("failure", 2);
++          const error = yield* controller.cancel.pipe(Effect.flip);
++          assert.equal(error._tag, "QueuedUpdateStateError");
++          const unacknowledged = yield* controller.getState;
++          assert.equal(unacknowledged.stage, "current");
++          assert.equal(unacknowledged.durable, false);
++          assert.deepStrictEqual(yield* fakes.readState, current);
++          yield* bothFailed;
++          disk.ops.length = 0;
++          // An observer arriving after the failure matches the pathname state
++          // but must still wait for its barrier.
++          const lateObserver = yield* Effect.forkChild(awaitStage(controller, "current"));
++          yield* Effect.yieldNow;
++          assert.equal(lateObserver.pollUnsafe(), undefined);
++
++          const retried = yield* controller.cancel.pipe(Effect.flip);
++          assert.equal(retried._tag, "QueuedUpdateStateError");
++          assert.deepStrictEqual(disk.ops, ["open:directory", "sync:directory"]);
++          assert.equal(observer.pollUnsafe(), undefined);
++          assert.equal(lateObserver.pollUnsafe(), undefined);
++
++          // Once the disk recovers the same command proves durability without a
++          // second replacement, and the controller carries on normally.
++          disk.clear();
++          disk.ops.length = 0;
++          const acknowledged = yield* controller.cancel;
++          assert.equal(acknowledged.stage, "current");
++          assert.equal(acknowledged.durable, true);
++          assert.deepStrictEqual(disk.ops, ["open:directory", "sync:directory"]);
++          assert.equal((yield* Fiber.join(observer)).stage, "current");
++          const late = yield* Fiber.join(lateObserver);
++          assert.equal(late.stage, "current");
++          assert.equal(late.durable, true);
++          assert.equal(fakes.activateCalls.length, 1);
++          yield* controller.queue(NEWER);
++          yield* controller.awaitState(
++            (state) =>
++              state.stage === "queued" &&
++              state.targetVersion === NEWER &&
++              state.reason !== undefined,
++          );
++          assert.deepStrictEqual(fakes.activateCalls, [artifactFor(TARGET), artifactFor(NEWER)]);
++        }),
++      ),
++  );
++
++  it.effect("the worker proves durability before staging a target whose barrier failed", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk } = yield* setup({ observed: true });
++
++        disk.fail("sync:directory", "until-cleared");
++        const bothFailed = disk.next("failure", 2);
++        const error = yield* controller.queue(TARGET).pipe(Effect.flip);
++        assert.equal(error._tag, "QueuedUpdateStateError");
++        yield* bothFailed;
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "downloading",
++          targetVersion: TARGET,
++        });
++        assert.deepStrictEqual(fakes.stageCalls, []);
++
++        disk.clear();
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(POLL);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET]);
++        assert.deepStrictEqual(fakes.stateAtStage, [
++          { version: 1, stage: "downloading", targetVersion: TARGET },
++        ]);
++        assert.equal(fakes.activateCalls.length, 1);
++      }),
++    ),
++  );
++
++  it.effect("a directory sync failure after a busy answer is retried without re-asking", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes, disk } = yield* setup({ observed: true });
++        const asked = yield* Deferred.make<void>();
++        const release = yield* Deferred.make<void>();
++        fakes.activate = () =>
++          Deferred.succeed(asked, undefined).pipe(
++            Effect.andThen(Deferred.await(release)),
++            Effect.as({ status: "busy" as const, reason: "agent running" }),
++          );
++        const queued = {
++          version: 1,
++          stage: "queued",
++          targetVersion: TARGET,
++          staged: artifactFor(TARGET),
++          reason: "busy: agent running",
++        };
++
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(asked);
++        disk.fail("sync:directory", "until-cleared");
++        const failed = disk.next("failure");
++        yield* Deferred.succeed(release, undefined);
++        yield* failed;
++
++        // The answer was renamed into place but is not yet durable: the
++        // reservation is released in memory, yet no command is acknowledged.
++        const pathname = yield* controller.getState;
++        assert.equal(pathname.stage, "queued");
++        assert.equal(pathname.durable, false);
++        assert.deepStrictEqual(yield* fakes.readState, queued);
++        assert.equal((yield* controller.cancel.pipe(Effect.flip))._tag, "QueuedUpdateStateError");
++
++        disk.clear();
++        const landed = disk.next("sync:directory");
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(POLL);
++        yield* landed;
++        assert.equal(fakes.activateCalls.length, 1);
++        assert.equal((yield* controller.cancel).stage, "current");
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "current",
++          targetVersion: INSTALLED,
++        });
++      }),
++    ),
++  );
++
++  it.effect("a cancel racing the handoff can never claim success", () =>
++    provide(
++      Effect.gen(function* () {
++        const scope = yield* Scope.make();
++        const { controller, fakes } = yield* setup({ scope });
++        const nearHandoff = yield* Deferred.make<void>();
++        const proceed = yield* Deferred.make<void>();
++        fakes.activate = (_, onHandoffAccepted) =>
++          Deferred.succeed(nearHandoff, undefined).pipe(
++            Effect.andThen(Deferred.await(proceed)),
++            Effect.andThen(onHandoffAccepted),
++            Effect.andThen(Effect.never),
++          );
++
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(nearHandoff);
++        assert.equal(
++          rejectedReason(yield* controller.cancel.pipe(Effect.flip)),
++          "activation-in-progress",
++        );
++        assert.equal(
++          rejectedReason(yield* controller.queue(NEWER).pipe(Effect.flip)),
++          "activation-in-progress",
++        );
++
++        yield* Deferred.succeed(proceed, undefined);
++        const handedOff = yield* controller.awaitState((state) => state.handoffAccepted);
++        assert.equal(handedOff.stage, "updating");
++        assert.equal(
++          rejectedReason(yield* controller.cancel.pipe(Effect.flip)),
++          "handoff-accepted",
++        );
++        assert.equal(
++          rejectedReason(yield* controller.queue(NEWER).pipe(Effect.flip)),
++          "handoff-accepted",
++        );
++
++        yield* Scope.close(scope, Exit.void);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "updating",
++          targetVersion: TARGET,
++          staged: artifactFor(TARGET),
++        });
++      }),
++    ),
++  );
++
++  it.effect("interrupting the caller of cancel leaves disk and memory in agreement", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        const staging = yield* blockedStaging();
++        fakes.stage = staging.stage;
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(staging.started);
++
++        const cancelling = yield* Effect.forkChild(controller.cancel);
++        yield* Effect.yieldNow;
++        yield* Fiber.interrupt(cancelling);
++
++        const memory = yield* controller.getState;
++        const disk = yield* fakes.readState;
++        if (memory.stage === "current") {
++          assert.deepStrictEqual(disk, { version: 1, stage: "current", targetVersion: INSTALLED });
++          yield* Deferred.await(staging.interrupted);
++        } else {
++          assert.equal(memory.stage, "downloading");
++          assert.deepStrictEqual(disk, { version: 1, stage: "downloading", targetVersion: TARGET });
++          assert.isFalse(yield* Deferred.isDone(staging.interrupted));
++          assert.equal((yield* controller.cancel).stage, "current");
++          yield* Deferred.await(staging.interrupted);
++        }
++        assert.deepStrictEqual(fakes.activateCalls, []);
++      }),
++    ),
++  );
++
++  it.effect("only exact versions can be queued", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const { controller, fakes, statePath } = yield* setup();
++        for (const version of ["", "latest", "^1.2.0", "1.2", "1.2.0 ", "v1.2.0", "1.2.0-"]) {
++          const error = yield* controller.queue(version).pipe(Effect.flip);
++          assert.equal(rejectedReason(error), "invalid-version", version);
++        }
++        assert.isFalse(yield* fs.exists(statePath));
++        assert.deepStrictEqual(fakes.stageCalls, []);
++
++        const nightly = "1.2.0-nightly.20260905+build.7";
++        const queued = yield* controller.queue(nightly);
++        assert.equal(queued.stage, "downloading");
++        assert.equal(queued.targetVersion, nightly);
++        const waiting = yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(waiting.staged, artifactFor(nightly));
++      }),
++    ),
++  );
++
++  it.effect("a stager that returns a bad artifact fails the update", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        fakes.stage = (version) => Effect.succeed({ version, artifactId: "  " });
++        yield* controller.queue(TARGET);
++        const failed = yield* awaitStage(controller, "failed");
++        assert.include(failed.reason ?? "", "artifact");
++        assert.deepStrictEqual(fakes.activateCalls, []);
++      }),
++    ),
++  );
++
++  it.effect("persisted state with inexact versions or an empty artifact fails closed", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" });
++        const fixtures = [
++          { version: 1, stage: "queued", targetVersion: "latest" },
++          {
++            version: 1,
++            stage: "queued",
++            targetVersion: TARGET,
++            staged: { version: "1.x", artifactId: "a" },
++          },
++          {
++            version: 1,
++            stage: "queued",
++            targetVersion: TARGET,
++            staged: { version: TARGET, artifactId: "" },
++          },
++        ];
++        for (const [index, fixture] of fixtures.entries()) {
++          const statePath = path.join(root, `${index}.json`);
++          const contents = encodeJson(fixture);
++          yield* fs.writeFileString(statePath, contents);
++          const error = yield* setup({ statePath }).pipe(Effect.flip);
++          assert.instanceOf(error, QueuedUpdateStateError);
++          assert.equal(error._tag === "QueuedUpdateStateError" ? error.operation : error, "decode");
++          assert.equal(yield* fs.readFileString(statePath), contents);
++        }
++      }),
++    ),
++  );
++
++  it.effect("failed staging stays failed until an explicit retry", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        fakes.stage = () =>
++          Effect.fail(new QueuedUpdateStepError({ step: "stage", reason: "download refused" }));
++
++        const notFailed = yield* controller.retry.pipe(Effect.flip);
++        assert.equal(rejectedReason(notFailed), "nothing-to-retry");
++
++        yield* controller.queue(TARGET);
++        const failed = yield* awaitStage(controller, "failed");
++        assert.equal(failed.reason, "download refused");
++        assert.equal(failed.targetVersion, TARGET);
++        yield* TestClock.adjust(POLL);
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET]);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "failed",
++          targetVersion: TARGET,
++          reason: "download refused",
++        });
++
++        fakes.stage = (version) => Effect.succeed(artifactFor(version));
++        const retried = yield* controller.retry;
++        assert.equal(retried.stage, "downloading");
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET, TARGET]);
++      }),
++    ),
++  );
++
++  it.effect("failed activation stays failed and retry re-stages the same target", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        fakes.activate = () =>
++          Effect.fail(new QueuedUpdateStepError({ step: "activate", reason: "launcher rejected" }));
++
++        yield* controller.queue(TARGET);
++        const failed = yield* awaitStage(controller, "failed");
++        assert.equal(failed.reason, "launcher rejected");
++        assert.deepStrictEqual(failed.staged, artifactFor(TARGET));
++        yield* TestClock.adjust(POLL);
++        assert.equal(fakes.activateCalls.length, 1);
++
++        fakes.activate = declined("busy", "agent running");
++        yield* controller.retry;
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET, TARGET]);
++        assert.equal(fakes.activateCalls.length, 2);
++      }),
++    ),
++  );
++
++  it.effect("cancel clears a failed update", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        fakes.stage = () =>
++          Effect.fail(new QueuedUpdateStepError({ step: "stage", reason: "nope" }));
++        yield* controller.queue(TARGET);
++        yield* awaitStage(controller, "failed");
++        assert.equal((yield* controller.cancel).stage, "current");
++        const error = yield* controller.retry.pipe(Effect.flip);
++        assert.equal(rejectedReason(error), "nothing-to-retry");
++      }),
++    ),
++  );
++
++  it.effect("a queued intent survives into a new controller and is re-staged", () =>
++    provide(
++      Effect.gen(function* () {
++        const first = yield* Scope.make();
++        const { controller, fakes, statePath } = yield* setup({ scope: first });
++        yield* controller.queue(TARGET);
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        yield* Scope.close(first, Exit.void);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "queued",
++          targetVersion: TARGET,
++          staged: artifactFor(TARGET),
++          reason: "busy: agent running",
++        });
++
++        const second = yield* setup({ statePath });
++        const booted = yield* second.controller.getState;
++        assert.deepStrictEqual(
++          [booted.stage, booted.targetVersion, booted.staged],
++          ["downloading", TARGET, undefined],
++        );
++        const waiting = yield* second.controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(waiting.staged, artifactFor(TARGET));
++        assert.deepStrictEqual(second.fakes.stageCalls, [TARGET]);
++      }),
++    ),
++  );
++
++  it.effect("staging interrupted by shutdown resumes on the next boot", () =>
++    provide(
++      Effect.gen(function* () {
++        const first = yield* Scope.make();
++        const { controller, fakes, statePath } = yield* setup({ scope: first });
++        const staging = yield* blockedStaging();
++        fakes.stage = staging.stage;
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(staging.started);
++        yield* Scope.close(first, Exit.void);
++        yield* Deferred.await(staging.interrupted);
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "downloading",
++          targetVersion: TARGET,
++        });
++
++        const second = yield* setup({ statePath });
++        const waiting = yield* second.controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.equal(waiting.targetVersion, TARGET);
++        assert.deepStrictEqual(second.fakes.stageCalls, [TARGET]);
++      }),
++    ),
++  );
++
++  it.effect("an interrupted updating state is re-staged, never trusted", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" });
++        const statePath = path.join(root, "queued-update.json");
++        yield* fs.writeFileString(
++          statePath,
++          encodeJson({
++            version: 1,
++            stage: "updating",
++            targetVersion: TARGET,
++            staged: artifactFor(TARGET),
++          }),
++        );
++        const { controller, fakes } = yield* setup({ statePath });
++        assert.equal((yield* controller.getState).stage, "downloading");
++        yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(fakes.stageCalls, [TARGET]);
++      }),
++    ),
++  );
++
++  it.effect("a prior target that matches the installed version becomes current", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" });
++        const statePath = path.join(root, "queued-update.json");
++        yield* fs.writeFileString(
++          statePath,
++          encodeJson({
++            version: 1,
++            stage: "updating",
++            targetVersion: TARGET,
++            staged: artifactFor(TARGET),
++          }),
++        );
++        const { controller, fakes } = yield* setup({ statePath, installedVersion: TARGET });
++        const state = yield* controller.getState;
++        assert.deepStrictEqual(
++          [state.stage, state.targetVersion, state.installedVersion],
++          ["current", TARGET, TARGET],
++        );
++        assert.deepStrictEqual(yield* fakes.readState, {
++          version: 1,
++          stage: "current",
++          targetVersion: TARGET,
++        });
++        assert.deepStrictEqual(fakes.stageCalls, []);
++      }),
++    ),
++  );
++
++  it.effect("a failed prior update is kept as failed", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" });
++        const statePath = path.join(root, "queued-update.json");
++        yield* fs.writeFileString(
++          statePath,
++          encodeJson({ version: 1, stage: "failed", targetVersion: TARGET, reason: "earlier" }),
++        );
++        const { controller, fakes } = yield* setup({ statePath });
++        const state = yield* controller.getState;
++        assert.deepStrictEqual([state.stage, state.reason], ["failed", "earlier"]);
++        assert.deepStrictEqual(fakes.stageCalls, []);
++      }),
++    ),
++  );
++
++  it.effect(
++    "after handoff the update is durable as updating and cannot be cancelled or replaced",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const scope = yield* Scope.make();
++          const { controller, fakes } = yield* setup({ scope });
++          fakes.activate = (_, onHandoffAccepted) =>
++            onHandoffAccepted.pipe(Effect.andThen(Effect.never));
++
++          yield* controller.queue(TARGET);
++          const handedOff = yield* controller.awaitState((state) => state.handoffAccepted);
++          assert.equal(handedOff.stage, "updating");
++
++          const cancel = yield* controller.cancel.pipe(Effect.flip);
++          assert.equal(rejectedReason(cancel), "handoff-accepted");
++          const queue = yield* controller.queue(NEWER).pipe(Effect.flip);
++          assert.equal(rejectedReason(queue), "handoff-accepted");
++          const retry = yield* controller.retry.pipe(Effect.flip);
++          assert.equal(rejectedReason(retry), "handoff-accepted");
++
++          yield* Scope.close(scope, Exit.void);
++          assert.deepStrictEqual(yield* fakes.readState, {
++            version: 1,
++            stage: "updating",
++            targetVersion: TARGET,
++            staged: artifactFor(TARGET),
++          });
++        }),
++      ),
++  );
++
++  it.effect("malformed state fails closed without rewriting the file", () =>
++    provide(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-queued-update-test-" });
++        for (const contents of [
++          "{not json",
++          encodeJson({ version: 1, stage: "flying", targetVersion: TARGET }),
++        ]) {
++          const statePath = path.join(root, `${contents.length}.json`);
++          yield* fs.writeFileString(statePath, contents);
++          const error = yield* setup({ statePath }).pipe(Effect.flip);
++          assert.instanceOf(error, QueuedUpdateStateError);
++          assert.equal(error.operation, "decode");
++          assert.include(error.message, statePath);
++          assert.equal(yield* fs.readFileString(statePath), contents);
++        }
++      }),
++    ),
++  );
++
++  it.effect("controllers with separate state paths are independent", () =>
++    provide(
++      Effect.gen(function* () {
++        const a = yield* setup();
++        const b = yield* setup();
++        yield* a.controller.queue(TARGET);
++        yield* a.controller.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.equal((yield* b.controller.getState).stage, "current");
++        assert.deepStrictEqual(b.fakes.stageCalls, []);
++        assert.deepStrictEqual(b.fakes.activateCalls, []);
++      }),
++    ),
++  );
++});
