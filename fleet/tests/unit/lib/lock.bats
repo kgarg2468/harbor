@@ -229,7 +229,7 @@ contender() {
   # contender OUTFILE: a background library-level acquisition of FIX_ROOT that
   # pauses at lock-acquired. env execs bash, so CONTENDER_PID is the acquiring
   # process and its EXIT trap releases the lock when the test resumes it.
-  env HARBOR_TEST_HOOKS=1 HARBOR_PAUSE_AFTER=lock-acquired \
+  env HARBOR_TEST_HOOKS=1 HARBOR_PAUSE_AFTER=lock-acquired HARBOR_LOG_FILE="${FIX_ROOT}/harbor.log" \
     bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; set -euo pipefail; HARBOR_PID=$$; harbor_install_traps; harbor_lock_acquire "$1" operator; HARBOR_COMPLETED=1; exit 0' _ "${FIX_ROOT}" >"${1}" 2>&1 3>&- &
   CONTENDER_PID=$!
   PAUSED_PIDS="${PAUSED_PIDS} ${CONTENDER_PID}"
@@ -458,6 +458,7 @@ contender() {
   contender "${BATS_TEST_TMPDIR}/b.out"
   pb="${CONTENDER_PID}"
   wait_for_one_exit "${pa}" "${pb}"
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -e "${FIX_ROOT}/reclaim.d" ]
   case "$(holder_pid "${FIX_ROOT}")" in
@@ -488,6 +489,7 @@ contender() {
   contender "${BATS_TEST_TMPDIR}/b.out"
   pb="${CONTENDER_PID}"
   wait_for_one_exit "${pa}" "${pb}"
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -e "${FIX_ROOT}/reclaim.d" ]
   resume_holder "${FIX_ROOT}" lock-acquired
