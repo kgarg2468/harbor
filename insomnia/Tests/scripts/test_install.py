@@ -47,6 +47,20 @@ class InstallTests(Fixture):
         app = self.home/'Applications/Insomnia.app'
         self.assertEqual((self.support/'InsomniaRecovery').read_bytes(), (app/'Contents/MacOS/Insomnia').read_bytes())
 
+    def test_failed_upgrade_restores_exact_previous_sudoers(self):
+        _, _, _, grant = self.installed_files()
+        before = grant.read_bytes()
+        self.inject_shim('launchctl', "if args[0] == 'bootstrap' and not (root/'failed-once').exists():\n    (root/'failed-once').touch(); sys.exit(5)")
+        result = self.run_script('install.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(grant.read_bytes(), before)
+
+    def test_failed_fresh_install_removes_new_sudoers(self):
+        grant = self.root/'sudoers'
+        result = self.run_script('install.sh', VERIFY_FAIL='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(grant.exists())
+
     def test_bootstrap_failure_restores_previous_helper_generation(self):
         app, helper, plist, grant = self.installed_files()
         paths = [helper, plist, self.support/'InsomniaRecovery', self.support/'InsomniaRecovery.protocol']

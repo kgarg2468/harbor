@@ -156,6 +156,30 @@ if app_running; then
   echo "Insomnia reopened before commit; quit it and retry. Existing installation retained." >&2
   exit 1
 fi
+# Restore the exact prior privilege grant on every failed commit path, including
+# failures before app/helper replacement begins.
+had_grant=0
+if /usr/bin/sudo /bin/test -e "$SUDOERS"; then
+  /usr/bin/sudo /bin/cat "$SUDOERS" > "$stage/previous.sudoers"
+  had_grant=1
+fi
+restore_grant() {
+  if (( had_grant == 1 )); then
+    /usr/bin/sudo /usr/bin/install -m 0440 -o root -g wheel "$stage/previous.sudoers" "$SUDOERS"
+  else /usr/bin/sudo /bin/rm -f "$SUDOERS"; fi
+}
+rollback_grant() {
+  status=$?
+  trap - EXIT
+  if (( status != 0 )); then
+    if ! restore_grant; then
+      /usr/bin/touch "$stage/rollback-failed"
+      echo "Restoring the previous sudoers grant failed; inspect retained rollback files." >&2
+    fi
+  fi
+  exit "$status"
+}
+trap rollback_grant EXIT
 /usr/bin/sudo /usr/bin/install -m 0440 -o root -g wheel "$stage/sudoers" "$SUDOERS"
 if ! /usr/bin/sudo -n -l /usr/bin/pmset -a disablesleep 0; then
   echo "Sudoers verification failed; existing installation retained." >&2; exit 1
@@ -196,6 +220,7 @@ rollback() {
       rollback_failed=1
     fi
   else /bin/rm -f "$PLIST" || rollback_failed=1; fi
+  restore_grant || rollback_failed=1
   if (( rollback_failed != 0 )); then /usr/bin/touch "$stage/rollback-failed"; fi
   echo "Installation failed; previous app and recovery generation retained." >&2
   exit "$status"
