@@ -1,0 +1,227 @@
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+index accfdf70b3a3fa11cf0b07cb0799c8c4c46da9fb..c2e5dad5d1671d2251f42a686ce20956046d8541 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+@@ -303,6 +303,53 @@ describe("DesktopBackendConfiguration", () => {
+     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+   );
+ 
++  it.effect("resolvePrimary tells a packaged backend to skip login-shell hydration", () =>
++    withHarness(
++      Effect.gen(function* () {
++        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
++        const config = yield* configuration.resolvePrimary;
++
++        // The Electron parent already carries a usable PATH; the packaged
++        // child must not re-run the user's login shell before binding its port.
++        assert.equal(config.env.T3CODE_SKIP_LOGIN_SHELL, "1");
++      }),
++    ),
++  );
++
++  it.effect("resolvePrimary keeps stock login-shell hydration in development", () =>
++    Effect.gen(function* () {
++      const fileSystem = yield* FileSystem.FileSystem;
++      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
++        prefix: "t3-desktop-backend-config-test-",
++      });
++
++      yield* Effect.gen(function* () {
++        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
++        const config = yield* configuration.resolvePrimary;
++
++        // The key is present-but-undefined so an ambient value from the dev
++        // runner's own environment is cleared rather than inherited.
++        assert.property(config.env, "T3CODE_SKIP_LOGIN_SHELL");
++        assert.isUndefined(config.env.T3CODE_SKIP_LOGIN_SHELL);
++      }).pipe(
++        Effect.provide(
++          DesktopBackendConfiguration.layer.pipe(
++            Layer.provideMerge(serverExposureLayer),
++            Layer.provideMerge(DesktopAppSettings.layerTest()),
++            Layer.provideMerge(DesktopWslServerTree.layerTest()),
++            Layer.provideMerge(DesktopWslEnvironment.layerTest()),
++            Layer.provideMerge(
++              makeEnvironmentLayer(baseDir, {
++                isPackaged: false,
++                devServerUrl: "http://127.0.0.1:5733",
++              }),
++            ),
++          ),
++        ),
++      );
++    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
++  );
++
+   it.effect("resolveWsl reuses the primary's bootstrap token", () =>
+     withHarness(
+       Effect.gen(function* () {
+@@ -897,6 +944,9 @@ describe("DesktopBackendConfiguration", () => {
+           assert.equal(config.httpBaseUrl.href, "http://172.27.0.99:5050/");
+           assert.equal(config.env.OPENAI_API_KEY, "openai-key");
+           assert.equal(config.env.ANTHROPIC_API_KEY, "anthropic-key");
++          // The prepared-env signal is a packaged-primary-only contract; the
++          // WSL backend must hydrate its own Linux-side environment.
++          assert.isUndefined(config.env.T3CODE_SKIP_LOGIN_SHELL);
+           // The existing WSLENV is preserved byte-for-byte (note the empty
+           // "::" segment survives — WSL ignores it, so we don't normalize
+           // it away) and ANTHROPIC_API_KEY is appended. OPENAI_API_KEY is
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 4c43070b5f97be8b59f797847cc19061b22afb4a..6d81999d1aa05afb4fe3d323cc88fe2538c9c022 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -85,6 +85,7 @@ const DESKTOP_BACKEND_ENV_NAMES = [
+   "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
+   "T3CODE_TAILSCALE_SERVE",
+   "T3CODE_TAILSCALE_SERVE_PORT",
++  "T3CODE_SKIP_LOGIN_SHELL",
+ ] as const;
+ 
+ // Sensitive env vars that the WSL backend needs but Windows process.env won't
+@@ -507,6 +508,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+       env: {
+         ...backendChildEnvPatch(),
+         ELECTRON_RUN_AS_NODE: "1",
++        // The packaged parent already inherited a usable PATH; the child must
++        // not re-run the user's login shell (whose rc files can block) before
++        // binding its port. Dev keeps stock hydration (see os-jank.ts).
++        ...(environment.isPackaged ? { T3CODE_SKIP_LOGIN_SHELL: "1" } : {}),
+       },
+       // Primary wants process.env (PATH, dev-runner's T3CODE_HOME, etc.).
+       extendEnv: true,
+diff --git a/apps/server/src/os-jank.test.ts b/apps/server/src/os-jank.test.ts
+index a157efb665fa17791f25e2fe91da38a418625dbc..94756fc367c2c0d5c891c82e4cbfe277066e14dd 100644
+--- a/apps/server/src/os-jank.test.ts
++++ b/apps/server/src/os-jank.test.ts
+@@ -1,7 +1,72 @@
+ import * as NodeOS from "node:os";
+ import { assert, it } from "vite-plus/test";
+ 
+-import { hydratePosixHome } from "./os-jank.ts";
++import { hydratePosixHome, hydratePosixPath } from "./os-jank.ts";
++
++const forbiddenReaders = {
++  readPathFromLoginShell: (): string | undefined => {
++    throw new Error("login shell must not run");
++  },
++  readPathFromLaunchctl: (): string | undefined => {
++    throw new Error("launchctl must not run");
++  },
++};
++
++it("skips the login shell and keeps the inherited PATH when the desktop prepared the env", () => {
++  const env: NodeJS.ProcessEnv = {
++    T3CODE_SKIP_LOGIN_SHELL: "1",
++    PATH: "/electron/bin:/usr/bin",
++  };
++
++  hydratePosixPath(env, "darwin", {
++    ...forbiddenReaders,
++    readPathFromLaunchctl: () => "/launchctl/bin:/usr/bin",
++  });
++
++  // Inherited entries stay first; launchctl only appends what is missing.
++  assert.equal(env.PATH, "/electron/bin:/usr/bin:/launchctl/bin");
++});
++
++it("skips both the login shell and launchctl on linux when the desktop prepared the env", () => {
++  const env: NodeJS.ProcessEnv = {
++    T3CODE_SKIP_LOGIN_SHELL: "1",
++    PATH: "/inherited/bin:/usr/bin",
++  };
++
++  hydratePosixPath(env, "linux", forbiddenReaders);
++
++  assert.equal(env.PATH, "/inherited/bin:/usr/bin");
++});
++
++it("keeps the inherited PATH when the desktop prepared the env and launchctl has nothing", () => {
++  const env: NodeJS.ProcessEnv = {
++    T3CODE_SKIP_LOGIN_SHELL: "1",
++    PATH: "/electron/bin:/usr/bin",
++  };
++
++  hydratePosixPath(env, "darwin", {
++    ...forbiddenReaders,
++    readPathFromLaunchctl: () => undefined,
++  });
++
++  assert.equal(env.PATH, "/electron/bin:/usr/bin");
++});
++
++it("still reads the login shell when the desktop signal is absent", () => {
++  const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
++  const observedShells: string[] = [];
++
++  hydratePosixPath(env, "darwin", {
++    ...forbiddenReaders,
++    readPathFromLoginShell: (shell) => {
++      observedShells.push(shell);
++      return "/login/bin";
++    },
++  });
++
++  assert.deepEqual(observedShells, ["/bin/zsh"]);
++  assert.equal(env.PATH, "/login/bin:/usr/bin");
++});
+ 
+ it("hydrates HOME for minimal service environments from the user account", () => {
+   const env: NodeJS.ProcessEnv = {};
+diff --git a/apps/server/src/os-jank.ts b/apps/server/src/os-jank.ts
+index 18ddbc66c0c852652c96a4def292b0f6b727c54f..1c19411e9e619f8c8b81f29b964628b976118171 100644
+--- a/apps/server/src/os-jank.ts
++++ b/apps/server/src/os-jank.ts
+@@ -17,11 +17,41 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
+   );
+ }
+ 
+-function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
++// Injectable so tests can prove the login shell is never spawned; production
++// callers use the real readers.
++interface PosixPathReaders {
++  readonly readPathFromLoginShell: (shell: string) => string | undefined;
++  readonly readPathFromLaunchctl: () => string | undefined;
++}
++
++const defaultPosixPathReaders: PosixPathReaders = {
++  readPathFromLoginShell,
++  readPathFromLaunchctl,
++};
++
++export function hydratePosixPath(
++  env: NodeJS.ProcessEnv,
++  platform: NodeJS.Platform,
++  readers: PosixPathReaders = defaultPosixPathReaders,
++): void {
++  // The packaged desktop app sets T3CODE_SKIP_LOGIN_SHELL=1 on its primary
++  // backend child: the Electron parent already inherited a usable PATH, and
++  // the synchronous login-shell read below can hang on user rc files before
++  // the backend binds its port. Keep the inherited PATH authoritative and
++  // only append launchctl entries on macOS (no shell involved).
++  if (env.T3CODE_SKIP_LOGIN_SHELL === "1") {
++    const launchctlPath = platform === "darwin" ? readers.readPathFromLaunchctl() : undefined;
++    const mergedPath = mergePathEntries(env.PATH, launchctlPath, platform);
++    if (mergedPath) {
++      env.PATH = mergedPath;
++    }
++    return;
++  }
++
+   let shellPath: string | undefined;
+   for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
+     try {
+-      shellPath = readPathFromLoginShell(shell);
++      shellPath = readers.readPathFromLoginShell(shell);
+     } catch (error) {
+       logPathHydrationWarning(`Failed to read PATH from login shell ${shell}.`, error);
+     }
+@@ -29,7 +59,8 @@ function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): vo
+     if (shellPath) break;
+   }
+ 
+-  const launchctlPath = platform === "darwin" && !shellPath ? readPathFromLaunchctl() : undefined;
++  const launchctlPath =
++    platform === "darwin" && !shellPath ? readers.readPathFromLaunchctl() : undefined;
+   const mergedPath = mergePathEntries(shellPath ?? launchctlPath, env.PATH, platform);
+   if (mergedPath) {
+     env.PATH = mergedPath;

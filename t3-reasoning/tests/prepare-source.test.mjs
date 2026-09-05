@@ -25,7 +25,8 @@ const gitEnv = {
 };
 
 async function git(cwd, ...args) {
-  const { stdout } = await run("git", args, { cwd, env: gitEnv });
+  // A real upstream checkout's `ls-files -s` listing exceeds the 1 MiB default.
+  const { stdout } = await run("git", args, { cwd, env: gitEnv, maxBuffer: 64 * 1024 * 1024 });
   return stdout.trim();
 }
 
@@ -73,6 +74,14 @@ const PATCH_CONFLICT = `diff --git a/hello.txt b/hello.txt
 -two
 +two patched
 `;
+// Stands in for a variant-only patch: touches a file no common patch touches.
+const PATCH_IDENTITY = `diff --git a/identity.txt b/identity.txt
+new file mode 100644
+--- /dev/null
++++ b/identity.txt
+@@ -0,0 +1 @@
++variant identity
+`;
 
 let root;
 let upstream;
@@ -92,8 +101,9 @@ async function writeLock(name, lock) {
   return file;
 }
 
-async function prepare({ lock, destination, repository = upstream, env = gitEnv, cwd }) {
+async function prepare({ lock, destination, repository = upstream, env = gitEnv, cwd, variant }) {
   const args = [script, "--lock", lock, "--destination", destination, "--repository", repository];
+  if (variant !== undefined) args.push("--variant", variant);
   try {
     const { stdout, stderr } = await run(process.execPath, args, { env, cwd });
     return { code: 0, stdout, stderr };
@@ -110,6 +120,47 @@ async function freshCase() {
 
 async function entries(dir) {
   return (await readdir(dir)).sort();
+}
+
+async function readProvenance(destination) {
+  return JSON.parse(await readFile(path.join(destination, ".git", "harbor-source.json"), "utf8"));
+}
+
+// Path -> blob id for every file in a prepared checkout, patches included.
+// Blob ids are content hashes, so two independent checkouts compare directly.
+async function blobsByPath(checkout) {
+  await git(checkout, "add", "-A");
+  const listing = await git(checkout, "ls-files", "-s");
+  return new Map(
+    listing
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [meta, file] = line.split("\t");
+        return [file, meta.split(" ")[1]];
+      }),
+  );
+}
+
+// A version 2 fixture lock: a catalog of three patches and two variants that
+// share the first two. `overrides` lets a test break one aspect at a time.
+async function writeVariantLock(name, patches, overrides = {}) {
+  const [one, two, identity] = patches;
+  return writeLock(name, {
+    version: 2,
+    repository: upstream,
+    commit: pinned,
+    patches: [
+      { id: "one", ...one },
+      { id: "two", ...two },
+      { id: "identity", ...identity },
+    ],
+    variants: {
+      "managed-nightly": ["one", "two"],
+      reasoning: ["one", "two", "identity"],
+    },
+    ...overrides,
+  });
 }
 
 before(async () => {
@@ -467,4 +518,326 @@ exec "$REAL_GIT" "$@"
       assert.equal(await readFile(path.join(destination, "hello.txt"), "utf8"), "one patched\n");
     });
   });
+
+  describe("version 2 variants", () => {
+    let fixturePatches;
+    before(async () => {
+      fixturePatches = [
+        await writePatch("v2-one.patch", PATCH_ONE),
+        await writePatch("v2-two.patch", PATCH_TWO),
+        await writePatch("v2-identity.patch", PATCH_IDENTITY),
+      ];
+    });
+
+    it("defaults to the reasoning variant and records the resolved ordered patches", async () => {
+      const { destination } = await freshCase();
+      const lock = await writeVariantLock("v2-default.json", fixturePatches);
+      const result = await prepare({ lock, destination });
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /prepared .* variant reasoning .* with 3 patch\(es\)/);
+      assert.equal(await git(destination, "rev-parse", "HEAD"), pinned);
+      assert.equal(await readFile(path.join(destination, "hello.txt"), "utf8"), "one patched twice\n");
+      assert.equal(await readFile(path.join(destination, "identity.txt"), "utf8"), "variant identity\n");
+      const provenance = await readProvenance(destination);
+      assert.equal(provenance.variant, "reasoning");
+      assert.equal(provenance.commit, pinned);
+      assert.deepEqual(provenance.patches, [
+        { id: "one", ...fixturePatches[0] },
+        { id: "two", ...fixturePatches[1] },
+        { id: "identity", ...fixturePatches[2] },
+      ]);
+    });
+
+    it("applies only the selected variant's patches", async () => {
+      const { destination } = await freshCase();
+      const lock = await writeVariantLock("v2-nightly.json", fixturePatches);
+      const result = await prepare({ lock, destination, variant: "managed-nightly" });
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /variant managed-nightly .* with 2 patch\(es\)/);
+      assert.doesNotMatch(result.stdout, /identity/);
+      assert.equal(await readFile(path.join(destination, "hello.txt"), "utf8"), "one patched twice\n");
+      assert.deepEqual(await entries(destination), [".git", "feature.txt", "hello.txt"]);
+      const provenance = await readProvenance(destination);
+      assert.equal(provenance.variant, "managed-nightly");
+      assert.deepEqual(provenance.patches, [
+        { id: "one", ...fixturePatches[0] },
+        { id: "two", ...fixturePatches[1] },
+      ]);
+    });
+
+    it("prepares two variants into independent destinations that differ only by the declared suffix", async () => {
+      const { dir } = await freshCase();
+      const lock = await writeVariantLock("v2-pair.json", fixturePatches);
+      const nightly = path.join(dir, "managed-nightly");
+      const reasoning = path.join(dir, "reasoning");
+      const results = await Promise.all([
+        prepare({ lock, destination: nightly, variant: "managed-nightly" }),
+        prepare({ lock, destination: reasoning, variant: "reasoning" }),
+      ]);
+      for (const result of results) assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(await entries(dir), ["managed-nightly", "reasoning"]);
+
+      const nightlyBlobs = await blobsByPath(nightly);
+      const reasoningBlobs = await blobsByPath(reasoning);
+      // Every file the common patches produce is byte-identical in both trees.
+      for (const [file, blob] of nightlyBlobs) {
+        assert.equal(reasoningBlobs.get(file), blob, `${file} differs between variants`);
+      }
+      const extra = [...reasoningBlobs.keys()].filter((file) => !nightlyBlobs.has(file));
+      assert.deepEqual(extra, ["identity.txt"]);
+
+      const nightlyProvenance = await readProvenance(nightly);
+      const reasoningProvenance = await readProvenance(reasoning);
+      assert.equal(nightlyProvenance.commit, reasoningProvenance.commit);
+      assert.deepEqual(reasoningProvenance.patches.slice(0, 2), nightlyProvenance.patches);
+      assert.deepEqual(
+        reasoningProvenance.patches.slice(2).map((patch) => patch.id),
+        ["identity"],
+      );
+    });
+
+    describe("rejections before any filesystem work", () => {
+      // Every case points at a repository that does not exist, so a run that
+      // got as far as git would fail with a fetch error instead. The case
+      // directory must stay empty: no destination, no staging, no lock.
+      const noRepository = "/nonexistent/prepare-source-never-fetched.git";
+
+      async function expectRejected({ lock, variant, pattern }) {
+        const { dir, destination } = await freshCase();
+        const result = await prepare({ lock, destination, repository: noRepository, variant });
+        assert.notEqual(result.code, 0);
+        assert.match(result.stderr, pattern);
+        assert.doesNotMatch(result.stderr, /git |fetching/);
+        assert.deepEqual(await entries(dir), []);
+      }
+
+      it("rejects an unknown variant and names the known ones", async () => {
+        const lock = await writeVariantLock("v2-unknown-variant.json", fixturePatches);
+        await expectRejected({
+          lock,
+          variant: "stock",
+          pattern: /unknown variant stock; the lock defines: managed-nightly, reasoning/,
+        });
+      });
+
+      it("rejects --variant against a version 1 lock", async () => {
+        const one = fixturePatches[0];
+        const lock = await writeLock("v1-with-variant.json", {
+          version: 1,
+          repository: upstream,
+          commit: pinned,
+          patches: [one],
+        });
+        await expectRejected({ lock, variant: "reasoning", pattern: /version 1 lock/ });
+      });
+
+      it("rejects a duplicate patch id in the catalog", async () => {
+        const [one, two, identity] = fixturePatches;
+        const lock = await writeVariantLock("v2-dup-id.json", fixturePatches, {
+          patches: [
+            { id: "one", ...one },
+            { id: "one", ...two },
+            { id: "identity", ...identity },
+          ],
+        });
+        await expectRejected({ lock, pattern: /duplicate patch id one/ });
+      });
+
+      it("rejects a catalog entry without an id", async () => {
+        const [one, two, identity] = fixturePatches;
+        const lock = await writeVariantLock("v2-no-id.json", fixturePatches, {
+          patches: [{ id: "one", ...one }, { ...two }, { id: "identity", ...identity }],
+        });
+        await expectRejected({ lock, pattern: /patches\[1\]\.id/ });
+      });
+
+      it("rejects a variant that references an unknown patch id", async () => {
+        const lock = await writeVariantLock("v2-bad-ref.json", fixturePatches, {
+          variants: { "managed-nightly": ["one", "two"], reasoning: ["one", "two", "three"] },
+        });
+        await expectRejected({
+          lock,
+          pattern: /variants\.reasoning\[2\] references unknown patch id three/,
+        });
+      });
+
+      it("rejects a variant that lists a patch id twice", async () => {
+        const lock = await writeVariantLock("v2-dup-ref.json", fixturePatches, {
+          variants: { "managed-nightly": ["one", "one"], reasoning: ["one", "two", "identity"] },
+        });
+        await expectRejected({
+          lock,
+          variant: "managed-nightly",
+          pattern: /variants\.managed-nightly lists patch id one twice/,
+        });
+      });
+
+      it("rejects a variant whose ids are out of catalog order", async () => {
+        const lock = await writeVariantLock("v2-order.json", fixturePatches, {
+          variants: { "managed-nightly": ["one", "two"], reasoning: ["one", "identity", "two"] },
+        });
+        await expectRejected({
+          lock,
+          pattern: /variants\.reasoning\[2\] \(two\) is out of catalog order/,
+        });
+      });
+
+      it("rejects a lock whose variants field is not an object", async () => {
+        const lock = await writeVariantLock("v2-variants-array.json", fixturePatches, {
+          variants: [["one", "two"]],
+        });
+        await expectRejected({ lock, pattern: /variants must be an object/ });
+      });
+
+      it("rejects a checksum mismatch on a patch the selected variant applies", async () => {
+        const [one, two, identity] = fixturePatches;
+        const lock = await writeVariantLock("v2-digest.json", fixturePatches, {
+          patches: [
+            { id: "one", ...one },
+            { id: "two", ...two },
+            { id: "identity", ...identity, sha256: sha256("something else") },
+          ],
+        });
+        await expectRejected({
+          lock,
+          variant: "reasoning",
+          pattern: /v2-identity\.patch: sha256 mismatch/,
+        });
+      });
+
+      it("rejects a catalog path that escapes the lock directory", async () => {
+        const [one, two] = fixturePatches;
+        await writeFile(path.join(root, "v2-escape.patch"), PATCH_IDENTITY);
+        const lock = await writeVariantLock("v2-escape.json", fixturePatches, {
+          patches: [
+            { id: "one", ...one },
+            { id: "two", ...two },
+            { id: "identity", path: "../v2-escape.patch", sha256: sha256(PATCH_IDENTITY) },
+          ],
+        });
+        await expectRejected({ lock, pattern: /\.\.\/v2-escape\.patch: path resolves outside the lock directory/ });
+      });
+    });
+  });
+});
+
+// The component's real lock, checked statically: every catalog file is present
+// with its recorded checksum, and the two variants differ by exactly the
+// Reasoning identity patch, which touches only identity files.
+describe("source.lock.json", () => {
+  const componentDir = path.join(here, "..");
+  const lockFile = path.join(componentDir, "source.lock.json");
+  const COMMON_RUNTIME_FILES = [
+    "apps/desktop/src/backend/DesktopBackendConfiguration.test.ts",
+    "apps/desktop/src/backend/DesktopBackendConfiguration.ts",
+    "apps/server/src/os-jank.test.ts",
+    "apps/server/src/os-jank.ts",
+  ];
+  const IDENTITY_FILES = [
+    "apps/desktop/src/app/DesktopClerk.test.ts",
+    "apps/desktop/src/app/DesktopEnvironment.test.ts",
+    "apps/desktop/src/app/DesktopEnvironment.ts",
+    "apps/desktop/src/electron/ElectronProtocol.test.ts",
+    "apps/desktop/src/electron/ElectronProtocol.ts",
+    "scripts/build-desktop-artifact.test.ts",
+    "scripts/build-desktop-artifact.ts",
+    "scripts/update-reasoning-mac-app.sh",
+  ];
+
+  function patchedFiles(patchText) {
+    return [...patchText.matchAll(/^diff --git a\/(\S+) b\//gm)].map((match) => match[1]).sort();
+  }
+
+  it("is a version 2 lock whose catalog checksums match the patch files", async () => {
+    const lock = JSON.parse(await readFile(lockFile, "utf8"));
+    assert.equal(lock.version, 2);
+    assert.match(lock.commit, /^[0-9a-f]{40}$/);
+    for (const patch of lock.patches) {
+      const content = await readFile(path.join(componentDir, patch.path));
+      assert.equal(
+        createHash("sha256").update(content).digest("hex"),
+        patch.sha256,
+        `${patch.id} (${patch.path}) checksum`,
+      );
+    }
+  });
+
+  it("defines managed-nightly as reasoning without the identity patch", async () => {
+    const lock = JSON.parse(await readFile(lockFile, "utf8"));
+    assert.deepEqual(Object.keys(lock.variants).sort(), ["managed-nightly", "reasoning"]);
+    assert.deepEqual(lock.variants.reasoning, [...lock.variants["managed-nightly"], "reasoning-identity"]);
+    assert.ok(lock.variants["managed-nightly"].includes("reasoning-full"));
+    assert.ok(lock.variants["managed-nightly"].includes("desktop-runtime-common"));
+  });
+
+  it("keeps the packaged runtime fix common and the Reasoning identity separate", async () => {
+    const lock = JSON.parse(await readFile(lockFile, "utf8"));
+    const byId = new Map(lock.patches.map((patch) => [patch.id, patch]));
+    const common = await readFile(path.join(componentDir, byId.get("desktop-runtime-common").path), "utf8");
+    const identity = await readFile(path.join(componentDir, byId.get("reasoning-identity").path), "utf8");
+    assert.deepEqual(patchedFiles(common), COMMON_RUNTIME_FILES);
+    assert.deepEqual(patchedFiles(identity), IDENTITY_FILES);
+    assert.match(common, /T3CODE_SKIP_LOGIN_SHELL/);
+    assert.doesNotMatch(common, /t3code-reasoning|com\.t3tools\.t3code\.reasoning|T3 Code \(Reasoning\)/);
+    // The identity patch also carries the disabled official feed, so the
+    // managed Nightly tree keeps upstream's feed resolver until a managed
+    // release patch owns the feed explicitly.
+    assert.match(identity, /^-export const resolveGitHubPublishConfig/m);
+  });
+
+  // Opt-in: materialize both real variants from a local clone that contains
+  // the pinned commit, then prove the trees differ only in the identity files.
+  //   T3_REASONING_UPSTREAM_REPOSITORY=/path/to/clone node --test ...
+  const localUpstream = process.env.T3_REASONING_UPSTREAM_REPOSITORY;
+  it(
+    "materializes both real variants from a local clone and differs only in identity files",
+    { skip: !localUpstream && "set T3_REASONING_UPSTREAM_REPOSITORY to a clone with the pinned commit" },
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "prepare-source-variants-"));
+      try {
+        const nightly = path.join(dir, "managed-nightly");
+        const reasoning = path.join(dir, "reasoning");
+        for (const [destination, variant] of [
+          [nightly, "managed-nightly"],
+          [reasoning, "reasoning"],
+        ]) {
+          const result = await prepare({ lock: lockFile, destination, repository: localUpstream, variant });
+          assert.equal(result.code, 0, result.stderr);
+        }
+        const lock = JSON.parse(await readFile(lockFile, "utf8"));
+        const nightlyProvenance = await readProvenance(nightly);
+        const reasoningProvenance = await readProvenance(reasoning);
+        assert.equal(nightlyProvenance.commit, lock.commit);
+        assert.deepEqual(
+          nightlyProvenance.patches.map((patch) => patch.id),
+          lock.variants["managed-nightly"],
+        );
+        assert.deepEqual(
+          reasoningProvenance.patches.map((patch) => patch.id),
+          lock.variants.reasoning,
+        );
+
+        const nightlyBlobs = await blobsByPath(nightly);
+        const reasoningBlobs = await blobsByPath(reasoning);
+        const differing = [];
+        for (const [file, blob] of reasoningBlobs) {
+          if (nightlyBlobs.get(file) !== blob) differing.push(file);
+        }
+        for (const file of nightlyBlobs.keys()) {
+          if (!reasoningBlobs.has(file)) differing.push(file);
+        }
+        assert.deepEqual(differing.sort(), IDENTITY_FILES);
+        for (const file of COMMON_RUNTIME_FILES) {
+          assert.ok(nightlyBlobs.has(file), `${file} missing from managed-nightly`);
+        }
+        // Managed Nightly keeps upstream's packaged identity.
+        const protocol = await readFile(path.join(nightly, IDENTITY_FILES[4]), "utf8");
+        assert.match(protocol, /DESKTOP_PRODUCTION_SCHEME = "t3code";/);
+        const reasoningProtocol = await readFile(path.join(reasoning, IDENTITY_FILES[4]), "utf8");
+        assert.match(reasoningProtocol, /DESKTOP_PRODUCTION_SCHEME = "t3code-reasoning";/);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

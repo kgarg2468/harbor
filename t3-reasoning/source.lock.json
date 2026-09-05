@@ -1,23 +1,47 @@
 {
-  "version": 1,
+  "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
   "commit": "9cb40178a53cca279c67a9079afab3cddf6b6ddb",
   "patches": [
     {
+      "id": "reasoning-full",
       "path": "patches/0001-reasoning.patch",
       "sha256": "02d105d58e50bf906cb00e7687230363be8bf2d39c3833642edf1af8ab60a52c"
     },
     {
-      "path": "patches/0002-desktop-identity.patch",
-      "sha256": "cc839a3d8682e71340e848a10116e7ab1dd530f3e10c3c424d711eb889bcbd09"
+      "id": "desktop-runtime-common",
+      "path": "patches/0002-desktop-runtime-common.patch",
+      "sha256": "d6e580b8ac62d0109057d3b2c3ef216ad3b4fb8011d1f8e44595d33f718c2503"
     },
     {
+      "id": "update-admission",
       "path": "patches/0003-update-admission.patch",
       "sha256": "663f8d54b6c79b5eaaebac0fd7e25c4cb84c3fc7ffba0cc2dd7566911cbf712a"
     },
     {
+      "id": "queued-update",
       "path": "patches/0004-queued-update.patch",
       "sha256": "a1242b0c4d74d0830e611686f87de6403befc7fe6cb36b31b989d3a583c208ce"
+    },
+    {
+      "id": "reasoning-identity",
+      "path": "patches/0002-reasoning-identity.patch",
+      "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
     }
-  ]
+  ],
+  "variants": {
+    "managed-nightly": [
+      "reasoning-full",
+      "desktop-runtime-common",
+      "update-admission",
+      "queued-update"
+    ],
+    "reasoning": [
+      "reasoning-full",
+      "desktop-runtime-common",
+      "update-admission",
+      "queued-update",
+      "reasoning-identity"
+    ]
+  }
 }

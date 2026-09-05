@@ -12,13 +12,17 @@ maintenance record for the current pin.
 | Upstream repository | `https://github.com/pingdotgg/t3code.git` |
 | Upstream commit | `9cb40178a53cca279c67a9079afab3cddf6b6ddb` |
 | Upstream tag at that commit | `v0.0.39-nightly.20260905.1284` |
-| Patch 1 | `patches/0001-reasoning.patch` (34 files) |
-| Patch 2 | `patches/0002-desktop-identity.patch` (12 files) |
+| Patch `reasoning-full` | `patches/0001-reasoning.patch` (34 files) |
+| Patch `desktop-runtime-common` | `patches/0002-desktop-runtime-common.patch` (4 files) |
+| Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (8 files) |
 | Upstream license | `UPSTREAM-LICENSE` (MIT, T3 Tools Inc., copied unchanged) |
 
-The two patches applied in lock order change exactly the 46 files that the
-ported feature commit changes against the upstream commit. The tag was
-confirmed on the upstream remote at the pinned SHA on 2026-09-05.
+These three patches together change exactly the 46 files that the ported
+feature commit changes against the upstream commit. They were originally
+exported as two patches; the desktop patch was split by whole file on
+2026-09-05 into the common runtime fix and the Reasoning identity, so the
+`managed-nightly` variant in `build-variants.md` can leave the identity out.
+The tag was confirmed on the upstream remote at the pinned SHA on 2026-09-05.
 
 ## Provenance
 
@@ -85,16 +89,36 @@ Everything outside the desktop identity surface:
   unchanged there. The mobile app does not render reasoning yet.
 - Docs: `docs/user/reasoning.md` and glossary and provider notes.
 
-### `0002-desktop-identity.patch`
+### `0002-desktop-runtime-common.patch`
 
-`apps/desktop/**`, `apps/server/src/os-jank.ts` with its test, and
-`scripts/**`:
+The functional packaged-startup fix, applied to both variants:
+
+- `apps/desktop/src/backend/DesktopBackendConfiguration.ts` and its test: the
+  packaged primary backend child is started with `T3CODE_SKIP_LOGIN_SHELL=1`;
+  development and the WSL backend keep stock hydration.
+- `apps/server/src/os-jank.ts` and its test: with that signal set, PATH
+  hydration keeps the inherited PATH and only appends `launchctl` entries on
+  macOS, with injectable readers so tests prove the login shell never runs.
+
+### `0002-reasoning-identity.patch`
+
+The remaining `apps/desktop/**` and `scripts/**` files, applied to the
+`reasoning` variant only:
 
 - Every packaged (non-development) identity surface belongs to the Reasoning
-  app so it installs beside the official app without colliding.
-- Build tooling and the manual macOS updater script.
+  app so it installs beside the official app without colliding
+  (`DesktopEnvironment.ts`, `ElectronProtocol.ts`, `DesktopClerk.test.ts`,
+  and their tests).
+- Build tooling: `scripts/build-desktop-artifact.ts` and its test carry the
+  Reasoning bundle id, product name, artifact name, URL scheme, Linux names,
+  staged package name, and the removal of the official update feed.
+- The manual macOS updater script `scripts/update-reasoning-mac-app.sh`.
 
-Development builds keep the stock identity in both patches.
+Development builds keep the stock identity in every patch. The
+`managed-nightly` variant receives neither of the identity changes nor the
+feed removal, so it keeps upstream's packaged identity and upstream's
+`resolveGitHubPublishConfig`; see `build-variants.md` for why that tree is
+not yet deployable.
 
 ## Migration identity repair
 
@@ -184,14 +208,29 @@ git "${GITOPTS[@]}" diff --no-color --no-ext-diff --no-renames --binary --full-i
      ':(exclude)apps/server/src/os-jank.test.ts' ':(exclude)scripts' \
   > t3-reasoning/patches/0001-reasoning.patch
 git "${GITOPTS[@]}" diff --no-color --no-ext-diff --no-renames --binary --full-index "$UP..$PORT" \
-  -- apps/desktop apps/server/src/os-jank.ts apps/server/src/os-jank.test.ts scripts \
-  > t3-reasoning/patches/0002-desktop-identity.patch
+  -- apps/desktop/src/backend/DesktopBackendConfiguration.ts \
+     apps/desktop/src/backend/DesktopBackendConfiguration.test.ts \
+     apps/server/src/os-jank.ts apps/server/src/os-jank.test.ts \
+  > t3-reasoning/patches/0002-desktop-runtime-common.patch
+git "${GITOPTS[@]}" diff --no-color --no-ext-diff --no-renames --binary --full-index "$UP..$PORT" \
+  -- apps/desktop scripts \
+     ':(exclude)apps/desktop/src/backend/DesktopBackendConfiguration.ts' \
+     ':(exclude)apps/desktop/src/backend/DesktopBackendConfiguration.test.ts' \
+  > t3-reasoning/patches/0002-reasoning-identity.patch
 shasum -a 256 t3-reasoning/patches/*.patch
 ```
 
 `--full-index` and `--binary` make the patches self-describing and let
-`git apply` check blob ids. The SHA-256 of each file goes into
-`source.lock.json`.
+`git apply` check blob ids. The SHA-256 of each file goes into the
+`patches` catalog of `source.lock.json`.
+
+The two `0002` files in this component were not produced by those commands
+but by partitioning the original single desktop patch into whole `diff --git`
+sections, byte for byte, so that the section bytes are unchanged from the
+reviewed original (SHA-256
+`cc839a3d8682e71340e848a10116e7ab1dd530f3e10c3c424d711eb889bcbd09`). The
+commands above produce the same file sets; re-export with them on the next
+port.
 
 ## Moving to the next Nightly
 
@@ -199,23 +238,32 @@ Updates are not automatic. Nothing discovers new Nightlies. To port:
 
 1. Pick the new upstream Nightly tag and resolve it to its full commit SHA.
 2. Change `commit` in `source.lock.json` to that SHA and run
-   `prepare-source` into a fresh destination. If both patches apply, run the
-   focused upstream checks in that checkout and stop here.
+   `prepare-source` for each variant into a fresh destination. If every patch
+   applies in both variants, run the focused upstream checks in those
+   checkouts and stop here.
 3. If a patch does not apply, make a working clone at the new commit, apply
-   the patches with `git apply --3way`, resolve the conflicts, and commit the
-   result as a single port commit on top of the new upstream commit.
-4. Re-export both patches with the commands above, update the two `sha256`
-   values in `source.lock.json`, and update the pin table in this document.
-5. Run `prepare-source` again and confirm the prepared tree matches the new
-   port commit: stage everything in the checkout, compare `git write-tree`
-   against the port commit's tree id.
+   the `reasoning` variant's patches with `git apply --3way`, resolve the
+   conflicts, and commit the result as a single port commit on top of the new
+   upstream commit.
+4. Re-export the three patches with the commands above, update their
+   `sha256` values in the `patches` catalog of `source.lock.json`, and update
+   the pin table in this document.
+5. Run `prepare-source --variant reasoning` again and confirm the prepared
+   tree matches the new port commit: stage everything in the checkout,
+   compare `git write-tree` against the port commit's tree id. Prepare
+   `managed-nightly` too and confirm its tree differs from the Reasoning tree
+   in exactly the identity patch's files (the opt-in test in the README does
+   this).
 6. Run the component checks listed in the README.
 
-Keep the split rule when re-exporting: `apps/desktop/**`,
-`apps/server/src/os-jank.ts`, `apps/server/src/os-jank.test.ts`, and
-`scripts/**` go to the desktop identity patch; everything else goes to the
-reasoning patch. A new file that belongs to neither rule is a signal to
-revisit the split, not to guess.
+Keep the split rule when re-exporting: the four packaged-runtime files
+(`apps/desktop/src/backend/DesktopBackendConfiguration.ts` and its test,
+`apps/server/src/os-jank.ts` and its test) go to the common runtime patch;
+the rest of `apps/desktop/**` and `scripts/**` go to the Reasoning identity
+patch; everything else goes to the reasoning patch. A new file that belongs
+to none of the rules, or a runtime file that gains an identity hunk, is a
+signal to revisit the split, not to guess. The lock test asserts the file
+sets of both `0002` patches.
 
 ## Verification evidence for this pin
 
@@ -225,11 +273,20 @@ were produced by different runs.
 Packaging run in Harbor (this document's author):
 
 - `prepare-source` with the lock above, fetching from a local read-only clone
-  into a new temporary destination, applied both patches. Staging every file
-  in the result gave tree id `6e3be0cb047c695ffc7fdec4fd0fdb6ba8187bd2`, the
-  same tree id as the port commit. The updater script was checked in at mode
-  `100755`.
+  into a new temporary destination, applied both original patches. Staging
+  every file in the result gave tree id
+  `6e3be0cb047c695ffc7fdec4fd0fdb6ba8187bd2`, the same tree id as the port
+  commit. The updater script was checked in at mode `100755`.
 - The component's `node --test` suite and `markdownlint` pass (see README).
+
+Split proof, recorded on 2026-09-05 in a throwaway clone at the pinned
+commit (see `build-variants.md` for the variant trees):
+
+- `0001-reasoning.patch` plus the two split `0002` patches, applied in either
+  order, staged to the same tree id `6e3be0cb047c695ffc7fdec4fd0fdb6ba8187bd2`
+  as `0001` plus the original `0002-desktop-identity.patch`.
+- The bytes of the two split files concatenated in original section order
+  equal the original patch file exactly.
 
 Main session, separately verified in the ported checkout, as reported to the
 packaging run: the server test suite (113 tests), the web timeline logic
