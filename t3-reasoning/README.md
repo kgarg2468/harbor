@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly, materialized as one of two build variants. `source.lock.json` pins
 upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, a catalog of eight checksummed patches, and
+`v0.0.39-nightly.20260905.1284`, a catalog of checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;
@@ -65,6 +65,9 @@ What this component does not do:
   See `docs/thread-forks.md`; the desktop action is a separate UI patch.
 - `patches/0010-nonwaiting-admission.patch`: an atomic maintenance claim that
   leaves requests open while a command is in flight. Updater wiring is pending.
+- `patches/0013-idle-coordinator.patch`: claims idle admission and activity
+  together and retains them through accepted or uncertain restart handoffs.
+  Transport, shutdown, and production request wiring remain separate work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
