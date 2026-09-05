@@ -970,7 +970,7 @@ nothing was reloaded, so the running sshd still has the configuration it had bef
 # refusal here goes to stderr through harbor_die, as the ones above it do, so the path
 # this function prints on stdout is never polluted by a message.
 harbor_ssh_admin_authorized_keys() {
-  local admin="${1}" home path owner mode
+  local admin="${1}" home path owner mode dir
   [ "${admin}" != root ] \
     || harbor_die 3 ssh.harden_no_key "--harden-sshd sets PermitRootLogin no, so root is not the installation user it can be given to; rerun through sudo from your own account, or drop --harden-sshd; nothing was written"
   home="$(harbor_ssh_user_home "${admin}")" || exit "$?"
@@ -989,6 +989,37 @@ harbor_ssh_admin_authorized_keys() {
       harbor_die 3 ssh.harden_key_unusable "${path} holds a key but is mode ${mode}, which is group-writable, so sshd ignores it: StrictModes refuses an authorized_keys every member of its group could add a key to. --harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, so it would leave ${admin} no way in at all: no password, no root login, and no key sshd will read. Harbor changes nothing it did not create: narrow the mode of ${path} by hand and rerun, or rerun without --harden-sshd; nothing was written"
       ;;
   esac
+  # And the key file is not the whole of what StrictModes judges. sshd does not stop at
+  # authorized_keys: it walks from that file up through every directory above it as far as
+  # the account's home, and refuses the key if any one of them is owned by someone other
+  # than root or that account, or is group- or world-writable. So a file that is itself
+  # perfectly owned and perfectly moded, sitting under a 0777 home, is still a key sshd
+  # will never read, and the checks above would have passed it. The two directories on
+  # that walk are ${home}/.ssh and ${home}, and both of them exist, ${path} having been
+  # proved a readable regular file a moment ago.
+  #
+  # Each is read from inside itself rather than by its name from outside. sshd resolves the
+  # path before it judges the components, so a home reached through a symlink is judged as
+  # what it resolves to; reading the name from outside would read the link instead, and a
+  # symlink is mode 0777 on Linux, which this very test would then refuse as world-writable
+  # when sshd has no objection to it at all. Entering the directory and reading '.' is the
+  # resolution, and needs no readlink -f, which this file's bash 3.2 subset does not have.
+  for dir in "${home}/.ssh" "${home}"; do
+    owner="$(cd "${dir}" 2>/dev/null && harbor_stat_owner .)" \
+      || harbor_die 3 ssh.harden_key_unusable "${dir}, which sshd reads ${path} through, cannot be entered to be judged, so whether sshd would read the key under it cannot be established. --harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, and Harbor will not take ${admin}'s password and root login away on a node it cannot prove that account can still log in to; nothing was written"
+    { [ "${owner}" = "${admin}" ] || [ "${owner}" = root ]; } \
+      || harbor_die 3 ssh.harden_key_unusable "${path} holds a key sshd will not read: ${dir}, one of the directories above it, is owned by ${owner}, which is neither ${admin} nor root, and StrictModes refuses a key file reached through a directory belonging to anyone else. --harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, so it would leave ${admin} no way in at all: no password, no root login, and no key sshd will read. Harbor changes nothing it did not create: give ${dir} to ${admin} by hand and rerun, or rerun without --harden-sshd; nothing was written"
+    mode="$(cd "${dir}" 2>/dev/null && harbor_stat_mode .)" \
+      || harbor_die 3 ssh.harden_key_unusable "${dir}, which sshd reads ${path} through, cannot be entered to be judged, so whether sshd would read the key under it cannot be established. --harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, and Harbor will not take ${admin}'s password and root login away on a node it cannot prove that account can still log in to; nothing was written"
+    case "${mode}" in
+      *[2367])
+        harbor_die 3 ssh.harden_key_unusable "${path} holds a key sshd will not read: ${dir}, one of the directories above it, is mode ${mode}, which is world-writable, and StrictModes refuses a key file reached through a directory any account on this node could put a key file into. --harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, so it would leave ${admin} no way in at all: no password, no root login, and no key sshd will read. Harbor changes nothing it did not create: narrow the mode of ${dir} by hand and rerun, or rerun without --harden-sshd; nothing was written"
+        ;;
+      *[2367][0-7])
+        harbor_die 3 ssh.harden_key_unusable "${path} holds a key sshd will not read: ${dir}, one of the directories above it, is mode ${mode}, which is group-writable, and StrictModes refuses a key file reached through a directory every member of its group could put a key file into. --harden-sshd sets PermitRootLogin no and PasswordAuthentication no for every account, so it would leave ${admin} no way in at all: no password, no root login, and no key sshd will read. Harbor changes nothing it did not create: narrow the mode of ${dir} by hand and rerun, or rerun without --harden-sshd; nothing was written"
+        ;;
+    esac
+  done
   printf '%s' "${path}"
 }
 # harbor_ssh_harden STATE_ROOT ADMIN [DEST_ROOT]: the --harden-sshd drop-in of design

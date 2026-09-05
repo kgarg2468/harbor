@@ -90,6 +90,12 @@ setup() {
     "${HOMES}/${ADMIN}/.ssh"
   KEYSRC="${HOMES}/${ADMIN}/.ssh/authorized_keys"
   printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture\n' >"${KEYSRC}"
+  # StrictModes judges the whole path, so the modes of the two directories above the key
+  # are set rather than left to the umask: a runner whose umask is 002 would otherwise hand
+  # every test a group-writable home, which is a key file sshd would not read.
+  chmod 0755 "${HOMES}/${ADMIN}"
+  chmod 0700 "${HOMES}/${ADMIN}/.ssh"
+  chmod 0600 "${KEYSRC}"
   os_release ubuntu 24.04
   # getent resolves to the PR 2 shim through a link in the fixture base, so the
   # operator clash refusal consults no real account or group on either platform.
@@ -242,7 +248,9 @@ stat_standin() {
   # a subprocess, so a shell function cannot stand in for it as tests/unit/lib/ssh.bats
   # does in-process, and a script on ${BIN} is the seam instead, beside the shim links.
   #
-  # It stands in for exactly one reading: the owner of ${KEYSRC}. Every other format and
+  # It stands in for one reading of three paths: the owner of ${KEYSRC} and of the two
+  # directories StrictModes walks to reach it, which are the installation user's on a real
+  # node and belong to the account the tests run as here. Every other format and
   # every other path is delegated to the real stat, so no other assertion in this file
   # silently changes meaning, and both platforms are delegated identically. The two forms
   # intercepted are the two lib/journal.sh asks an owner in, stat -c '%U' on Linux and
@@ -262,10 +270,45 @@ real=/usr/bin/stat
 }
 owner=""
 [ ! -f "${VST}/admin-key-owner" ] || owner="$(cat "${VST}/admin-key-owner")"
-if [ "$#" -eq 3 ] && [ -n "${owner}" ] && [ "${3}" = "${KEYSRC}" ]; then
+# lib/ssh.sh reads the directories above the key from inside them, entering each and
+# reading '.', which is how a home reached through a symlink is judged as what it resolves
+# to, so the subject of a '.' is the physical working directory. Every path compared here
+# goes through the same resolution, because ${TMPDIR} is itself reached through a symlink
+# on macOS, where /var resolves to /private/var: a fixture with no symlink of its own still
+# has a logical and a physical name for every path in it, and stat reads the physical one.
+# No readlink -f, which is not portable and which the library does not use either.
+# A path this cannot enter is answered with itself rather than failing the call: the
+# comparisons below then simply do not match, and the reading goes to the real stat, which
+# is the right answer for a path that is not one of the three anyway.
+phys() {
+  local d
+  if [ -d "${1}" ]; then
+    (cd "${1}" 2>/dev/null && pwd -P) || printf '%s\n' "${1}"
+  else
+    d="$(cd "$(dirname "${1}")" 2>/dev/null && pwd -P)" || d="$(dirname "${1}")"
+    printf '%s/%s\n' "${d}" "$(basename "${1}")"
+  fi
+}
+# Resolution is attempted only for a call this could possibly answer, and only for a path
+# that is there: phys enters a directory, and a reading of a path that does not exist is
+# the real stat's to refuse, not this script's to fail on.
+answer=""
+if [ "$#" -eq 3 ] && [ -e "${3}" ]; then
+  # The two directories on StrictModes' walk are named relative to the key rather than
+  # passed in separately.
+  subject="$(phys "${3}")"
+  keyfile="$(phys "${KEYSRC}")"
+  keydir="$(phys "$(dirname "${KEYSRC}")")"
+  adminhome="$(phys "$(dirname "$(dirname "${KEYSRC}")")")"
+  case "${subject}" in
+    "${keyfile}") answer="${owner}" ;;
+    "${keydir}" | "${adminhome}") answer="${ADMIN}" ;;
+  esac
+fi
+if [ -n "${answer}" ]; then
   case "${1} ${2}" in
     '-c %U' | '-f %Su')
-      printf '%s\n' "${owner}"
+      printf '%s\n' "${answer}"
       exit 0
       ;;
   esac
@@ -300,6 +343,7 @@ vendor_init() {
     printf 'LOGIND="%s"\n' "${LOGIND}"
     printf 'PROPERTIES="%s"\n' "${PROPERTIES}"
     printf 'OPUSER="%s"\n' "${OPUSER}"
+    printf 'ADMIN="%s"\n' "${ADMIN}"
     printf 'KEYSRC="%s"\n' "${KEYSRC}"
   } >"${VENDOR_ENV}"
   # The installation user's own key file belongs to the installation user, which is what

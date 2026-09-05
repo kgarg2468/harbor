@@ -261,21 +261,55 @@ admin_key() {
   printf '%s/%s/.ssh/authorized_keys' "${HOMES}" "${ADMIN}"
 }
 
-admin_key_owner() {
-  # admin_key_owner [NAME]: make the installation user's own authorized_keys report NAME,
-  # the installation user by default, as its owner. chown is the one call an unprivileged
-  # test cannot make, so a file belonging to an account the test cannot create has no other
-  # way to exist in a fixture: every file here belongs to the account the tests run as,
-  # which is neither ${ADMIN} nor root, so without this seam every --harden-sshd test would
-  # be modeling the very node the refusal under test exists to catch rather than the path it
-  # is about. The library's own helper is the seam, wrapped for that one path; every other
-  # path in the run is answered the real way, read exactly as lib/journal.sh reads it, so
-  # nothing else any test observes is faked.
-  FAKE_ADMIN_KEY_OWNER="${1:-${ADMIN}}"
-  ADMIN_KEY_PATH="$(admin_key)"
+phys_path() {
+  # phys_path PATH: PATH with every symlink above its last component resolved, which is the
+  # form stat actually reads. Both sides of the owner seam are normalized to it so they
+  # cannot disagree about which file they mean. Two things make that necessary. lib/ssh.sh
+  # names the key file by its path and the directories above it as '.' from inside them, so
+  # a seam keyed on the literal argument would have to answer for '.'; and ${TMPDIR} is
+  # itself reached through a symlink on macOS, where /var resolves to /private/var, so even
+  # a fixture with no symlink of its own has a logical and a physical name for every path
+  # in it. No readlink -f, which is not portable and which the library does not use either.
+  # A path that cannot be entered is answered with itself rather than failing: the lookup
+  # then simply does not match and the reading is delegated to the real stat, which is the
+  # right answer for a path no test has registered anyway.
+  local d
+  if [ -d "${1}" ]; then
+    (cd "${1}" 2>/dev/null && pwd -P) || printf '%s' "${1}"
+  else
+    d="$(cd "$(dirname "${1}")" 2>/dev/null && pwd -P)" || d="$(dirname "${1}")"
+    printf '%s/%s' "${d}" "$(basename "${1}")"
+  fi
+}
+
+fake_owner() {
+  # fake_owner PATH NAME: make PATH report NAME as its owner for the rest of this test.
+  # chown is the one call an unprivileged test cannot make, so a path belonging to an
+  # account the test cannot create has no other way to exist in a fixture: everything here
+  # belongs to the account the tests run as, which is neither ${ADMIN} nor root, so without
+  # this seam every --harden-sshd test would be modeling the very node the refusals under
+  # test exist to catch rather than the path it is about. The library's own helper is the
+  # seam, wrapped for the named paths only; every other path in the run is answered the
+  # real way, read exactly as lib/journal.sh reads it, so nothing else any test observes
+  # is faked.
+  #
+  # A path is matched whole rather than as a prefix, and both sides go through phys_path so
+  # that the '.' the library reads a directory as, and the name a test registers it under,
+  # are the same string.
+  FAKE_OWNERS="${FAKE_OWNERS:-}
+$(phys_path "${1}")${TAB}${2}"
   harbor_stat_owner() {
-    if [ "${1}" = "${ADMIN_KEY_PATH}" ]; then
-      printf '%s' "${FAKE_ADMIN_KEY_OWNER}"
+    local p name owner found=""
+    p="$(phys_path "${1}")"
+    while IFS="${TAB}" read -r name owner; do
+      [ -n "${name}" ] || continue
+      [ "${name}" = "${p}" ] || continue
+      found="${owner}"
+    done <<EOF
+${FAKE_OWNERS}
+EOF
+    if [ -n "${found}" ]; then
+      printf '%s' "${found}"
       return 0
     fi
     case "$(harbor_os)" in
@@ -283,6 +317,17 @@ admin_key_owner() {
       Darwin) stat -f '%Su' "${1}" ;;
     esac
   }
+}
+
+admin_key_owner() {
+  # admin_key_owner [NAME]: the installation user's own authorized_keys reports NAME, the
+  # installation user by default, and the two directories sshd reads that file through are
+  # the installation user's, which is what a real node has and what these tests are about
+  # unless one of them says otherwise. StrictModes walks the whole path, so a fixture that
+  # faked only the file would still be modeling a node whose key sshd ignores.
+  fake_owner "${HOMES}/${ADMIN}" "${ADMIN}"
+  fake_owner "${HOMES}/${ADMIN}/.ssh" "${ADMIN}"
+  fake_owner "$(admin_key)" "${1:-${ADMIN}}"
 }
 
 staged_key_dir() {
@@ -294,6 +339,10 @@ staged_key_dir() {
 seed_key() {
   # seed_key USER TEXT: an account under the fixture home root with a key
   mkdir -p "${HOMES}/${1}/.ssh"
+  # The home's own mode is set rather than left to the umask, because sshd judges it: a
+  # runner whose umask is 002 would otherwise hand every test a 0775 home, which is
+  # group-writable and a key file sshd would not read.
+  chmod 0755 "${HOMES}/${1}"
   chmod 0700 "${HOMES}/${1}/.ssh"
   printf '%s\n' "${2}" >"${HOMES}/${1}/.ssh/authorized_keys"
   chmod 0600 "${HOMES}/${1}/.ssh/authorized_keys"
@@ -1569,6 +1618,75 @@ resume_paused() {
   assert [ ! -e "${GLOBAL_DROPIN}" ]
   assert_equal "$(journal_names)" ""
   assert_equal "$(shim_calls)" 0
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd refuses when a directory above the installation user's key is one sshd will not read through" {
+  # StrictModes does not stop at authorized_keys. sshd walks from that file up through
+  # every directory above it as far as the account's home and refuses the key if any one of
+  # them belongs to someone other than root or that account, or is group- or world-writable.
+  # A file that is itself perfectly owned and perfectly moded is still a key sshd will never
+  # read when it sits under a 0777 home, and the file's own two checks pass it. The reload
+  # this flag would then perform takes password authentication and root login away from
+  # every account, so the administrator is left with nothing.
+  acquire
+  # The home itself, world-writable. The key file is untouched and impeccable throughout.
+  admin_key_owner
+  chmod 0777 "${HOMES}/${ADMIN}"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial 'world-writable'
+  assert_output --partial "${HOMES}/${ADMIN}"
+  assert_output --partial 'StrictModes'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  # Group-writable is named for what it is here too.
+  chmod 0775 "${HOMES}/${ADMIN}"
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial 'group-writable'
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  # And ~/.ssh, the other directory on that walk, judged by its owner.
+  chmod 0755 "${HOMES}/${ADMIN}"
+  fake_owner "${HOMES}/${ADMIN}/.ssh" mallory
+  run harden
+  assert_equal "${status}" 3
+  assert_output --partial 'ssh.harden_key_unusable'
+  assert_output --partial mallory
+  assert_output --partial "${HOMES}/${ADMIN}/.ssh"
+  assert [ ! -e "${GLOBAL_DROPIN}" ]
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(shim_calls)" 0
+  # A refusal, never a repair: Harbor did not create these directories and does not remode
+  # them, so the node is left exactly as the administrator will find it.
+  assert_equal "$(harbor_stat_mode "${HOMES}/${ADMIN}")" 0755
+  assert_equal "$(harbor_stat_mode "${HOMES}/${ADMIN}/.ssh")" 0700
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "--harden-sshd judges a home reached through a symlink as what it resolves to" {
+  # sshd resolves the path before it judges the components, so a home reached through a
+  # symlink is judged as the directory it resolves to. Reading the name from outside would
+  # read the link instead, and a symlink is mode 0777 on Linux: a check made that way would
+  # refuse every node whose home root is a symlink, which is a lockout of its own kind,
+  # denying a flag that was safe to give. lib/ssh.sh enters each directory and reads '.'
+  # for exactly this reason.
+  real="${BATS_TEST_TMPDIR}/real-home"
+  mkdir -p "${real}/.ssh"
+  chmod 0755 "${real}"
+  chmod 0700 "${real}/.ssh"
+  printf '%s\n' "${ALICE_KEY}" >"${real}/.ssh/authorized_keys"
+  chmod 0600 "${real}/.ssh/authorized_keys"
+  rm -rf "${HOMES}/${ADMIN}"
+  ln -s "${real}" "${HOMES}/${ADMIN}"
+  admin_key_owner
+  acquire
+  run harden
+  assert_success
+  assert [ -f "${GLOBAL_DROPIN}" ]
   harbor_lock_release "${FIX_ROOT}"
 }
 
