@@ -32,11 +32,12 @@ same snapshots differently. The variants differ only by the identity patch.
     { "id": "update-admission", "path": "patches/0003-update-admission.patch", "sha256": "..." },
     { "id": "queued-update", "path": "patches/0004-queued-update.patch", "sha256": "..." },
     { "id": "update-activity", "path": "patches/0005-update-activity.patch", "sha256": "..." },
+    { "id": "thread-fork-backend", "path": "patches/0006-thread-fork-backend.patch", "sha256": "..." },
     { "id": "reasoning-identity", "path": "patches/0002-reasoning-identity.patch", "sha256": "..." }
   ],
   "variants": {
-    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity"],
-    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "reasoning-identity"]
+    "managed-nightly": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend"],
+    "reasoning": ["reasoning-full", "desktop-runtime-common", "update-admission", "queued-update", "update-activity", "thread-fork-backend", "reasoning-identity"]
   }
 }
 ```
@@ -86,6 +87,7 @@ can pick up the first variant's bundles.
 | `update-admission` | yes | yes | maintenance admission primitive |
 | `queued-update` | yes | yes | durable queued update controller |
 | `update-activity` | yes | yes | activity ownership and required-consumer fanout helpers |
+| `thread-fork-backend` | yes | yes | durable conversation forks, checkpoint worktrees and first-turn context handoff |
 | `reasoning-identity` | no | yes | Reasoning bundle id, name, scheme, state home, artifact name, disabled official feed, manual macOS updater |
 
 The `managed-nightly` tree keeps upstream's packaged identity: bundle id
@@ -120,6 +122,11 @@ After applying the common `0005` activity helper patch, the managed Nightly tree
 is `4bf46b9a8d4e1685f6a10f3a83162310a7235e7f` and the Reasoning tree is
 `77a2d74f8fd3d76002ed2f41ca0e3069f716dbd5`. The real-variant materialization test
 continues to prove that only the eight identity files differ.
+
+After the common `0006` fork backend patch, the managed Nightly tree is
+`98b6a174f52b15d7944364d96a92c7a2fb227841` and the Reasoning tree is
+`393320bcae80b45d91eff3e4cc13ccf38a63d319`. Both variants materialize successfully;
+only the same eight identity files differ.
 
 ## Not ready for deployment
 
