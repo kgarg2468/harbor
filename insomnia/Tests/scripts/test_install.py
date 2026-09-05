@@ -40,6 +40,17 @@ class InstallTests(Fixture):
         self.assertEqual([p.read_bytes() for p in [helper, plist, grant]], original)
         self.assertFalse(any(c[0] in ['install', 'pmset', 'launchctl'] for c in self.calls()))
 
+    def test_failed_bootstrap_and_rollback_reports_missing_recovery_job(self):
+        app, helper, plist, grant = self.installed_files()
+        previous = plist.read_bytes()
+        self.inject_shim('launchctl', "if args[0] == 'bootstrap': sys.exit(5)")
+        result = self.run_script('install.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((app/'sentinel').exists())
+        self.assertEqual(plist.read_bytes(), previous)
+        self.assertIn('previous recovery job also failed', result.stderr)
+        self.assertEqual(sum(c[:2] == ['launchctl', 'bootstrap'] for c in self.calls()), 2)
+
     def test_failed_bootout_keeps_still_loaded_job_files(self):
         app, helper, plist, grant = self.installed_files()
         self.inject_shim('launchctl', "if args[0] == 'bootout': sys.exit(5)\nif args[0] == 'print': sys.exit(0)")

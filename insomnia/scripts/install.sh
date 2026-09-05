@@ -160,7 +160,10 @@ unload_agent
 if ! /bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
   if [[ -f "$stage/previous.plist" ]]; then
     /bin/cp "$stage/previous.plist" "$PLIST"
-    /bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" || true
+    if ! /bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
+      echo "Reloading the previous recovery job also failed. Sleep restoration completed, but no recovery agent is confirmed loaded. Re-run install successfully before using Insomnia." >&2
+      exit 1
+    fi
   fi
   echo "LaunchAgent installation failed; existing app retained." >&2; exit 1
 fi
