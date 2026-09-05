@@ -54,6 +54,7 @@ final class SessionManager {
     private let clamshell: @Sendable () -> Bool?
     private let clock: @Sendable () -> Date
     private let installerGuardActive: @Sendable () -> Bool
+    private let recoveryLeaseTimeout: Duration
     private let sessionRemover: @Sendable () throws -> Void
 
     /// System integrations (lid, battery, network, ...). Set by `live()`;
@@ -66,7 +67,7 @@ final class SessionManager {
     /// Whether the 1 Hz redraw is currently on the run loop. Tests assert on
     /// this to prove an idle session leaves no repeating wakeup behind.
     var countdownTimerArmed: Bool { countdownTimer != nil }
-    var cleanupRetryScheduled: Bool { cleanupTimer != nil }
+    var cleanupRetryScheduled: Bool { cleanupTimer?.isValid == true }
     @ObservationIgnored private var countdownPaused = false
 
     init(
@@ -79,6 +80,7 @@ final class SessionManager {
         clamshell: @escaping @Sendable () -> Bool? = { LidObserver.readClamshellState() },
         clock: @escaping @Sendable () -> Date = { Date() },
         installerGuardActive: @escaping @Sendable () -> Bool = { AppInstanceLease.isInstallationActive() },
+        recoveryLeaseTimeout: Duration = .seconds(30),
         sessionRemover: (@Sendable () throws -> Void)? = nil
     ) {
         self.paths = paths
@@ -91,6 +93,7 @@ final class SessionManager {
         self.clamshell = clamshell
         self.clock = clock
         self.installerGuardActive = installerGuardActive
+        self.recoveryLeaseTimeout = recoveryLeaseTimeout
         self.sessionRemover = sessionRemover ?? { try Store(paths: paths).deleteSession() }
 
         try? paths.createDirectories()
@@ -282,6 +285,8 @@ final class SessionManager {
     /// from disk, then clear the backstop trigger.
     func end(reason: EndReason) async {
         generation &+= 1
+        let endingGeneration = generation
+        let endingSession = initialSession
         pendingEnds += 1
         // Stop producers now; already-started mutations finish before cleanup.
         services?.stop()
@@ -290,9 +295,13 @@ final class SessionManager {
             pendingEnds -= 1
             operationGate.release()
         }
-        await withRecoveryLease {
+        let completed = await withRecoveryLease {
             guard try validateOwnership() else { return }
             await endUnlocked(reason: reason)
+        }
+        if !completed, generation == endingGeneration, cleanupPending,
+           session == nil, initialSession == endingSession {
+            armCleanupRetry()
         }
     }
 
@@ -659,12 +668,15 @@ final class SessionManager {
         return true
     }
 
-    private func withRecoveryLease(_ operation: () async throws -> Void) async {
+    @discardableResult
+    private func withRecoveryLease(_ operation: () async throws -> Void) async -> Bool {
         do {
-            try await JournalLock.withLease(at: paths.recoveryLock, operation)
+            try await JournalLock.withLease(at: paths.recoveryLock, timeout: recoveryLeaseTimeout, operation)
+            return true
         } catch {
             cleanupPending = true
             fail("could not coordinate recovery: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -781,6 +793,12 @@ final class SessionManager {
     private func armCleanupRecovery() async {
         do { try await scheduleBackstop(endsAt: clock()) }
         catch { cleanupFailed("could not arm cleanup recovery: \(error.localizedDescription)") }
+        armCleanupRetry()
+    }
+
+    /// Lock contention must retain a local retry without changing launchd outside
+    /// the recovery transaction. Its callback captures the latest cleanup owner.
+    private func armCleanupRetry() {
         cleanupTimer?.invalidate()
         let retry = makeCleanupRetryAction()
         let timer = Timer(timeInterval: 60, repeats: false) { _ in
@@ -799,6 +817,8 @@ final class SessionManager {
             guard let self, self.generation == expectedGeneration,
                   self.cleanupPending, self.session == nil,
                   self.initialSession == expectedSession else { return }
+            self.cleanupTimer?.invalidate()
+            self.cleanupTimer = nil
             await self.end(reason: .backstop)
         }
     }
