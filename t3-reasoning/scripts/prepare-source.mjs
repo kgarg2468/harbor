@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Materialize the exact upstream T3 source pinned in source.lock.json, then
 // apply the component's ordered, checksum-verified feature patches, into a new
-// destination directory. The result is staged next to the destination and
-// renamed into place only after every step succeeds; an existing destination
-// is never modified. Concurrent runs against the same destination are
-// serialized by an adjacent mkdir lock. Dependency-free: Node built-ins and
-// the git binary only.
+// destination directory. A version 2 lock names variants, each an ordered
+// selection from one checksummed patch catalog; `--variant` picks one. The
+// result is staged next to the destination and renamed into place only after
+// every step succeeds; an existing destination is never modified. Concurrent
+// runs against the same destination are serialized by an adjacent mkdir lock.
+// Dependency-free: Node built-ins and the git binary only.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -27,6 +28,9 @@ const execFileAsync = promisify(execFile);
 const componentDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+// The variant prepared when `--variant` is omitted. Version 1 locks have no
+// variants and ignore this; the flag is then an error.
+const DEFAULT_VARIANT = "reasoning";
 
 class PrepareError extends Error {}
 
@@ -39,17 +43,20 @@ function parseArgs(argv) {
     lock: path.join(componentDir, "source.lock.json"),
     destination: path.join(componentDir, ".build", "source"),
     repository: null,
+    variant: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = argv[i + 1];
-    if (!["--lock", "--destination", "--repository"].includes(flag)) {
-      fail(`unknown argument ${flag}; expected --lock, --destination, or --repository`);
+    if (!["--lock", "--destination", "--repository", "--variant"].includes(flag)) {
+      fail(`unknown argument ${flag}; expected --lock, --destination, --repository, or --variant`);
     }
     if (value === undefined || value.startsWith("-")) {
       fail(`${flag} requires a value`);
     }
-    options[flag.slice(2)] = flag === "--repository" ? resolveRepository(value) : path.resolve(value);
+    if (flag === "--repository") options.repository = resolveRepository(value);
+    else if (flag === "--variant") options.variant = value;
+    else options[flag.slice(2)] = path.resolve(value);
     i += 1;
   }
   return options;
@@ -66,6 +73,10 @@ function resolveRepository(value) {
   return path.resolve(value);
 }
 
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function readLock(lockPath) {
   let lock;
   try {
@@ -73,7 +84,9 @@ async function readLock(lockPath) {
   } catch (error) {
     fail(`cannot read lock ${lockPath}: ${error.message}`);
   }
-  if (lock?.version !== 1) fail(`lock ${lockPath}: unsupported version ${lock?.version}`);
+  if (lock?.version !== 1 && lock?.version !== 2) {
+    fail(`lock ${lockPath}: unsupported version ${lock?.version}`);
+  }
   if (typeof lock.repository !== "string" || lock.repository === "" || lock.repository.startsWith("-")) {
     fail(`lock ${lockPath}: repository must be a non-empty string`);
   }
@@ -89,7 +102,81 @@ async function readLock(lockPath) {
       fail(`lock ${lockPath}: patches[${index}].sha256 must be 64 lowercase hex characters`);
     }
   });
+  if (lock.version === 2) validateCatalogAndVariants(lock, lockPath);
   return lock;
+}
+
+// Version 2: `patches` is a catalog of `{ id, path, sha256 }` in canonical
+// order, and `variants` maps each variant name to the ordered ids it applies.
+// Every reference must resolve, no id or path may repeat, and a variant must
+// list its ids in catalog order so the variants can only differ by which
+// catalog entries they include, never by re-ordering them.
+function validateCatalogAndVariants(lock, lockPath) {
+  const indexById = new Map();
+  const seenPaths = new Set();
+  lock.patches.forEach((patch, index) => {
+    if (typeof patch.id !== "string" || patch.id === "") {
+      fail(`lock ${lockPath}: patches[${index}].id must be a non-empty string`);
+    }
+    if (indexById.has(patch.id)) {
+      fail(`lock ${lockPath}: duplicate patch id ${patch.id} at patches[${index}]`);
+    }
+    if (seenPaths.has(patch.path)) {
+      fail(`lock ${lockPath}: duplicate patch path ${patch.path} at patches[${index}]`);
+    }
+    indexById.set(patch.id, index);
+    seenPaths.add(patch.path);
+  });
+  if (!isPlainObject(lock.variants)) {
+    fail(`lock ${lockPath}: variants must be an object mapping variant names to patch id lists`);
+  }
+  for (const [name, ids] of Object.entries(lock.variants)) {
+    if (name === "") fail(`lock ${lockPath}: variant names must be non-empty`);
+    if (!Array.isArray(ids)) fail(`lock ${lockPath}: variants.${name} must be an array of patch ids`);
+    let previous = -1;
+    const seen = new Set();
+    ids.forEach((id, position) => {
+      if (typeof id !== "string" || !indexById.has(id)) {
+        fail(`lock ${lockPath}: variants.${name}[${position}] references unknown patch id ${String(id)}`);
+      }
+      if (seen.has(id)) fail(`lock ${lockPath}: variants.${name} lists patch id ${id} twice`);
+      seen.add(id);
+      const index = indexById.get(id);
+      if (index <= previous) {
+        fail(
+          `lock ${lockPath}: variants.${name}[${position}] (${id}) is out of catalog order; ` +
+            `variants must list patch ids in the order of the patches catalog`,
+        );
+      }
+      previous = index;
+    });
+  }
+}
+
+// Returns `{ variant, patches }` for the run: the ordered catalog entries the
+// selected variant applies (version 2), or the whole flat list (version 1, no
+// variant). Pure lock/argument logic, so every rejection here happens before
+// any network or filesystem work.
+function resolveVariant(lock, requestedVariant) {
+  if (lock.version === 1) {
+    if (requestedVariant !== null) {
+      fail(`--variant ${requestedVariant} is not supported by a version 1 lock, which has no variants`);
+    }
+    return { variant: null, patches: lock.patches.map(({ path: p, sha256 }) => ({ path: p, sha256 })) };
+  }
+  const variant = requestedVariant ?? DEFAULT_VARIANT;
+  if (!Object.hasOwn(lock.variants, variant)) {
+    const known = Object.keys(lock.variants).sort().join(", ") || "(none)";
+    fail(`unknown variant ${variant}; the lock defines: ${known}`);
+  }
+  const byId = new Map(lock.patches.map((patch) => [patch.id, patch]));
+  return {
+    variant,
+    patches: lock.variants[variant].map((id) => {
+      const { path: p, sha256 } = byId.get(id);
+      return { id, path: p, sha256 };
+    }),
+  };
 }
 
 // True when `target` is `dir` itself or lies somewhere beneath it. Both paths
@@ -128,15 +215,15 @@ async function resolvePatchFile(realLockDir, patchPath) {
   return real;
 }
 
-// Returns the patches in lock order with their verified bytes, after
+// Returns the resolved patches in order with their verified bytes, after
 // confirming each file lies within the lock directory and its SHA-256 matches
 // the lock. Runs before any network or filesystem work; the bytes verified
 // here are the bytes applied later, so a patch file changing on disk after
 // this point cannot reach `git apply`.
-async function verifyPatches(lock, lockPath) {
+async function verifyPatches(patches, lockPath) {
   const lockDir = await realpath(path.dirname(lockPath));
   const verified = [];
-  for (const patch of lock.patches) {
+  for (const patch of patches) {
     const file = await resolvePatchFile(lockDir, patch.path);
     let content;
     try {
@@ -148,7 +235,7 @@ async function verifyPatches(lock, lockPath) {
     if (actual !== patch.sha256) {
       fail(`patch ${patch.path}: sha256 mismatch (lock ${patch.sha256}, file ${actual})`);
     }
-    verified.push({ path: patch.path, sha256: patch.sha256, content });
+    verified.push({ ...patch, content });
   }
   return verified;
 }
@@ -184,13 +271,17 @@ async function fetchCommit(staging, repository, commit) {
   if (stdout.trim() !== commit) fail(`checked out ${stdout.trim()} but lock pins ${commit}`);
 }
 
+function describePatch(patch) {
+  return patch.id === undefined ? patch.path : `${patch.id} (${patch.path})`;
+}
+
 async function applyPatches(staging, patches) {
   for (const patch of patches) {
     // Apply the verified bytes from memory via stdin, never re-reading the file.
     await git(staging, ["apply"], patch.content).catch((error) =>
       fail(`patch ${patch.path} does not apply cleanly: ${error.message}`),
     );
-    console.log(`prepare-source: applied ${patch.path}`);
+    console.log(`prepare-source: applied ${describePatch(patch)}`);
   }
 }
 
@@ -209,7 +300,8 @@ async function main() {
   const lock = await readLock(options.lock);
   const repository = options.repository ?? lock.repository;
   if (repository.startsWith("-")) fail("--repository must not start with '-'");
-  const patches = await verifyPatches(lock, options.lock);
+  const selection = resolveVariant(lock, options.variant);
+  const patches = await verifyPatches(selection.patches, options.lock);
 
   const destination = options.destination;
   if (await exists(destination)) fail(`destination ${destination} already exists; remove it first`);
@@ -229,28 +321,35 @@ async function main() {
   });
   try {
     if (await exists(destination)) fail(`destination ${destination} already exists; remove it first`);
-    await prepareInto(destination, parent, options, lock, repository, patches);
+    await prepareInto(destination, parent, options, lock, repository, selection.variant, patches);
   } finally {
     await rmdir(lockDir).catch(() => {});
   }
+  const variantNote = selection.variant === null ? "" : ` variant ${selection.variant}`;
   console.log(
-    `prepare-source: prepared ${destination} at ${lock.commit} with ${patches.length} patch(es)`,
+    `prepare-source: prepared ${destination}${variantNote} at ${lock.commit} with ${patches.length} patch(es)`,
   );
 }
 
-async function prepareInto(destination, parent, options, lock, repository, patches) {
+async function prepareInto(destination, parent, options, lock, repository, variant, patches) {
   const staging = await mkdtemp(path.join(parent, `.${path.basename(destination)}.staging-`));
   try {
     console.log(`prepare-source: fetching ${lock.commit} from ${repository}`);
     await fetchCommit(staging, repository, lock.commit);
     await applyPatches(staging, patches);
+    // The record names the variant and the fully resolved, ordered patch
+    // sequence with its checksums, so two prepared trees can be compared by
+    // their provenance alone. Version 1 locks record the flat list unchanged.
     const provenance = {
       preparedAt: new Date().toISOString(),
       lock: options.lock,
       lockRepository: lock.repository,
       repository,
       commit: lock.commit,
-      patches: patches.map(({ path: p, sha256 }) => ({ path: p, sha256 })),
+      ...(variant === null ? {} : { variant }),
+      patches: patches.map(({ id, path: p, sha256 }) =>
+        id === undefined ? { path: p, sha256 } : { id, path: p, sha256 },
+      ),
     };
     await writeFile(
       path.join(staging, ".git", "harbor-source.json"),

@@ -8,11 +8,15 @@ pin is in `docs/nightly-port.md`.
 ## Status
 
 Reproducible port of the existing Reasoning feature set onto the latest
-Nightly. `source.lock.json` pins upstream commit
-`9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, and four checksummed patches. Preparing the
-source yields a checkout you can install dependencies into and build the
-server from, using upstream's own scripts.
+Nightly, materialized as one of two build variants. `source.lock.json` pins
+upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
+`v0.0.39-nightly.20260905.1284`, a catalog of five checksummed patches, and
+two ordered variants over that catalog: `managed-nightly` (stock Nightly
+desktop identity) and `reasoning` (the separate Reasoning desktop identity).
+Both variants carry the same server, contracts, and client-runtime changes;
+see `docs/build-variants.md`. Preparing the source yields a checkout you can
+install dependencies into and build the server from, using upstream's own
+scripts.
 
 What this component does not do:
 
@@ -27,18 +31,26 @@ What this component does not do:
 
 ## Layout
 
-- `source.lock.json`: the pin. `version` is `1`; `repository` is the upstream
-  HTTPS URL; `commit` is the full SHA-1; `patches` is the ordered list of
-  `{ "path", "sha256" }` entries. Each path is relative to the lock file and
-  must stay inside the lock file's directory: absolute paths, `..` escapes,
-  and symlinks whose real target lies elsewhere are rejected even when the
-  checksum matches. Subdirectories are fine.
-- `patches/0001-reasoning.patch`: streaming provider reasoning into the
-  thread timeline, with its server, contracts, client runtime, web, mobile,
-  and docs changes.
-- `patches/0002-desktop-identity.patch`: the separate Reasoning desktop
-  identity, the disabled updater feed, the packaged backend PATH fix, and the
-  manual macOS updater script.
+- `source.lock.json`: the pin. `version` is `2`; `repository` is the upstream
+  HTTPS URL; `commit` is the full SHA-1; `patches` is the catalog, an ordered
+  list of `{ "id", "path", "sha256" }` entries; `variants` maps each variant
+  name to the ordered list of patch ids it applies. Ids and paths are unique,
+  every variant entry must name a catalog id, and a variant lists its ids in
+  catalog order, so variants can differ only by which catalog entries they
+  include. Each path is relative to the lock file and must stay inside the
+  lock file's directory: absolute paths, `..` escapes, and symlinks whose
+  real target lies elsewhere are rejected even when the checksum matches.
+  Subdirectories are fine. Version `1` locks (a flat `patches` list of
+  `{ "path", "sha256" }` and no variants) are still accepted.
+- `patches/0001-reasoning.patch` (`reasoning-full`): streaming provider
+  reasoning into the thread timeline, with its server, contracts, client
+  runtime, web, mobile, and docs changes. Applied to both variants.
+- `patches/0002-desktop-runtime-common.patch` (`desktop-runtime-common`): the
+  packaged backend PATH fix (`T3CODE_SKIP_LOGIN_SHELL`, `os-jank`). Applied to
+  both variants.
+- `patches/0002-reasoning-identity.patch` (`reasoning-identity`): the separate
+  Reasoning desktop identity, the disabled updater feed, and the manual macOS
+  updater script. Applied to the `reasoning` variant only.
 - `patches/0003-update-admission.patch`: a tested command-admission primitive
   for maintenance. It is not yet wired into server requests or an updater;
   it does not by itself detect agent activity or enable automatic updates.
@@ -51,6 +63,8 @@ What this component does not do:
   temporary fixture repository with real `git` processes.
 - `docs/design.md`: the product contract. `docs/nightly-port.md`: where the
   patches came from, what they change, and how to re-port them.
+  `docs/build-variants.md`: the two-variant lock, what each variant contains,
+  and what is still missing before either tree is a deployable release.
 - `.build/`: ignored build output, including the default checkout.
 
 ## Preparing the source
@@ -61,9 +75,14 @@ Requires Node.js 24 and `git`. No npm dependencies.
 node t3-reasoning/scripts/prepare-source.mjs
 ```
 
-Defaults are the component's `source.lock.json` and the destination
-`t3-reasoning/.build/source`. Options:
+Defaults are the component's `source.lock.json`, the destination
+`t3-reasoning/.build/source`, and the `reasoning` variant. Options:
 
+- `--variant managed-nightly|reasoning`: which of the lock's variants to
+  materialize. Defaults to `reasoning`. An unknown name is rejected before
+  anything is fetched or created, and the flag is an error with a version `1`
+  lock. Prepare each variant into its own destination; never reuse one
+  checkout for both.
 - `--lock /absolute/lock.json`: use another lock file.
 - `--destination /absolute/new/path`: write somewhere else. The path must not
   exist; the tool never modifies or replaces an existing directory.
@@ -73,9 +92,11 @@ Defaults are the component's `source.lock.json` and the destination
   resolved against the directory you run the command from; URLs and SCP-like
   `host:path` forms are passed to `git` unchanged.
 
-The tool first checks that every patch path stays inside the lock directory
-(symlinks resolved), then reads each patch and verifies its SHA-256 against
-the lock, all before any network or filesystem work. It then fetches the
+The tool first validates the lock (catalog ids, variant references, and
+ordering), resolves the selected variant to its ordered patch list, checks
+that every resolved patch path stays inside the lock directory (symlinks
+resolved), then reads each patch and verifies its SHA-256 against the lock,
+all before any network or filesystem work. It then fetches the
 pinned commit into a staging directory next to the destination, checks it out
 detached, applies
 the patches in order by piping the already-verified bytes into `git apply`
@@ -101,8 +122,9 @@ final publish step would have it replaced.
 The result is a detached checkout at the pinned commit with the patches applied
 as uncommitted working-tree changes, so `git diff` in the checkout shows the
 whole feature delta. The provenance record, including the lock used, the
-repository actually fetched from, the commit, and the patch checksums, is
-written to `.git/harbor-source.json` inside the checkout.
+repository actually fetched from, the commit, the selected variant, and the
+fully resolved ordered patch list with ids and checksums, is written to
+`.git/harbor-source.json` inside the checkout.
 
 ## Installing dependencies and building the server
 
@@ -131,9 +153,17 @@ npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml 't3-reasoning/**/*.
 ```
 
 These are the commands `.github/workflows/t3-reasoning.yml` runs on Linux and
-macOS whenever this directory changes.
+macOS whenever this directory changes. One further test materializes both
+real variants and is skipped unless `T3_REASONING_UPSTREAM_REPOSITORY` names
+a local clone containing the pinned commit:
 
-The first two patches reproduce the port commit's tree recorded in
-`docs/nightly-port.md`. Later patches add incremental features beyond that
-baseline. The admission primitive's focused check in a prepared checkout is
+```sh
+T3_REASONING_UPSTREAM_REPOSITORY=/path/to/t3code-clone \
+  node --test t3-reasoning/tests/prepare-source.test.mjs
+```
+
+`reasoning-full`, `desktop-runtime-common`, and `reasoning-identity` together
+reproduce the port commit's tree recorded in `docs/nightly-port.md`. Later
+patches add incremental features beyond that baseline. The admission
+primitive's focused check in a prepared checkout is
 `pnpm --filter t3 test src/updateAdmission.test.ts` (11 tests).
