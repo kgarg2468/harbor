@@ -60,6 +60,8 @@ class InstallTests(Fixture):
         result = self.run_script('install.sh', VERIFY_FAIL='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(grant.exists())
+        self.assertFalse((self.root/'installer.lock').exists())
+        self.assertEqual(list((self.home/'Applications').glob('.insomnia-install.*')), [])
 
     def test_bootstrap_failure_restores_previous_helper_generation(self):
         app, helper, plist, grant = self.installed_files()
