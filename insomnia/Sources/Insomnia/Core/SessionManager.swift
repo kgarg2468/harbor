@@ -465,29 +465,13 @@ final class SessionManager {
     /// Shared body of `undoLidActions()` and `restoreAll()`; each entry is
     /// persisted as soon as it is undone.
     private func undoLidActions(in s: inout RuntimeState) {
-        if !s.frozenPids.isEmpty {
-            processControl.resume(pids: s.frozenPids)
-            Log.info("resumed \(s.frozenPids.count) frozen pid(s)")
-            s.frozenPids = []
-            // Docker Desktop is frozen via its pids too; the flag is only a marker.
-            s.dockerFrozen = false
-            try? persistState(s)
-        } else if s.dockerFrozen {
-            s.dockerFrozen = false
-            try? persistState(s)
-        }
-
-        if s.savedOutputVolume != nil || s.savedMuted != nil {
-            do {
-                let current = try audio.read()
-                try audio.apply(volume: s.savedOutputVolume ?? current.volume, muted: s.savedMuted ?? current.muted)
-                Log.info("audio restored (volume \(s.savedOutputVolume ?? current.volume), muted \(s.savedMuted ?? current.muted))")
-                s.savedOutputVolume = nil
-                s.savedMuted = nil
-                try? persistState(s)
-            } catch {
-                Log.error("could not restore audio: \(error.localizedDescription)")
+        do {
+            if try !OwnedRecovery.restore(&s, processes: processControl, audio: audio, persist: { try persistState($0) }) {
+                lastError = "Process or audio recovery is incomplete; ownership records were retained."
             }
+        } catch {
+            Log.error("could not persist owned recovery: \(error.localizedDescription)")
+            lastError = "could not persist owned recovery: \(error.localizedDescription)"
         }
     }
 

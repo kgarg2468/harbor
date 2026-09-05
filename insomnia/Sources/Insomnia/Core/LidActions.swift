@@ -62,14 +62,22 @@ final class LidActions {
     private func muteSavingCurrent(_ manager: SessionManager) {
         do {
             try manager.withLidTransaction {
-                let current = try audio.read()
-                try manager.journal { s in
-                    // Keep an earlier save if a previous close was never undone.
-                    if s.savedOutputVolume == nil { s.savedOutputVolume = current.volume }
-                    if s.savedMuted == nil { s.savedMuted = current.muted }
+                let saved = try manager.store.loadState() ?? manager.state
+                // Never mute a new default while recovery for an earlier device is pending.
+                if saved.hasAudioOwnership {
+                    guard let snapshot = saved.audioSnapshot else { return }
+                    try audio.mute(deviceUID: snapshot.deviceUID)
+                    return
                 }
-                try audio.mute()
-                Log.info("muted (was volume \(current.volume), muted \(current.muted))")
+                let current = try audio.snapshotDefault()
+                guard current.isValid else { throw AudioControlError(what: "invalid output snapshot", status: -1) }
+                try manager.journal { s in
+                    s.savedOutputVolume = current.volume
+                    s.savedMuted = current.muted
+                    s.savedOutputDeviceUID = current.deviceUID
+                }
+                try audio.mute(deviceUID: current.deviceUID)
+                Log.info("muted saved output device")
             }
         } catch {
             Log.error("mute on lid close failed: \(error.localizedDescription)")
@@ -79,15 +87,26 @@ final class LidActions {
     private func freeze(_ group: FreezeGroup, docker: Bool, manager: SessionManager) {
         do {
             try manager.withLidTransaction {
-                let already = Set(manager.state.frozenPids)
-                let pids = group.pids.filter { !already.contains($0) }
-                guard !pids.isEmpty else { return }
+                let saved = try manager.store.loadState() ?? manager.state
+                let already = Set(saved.frozenPids + saved.frozenProcesses.map(\.pid))
+                let candidates = group.identities.filter { !already.contains($0.pid) }
+                let identities = freezer.prepareSuspend(processes: candidates, expectedParents: group.expectedParents)
+                guard !identities.isEmpty else { return }
                 try manager.journal { s in
-                    s.frozenPids.append(contentsOf: pids)
+                    s.frozenProcesses.append(contentsOf: identities)
+                    s.frozenPids.append(contentsOf: identities.map(\.pid))
                     if docker { s.dockerFrozen = true }
                 }
-                freezer.suspend(pids: pids, expectedParents: group.expectedParents)
-                Log.info("froze \(group.name) (\(pids.count) pid(s))")
+                let stopped = Set(freezer.suspend(processes: identities, expectedParents: group.expectedParents))
+                let skipped = Set(identities).subtracting(stopped)
+                if !skipped.isEmpty {
+                    try manager.journal { s in
+                        s.frozenProcesses.removeAll { skipped.contains($0) }
+                        s.frozenPids.removeAll { pid in skipped.contains { $0.pid == pid } }
+                        if s.frozenPids.isEmpty && s.frozenProcesses.isEmpty { s.dockerFrozen = false }
+                    }
+                }
+                Log.info("froze \(group.name) (\(stopped.count) process(es))")
             }
         } catch {
             Log.error("could not journal freeze of \(group.bundleId): \(error.localizedDescription); left running")

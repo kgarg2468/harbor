@@ -21,6 +21,7 @@ final class ReconcileTests: XCTestCase {
         st.sleepDisabledByUs = true
         st.lowPowerSetByUs = true
         st.frozenPids = [111, 222]
+        st.frozenProcesses = st.frozenPids.map(FakeProcessControl.identity)
         st.dockerFrozen = true
         try h.store.saveState(st)
         h.guardFake.sleepDisabled = true
@@ -103,6 +104,7 @@ final class ReconcileTests: XCTestCase {
         var st = RuntimeState()
         st.sleepDisabledByUs = true
         st.savedOutputVolume = 0.6
+        st.savedOutputDeviceUID = "test-output"
         st.savedMuted = false
         try h.store.saveState(st)
 
@@ -124,6 +126,7 @@ final class ReconcileTests: XCTestCase {
         try h.store.saveSession(Session(startedAt: now.addingTimeInterval(-7200), endsAt: now.addingTimeInterval(-1)))
         var st = RuntimeState()
         st.savedOutputVolume = 0.6
+        st.savedOutputDeviceUID = "test-output"
         st.savedMuted = true
         try h.store.saveState(st)
         h.audio.throwOnApply = true
