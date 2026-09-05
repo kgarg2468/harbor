@@ -43,10 +43,16 @@ struct RuntimeState: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        sleepDisabledByUs = try c.decodeIfPresent(Bool.self, forKey: .sleepDisabledByUs) ?? false
-        lowPowerSetByUs = try c.decodeIfPresent(Bool.self, forKey: .lowPowerSetByUs) ?? false
-        originalSleepDisabled = try c.decodeIfPresent(Bool.self, forKey: .originalSleepDisabled)
-        originalBatteryLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .originalBatteryLowPowerMode)
+        // Missing legacy keys are supported; present null is unknown ownership,
+        // not evidence that no restoration is needed.
+        func powerValue(_ key: CodingKeys) throws -> Bool? {
+            guard c.contains(key) else { return nil }
+            return try c.decode(Bool.self, forKey: key)
+        }
+        sleepDisabledByUs = try powerValue(.sleepDisabledByUs) ?? false
+        lowPowerSetByUs = try powerValue(.lowPowerSetByUs) ?? false
+        originalSleepDisabled = try powerValue(.originalSleepDisabled)
+        originalBatteryLowPowerMode = try powerValue(.originalBatteryLowPowerMode)
         frozenPids = try c.decodeIfPresent([Int32].self, forKey: .frozenPids) ?? []
         frozenProcesses = try c.decodeIfPresent([ProcessIdentity].self, forKey: .frozenProcesses) ?? []
         dockerFrozen = try c.decodeIfPresent(Bool.self, forKey: .dockerFrozen) ?? false
