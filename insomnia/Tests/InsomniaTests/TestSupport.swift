@@ -54,14 +54,19 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
     private let lock = NSLock()
     private var _calls: [String] = []
     private var _sleepDisabled = false
+    private var _lowPower = false
+    var onSleepChange: (@Sendable (Bool) -> Void)?
+    var sleepGate: AsyncGate?
     private var _lowPowerGate: AsyncGate?
     var throwOn: Set<String> = []
+    var throwAfterApplying: Set<String> = []
 
     var calls: [String] { lock.withLock { _calls } }
     var sleepDisabled: Bool {
         get { lock.withLock { _sleepDisabled } }
         set { lock.withLock { _sleepDisabled = newValue } }
     }
+    var lowPower: Bool { lock.withLock { _lowPower } }
     var lowPowerGate: AsyncGate? {
         get { lock.withLock { _lowPowerGate } }
         set { lock.withLock { _lowPowerGate = newValue } }
@@ -76,7 +81,9 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
 
     func setSleepDisabled(_ disabled: Bool) async throws {
         try record("disablesleep \(disabled ? 1 : 0)")
+        if disabled, let gate = sleepGate { await gate.wait() }
         sleepDisabled = disabled
+        onSleepChange?(disabled)
     }
 
     func isSleepDisabled() async throws -> Bool {
@@ -87,6 +94,10 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
     func setLowPowerMode(_ on: Bool) async throws {
         try record("lowpowermode \(on ? 1 : 0)")
         if on, let gate = lowPowerGate { await gate.wait() }
+        lock.withLock { _lowPower = on }
+        if throwAfterApplying.contains("lowpowermode \(on ? 1 : 0)") {
+            throw SleepGuardError(command: "lowpowermode", status: 1, stderr: "failure after applying")
+        }
     }
 }
 
@@ -193,6 +204,8 @@ final class FakeBackstop: BackstopScheduling, @unchecked Sendable {
     private var _scheduled: [Date] = []
     private var _clears = 0
     private var _failSchedule = false
+    var scheduleGate: AsyncGate?
+    var onSchedule: (@Sendable () -> Void)?
     var scheduled: [Date] { lock.withLock { _scheduled } }
     var clears: Int { lock.withLock { _clears } }
     var failSchedule: Bool {
@@ -200,6 +213,8 @@ final class FakeBackstop: BackstopScheduling, @unchecked Sendable {
         set { lock.withLock { _failSchedule = newValue } }
     }
     func schedule(endsAt: Date) async throws {
+        if let gate = scheduleGate { await gate.wait() }
+        onSchedule?()
         if failSchedule { throw BackstopError(message: "fake launchd refused") }
         lock.withLock { _scheduled.append(endsAt) }
     }

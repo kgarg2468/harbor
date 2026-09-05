@@ -429,7 +429,7 @@ final class StatusItemController: NSObject {
     private func menuItems() -> [StatusMenu.Item] {
         StatusMenu.items(
             sessionActive: manager.isActive,
-            sleepHeld: manager.state.sleepDisabledByUs,
+            sleepHeld: manager.sleepHeld,
             machine: StatusLines.machine(
                 lidClosed: status.lidClosed,
                 watts: status.instantWatts(),
