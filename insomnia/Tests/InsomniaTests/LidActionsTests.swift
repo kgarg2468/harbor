@@ -259,3 +259,31 @@ final class Locked<T: Sendable>: @unchecked Sendable {
         set { lock.withLock { _v = newValue } }
     }
 }
+
+extension LidActionsTests {
+    func testAlreadyStoppedProcessesAreNotJournaledAndFailedStopsAreRemoved() async throws {
+        h.procs.stoppedBeforePlanning = [100]
+        h.procs.failedSuspends = [101]
+        let (manager, actions) = await make(mute: false)
+        await manager.start(duration: 3600)
+        await actions.onClose()
+        let state = try XCTUnwrap(try h.store.loadState())
+        XCTAssertFalse(state.frozenPids.contains(100))
+        XCTAssertFalse(state.frozenPids.contains(101))
+        XCTAssertFalse(h.procs.suspended.flatMap { $0 }.contains(100))
+        XCTAssertEqual(Set(state.frozenPids), Set(state.frozenProcesses.map(\.pid)))
+    }
+
+    func testRepeatedCloseKeepsOriginalAudioDeviceOwnership() async throws {
+        let (manager, actions) = await make()
+        await manager.start(duration: 3600)
+        await actions.onClose()
+        h.audio.defaultDeviceUID = "new-default"
+        await actions.onClose()
+        XCTAssertEqual(h.audio.mutedDevices, ["test-output", "test-output"])
+        XCTAssertEqual(try h.store.loadState()?.savedOutputDeviceUID, "test-output")
+        await actions.onOpen()
+        XCTAssertEqual(h.audio.restoredDevices, ["test-output"])
+    }
+
+}

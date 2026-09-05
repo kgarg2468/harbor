@@ -17,8 +17,10 @@ final class ReconcileLidGatingTests: XCTestCase {
         var st = RuntimeState()
         st.sleepDisabledByUs = true
         st.frozenPids = [111, 222]
+        st.frozenProcesses = st.frozenPids.map(FakeProcessControl.identity)
         st.dockerFrozen = true
         st.savedOutputVolume = 0.4
+        st.savedOutputDeviceUID = "test-output"
         st.savedMuted = false
         try h.store.saveState(st)
         return s
@@ -75,6 +77,7 @@ final class ReconcileLidGatingTests: XCTestCase {
         var st = RuntimeState()
         st.sleepDisabledByUs = true
         st.frozenPids = [111]
+        st.frozenProcesses = st.frozenPids.map(FakeProcessControl.identity)
         try h.store.saveState(st)
         h.clamshell.closed = true
         let m = h.makeManager()

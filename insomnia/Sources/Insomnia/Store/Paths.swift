@@ -64,6 +64,7 @@ struct Paths: Sendable, Equatable {
     var configFile: URL { appSupport.appendingPathComponent("config.json") }
     /// Installed copy of scripts/backstop.sh, placed there by install.sh.
     var backstopScript: URL { appSupport.appendingPathComponent("backstop.sh") }
+    var recoveryHelper: URL { appSupport.appendingPathComponent("InsomniaRecovery") }
 
     var logFile: URL { logs.appendingPathComponent("insomnia.log") }
     var handoffsLog: URL { logs.appendingPathComponent("handoffs.log") }
