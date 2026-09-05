@@ -1,7 +1,7 @@
 import AppKit
 
-/// The right-click menu on the status item: a read-only status block, then
-/// Settings and Quit, which live here and nowhere else.
+/// The right-click menu: current status, preset start/extend actions, then
+/// Settings and Quit.
 ///
 /// The item list is pure so the ordering and the omission rules can be
 /// tested without a menu bar; `menu(_:target:settings:quit:)` is the only
@@ -17,6 +17,7 @@ enum StatusMenu {
             /// Relaunch this browser with the occlusion flags. Carries the
             /// display name so the menu item knows what to relaunch.
             case relaunchBrowser(String)
+            case preset(TimeInterval)
         }
 
         let title: String
@@ -26,7 +27,7 @@ enum StatusMenu {
     static let settingsTitle = "Settings\u{2026}"
     static let quitTitle = "Quit Insomnia"
 
-    /// Disabled status lines, a separator, then Settings… and Quit. Empty
+    /// Disabled status lines, optional presets, then Settings… and Quit. Empty
     /// lines are dropped, and the separator only appears when something
     /// precedes it, so the menu never opens with a stray rule at the top.
     static func items(
@@ -35,7 +36,9 @@ enum StatusMenu {
         machine: String?,
         actions: String?,
         throttledBrowsers: [String],
-        error: String?
+        error: String?,
+        presets: [TimeInterval] = [],
+        maxDuration: TimeInterval = Config().maxDuration
     ) -> [Item] {
         var out: [Item] = []
         if let held = SleepHeldLine.line(sessionActive: sessionActive, sleepHeld: sleepHeld) {
@@ -62,6 +65,12 @@ enum StatusMenu {
         if !out.isEmpty {
             out.append(Item(title: "", kind: .separator))
         }
+        var seen = Set<TimeInterval>()
+        let available = presets.filter { $0.isFinite && $0 > 0 && $0 <= maxDuration && seen.insert($0).inserted }
+        for duration in available {
+            out.append(Item(title: "\(sessionActive ? "Extend by" : "Start") \(chipLabel(for: duration))", kind: .preset(duration)))
+        }
+        if !available.isEmpty { out.append(Item(title: "", kind: .separator)) }
         out.append(Item(title: settingsTitle, kind: .settings))
         out.append(Item(title: quitTitle, kind: .quit))
         return out
@@ -81,7 +90,8 @@ enum StatusMenu {
         target: AnyObject?,
         settings: Selector,
         quit: Selector,
-        relaunchBrowser: Selector
+        relaunchBrowser: Selector,
+        preset: Selector
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -105,6 +115,10 @@ enum StatusMenu {
                 menu.addItem(action(title: item.title, selector: settings, key: ",", target: target))
             case .quit:
                 menu.addItem(action(title: item.title, selector: quit, key: "q", target: target))
+            case let .preset(duration):
+                let entry = action(title: item.title, selector: preset, key: "", target: target)
+                entry.representedObject = NSNumber(value: duration)
+                menu.addItem(entry)
             case let .relaunchBrowser(name):
                 let entry = action(title: item.title, selector: relaunchBrowser, key: "", target: target)
                 entry.representedObject = name
