@@ -1,0 +1,1599 @@
+diff --git a/apps/server/src/cloud/managedCandidateProcess.test.ts b/apps/server/src/cloud/managedCandidateProcess.test.ts
+new file mode 100644
+index 000000000..cad2faa68
+--- /dev/null
++++ b/apps/server/src/cloud/managedCandidateProcess.test.ts
+@@ -0,0 +1,866 @@
++// @effect-diagnostics nodeBuiltinImport:off - drives a fake raw child and inspects the scratch directory directly.
++import * as NodeEvents from "node:events";
++import * as NodeFSP from "node:fs/promises";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import * as NodeStream from "node:stream";
++
++import { afterEach, assert, beforeEach, describe, it } from "@effect/vitest";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as Option from "effect/Option";
++import { vi } from "vite-plus/test";
++
++import {
++  MANAGED_CANDIDATE_NODE_VERSION,
++  makeManagedCandidateProcess,
++  type CandidateChildHandle,
++  type CandidateSpawn,
++  type CandidateSpawnOptions,
++  type ManagedCandidateError,
++  type ManagedCandidateLimits,
++  type ManagedCandidateOperation,
++  type ManagedCandidateOutput,
++} from "./managedCandidateProcess.ts";
++
++// Scratch creation is held at its first filesystem call so cancellation can be
++// delivered deterministically before any child exists.
++vi.mock("node:fs/promises", async (importOriginal) => {
++  const actual = await importOriginal<typeof import("node:fs/promises")>();
++  return { ...actual, mkdtemp: vi.fn(actual.mkdtemp) };
++});
++
++// --- fake raw spawn ----------------------------------------------------------------
++
++class FakeChild extends NodeEvents.EventEmitter implements CandidateChildHandle {
++  pid: number | undefined = 4242;
++  readonly stdout = new NodeStream.PassThrough();
++  readonly stderr = new NodeStream.PassThrough();
++  readonly kills: Array<NodeJS.Signals> = [];
++  killResult = true;
++  private killWaiters: Array<() => void> = [];
++
++  kill(signal: NodeJS.Signals): boolean {
++    this.kills.push(signal);
++    const waiters = this.killWaiters;
++    this.killWaiters = [];
++    for (const waiter of waiters) waiter();
++    return this.killResult;
++  }
++
++  /** Resolves the next time the runner asks this child to stop. */
++  nextKill(): Promise<void> {
++    return new Promise((resolve) => this.killWaiters.push(resolve));
++  }
++
++  endStreams(): void {
++    this.stdout.end();
++    this.stderr.end();
++  }
++
++  exit(code: number | null, signal: NodeJS.Signals | null = null): void {
++    this.emit("exit", code, signal);
++  }
++
++  /** The ordinary happy path: output is flushed, pipes close, then the process exits. */
++  finish(code: number | null, signal: NodeJS.Signals | null = null): void {
++    this.endStreams();
++    this.exit(code, signal);
++  }
++}
++
++interface SpawnCall {
++  readonly command: string;
++  readonly args: ReadonlyArray<string>;
++  readonly options: CandidateSpawnOptions;
++  readonly child: FakeChild;
++}
++
++function fakeSpawn(configure?: (child: FakeChild) => void) {
++  const calls: Array<SpawnCall> = [];
++  let waiters: Array<(call: SpawnCall) => void> = [];
++  const spawn: CandidateSpawn = (command, args, options) => {
++    const child = new FakeChild();
++    configure?.(child);
++    const call: SpawnCall = { command, args, options, child };
++    calls.push(call);
++    const pending = waiters;
++    waiters = [];
++    for (const waiter of pending) waiter(call);
++    return child;
++  };
++  return {
++    spawn,
++    calls,
++    nextSpawn: (): Promise<SpawnCall> => new Promise((resolve) => waiters.push(resolve)),
++  };
++}
++
++// --- helpers -----------------------------------------------------------------------
++
++const NODE = "/opt/managed/node";
++const ENTRY = "/opt/managed/versions/1.2.3/node_modules/t3/dist/bin.mjs";
++const SNAPSHOT = "/private/tmp/t3-migration-preflight-abc/snapshot.sqlite";
++const REPLACEMENT_ENV_KEYS = [
++  "HOME",
++  "TMPDIR",
++  "TMP",
++  "TEMP",
++  "XDG_CONFIG_HOME",
++  "XDG_CACHE_HOME",
++  "XDG_DATA_HOME",
++  "PATH",
++  "LANG",
++  "LC_ALL",
++].sort();
++
++const flush = async (): Promise<void> => {
++  for (let index = 0; index < 5; index += 1) {
++    await new Promise<void>((resolve) => setImmediate(resolve));
++  }
++};
++
++/** Drains the microtask and immediate queues, then asserts the fiber still has no exit. */
++const assertPending = (fiber: Fiber.Fiber<unknown, unknown>, message?: string) =>
++  Effect.promise(flush).pipe(
++    Effect.map(() => {
++      assert.isUndefined(fiber.pollUnsafe(), message ?? "must still be waiting on the child");
++    }),
++  );
++
++const failureOf = <A>(fiber: Fiber.Fiber<A, ManagedCandidateError>) =>
++  Effect.flip(Fiber.join(fiber)).pipe(
++    Effect.map((error) => {
++      assert.strictEqual(error._tag, "ManagedCandidateError");
++      return error;
++    }),
++  );
++
++let scratchParent: string;
++const scratchEntries = Effect.promise(() => NodeFSP.readdir(scratchParent));
++const exists = (path: string) =>
++  Effect.promise(() =>
++    NodeFSP.lstat(path).then(
++      () => true,
++      () => false,
++    ),
++  );
++
++beforeEach(async () => {
++  scratchParent = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-candidate-test-"));
++});
++
++afterEach(async () => {
++  vi.unstubAllEnvs();
++  // Drops any unconsumed one-shot hold and restores the original implementation.
++  vi.mocked(NodeFSP.mkdtemp).mockReset();
++  await NodeFSP.rm(scratchParent, { recursive: true, force: true });
++});
++
++function runner(spawn: CandidateSpawn, limits?: Partial<ManagedCandidateLimits>) {
++  return makeManagedCandidateProcess({
++    nodeExecutable: NODE,
++    scratchParent,
++    spawn,
++    ...(limits === undefined ? {} : { limits }),
++  });
++}
++
++/** Starts one operation against the fake and hands back the spawn call and the running fiber. */
++const launch = (
++  spawn: CandidateSpawn,
++  operation: ManagedCandidateOperation,
++  limits?: Partial<ManagedCandidateLimits>,
++) => Effect.forkChild(runner(spawn, limits).run({ entryPath: ENTRY, operation }));
++
++const launched = (
++  fake: ReturnType<typeof fakeSpawn>,
++  operation: ManagedCandidateOperation,
++  limits?: Partial<ManagedCandidateLimits>,
++) =>
++  Effect.gen(function* () {
++    const spawned = fake.nextSpawn();
++    const fiber = yield* launch(fake.spawn, operation, limits);
++    const call = yield* Effect.promise(() => spawned);
++    return { fiber, ...call };
++  });
++
++// --- tests -------------------------------------------------------------------------
++
++describe("managedCandidateProcess", () => {
++  it.effect(
++    "spawns the version probe with exact argv, a replacement environment, and private scratch",
++    () =>
++      Effect.gen(function* () {
++        vi.stubEnv("NODE_OPTIONS", "--require /tmp/evil.cjs");
++        vi.stubEnv("NODE_PATH", "/tmp/evil");
++        vi.stubEnv("NODE_CHANNEL_FD", "3");
++        vi.stubEnv("ELECTRON_RUN_AS_NODE", "1");
++        vi.stubEnv("T3CODE_HOME", "/tmp/live-home");
++        vi.stubEnv("HTTPS_PROXY", "http://proxy.invalid");
++        vi.stubEnv("ANTHROPIC_API_KEY", "secret");
++        const { fiber, command, args, options, child } = yield* launched(fakeSpawn(), {
++          kind: "version",
++        });
++
++        assert.strictEqual(command, NODE);
++        assert.deepStrictEqual(args, ["--no-global-search-paths", ENTRY, "--version"]);
++        assert.deepStrictEqual(options.stdio, ["ignore", "pipe", "pipe"]);
++        assert.strictEqual(options.shell, false);
++        assert.strictEqual(options.detached, false);
++        assert.deepStrictEqual(Object.keys(options.env).sort(), REPLACEMENT_ENV_KEYS);
++        assert.strictEqual(options.env.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
++
++        const [scratchName] = yield* scratchEntries;
++        assert.isDefined(scratchName);
++        const scratch = NodePath.join(scratchParent, scratchName as string);
++        assert.strictEqual(
++          (yield* Effect.promise(() => NodeFSP.stat(scratch))).mode & 0o777,
++          0o700,
++        );
++        assert.strictEqual(options.cwd, NodePath.join(scratch, "cwd"));
++        assert.deepStrictEqual(yield* Effect.promise(() => NodeFSP.readdir(options.cwd)), []);
++        assert.strictEqual(options.env.HOME, NodePath.join(scratch, "home"));
++        assert.notStrictEqual(options.env.HOME, NodeOS.homedir());
++        for (const key of ["TMPDIR", "TMP", "TEMP"] as const) {
++          assert.strictEqual(options.env[key], NodePath.join(scratch, "tmp"));
++        }
++        assert.strictEqual(options.env.XDG_CONFIG_HOME, NodePath.join(scratch, "xdg", "config"));
++        assert.strictEqual(options.env.XDG_CACHE_HOME, NodePath.join(scratch, "xdg", "cache"));
++        assert.strictEqual(options.env.XDG_DATA_HOME, NodePath.join(scratch, "xdg", "data"));
++
++        child.stdout.write("1.2.3\n");
++        child.finish(0);
++        const output = yield* Fiber.join(fiber);
++        assert.deepStrictEqual(output, {
++          code: 0,
++          signal: null,
++          stdout: "1.2.3\n",
++          stderr: "",
++          stdoutTruncated: false,
++          stderrTruncated: false,
++          stdoutInvalidUtf8: false,
++          stderrInvalidUtf8: false,
++          timedOut: false,
++        } satisfies ManagedCandidateOutput);
++        assert.deepStrictEqual(yield* scratchEntries, []);
++      }),
++  );
++
++  it.effect(
++    "points the service identity probe at an absent scratch database and refuses one that appears",
++    () =>
++      Effect.gen(function* () {
++        const { fiber, args, child } = yield* launched(fakeSpawn(), { kind: "service-preflight" });
++        assert.strictEqual(args[0], "--no-global-search-paths");
++        assert.strictEqual(args[1], ENTRY);
++        assert.strictEqual(args[2], "__service-preflight");
++        assert.strictEqual(args[3], "--database-path");
++        const databasePath = args[4] as string;
++        assert.deepStrictEqual(args.slice(5), ["--launcher-protocol", "2"]);
++        const [scratchName] = yield* scratchEntries;
++        assert.isTrue(databasePath.startsWith(NodePath.join(scratchParent, scratchName as string)));
++        assert.isFalse(yield* exists(databasePath));
++
++        child.stdout.write('{"status":"ready","version":"1.2.3","launcherProtocol":2}\n');
++        child.finish(0);
++        assert.strictEqual((yield* Fiber.join(fiber)).code, 0);
++
++        const second = yield* launched(fakeSpawn(), { kind: "service-preflight" });
++        yield* Effect.promise(() => NodeFSP.writeFile(`${second.args[4] as string}-wal`, ""));
++        second.child.stdout.write('{"status":"ready","version":"1.2.3","launcherProtocol":2}\n');
++        second.child.finish(0);
++        const error = yield* failureOf(second.fiber);
++        assert.include(error.reason, "identity database path");
++        assert.include(error.reason, "-wal");
++        assert.strictEqual(error.output?.code, 0);
++        assert.deepStrictEqual(yield* scratchEntries, []);
++      }),
++  );
++
++  it.effect("passes the migration snapshot path verbatim with the fixed launcher protocol", () =>
++    Effect.gen(function* () {
++      const fake = fakeSpawn();
++      const { fiber, args, child } = yield* launched(fake, {
++        kind: "migration-preflight",
++        snapshotPath: SNAPSHOT,
++      });
++      assert.deepStrictEqual(args, [
++        "--no-global-search-paths",
++        ENTRY,
++        "__migration-preflight",
++        "--snapshot-path",
++        SNAPSHOT,
++        "--launcher-protocol",
++        "2",
++      ]);
++      child.stdout.write('{"protocol":1,"status":"ok"}\n');
++      child.finish(0);
++      assert.strictEqual((yield* Fiber.join(fiber)).stdout, '{"protocol":1,"status":"ok"}\n');
++
++      const relative = yield* Effect.flip(
++        runner(fake.spawn).run({
++          entryPath: ENTRY,
++          operation: { kind: "migration-preflight", snapshotPath: "relative.sqlite" },
++        }),
++      );
++      assert.include(relative.reason, "not absolute");
++      assert.strictEqual(fake.calls.length, 1);
++    }),
++  );
++
++  it.effect("keeps a complete JSON line pending until the child has actually exited", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(fakeSpawn(), { kind: "version" });
++      child.stdout.write("1.2.3\n");
++      child.endStreams();
++      yield* assertPending(fiber);
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.exit(0);
++      assert.strictEqual((yield* Fiber.join(fiber)).stdout, "1.2.3\n");
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("keeps an exited child pending until both pipes reach end-of-stream", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(fakeSpawn(), { kind: "version" });
++      child.stdout.write("1.2.3\n");
++      child.exit(0);
++      yield* assertPending(fiber);
++      child.stdout.end();
++      yield* assertPending(fiber);
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.stderr.end();
++      assert.strictEqual((yield* Fiber.join(fiber)).code, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("rejects a pipe that closes without end-of-stream", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(fakeSpawn(), { kind: "version" });
++      child.stdout.write("1.2.3\n");
++      child.stderr.end();
++      child.stdout.destroy();
++      child.exit(0);
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "stdout closed before end-of-stream");
++    }),
++  );
++
++  it.effect("asks a live child to stop as soon as a pipe closes without end-of-stream", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(
++        fakeSpawn(),
++        { kind: "version" },
++        { identityTimeoutMs: 60_000 },
++      );
++      const killed = child.nextKill();
++      child.stdout.write("1.2.3\n");
++      child.stdout.destroy();
++      yield* Effect.promise(() => killed);
++      assert.deepStrictEqual(child.kills, ["SIGTERM"]);
++      yield* assertPending(fiber, "termination request must not settle the process");
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.stderr.end();
++      child.exit(0);
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "stdout closed before end-of-stream");
++      assert.strictEqual(error.output?.code, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("rejects a signal exit and reports the signal", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(fakeSpawn(), { kind: "version" });
++      child.finish(null, "SIGKILL");
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "exited on signal SIGKILL");
++      assert.strictEqual(error.output?.signal, "SIGKILL");
++      assert.strictEqual(error.output?.code, null);
++    }),
++  );
++
++  it.effect("treats an error after the PID exists as unusable but not as exit", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(fakeSpawn(), { kind: "version" });
++      child.emit("error", new Error("kill EPERM"));
++      yield* assertPending(fiber);
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.stdout.write("1.2.3\n");
++      child.finish(0);
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "process error: kill EPERM");
++      assert.strictEqual(error.output?.code, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("settles a spawn failure with no PID as a failure and removes scratch", () =>
++    Effect.gen(function* () {
++      const fake = fakeSpawn((child) => {
++        child.pid = undefined;
++        process.nextTick(() => child.emit("error", new Error("spawn ENOENT")));
++      });
++      const error = yield* Effect.flip(
++        runner(fake.spawn).run({ entryPath: ENTRY, operation: { kind: "version" } }),
++      );
++      assert.include(error.reason, "could not start: spawn ENOENT");
++      assert.isUndefined(error.output);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("refuses non-absolute inputs before creating anything", () =>
++    Effect.gen(function* () {
++      const fake = fakeSpawn();
++      const relative = yield* Effect.flip(
++        runner(fake.spawn).run({ entryPath: "dist/bin.mjs", operation: { kind: "version" } }),
++      );
++      assert.include(relative.reason, "entry path is not absolute");
++      const badNode = yield* Effect.flip(
++        makeManagedCandidateProcess({
++          nodeExecutable: "node",
++          scratchParent,
++          spawn: fake.spawn,
++        }).run({ entryPath: ENTRY, operation: { kind: "version" } }),
++      );
++      assert.include(badNode.reason, "node executable path is not absolute");
++      assert.strictEqual(fake.calls.length, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("times out by signalling the child and waits for its actual exit before cleanup", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(
++        fakeSpawn(),
++        { kind: "version" },
++        { identityTimeoutMs: 5 },
++      );
++      yield* Effect.promise(() => child.nextKill());
++      assert.deepStrictEqual(child.kills, ["SIGTERM"]);
++      yield* assertPending(fiber);
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.finish(null, "SIGTERM");
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "timed out after 5ms");
++      assert.strictEqual(error.output?.timedOut, true);
++      assert.strictEqual(error.output?.signal, "SIGTERM");
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("retains ownership when the kill is refused until the child really exits", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(
++        fakeSpawn((spawnedChild) => {
++          spawnedChild.killResult = false;
++        }),
++        { kind: "version" },
++        { identityTimeoutMs: 5 },
++      );
++      yield* Effect.promise(() => child.nextKill());
++      yield* assertPending(fiber);
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.stdout.write("late\n");
++      child.finish(0);
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "timed out");
++      assert.strictEqual(error.output?.code, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("uses the migration timeout for migration probes", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(
++        fakeSpawn(),
++        { kind: "migration-preflight", snapshotPath: SNAPSHOT },
++        { identityTimeoutMs: 60_000, migrationTimeoutMs: 5 },
++      );
++      yield* Effect.promise(() => child.nextKill());
++      child.finish(null, "SIGTERM");
++      assert.include((yield* failureOf(fiber)).reason, "timed out after 5ms");
++    }),
++  );
++
++  it.effect("bounds stdout without retaining bytes past the cap and asks the child to stop", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(
++        fakeSpawn(),
++        { kind: "version" },
++        { maxOutputBytes: 64 },
++      );
++      const killed = child.nextKill();
++      child.stdout.write("a".repeat(40));
++      child.stdout.write("b".repeat(40));
++      yield* Effect.promise(() => killed);
++      assert.deepStrictEqual(child.kills, ["SIGTERM"]);
++      child.stdout.write("c".repeat(1000));
++      child.stderr.write("fine\n");
++      child.finish(null, "SIGTERM");
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "exited on signal SIGTERM");
++      assert.strictEqual(error.output?.stdoutTruncated, true);
++      assert.strictEqual(error.output?.stderrTruncated, false);
++      assert.strictEqual(error.output?.stdout, `${"a".repeat(40)}${"b".repeat(24)}`);
++      assert.strictEqual(error.output?.stderr, "fine\n");
++    }),
++  );
++
++  it.effect("reports a stderr overflow when the child exits normally anyway", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(
++        fakeSpawn(),
++        { kind: "version" },
++        { maxOutputBytes: 8 },
++      );
++      child.stderr.write("x".repeat(9));
++      child.finish(0);
++      const error = yield* failureOf(fiber);
++      assert.include(error.reason, "stderr exceeded 8 bytes");
++      assert.strictEqual(error.output?.stderrTruncated, true);
++      assert.strictEqual(error.output?.code, 0);
++    }),
++  );
++
++  it.effect("decodes UTF-8 incrementally across chunk boundaries and flags invalid bytes", () =>
++    Effect.gen(function* () {
++      const encoded = Buffer.from("héllo\n");
++      const split = yield* launched(fakeSpawn(), { kind: "version" });
++      split.child.stdout.write(encoded.subarray(0, 2));
++      split.child.stdout.write(encoded.subarray(2));
++      split.child.finish(0);
++      assert.strictEqual((yield* Fiber.join(split.fiber)).stdout, "héllo\n");
++
++      const invalid = yield* launched(fakeSpawn(), { kind: "version" });
++      const killed = invalid.child.nextKill();
++      invalid.child.stdout.write(Buffer.from([0x31, 0xff, 0x32]));
++      yield* Effect.promise(() => killed);
++      invalid.child.stdout.write("more\n");
++      invalid.child.finish(0);
++      const error = yield* failureOf(invalid.fiber);
++      assert.include(error.reason, "stdout is not valid UTF-8");
++      assert.strictEqual(error.output?.stdoutInvalidUtf8, true);
++      // The offending chunk and everything after it are discarded, never retained.
++      assert.strictEqual(error.output?.stdout, "");
++
++      const dangling = yield* launched(fakeSpawn(), { kind: "version" });
++      dangling.child.stdout.write(encoded.subarray(0, 2));
++      dangling.child.finish(0);
++      assert.include((yield* failureOf(dangling.fiber)).reason, "stdout is not valid UTF-8");
++    }),
++  );
++
++  it.effect(
++    "asks a live child to stop as soon as end-of-stream leaves a dangling UTF-8 sequence",
++    () =>
++      Effect.gen(function* () {
++        const { fiber, child } = yield* launched(
++          fakeSpawn(),
++          { kind: "version" },
++          { identityTimeoutMs: 60_000 },
++        );
++        const killed = child.nextKill();
++        child.stdout.write(Buffer.from([0xe2, 0x82]));
++        child.stdout.end();
++        yield* Effect.promise(() => killed);
++        assert.deepStrictEqual(child.kills, ["SIGTERM"]);
++        yield* assertPending(fiber, "termination request must not settle the process");
++        assert.strictEqual((yield* scratchEntries).length, 1);
++        child.stderr.end();
++        child.exit(0);
++        const error = yield* failureOf(fiber);
++        assert.include(error.reason, "stdout is not valid UTF-8");
++        assert.strictEqual(error.output?.stdoutInvalidUtf8, true);
++        assert.strictEqual(error.output?.code, 0);
++        assert.deepStrictEqual(yield* scratchEntries, []);
++      }),
++  );
++
++  it.effect("interruption signals the child and waits for its exit before releasing scratch", () =>
++    Effect.gen(function* () {
++      const { fiber, child } = yield* launched(fakeSpawn(), { kind: "version" });
++      const killed = child.nextKill();
++      const interrupter = yield* Effect.forkChild(Fiber.interrupt(fiber), {
++        startImmediately: true,
++      });
++      yield* Effect.promise(() => killed);
++      assert.deepStrictEqual(child.kills, ["SIGTERM"]);
++      yield* assertPending(fiber, "must wait for the actual exit");
++      yield* assertPending(interrupter, "interruption must not complete early");
++      assert.strictEqual((yield* scratchEntries).length, 1);
++      child.finish(null, "SIGTERM");
++      yield* Fiber.join(interrupter);
++      const exit = yield* Effect.exit(Fiber.join(fiber));
++      assert.isTrue(Exit.hasInterrupts(exit));
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect(
++    "interruption with a refused kill keeps waiting and cleans up only after the exit",
++    () =>
++      Effect.gen(function* () {
++        const { fiber, child } = yield* launched(
++          fakeSpawn((spawnedChild) => {
++            spawnedChild.killResult = false;
++          }),
++          { kind: "version" },
++        );
++        const killed = child.nextKill();
++        const interrupter = yield* Effect.forkChild(Fiber.interrupt(fiber), {
++          startImmediately: true,
++        });
++        yield* Effect.promise(() => killed);
++        yield* assertPending(fiber);
++        yield* assertPending(interrupter);
++        assert.strictEqual((yield* scratchEntries).length, 1);
++        child.stdout.write("1.2.3\n");
++        child.finish(0);
++        yield* Fiber.join(interrupter);
++        assert.isTrue(Exit.hasInterrupts(yield* Effect.exit(Fiber.join(fiber))));
++        assert.deepStrictEqual(yield* scratchEntries, []);
++      }),
++  );
++
++  it.effect("interruption while scratch is being created never spawns and leaves nothing", () =>
++    Effect.gen(function* () {
++      const fake = fakeSpawn();
++      let release: (() => void) | undefined;
++      const entered = new Promise<void>((resolveEntered) => {
++        const actual = vi.mocked(NodeFSP.mkdtemp).getMockImplementation();
++        vi.mocked(NodeFSP.mkdtemp).mockImplementationOnce(async (...mkdtempArgs) => {
++          resolveEntered();
++          await new Promise<void>((resolveHeld) => {
++            release = resolveHeld;
++          });
++          return (actual as typeof NodeFSP.mkdtemp)(...mkdtempArgs);
++        });
++      });
++      const fiber = yield* launch(fake.spawn, { kind: "version" });
++      yield* Effect.promise(() => entered);
++      const interrupter = yield* Effect.forkChild(Fiber.interrupt(fiber), {
++        startImmediately: true,
++      });
++      yield* assertPending(fiber, "must wait for the in-flight scratch creation");
++      assert.isDefined(release);
++      (release as () => void)();
++      yield* Fiber.join(interrupter);
++      assert.isTrue(Exit.hasInterrupts(yield* Effect.exit(Fiber.join(fiber))));
++      assert.strictEqual(fake.calls.length, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("removes an allocated scratch root when its setup fails before any spawn", () =>
++    Effect.gen(function* () {
++      const fake = fakeSpawn();
++      const actual = vi.mocked(NodeFSP.mkdtemp).getMockImplementation() as typeof NodeFSP.mkdtemp;
++      // A regular file where the first subdirectory belongs makes setup fail after the root exists.
++      vi.mocked(NodeFSP.mkdtemp).mockImplementationOnce(async (...mkdtempArgs) => {
++        const root = String(await actual(...mkdtempArgs));
++        await NodeFSP.writeFile(NodePath.join(root, "home"), "");
++        return root;
++      });
++      const error = yield* Effect.flip(
++        runner(fake.spawn).run({ entryPath: ENTRY, operation: { kind: "version" } }),
++      );
++      assert.include(error.reason, "creating scratch");
++      assert.isUndefined(error.output);
++      assert.strictEqual(fake.calls.length, 0);
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("inspects Node through the isolated identity probe and enforces the host policy", () =>
++    Effect.gen(function* () {
++      const fake = fakeSpawn();
++      const spawned = fake.nextSpawn();
++      const fiber = yield* Effect.forkChild(runner(fake.spawn).inspectNode);
++      const { command, args, options, child } = yield* Effect.promise(() => spawned);
++      assert.strictEqual(command, NODE);
++      assert.strictEqual(args[0], "--no-global-search-paths");
++      assert.strictEqual(args[1], "-e");
++      assert.include(args[2], "process.versions.modules");
++      assert.strictEqual(args.length, 3);
++      assert.deepStrictEqual(Object.keys(options.env).sort(), REPLACEMENT_ENV_KEYS);
++      child.stdout.write(
++        // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed probe fixture line.
++        `${JSON.stringify({
++          release: "node",
++          version: MANAGED_CANDIDATE_NODE_VERSION,
++          modules: "137",
++          platform: "linux",
++          arch: "x64",
++          glibc: "2.35",
++        })}\n`,
++      );
++      child.finish(0);
++      assert.deepStrictEqual(yield* Fiber.join(fiber), {
++        version: MANAGED_CANDIDATE_NODE_VERSION,
++        modulesAbi: "137",
++        platform: "linux",
++        arch: "x64",
++        glibcVersionRuntime: "2.35",
++      });
++
++      const identity = (overrides: Record<string, unknown>) =>
++        `${JSON.stringify({
++          release: "node",
++          version: MANAGED_CANDIDATE_NODE_VERSION,
++          modules: "137",
++          platform: "darwin",
++          arch: "arm64",
++          ...overrides,
++        })}\n`;
++      const probe = (line: string, code = 0) =>
++        Effect.gen(function* () {
++          const attempt = fakeSpawn();
++          const next = attempt.nextSpawn();
++          const probeFiber = yield* Effect.forkChild(runner(attempt.spawn).inspectNode);
++          const call = yield* Effect.promise(() => next);
++          call.child.stdout.write(line);
++          call.child.finish(code);
++          return yield* Effect.exit(Fiber.join(probeFiber));
++        });
++      const reasonOf = (line: string, code = 0) =>
++        probe(line, code).pipe(
++          Effect.map((exit) => {
++            const error = Option.getOrUndefined(Exit.findErrorOption(exit));
++            assert.isDefined(error, "expected the probe to be rejected");
++            return (error as ManagedCandidateError).reason;
++          }),
++        );
++
++      const darwin = yield* probe(identity({}));
++      assert.isTrue(Exit.isSuccess(darwin));
++      assert.include(yield* reasonOf(identity({ version: "v22.0.0" })), "not the pinned");
++      assert.include(yield* reasonOf(identity({ electron: "38.0.0" })), "not plain Node");
++      assert.include(yield* reasonOf(identity({ bun: "1.2.0" })), "not plain Node");
++      assert.include(yield* reasonOf(identity({ release: "io.js" })), "not plain Node");
++      assert.include(yield* reasonOf(identity({ arch: "x64" })), "unsupported host darwin-x64");
++      assert.include(
++        yield* reasonOf(identity({ platform: "linux", arch: "x64" })),
++        "did not report a glibc runtime",
++      );
++      assert.include(yield* reasonOf(`${identity({})}extra\n`), "exactly one line");
++      assert.include(yield* reasonOf("not json\n"), "not JSON");
++      assert.include(yield* reasonOf(identity({}), 1), "exited with code 1");
++    }),
++  );
++});
++
++describe("managedCandidateProcess with a real Node child", () => {
++  let fixtureDir: string;
++
++  beforeEach(async () => {
++    fixtureDir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-candidate-fixture-"));
++  });
++
++  afterEach(async () => {
++    await NodeFSP.rm(fixtureDir, { recursive: true, force: true });
++  });
++
++  it.effect("runs an entry under the replacement environment and empty private cwd", () =>
++    Effect.gen(function* () {
++      vi.stubEnv("NODE_OPTIONS", "--require /tmp/evil.cjs");
++      vi.stubEnv("T3CODE_HOME", "/tmp/live-home");
++      const entryPath = NodePath.join(fixtureDir, "entry.mjs");
++      yield* Effect.promise(() =>
++        NodeFSP.writeFile(
++          entryPath,
++          [
++            "process.stdout.write(JSON.stringify({",
++            "  argv: process.argv.slice(2),",
++            "  cwd: process.cwd(),",
++            "  env: process.env,",
++            "  execArgv: process.execArgv,",
++            "  cwdEntries: (await import('node:fs')).readdirSync(process.cwd()),",
++            "}) + '\\n');",
++            "process.stderr.write('warned\\n');",
++            "process.exitCode = 3;",
++          ].join("\n"),
++        ),
++      );
++      const output = yield* makeManagedCandidateProcess({
++        nodeExecutable: process.execPath,
++        scratchParent,
++      }).run({ entryPath, operation: { kind: "version" } });
++      assert.strictEqual(output.code, 3);
++      assert.strictEqual(output.signal, null);
++      assert.strictEqual(output.stderr, "warned\n");
++      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixture-owned report document.
++      const report = JSON.parse(output.stdout) as {
++        argv: Array<string>;
++        cwd: string;
++        env: Record<string, string>;
++        execArgv: Array<string>;
++        cwdEntries: Array<string>;
++      };
++      assert.deepStrictEqual(report.argv, ["--version"]);
++      assert.deepStrictEqual(report.execArgv, ["--no-global-search-paths"]);
++      assert.deepStrictEqual(report.cwdEntries, []);
++      // macOS libc injects __CF_USER_TEXT_ENCODING into every process it starts; nothing else may appear.
++      const childKeys = Object.keys(report.env)
++        .filter((key) => !key.startsWith("__CF_"))
++        .sort();
++      assert.deepStrictEqual(childKeys, REPLACEMENT_ENV_KEYS);
++      assert.notProperty(report.env, "NODE_OPTIONS");
++      assert.notProperty(report.env, "T3CODE_HOME");
++      const realScratchParent = yield* Effect.promise(() => NodeFSP.realpath(scratchParent));
++      assert.isTrue(report.cwd.startsWith(realScratchParent));
++      assert.isTrue(report.env.HOME?.startsWith(scratchParent));
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("terminates a hung child on timeout and reports the signal exit", () =>
++    Effect.gen(function* () {
++      const entryPath = NodePath.join(fixtureDir, "hang.mjs");
++      yield* Effect.promise(() =>
++        NodeFSP.writeFile(
++          entryPath,
++          "process.stdout.write('started\\n');\nsetInterval(() => {}, 1000);\n",
++        ),
++      );
++      const error = yield* Effect.flip(
++        makeManagedCandidateProcess({
++          nodeExecutable: process.execPath,
++          scratchParent,
++          limits: { identityTimeoutMs: 500 },
++        }).run({ entryPath, operation: { kind: "version" } }),
++      );
++      assert.include(error.reason, "timed out");
++      assert.strictEqual(error.output?.timedOut, true);
++      assert.strictEqual(error.output?.signal, "SIGTERM");
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++
++  it.effect("evaluates the identity probe as real JavaScript", () =>
++    Effect.gen(function* () {
++      const exit = yield* Effect.exit(
++        makeManagedCandidateProcess({ nodeExecutable: process.execPath, scratchParent })
++          .inspectNode,
++      );
++      if (Exit.isSuccess(exit)) {
++        assert.strictEqual(exit.value.version, MANAGED_CANDIDATE_NODE_VERSION);
++        assert.match(exit.value.modulesAbi, /^\d+$/);
++      } else {
++        // Another Node or host still proves the probe printed a decodable identity.
++        const error = Option.getOrUndefined(Exit.findErrorOption(exit));
++        assert.isDefined(error);
++        assert.match(
++          (error as ManagedCandidateError).reason,
++          /not the pinned|unsupported host|glibc/,
++        );
++      }
++      assert.deepStrictEqual(yield* scratchEntries, []);
++    }),
++  );
++});
+diff --git a/apps/server/src/cloud/managedCandidateProcess.ts b/apps/server/src/cloud/managedCandidateProcess.ts
+new file mode 100644
+index 000000000..ffdff6e27
+--- /dev/null
++++ b/apps/server/src/cloud/managedCandidateProcess.ts
+@@ -0,0 +1,721 @@
++// @effect-diagnostics nodeBuiltinImport:off - owns one raw child process and its private scratch directory; only Node reports the actual exit and pipe settlement this boundary waits for.
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFSP from "node:fs/promises";
++import * as NodePath from "node:path";
++import type * as NodeStream from "node:stream";
++
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++/**
++ * Runs a staged (not yet trusted) server build as a short-lived probe: its
++ * `--version`, the hidden `__service-preflight` identity command against a
++ * database path that must never come into existence, and the hidden
++ * `__migration-preflight` rehearsal against a private snapshot. It is
++ * deliberately not a general process facility.
++ *
++ * The child sees a replacement environment built from nothing, a fresh
++ * mode-0700 scratch directory for HOME/cwd/temp/XDG, no stdin, and no IPC
++ * channel. A result is reported only after Node has delivered the raw `exit`
++ * event and both stdout and stderr have closed. Timeouts, output bounds, and
++ * cancellation ask the child to stop with SIGTERM but never synthesize an
++ * exit: the scratch directory and the caller's snapshot stay put until the
++ * process is proven gone, even if that means the operation stays pending.
++ */
++
++/** Builder pin for this release generation; not a field the manifest authenticates yet. */
++export const MANAGED_CANDIDATE_NODE_VERSION = "v24.13.1";
++
++export interface ManagedCandidateLimits {
++  /** Cap on retained bytes for stdout and for stderr, each. */
++  readonly maxOutputBytes: number;
++  /** Version, service identity, and Node identity probes. */
++  readonly identityTimeoutMs: number;
++  readonly migrationTimeoutMs: number;
++}
++
++export const DEFAULT_MANAGED_CANDIDATE_LIMITS: ManagedCandidateLimits = {
++  maxOutputBytes: 256 * 1024,
++  identityTimeoutMs: 30_000,
++  migrationTimeoutMs: 120_000,
++};
++
++const CANDIDATE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
++const CANDIDATE_LOCALE = "C.UTF-8";
++const TERMINATION_SIGNAL: NodeJS.Signals = "SIGTERM";
++/** Everything SQLite could leave beside a database file it was asked to open. */
++const SQLITE_SIDECAR_SUFFIXES = ["", "-wal", "-shm", "-journal"] as const;
++
++export type ManagedCandidateOperation =
++  | { readonly kind: "version" }
++  /** The database path is owned by the runner: a fresh absent file in scratch, never the live database. */
++  | { readonly kind: "service-preflight" }
++  | { readonly kind: "migration-preflight"; readonly snapshotPath: string };
++
++type OperationKind = ManagedCandidateOperation["kind"] | "inspect-node";
++
++export const ManagedCandidateOutput = Schema.Struct({
++  code: Schema.NullOr(Schema.Number),
++  signal: Schema.NullOr(Schema.String),
++  stdout: Schema.String,
++  stderr: Schema.String,
++  stdoutTruncated: Schema.Boolean,
++  stderrTruncated: Schema.Boolean,
++  stdoutInvalidUtf8: Schema.Boolean,
++  stderrInvalidUtf8: Schema.Boolean,
++  timedOut: Schema.Boolean,
++});
++export type ManagedCandidateOutput = typeof ManagedCandidateOutput.Type;
++
++export interface ManagedNodeIdentity {
++  readonly version: string;
++  /** `process.versions.modules`, reported verbatim rather than compared to a remembered constant. */
++  readonly modulesAbi: string;
++  readonly platform: string;
++  readonly arch: string;
++  readonly glibcVersionRuntime: string | undefined;
++}
++
++export class ManagedCandidateError extends Schema.TaggedErrorClass<ManagedCandidateError>()(
++  "ManagedCandidateError",
++  {
++    reason: Schema.String,
++    operation: Schema.String,
++    /** Present once the child actually settled, so callers can see what it printed. */
++    output: Schema.optional(ManagedCandidateOutput),
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    return `Managed candidate ${this.operation} rejected: ${this.reason}`;
++  }
++}
++
++export interface ManagedCandidateProcess {
++  readonly inspectNode: Effect.Effect<ManagedNodeIdentity, ManagedCandidateError>;
++  readonly run: (input: {
++    readonly entryPath: string;
++    readonly operation: ManagedCandidateOperation;
++  }) => Effect.Effect<ManagedCandidateOutput, ManagedCandidateError>;
++}
++
++// --- raw spawn seam -----------------------------------------------------------------
++
++/** The exact spawn options this runner uses; tests assert them and nothing else is ever passed. */
++export interface CandidateSpawnOptions {
++  readonly cwd: string;
++  readonly env: Readonly<Record<string, string>>;
++  readonly stdio: ["ignore", "pipe", "pipe"];
++  readonly shell: false;
++  readonly detached: false;
++  readonly windowsHide: true;
++}
++
++/** The slice of `ChildProcess` the runner observes. */
++export interface CandidateChildHandle {
++  /** Undefined when Node could not create the process; then an `error` event settles the invocation. */
++  readonly pid?: number | undefined;
++  readonly stdout: NodeStream.Readable | null;
++  readonly stderr: NodeStream.Readable | null;
++  on(
++    event: "exit",
++    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
++  ): unknown;
++  on(event: "error", listener: (error: Error) => void): unknown;
++  kill(signal: NodeJS.Signals): boolean;
++}
++
++export type CandidateSpawn = (
++  command: string,
++  args: ReadonlyArray<string>,
++  options: CandidateSpawnOptions,
++) => CandidateChildHandle;
++
++export interface ManagedCandidateProcessOptions {
++  /** Absolute path to a plain Node binary; never `process.execPath` by default because the parent may be Electron or Bun. */
++  readonly nodeExecutable: string;
++  /** Absolute, server-owned directory that receives one private scratch directory per invocation. */
++  readonly scratchParent: string;
++  readonly limits?: Partial<ManagedCandidateLimits>;
++  readonly spawn?: CandidateSpawn;
++}
++
++// --- argv ---------------------------------------------------------------------------
++
++/**
++ * Mirrors the hidden `__migration-preflight` command's flags. The migration
++ * helper that owns this argv is not integrated into this tree yet; replace
++ * this with its builder when it lands rather than keeping two copies.
++ */
++function migrationPreflightArgs(snapshotPath: string): ReadonlyArray<string> {
++  return [
++    "__migration-preflight",
++    "--snapshot-path",
++    snapshotPath,
++    "--launcher-protocol",
++    String(SERVICE_LAUNCHER_PROTOCOL),
++  ];
++}
++
++function servicePreflightArgs(databasePath: string): ReadonlyArray<string> {
++  return [
++    "__service-preflight",
++    "--database-path",
++    databasePath,
++    "--launcher-protocol",
++    String(SERVICE_LAUNCHER_PROTOCOL),
++  ];
++}
++
++/** Trusted inline probe; prints one JSON line and nothing else. */
++const NODE_IDENTITY_PROBE = [
++  "const report = typeof process.report?.getReport === 'function' ? process.report.getReport() : undefined;",
++  "process.stdout.write(JSON.stringify({",
++  "  release: process.release?.name,",
++  "  version: process.version,",
++  "  modules: process.versions.modules,",
++  "  electron: process.versions.electron,",
++  "  bun: process.versions.bun,",
++  "  platform: process.platform,",
++  "  arch: process.arch,",
++  "  glibc: report?.header?.glibcVersionRuntime,",
++  "}) + '\\n');",
++].join("\n");
++
++// --- scratch ------------------------------------------------------------------------
++
++interface Scratch {
++  readonly root: string;
++  readonly home: string;
++  readonly cwd: string;
++  readonly tmp: string;
++  readonly xdgConfig: string;
++  readonly xdgCache: string;
++  readonly xdgData: string;
++  /** Never created by the runner; the service identity probe must leave it absent. */
++  readonly databasePath: string;
++}
++
++/**
++ * Owns the root from the moment `mkdtemp` succeeds: if any later setup step
++ * fails, the partially built root is removed before the error propagates, so
++ * the caller only ever holds a complete Scratch or nothing.
++ */
++async function createScratch(parent: string): Promise<Scratch> {
++  const root = await NodeFSP.mkdtemp(NodePath.join(parent, "candidate-"));
++  try {
++    await NodeFSP.chmod(root, 0o700);
++    const scratch: Scratch = {
++      root,
++      home: NodePath.join(root, "home"),
++      cwd: NodePath.join(root, "cwd"),
++      tmp: NodePath.join(root, "tmp"),
++      xdgConfig: NodePath.join(root, "xdg", "config"),
++      xdgCache: NodePath.join(root, "xdg", "cache"),
++      xdgData: NodePath.join(root, "xdg", "data"),
++      databasePath: NodePath.join(root, "identity", "never-created.sqlite"),
++    };
++    for (const directory of [
++      scratch.home,
++      scratch.cwd,
++      scratch.tmp,
++      scratch.xdgConfig,
++      scratch.xdgCache,
++      scratch.xdgData,
++      NodePath.dirname(scratch.databasePath),
++    ]) {
++      await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
++    }
++    return scratch;
++  } catch (error) {
++    // The setup error is what the caller needs to see; a failing removal must not mask it.
++    await NodeFSP.rm(root, { recursive: true, force: true }).catch(() => {});
++    throw error;
++  }
++}
++
++/** Built from nothing: no inherited loader, channel, proxy, credential, or T3 variables. */
++function candidateEnvironment(scratch: Scratch): Record<string, string> {
++  return {
++    HOME: scratch.home,
++    TMPDIR: scratch.tmp,
++    TMP: scratch.tmp,
++    TEMP: scratch.tmp,
++    XDG_CONFIG_HOME: scratch.xdgConfig,
++    XDG_CACHE_HOME: scratch.xdgCache,
++    XDG_DATA_HOME: scratch.xdgData,
++    PATH: CANDIDATE_PATH,
++    LANG: CANDIDATE_LOCALE,
++    LC_ALL: CANDIDATE_LOCALE,
++  };
++}
++
++// --- bounded capture ----------------------------------------------------------------
++
++/**
++ * Decodes one pipe incrementally with a hard byte bound. Bytes past the bound
++ * are counted and discarded, never retained, so a chatty child costs memory
++ * proportional to the bound only.
++ */
++class BoundedCapture {
++  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
++  private readonly limit: number;
++  private readonly onUnusable: () => void;
++  private bytes = 0;
++  text = "";
++  truncated = false;
++  invalidUtf8 = false;
++  ended = false;
++  closed = false;
++  readError: Error | undefined;
++
++  constructor(limit: number, onUnusable: () => void) {
++    this.limit = limit;
++    this.onUnusable = onUnusable;
++  }
++
++  push(chunk: Buffer): void {
++    const previous = this.bytes;
++    this.bytes += chunk.length;
++    if (this.truncated || this.invalidUtf8) return;
++    const retained = this.bytes > this.limit ? chunk.subarray(0, this.limit - previous) : chunk;
++    try {
++      this.text += this.decoder.decode(retained, { stream: true });
++    } catch {
++      this.invalidUtf8 = true;
++      this.onUnusable();
++      return;
++    }
++    if (this.bytes > this.limit) {
++      this.truncated = true;
++      this.onUnusable();
++    }
++  }
++
++  /** Flushes the decoder at end-of-stream; a dangling partial sequence is invalid UTF-8. */
++  finish(): void {
++    if (this.truncated || this.invalidUtf8) return;
++    try {
++      this.text += this.decoder.decode();
++    } catch {
++      this.invalidUtf8 = true;
++      this.onUnusable();
++    }
++  }
++}
++
++// --- one invocation -----------------------------------------------------------------
++
++type TerminationReason =
++  | "timeout"
++  | "cancelled"
++  | "output bound"
++  | "invalid output"
++  | "read failure"
++  | "premature close";
++
++type Settlement =
++  | { readonly kind: "spawn-failed"; readonly error: Error }
++  | {
++      readonly kind: "exited";
++      readonly code: number | null;
++      readonly signal: NodeJS.Signals | null;
++      readonly stdout: BoundedCapture;
++      readonly stderr: BoundedCapture;
++      readonly timedOut: boolean;
++      readonly cancelled: boolean;
++      readonly termination: TerminationReason | undefined;
++      readonly postSpawnError: Error | undefined;
++    };
++
++/**
++ * Spawns and observes one child. Resolves only on proof: either Node reported
++ * an error before any PID existed, or the raw `exit` event fired and both
++ * pipes closed. It never rejects and never resolves early, so a child the OS
++ * will not terminate keeps the returned promise pending.
++ */
++function runChild(input: {
++  readonly spawn: CandidateSpawn;
++  readonly command: string;
++  readonly args: ReadonlyArray<string>;
++  readonly options: CandidateSpawnOptions;
++  readonly maxOutputBytes: number;
++  readonly timeoutMs: number;
++  readonly signal: AbortSignal | undefined;
++}): Promise<Settlement> {
++  return new Promise<Settlement>((resolve) => {
++    let settled = false;
++    let exited:
++      | { readonly code: number | null; readonly signal: NodeJS.Signals | null }
++      | undefined;
++    let timedOut = false;
++    let cancelled = false;
++    let termination: TerminationReason | undefined;
++    let postSpawnError: Error | undefined;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++
++    const child = input.spawn(input.command, input.args, input.options);
++
++    const requestTermination = (reason: TerminationReason): void => {
++      termination ??= reason;
++      if (settled || exited !== undefined || child.pid === undefined) return;
++      // A refused or failing kill is recorded by Node as an error event or a
++      // false return; neither is treated as exit, so we keep waiting.
++      try {
++        child.kill(TERMINATION_SIGNAL);
++      } catch {
++        // Ownership is retained until Node proves the exit.
++      }
++    };
++
++    const stdout = new BoundedCapture(input.maxOutputBytes, () =>
++      requestTermination(stdout.truncated ? "output bound" : "invalid output"),
++    );
++    const stderr = new BoundedCapture(input.maxOutputBytes, () =>
++      requestTermination(stderr.truncated ? "output bound" : "invalid output"),
++    );
++
++    const finish = (settlement: Settlement): void => {
++      if (settled) return;
++      settled = true;
++      if (timer !== undefined) clearTimeout(timer);
++      input.signal?.removeEventListener("abort", onAbort);
++      resolve(settlement);
++    };
++
++    const check = (): void => {
++      if (exited === undefined || !stdout.closed || !stderr.closed) return;
++      finish({
++        kind: "exited",
++        code: exited.code,
++        signal: exited.signal,
++        stdout,
++        stderr,
++        timedOut,
++        cancelled,
++        termination,
++        postSpawnError,
++      });
++    };
++
++    const observe = (stream: NodeStream.Readable | null, capture: BoundedCapture): void => {
++      if (stream === null) {
++        // Without a pipe there is nothing to settle; the output is unusable.
++        capture.readError = new Error("pipe was not created");
++        capture.closed = true;
++        return;
++      }
++      stream.on("data", (chunk: Buffer | string) => {
++        capture.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
++      });
++      stream.on("end", () => {
++        capture.ended = true;
++      });
++      stream.on("error", (error: Error) => {
++        capture.readError ??= error;
++        requestTermination("read failure");
++      });
++      stream.on("close", () => {
++        if (capture.closed) return;
++        capture.closed = true;
++        capture.finish();
++        // Output that became unusable at pipe close asks the child to stop
++        // now rather than at the deadline; settlement still waits for exit.
++        if (!capture.ended) requestTermination("premature close");
++        check();
++      });
++    };
++
++    const onAbort = (): void => {
++      cancelled = true;
++      requestTermination("cancelled");
++    };
++
++    // Observers go on before anything asynchronous can run: Node emits spawn
++    // failures and early output on the next tick.
++    child.on("error", (error: Error) => {
++      if (child.pid === undefined) {
++        child.stdout?.destroy();
++        child.stderr?.destroy();
++        finish({ kind: "spawn-failed", error });
++        return;
++      }
++      postSpawnError ??= error;
++    });
++    child.on("exit", (code, signal) => {
++      if (exited !== undefined) return;
++      exited = { code, signal };
++      check();
++    });
++    observe(child.stdout, stdout);
++    observe(child.stderr, stderr);
++
++    // @effect-diagnostics-next-line globalTimers:off - the deadline belongs to this raw child and is cleared on the same settlement path.
++    timer = setTimeout(() => {
++      timedOut = true;
++      requestTermination("timeout");
++    }, input.timeoutMs);
++    if (input.signal !== undefined) {
++      if (input.signal.aborted) onAbort();
++      else input.signal.addEventListener("abort", onAbort, { once: true });
++    }
++    check();
++  });
++}
++
++// --- runner -------------------------------------------------------------------------
++
++const isManagedCandidateError = Schema.is(ManagedCandidateError);
++
++function describeError(error: unknown): string {
++  return error instanceof Error ? error.message : String(error);
++}
++
++/** Reports the first sidecar the candidate left beside the never-created identity database. */
++async function findCreatedDatabaseFile(databasePath: string): Promise<string | undefined> {
++  for (const suffix of SQLITE_SIDECAR_SUFFIXES) {
++    const candidate = `${databasePath}${suffix}`;
++    try {
++      await NodeFSP.lstat(candidate);
++      return candidate;
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return candidate;
++    }
++  }
++  return undefined;
++}
++
++export function managedNodeIdentityProblem(identity: ManagedNodeIdentity): string | undefined {
++  if (identity.version !== MANAGED_CANDIDATE_NODE_VERSION) {
++    return `Node ${identity.version} is not the pinned ${MANAGED_CANDIDATE_NODE_VERSION}`;
++  }
++  if (identity.platform === "darwin" && identity.arch === "arm64") return undefined;
++  if (identity.platform === "linux" && identity.arch === "x64") {
++    return identity.glibcVersionRuntime === undefined
++      ? "Linux Node did not report a glibc runtime"
++      : undefined;
++  }
++  return `unsupported host ${identity.platform}-${identity.arch}`;
++}
++
++function decodeNodeIdentity(stdout: string): ManagedNodeIdentity | string {
++  const lines = stdout.split("\n");
++  if (lines.length !== 2 || lines[1] !== "") return "probe did not print exactly one line";
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(lines[0] as string) as unknown;
++  } catch {
++    return "probe output is not JSON";
++  }
++  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
++    return "probe output is not an object";
++  }
++  const record = parsed as Record<string, unknown>;
++  if (record.release !== "node") return "executable is not plain Node";
++  if (record.electron !== undefined || record.bun !== undefined) {
++    return "executable is not plain Node";
++  }
++  if (
++    typeof record.version !== "string" ||
++    typeof record.modules !== "string" ||
++    typeof record.platform !== "string" ||
++    typeof record.arch !== "string" ||
++    (record.glibc !== undefined && typeof record.glibc !== "string")
++  ) {
++    return "probe output is incomplete";
++  }
++  return {
++    version: record.version,
++    modulesAbi: record.modules,
++    platform: record.platform,
++    arch: record.arch,
++    glibcVersionRuntime: record.glibc === "" ? undefined : record.glibc,
++  };
++}
++
++export function makeManagedCandidateProcess(
++  options: ManagedCandidateProcessOptions,
++): ManagedCandidateProcess {
++  const limits: ManagedCandidateLimits = { ...DEFAULT_MANAGED_CANDIDATE_LIMITS, ...options.limits };
++  const spawn: CandidateSpawn =
++    options.spawn ??
++    ((command, args, spawnOptions) => NodeChildProcess.spawn(command, args, spawnOptions));
++
++  const fail = (
++    operation: OperationKind,
++    reason: string,
++    extra: { readonly output?: ManagedCandidateOutput; readonly cause?: unknown } = {},
++  ): ManagedCandidateError =>
++    new ManagedCandidateError({
++      reason,
++      operation,
++      ...(extra.output === undefined ? {} : { output: extra.output }),
++      ...(extra.cause === undefined ? {} : { cause: extra.cause }),
++    });
++
++  /**
++   * Creates scratch, runs the child to proven settlement, checks what it left
++   * behind, and only then removes the scratch. Rejections carry the settled
++   * output so callers can report what the candidate printed.
++   */
++  const invoke = async (
++    operation: OperationKind,
++    argsAfterNode: (scratch: Scratch) => ReadonlyArray<string>,
++    timeoutMs: number,
++    signal: AbortSignal | undefined,
++  ): Promise<ManagedCandidateOutput> => {
++    if (signal?.aborted) throw fail(operation, "cancelled");
++    if (!NodePath.isAbsolute(options.nodeExecutable)) {
++      throw fail(operation, "node executable path is not absolute");
++    }
++    if (!NodePath.isAbsolute(options.scratchParent)) {
++      throw fail(operation, "scratch parent path is not absolute");
++    }
++    let scratch: Scratch;
++    try {
++      scratch = await createScratch(options.scratchParent);
++    } catch (error) {
++      throw fail(operation, `creating scratch: ${describeError(error)}`, { cause: error });
++    }
++    try {
++      if (signal?.aborted) throw fail(operation, "cancelled");
++      const settlement = await runChild({
++        spawn,
++        command: options.nodeExecutable,
++        args: ["--no-global-search-paths", ...argsAfterNode(scratch)],
++        options: {
++          cwd: scratch.cwd,
++          env: candidateEnvironment(scratch),
++          stdio: ["ignore", "pipe", "pipe"],
++          shell: false,
++          detached: false,
++          windowsHide: true,
++        },
++        maxOutputBytes: limits.maxOutputBytes,
++        timeoutMs,
++        signal,
++      });
++      if (settlement.kind === "spawn-failed") {
++        throw fail(operation, `could not start: ${settlement.error.message}`, {
++          cause: settlement.error,
++        });
++      }
++      const output: ManagedCandidateOutput = {
++        code: settlement.code,
++        signal: settlement.signal,
++        stdout: settlement.stdout.text,
++        stderr: settlement.stderr.text,
++        stdoutTruncated: settlement.stdout.truncated,
++        stderrTruncated: settlement.stderr.truncated,
++        stdoutInvalidUtf8: settlement.stdout.invalidUtf8,
++        stderrInvalidUtf8: settlement.stderr.invalidUtf8,
++        timedOut: settlement.timedOut,
++      };
++      const reject = (reason: string): ManagedCandidateError => fail(operation, reason, { output });
++      if (settlement.cancelled) throw reject("cancelled");
++      if (settlement.timedOut) throw reject(`timed out after ${timeoutMs}ms`);
++      if (settlement.postSpawnError !== undefined) {
++        throw fail(operation, `process error: ${settlement.postSpawnError.message}`, {
++          output,
++          cause: settlement.postSpawnError,
++        });
++      }
++      if (settlement.signal !== null) throw reject(`exited on signal ${settlement.signal}`);
++      for (const [name, capture] of [
++        ["stdout", settlement.stdout],
++        ["stderr", settlement.stderr],
++      ] as const) {
++        if (capture.readError !== undefined) {
++          throw reject(`${name} read failed: ${capture.readError.message}`);
++        }
++        if (!capture.ended) throw reject(`${name} closed before end-of-stream`);
++        if (capture.truncated) throw reject(`${name} exceeded ${limits.maxOutputBytes} bytes`);
++        if (capture.invalidUtf8) throw reject(`${name} is not valid UTF-8`);
++      }
++      if (operation === "service-preflight") {
++        const created = await findCreatedDatabaseFile(scratch.databasePath);
++        if (created !== undefined) {
++          throw reject(`service preflight touched the identity database path: ${created}`);
++        }
++      }
++      return output;
++    } finally {
++      // Reached only after settlement (or before any child existed).
++      await NodeFSP.rm(scratch.root, { recursive: true, force: true }).catch(() => {});
++    }
++  };
++
++  const inspect = async (signal: AbortSignal | undefined): Promise<ManagedNodeIdentity> => {
++    const output = await invoke(
++      "inspect-node",
++      () => ["-e", NODE_IDENTITY_PROBE],
++      limits.identityTimeoutMs,
++      signal,
++    );
++    if (output.code !== 0) {
++      throw fail("inspect-node", `probe exited with code ${output.code}`, { output });
++    }
++    const identity = decodeNodeIdentity(output.stdout);
++    if (typeof identity === "string") throw fail("inspect-node", identity, { output });
++    const problem = managedNodeIdentityProblem(identity);
++    if (problem !== undefined) throw fail("inspect-node", problem, { output });
++    return identity;
++  };
++
++  const runOperation = async (
++    entryPath: string,
++    operation: ManagedCandidateOperation,
++    signal: AbortSignal | undefined,
++  ): Promise<ManagedCandidateOutput> => {
++    if (!NodePath.isAbsolute(entryPath)) {
++      throw fail(operation.kind, "entry path is not absolute");
++    }
++    switch (operation.kind) {
++      case "version":
++        return invoke("version", () => [entryPath, "--version"], limits.identityTimeoutMs, signal);
++      case "service-preflight":
++        return invoke(
++          "service-preflight",
++          (scratch) => [entryPath, ...servicePreflightArgs(scratch.databasePath)],
++          limits.identityTimeoutMs,
++          signal,
++        );
++      case "migration-preflight": {
++        if (!NodePath.isAbsolute(operation.snapshotPath)) {
++          throw fail(operation.kind, "snapshot path is not absolute");
++        }
++        return invoke(
++          "migration-preflight",
++          () => [entryPath, ...migrationPreflightArgs(operation.snapshotPath)],
++          limits.migrationTimeoutMs,
++          signal,
++        );
++      }
++    }
++  };
++
++  /** Interruption aborts the invocation and waits for the same settlement before the fiber finishes. */
++  const bridge = <A>(start: (signal: AbortSignal) => Promise<A>) =>
++    Effect.callback<A, ManagedCandidateError>((resume, signal) => {
++      const settled = start(signal).then(
++        (value) => resume(Effect.succeed(value)),
++        (error: unknown) =>
++          resume(isManagedCandidateError(error) ? Effect.fail(error) : Effect.die(error)),
++      );
++      return Effect.promise(() => settled);
++    });
++
++  return {
++    inspectNode: bridge((signal) => inspect(signal)).pipe(
++      Effect.withSpan("cloud.managed_candidate.inspect_node"),
++    ),
++    run: (input) =>
++      bridge((signal) => runOperation(input.entryPath, input.operation, signal)).pipe(
++        Effect.withSpan("cloud.managed_candidate.run", {
++          attributes: { operation: input.operation.kind },
++        }),
++      ),
++  };
++}

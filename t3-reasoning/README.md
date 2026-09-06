@@ -10,7 +10,7 @@ pin is in `docs/nightly-port.md`.
 Reproducible port of the existing Reasoning feature set onto the latest
 Nightly, materialized as one of two build variants. `source.lock.json` pins
 upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, a catalog of eight checksummed patches, and
+`v0.0.39-nightly.20260905.1284`, a catalog of checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;
@@ -26,8 +26,8 @@ What this component does not do:
 - It does not install, update, launch, or synchronize anything, and it does
   not touch an existing T3 installation or its data. No shared live
   installation exists yet.
-- It does not implement the shared environments, queued updates, or
-  complete conversation-fork UI from `docs/design.md`. The backend is present.
+- Shared environments and queued updates still need production integration.
+- Conversation forking is handled by a separate skill and excluded from both builds.
 
 ## Layout
 
@@ -62,9 +62,20 @@ What this component does not do:
   updater integration remain separate work.
 - `patches/0006-thread-fork-backend.patch`: fork RPC, durable copied history and
   lineage, checkpoint worktrees, and fresh provider context on the first send.
-  See `docs/thread-forks.md`; the desktop action is a separate UI patch.
+  Retained as an inactive catalog entry; neither build variant includes it.
 - `patches/0010-nonwaiting-admission.patch`: an atomic maintenance claim that
   leaves requests open while a command is in flight. Updater wiring is pending.
+- `patches/0012-migration-preflight.patch`: rehearses candidate migrations on a
+  disposable snapshot and checks the candidate response. Downloading, invoking
+  the staged candidate, and activating it remain separate updater work.
+- `patches/0014-managed-runtime-stager.patch`: validates managed release documents
+  and extracts verified archives into a confined private tree, preserving safe
+  internal dependency links. Cancellation waits for cleanup; downloading and
+  activating a runtime remain separate updater work.
+- `patches/0018-candidate-process.patch`: runs candidate version and preflight
+  probes with a private home and replacement environment. It retains owned
+  files until actual child exit and pipe settlement; staging and activation
+  remain separate updater work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
@@ -174,4 +185,4 @@ T3_REASONING_UPSTREAM_REPOSITORY=/path/to/t3code-clone \
 reproduce the port commit's tree recorded in `docs/nightly-port.md`. Later
 patches add incremental features beyond that baseline. The admission
 primitive's focused check in a prepared checkout is
-`pnpm --filter t3 test src/updateAdmission.test.ts` (20 tests).
+`pnpm --filter t3 test src/updateAdmission.test.ts` (11 tests).
