@@ -1,0 +1,2866 @@
+diff --git a/apps/server/src/cloud/managedRuntime.test.ts b/apps/server/src/cloud/managedRuntime.test.ts
+new file mode 100644
+index 000000000..bee9d1b33
+--- /dev/null
++++ b/apps/server/src/cloud/managedRuntime.test.ts
+@@ -0,0 +1,1642 @@
++// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - builds tar and release-document fixtures, inspects the staged tree directly, and forges records as plain JSON.
++import * as NodeFSP from "node:fs/promises";
++import * as NodePath from "node:path";
++import * as NodeZlib from "node:zlib";
++
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { afterEach, assert, it } from "@effect/vitest";
++import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Stream from "effect/Stream";
++import * as SqlClient from "effect/unstable/sql/SqlClient";
++import { Header, type HeaderData } from "tar";
++import { vi } from "vite-plus/test";
++
++import {
++  MANAGED_CANDIDATE_NODE_VERSION,
++  type ManagedCandidateOutput,
++  type ManagedCandidateProcess,
++  type ManagedNodeIdentity,
++} from "./managedCandidateProcess.ts";
++import {
++  canonicalJson,
++  computeReleaseInputDigest,
++  formatManagedReleaseVersion,
++  MANAGED_PUBLIC_CONFIG_KEYS,
++  MANAGED_RELEASE_MANIFEST_FILE,
++  sha256Hex,
++  type ManagedServerTarget,
++} from "./managedRelease.ts";
++import {
++  MANAGED_ARTIFACT_RECORD_FILE,
++  MANAGED_INSTALL_SENTINEL_FILE,
++  makeManagedRuntimeStager,
++  makeSnapshotMigrationValidator,
++  ManagedArtifactSourceError,
++  ManagedRuntimeStageError,
++  type ManagedArtifactSource,
++  type ManagedMigrationProbe,
++  type ManagedMigrationValidator,
++  type ManagedReleaseDocuments,
++  type ManagedRuntimeStager,
++} from "./managedRuntime.ts";
++import {
++  MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++  MIGRATION_PREFLIGHT_PROTOCOL,
++  MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME,
++} from "./migrationPreflight.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++// The transaction is observed at its real filesystem calls: `open` records the
++// order in which parents are synced and the record and sentinel are created,
++// and can be held or made to fail; `mkdir` records first-time directory
++// creation; `chmod` can be held or made to fail right after `mkdtemp`;
++// `rename` is intercepted to inspect the payload at the instant it is published.
++vi.mock("node:fs/promises", async (importOriginal) => {
++  const actual = await importOriginal<typeof import("node:fs/promises")>();
++  return {
++    ...actual,
++    chmod: vi.fn(actual.chmod),
++    mkdir: vi.fn(actual.mkdir),
++    open: vi.fn(actual.open),
++    rename: vi.fn(actual.rename),
++  };
++});
++
++afterEach(() => {
++  vi.mocked(NodeFSP.chmod).mockReset();
++  vi.mocked(NodeFSP.mkdir).mockReset();
++  vi.mocked(NodeFSP.open).mockReset();
++  vi.mocked(NodeFSP.rename).mockReset();
++});
++
++// --- release fixture ------------------------------------------------------------------
++
++const DARWIN: ManagedServerTarget = { platform: "darwin", arch: "arm64" };
++const UPSTREAM_VERSION = "0.0.38-nightly.20260905.3";
++const COMMON_PATCHES = [
++  { id: "common-one", sha256: "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a" },
++  { id: "common-two", sha256: "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79" },
++];
++const REASONING_PATCHES = [
++  ...COMMON_PATCHES,
++  {
++    id: "reasoning-identity",
++    sha256: "3f72debee6fc10edb75cf331347684c769d350ace0d667d7ff1246ef5c1de450",
++  },
++];
++const PROVENANCE = {
++  upstreamRepository: "https://github.com/pingdotgg/t3code",
++  upstreamCommit: "0123456789abcdef0123456789abcdef01234567",
++  upstreamVersion: UPSTREAM_VERSION,
++  variants: { "managed-nightly": COMMON_PATCHES, reasoning: REASONING_PATCHES },
++  builderRevision: "fedcba9876543210fedcba9876543210fedcba98",
++  publicConfigSha256: "2cee922b77e095709737110ab244615e0fe4230ace80231198c01a2cfb9b377e",
++  presentationVariants: { "managed-nightly": "managed-nightly", reasoning: "reasoning" },
++};
++const RELEASE_INPUT_SHA256 = computeReleaseInputDigest(PROVENANCE);
++const VERSION = formatManagedReleaseVersion(UPSTREAM_VERSION, 1, RELEASE_INPUT_SHA256);
++const OTHER_VERSION = formatManagedReleaseVersion(UPSTREAM_VERSION, 2, RELEASE_INPUT_SHA256);
++const encoder = new TextEncoder();
++
++/** A complete, self-consistent Harbor release whose darwin server archive is `archive`. */
++function documentsFor(archive: Buffer): ManagedReleaseDocuments {
++  const desktop = (id: string, variant: string, file: string, extra: Record<string, unknown>) => ({
++    id,
++    kind: "desktop",
++    variant,
++    platform: "darwin",
++    arch: "arm64",
++    format: "zip",
++    presentationVariant: variant,
++    file,
++    version: VERSION,
++    embeddedServerVersion: VERSION,
++    bytes: 12,
++    sha256: sha256Hex(file),
++    ...extra,
++  });
++  const server = (id: string, platform: string, arch: string, bytes: number, sha256: string) => ({
++    id,
++    kind: "server",
++    variant: "common",
++    platform,
++    arch,
++    format: "tar.gz",
++    entry: "node_modules/t3/dist/bin.mjs",
++    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++    file: `server-${platform}-${arch}.tar.gz`,
++    version: VERSION,
++    bytes,
++    sha256,
++  });
++  const manifest = {
++    schemaVersion: 1,
++    releaseVersion: VERSION,
++    upstreamVersion: UPSTREAM_VERSION,
++    upstreamCommit: PROVENANCE.upstreamCommit,
++    upstreamRepository: PROVENANCE.upstreamRepository,
++    releaseCounter: 1,
++    releaseInputSha256: RELEASE_INPUT_SHA256,
++    publicConfigSha256: PROVENANCE.publicConfigSha256,
++    publicConfigKeys: [...MANAGED_PUBLIC_CONFIG_KEYS],
++    builderRevision: PROVENANCE.builderRevision,
++    presentationVariants: PROVENANCE.presentationVariants,
++    variants: {
++      "managed-nightly": { patches: COMMON_PATCHES },
++      reasoning: { patches: REASONING_PATCHES },
++    },
++    artifacts: [
++      desktop("managed-nightly-darwin-arm64", "managed-nightly", "nightly.zip", {
++        bundleId: "com.t3tools.t3code",
++        productName: "T3 Code (Nightly)",
++        urlSchemes: ["t3code", "t3code-dev"],
++      }),
++      desktop("reasoning-darwin-arm64", "reasoning", "reasoning.zip", {
++        bundleId: "com.t3tools.t3code.reasoning",
++        productName: "T3 Code (Reasoning)",
++        urlSchemes: ["t3code-reasoning"],
++      }),
++      server("managed-server-darwin-arm64", "darwin", "arm64", archive.length, sha256Hex(archive)),
++      server("managed-server-linux-x64", "linux", "x64", 13, sha256Hex("linux")),
++    ],
++  };
++  const manifestText = canonicalJson(manifest);
++  const sums = [
++    ...manifest.artifacts.map((artifact) => ({ file: artifact.file, sha256: artifact.sha256 })),
++    { file: MANAGED_RELEASE_MANIFEST_FILE, sha256: sha256Hex(manifestText) },
++  ]
++    .sort((a, b) => (a.file < b.file ? -1 : 1))
++    .map(({ file, sha256 }) => `${sha256}  ${file}\n`)
++    .join("");
++  return { manifestBytes: encoder.encode(manifestText), sumsBytes: encoder.encode(sums) };
++}
++
++// --- archive fixture ------------------------------------------------------------------
++
++const BLOCK = 512;
++const PKG = "node_modules/t3";
++
++function pad(buffer: Buffer, unit = BLOCK): Buffer {
++  const remainder = buffer.length % unit;
++  return remainder === 0 ? buffer : Buffer.concat([buffer, Buffer.alloc(unit - remainder)]);
++}
++
++function member(spec: {
++  readonly path: string;
++  readonly type?: HeaderData["type"];
++  readonly body?: string | Buffer;
++  readonly linkpath?: string;
++  readonly mode?: number;
++}): Buffer {
++  const body =
++    spec.body === undefined
++      ? Buffer.alloc(0)
++      : Buffer.isBuffer(spec.body)
++        ? spec.body
++        : Buffer.from(spec.body);
++  const type = spec.type ?? "File";
++  const header = new Header({
++    // @effect-diagnostics-next-line globalDate:off - tar headers carry a plain mtime
++    mtime: new Date(0),
++    uid: 0,
++    gid: 0,
++    uname: "",
++    gname: "",
++    path: spec.path,
++    type,
++    size: body.length,
++    ...(spec.linkpath === undefined ? {} : { linkpath: spec.linkpath }),
++    mode: spec.mode ?? 0o644,
++  });
++  header.encode();
++  return Buffer.concat([Buffer.from(header.block as Buffer), pad(body)]);
++}
++
++function machOArm64(): Buffer {
++  const head = Buffer.alloc(32);
++  head.writeUInt32LE(0xfeedfacf, 0);
++  head.writeUInt32LE(0x0100000c, 4);
++  head.writeUInt32LE(2, 12);
++  return head;
++}
++
++function elfX64(): Buffer {
++  const head = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...Buffer.alloc(24)]);
++  head.writeUInt16LE(3, 16);
++  head.writeUInt16LE(0x3e, 18);
++  return head;
++}
++
++const DEP_DIR = `${PKG}/node_modules/.pnpm/dep@1.0.0/node_modules/dep`;
++const DEP_LINK = ".pnpm/dep@1.0.0/node_modules/dep";
++
++function buildArchive(
++  overrides: { readonly packageVersion?: string; readonly monitor?: Buffer } = {},
++): Buffer {
++  const tar = Buffer.concat([
++    member({
++      path: `${PKG}/package.json`,
++      body: JSON.stringify({ name: "t3", version: overrides.packageVersion ?? VERSION }),
++    }),
++    member({ path: `${PKG}/dist/bin.mjs`, body: "#!/usr/bin/env node\n", mode: 0o755 }),
++    member({ path: `${PKG}/dist/service-launcher.mjs`, body: "export {};\n" }),
++    member({ path: `${PKG}/dist/client/index.html`, body: "<!doctype html>\n" }),
++    member({
++      path: `${PKG}/dist/resource-monitor/darwin-arm64/t3-resource-monitor`,
++      body: overrides.monitor ?? machOArm64(),
++      mode: 0o755,
++    }),
++    member({ path: `${DEP_DIR}/index.js`, body: "module.exports = 1;\n" }),
++    member({ path: `${PKG}/node_modules/dep`, type: "SymbolicLink", linkpath: DEP_LINK }),
++    Buffer.alloc(2 * BLOCK),
++  ]);
++  return NodeZlib.gzipSync(pad(tar, 10240));
++}
++
++const ARCHIVE = buildArchive();
++
++// --- fakes ----------------------------------------------------------------------------
++
++interface Hold {
++  readonly entered: Deferred.Deferred<string>;
++  readonly release: Deferred.Deferred<void>;
++}
++
++const hold = (): Hold => ({
++  entered: Deferred.makeUnsafe<string>(),
++  release: Deferred.makeUnsafe<void>(),
++});
++
++/** A promise-level hold for a mocked filesystem call: `entered` settles when the call starts, `release` lets it finish. */
++function gate() {
++  let enter!: () => void;
++  let release!: () => void;
++  const entered = new Promise<void>((resolve) => {
++    enter = resolve;
++  });
++  const released = new Promise<void>((resolve) => {
++    release = resolve;
++  });
++  return { entered, released, enter, release };
++}
++
++/** Blocks until released; interruption also waits for release, like a child that has not yet exited. */
++const heldUntil = (held: Hold, entered: string) =>
++  Deferred.succeed(held.entered, entered).pipe(
++    Effect.andThen(Deferred.await(held.release)),
++    Effect.onInterrupt(() => Deferred.await(held.release)),
++  );
++
++interface CandidateCall {
++  readonly kind: string;
++  readonly entryPath?: string;
++  readonly snapshotPath?: string;
++}
++
++function output(stdout: string, code = 0): ManagedCandidateOutput {
++  return {
++    code,
++    signal: null,
++    stdout,
++    stderr: "",
++    stdoutTruncated: false,
++    stderrTruncated: false,
++    stdoutInvalidUtf8: false,
++    stderrInvalidUtf8: false,
++    timedOut: false,
++  };
++}
++
++const READY_PREFLIGHT = `${JSON.stringify({ status: "ready", version: VERSION, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL })}\n`;
++const READY_MIGRATION = `${JSON.stringify({ preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL, version: VERSION, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL, status: "ready" })}\n`;
++
++function fakeCandidate(
++  overrides: {
++    readonly identity?: Partial<ManagedNodeIdentity>;
++    readonly stdout?: Partial<Record<string, string>>;
++    readonly holdKind?: string;
++    readonly onMigration?: (snapshotPath: string) => Promise<void>;
++  } = {},
++) {
++  const calls: Array<CandidateCall> = [];
++  const held = hold();
++  const identity: ManagedNodeIdentity = {
++    version: MANAGED_CANDIDATE_NODE_VERSION,
++    modulesAbi: "137",
++    platform: "darwin",
++    arch: "arm64",
++    glibcVersionRuntime: undefined,
++    ...overrides.identity,
++  };
++  const stdout: Record<string, string> = {
++    version: `t3 v${VERSION}\n`,
++    "service-preflight": READY_PREFLIGHT,
++    "migration-preflight": READY_MIGRATION,
++    ...overrides.stdout,
++  };
++  const candidate: ManagedCandidateProcess = {
++    inspectNode: Effect.suspend(() => {
++      calls.push({ kind: "inspect-node" });
++      return overrides.holdKind === "inspect-node"
++        ? heldUntil(held, "").pipe(Effect.as(identity))
++        : Effect.succeed(identity);
++    }),
++    run: (input) =>
++      Effect.suspend(() => {
++        const operation = input.operation;
++        calls.push({
++          kind: operation.kind,
++          entryPath: input.entryPath,
++          ...(operation.kind === "migration-preflight"
++            ? { snapshotPath: operation.snapshotPath }
++            : {}),
++        });
++        const result = Effect.succeed(output(stdout[operation.kind] as string));
++        const observed =
++          operation.kind === "migration-preflight" && overrides.onMigration !== undefined
++            ? Effect.promise(() => overrides.onMigration?.(operation.snapshotPath) as Promise<void>)
++            : Effect.void;
++        return overrides.holdKind === operation.kind
++          ? heldUntil(held, input.entryPath).pipe(Effect.andThen(observed), Effect.andThen(result))
++          : observed.pipe(Effect.andThen(result));
++      }),
++  };
++  return { candidate, calls, held, kinds: () => calls.map((call) => call.kind) };
++}
++
++function fakeMigration(
++  overrides: {
++    readonly onProbe?: (probe: ManagedMigrationProbe) => Promise<void>;
++    readonly held?: Hold;
++    readonly reject?: string;
++  } = {},
++) {
++  const probes: Array<ManagedMigrationProbe> = [];
++  const validate: ManagedMigrationValidator = (probe) =>
++    Effect.gen(function* () {
++      probes.push(probe);
++      if (overrides.onProbe !== undefined) {
++        yield* Effect.promise(() => overrides.onProbe?.(probe) as Promise<void>);
++      }
++      if (overrides.held !== undefined) yield* heldUntil(overrides.held, probe.entryPath);
++      if (overrides.reject !== undefined) {
++        return yield* new ManagedRuntimeStageError({
++          step: "rehearsing migrations",
++          reason: overrides.reject,
++        });
++      }
++    });
++  return { validate, probes };
++}
++
++function chunked(bytes: Buffer, size = 1000): Array<Uint8Array> {
++  const chunks: Array<Uint8Array> = [];
++  for (let offset = 0; offset < bytes.length; offset += size) {
++    chunks.push(new Uint8Array(bytes.subarray(offset, offset + size)));
++  }
++  return chunks;
++}
++
++function fakeSource(
++  overrides: {
++    readonly documents?: ManagedReleaseDocuments;
++    readonly body?: Buffer;
++    readonly hangAfterFirstChunk?: Deferred.Deferred<void>;
++  } = {},
++) {
++  const state = { documentReads: 0, opened: 0, closed: 0 };
++  const documents = overrides.documents ?? documentsFor(ARCHIVE);
++  const chunks = chunked(overrides.body ?? ARCHIVE);
++  const source: ManagedArtifactSource = {
++    readDocuments: () =>
++      Effect.sync(() => {
++        state.documentReads += 1;
++        return documents;
++      }),
++    openArchive: () =>
++      Effect.gen(function* () {
++        state.opened += 1;
++        yield* Effect.addFinalizer(() =>
++          Effect.sync(() => {
++            state.closed += 1;
++          }),
++        );
++        const hang = overrides.hangAfterFirstChunk;
++        return hang === undefined
++          ? Stream.fromIterable(chunks)
++          : Stream.concat(
++              Stream.fromIterable(chunks.slice(0, 1)),
++              Stream.fromEffect(Deferred.await(hang)).pipe(
++                Stream.flatMap(() => Stream.fromIterable(chunks.slice(1))),
++              ),
++            );
++      }),
++  };
++  return { source, state };
++}
++
++// --- harness --------------------------------------------------------------------------
++
++const exists = (path: string) =>
++  NodeFSP.lstat(path).then(
++    () => true,
++    () => false,
++  );
++
++const isPending = (fiber: Fiber.Fiber<unknown, unknown>) =>
++  Effect.yieldNow.pipe(Effect.map(() => fiber.pollUnsafe() === undefined));
++
++const setup = Effect.fn("setup")(function* (
++  overrides: {
++    readonly candidate?: ReturnType<typeof fakeCandidate>;
++    readonly migration?: ReturnType<typeof fakeMigration>;
++    readonly source?: ReturnType<typeof fakeSource>;
++  } = {},
++) {
++  const fs = yield* FileSystem.FileSystem;
++  const root = yield* fs.makeTempDirectoryScoped({ prefix: "managed-runtime-" });
++  const baseDir = NodePath.join(root, "base");
++  yield* Effect.promise(() => NodeFSP.mkdir(baseDir));
++  const realBase = yield* Effect.promise(() => NodeFSP.realpath(baseDir));
++  const versionsDir = NodePath.join(realBase, "runtime", "versions");
++  const versionDir = NodePath.join(versionsDir, VERSION);
++  const entryPath = NodePath.join(versionDir, "node_modules", "t3", "dist", "bin.mjs");
++  const candidate = overrides.candidate ?? fakeCandidate();
++  const migration = overrides.migration ?? fakeMigration();
++  const source = overrides.source ?? fakeSource();
++  const stager = yield* makeManagedRuntimeStager({
++    baseDir,
++    hostTarget: DARWIN,
++    candidate: candidate.candidate,
++    source: source.source,
++    validateMigration: migration.validate,
++  });
++  return { baseDir, versionsDir, versionDir, entryPath, candidate, migration, source, stager };
++});
++
++type Harness = Effect.Success<ReturnType<typeof setup>>;
++
++/** A second stager over the same base directory, sharing the harness fakes unless overridden. */
++const sibling = (
++  harness: Harness,
++  overrides: {
++    readonly candidate?: ManagedCandidateProcess;
++    readonly validateMigration?: ManagedMigrationValidator;
++  } = {},
++) =>
++  makeManagedRuntimeStager({
++    baseDir: harness.baseDir,
++    hostTarget: DARWIN,
++    candidate: overrides.candidate ?? harness.candidate.candidate,
++    source: harness.source.source,
++    validateMigration: overrides.validateMigration ?? harness.migration.validate,
++  });
++
++/** Every probe entry lives in a private staging payload, never in the published version directory. */
++const assertPrivateEntry = (harness: Harness, entryPath: string | undefined, label: string) => {
++  assert.isDefined(entryPath, label);
++  assert.notStrictEqual(entryPath, harness.entryPath, label);
++  assert.isTrue(entryPath.startsWith(`${harness.versionsDir}/.staging-`), `${label}: ${entryPath}`);
++  assert.isTrue(
++    entryPath.endsWith("/payload/node_modules/t3/dist/bin.mjs"),
++    `${label}: ${entryPath}`,
++  );
++  assert.isFalse(entryPath.startsWith(`${harness.versionDir}/`), `${label}: ${entryPath}`);
++};
++
++const expectedArtifactId = `managed-server-darwin-arm64@sha256:${sha256Hex(ARCHIVE)}`;
++
++const failure = (stager: ManagedRuntimeStager, version = VERSION) =>
++  stager.stage(version).pipe(
++    Effect.flip,
++    Effect.map((error) => ({ step: error.step, reason: error.reason })),
++  );
++
++/** After a refused staging nothing may remain beside published versions: no lock, no staging directory. */
++const onlyPublished = async (versionsDir: string, ...published: Array<string>) => {
++  const entries = (await exists(versionsDir)) ? await NodeFSP.readdir(versionsDir) : [];
++  assert.deepStrictEqual(entries.sort(), [...published].sort());
++};
++
++/** Writes a fully published-looking version directory by hand, for refusal and reuse tests. */
++async function writePublished(
++  versionDir: string,
++  parts: { readonly sentinel?: string; readonly record?: unknown },
++): Promise<void> {
++  await NodeFSP.mkdir(NodePath.join(versionDir, "node_modules", "t3", "dist"), {
++    recursive: true,
++  });
++  await NodeFSP.writeFile(NodePath.join(versionDir, "node_modules", "t3", "dist", "bin.mjs"), "x");
++  if (parts.sentinel !== undefined) {
++    await NodeFSP.writeFile(
++      NodePath.join(versionDir, MANAGED_INSTALL_SENTINEL_FILE),
++      parts.sentinel,
++    );
++  }
++  if (parts.record !== undefined) {
++    await NodeFSP.writeFile(
++      NodePath.join(versionDir, MANAGED_ARTIFACT_RECORD_FILE),
++      JSON.stringify(parts.record),
++    );
++  }
++}
++
++/** Every file's mode and bytes and every symlink's target below `root`, in a stable order. */
++async function snapshotTree(root: string): Promise<Array<[string, string]>> {
++  const entries: Array<[string, string]> = [];
++  const pending = [root];
++  while (pending.length > 0) {
++    const directory = pending.pop() as string;
++    for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
++      const absolute = NodePath.join(directory, entry.name);
++      if (entry.isDirectory()) {
++        pending.push(absolute);
++      } else if (entry.isSymbolicLink()) {
++        entries.push([absolute, `link:${await NodeFSP.readlink(absolute)}`]);
++      } else {
++        const mode = ((await NodeFSP.lstat(absolute)).mode & 0o777).toString(8);
++        entries.push([absolute, `${mode}:${await NodeFSP.readFile(absolute, "utf8")}`]);
++      }
++    }
++  }
++  return entries.sort();
++}
++
++const clearLayoutTrace = () => {
++  vi.mocked(NodeFSP.mkdir).mockClear();
++  vi.mocked(NodeFSP.open).mockClear();
++  vi.mocked(NodeFSP.rename).mockClear();
++};
++
++/**
++ * The order of layout-parent creation and sync, record and sentinel creation,
++ * and the publishing rename since the last `clearLayoutTrace`, as
++ * `<op> <label>` strings. Parents are labelled `base`, `runtime`, `versions`.
++ */
++function layoutTrace(harness: Harness): Array<string> {
++  const runtimeDir = NodePath.dirname(harness.versionsDir);
++  const realBase = NodePath.dirname(runtimeDir);
++  const mkdir = vi.mocked(NodeFSP.mkdir);
++  const open = vi.mocked(NodeFSP.open);
++  const rename = vi.mocked(NodeFSP.rename);
++  const label = (path: string) =>
++    path === realBase
++      ? "base"
++      : path === runtimeDir
++        ? "runtime"
++        : path === harness.versionsDir
++          ? "versions"
++          : NodePath.basename(path);
++  const watched = new Set([
++    "base",
++    "runtime",
++    "versions",
++    MANAGED_ARTIFACT_RECORD_FILE,
++    MANAGED_INSTALL_SENTINEL_FILE,
++  ]);
++  return [
++    ...mkdir.mock.calls.map((call, index) => ({
++      order: mkdir.mock.invocationCallOrder[index] ?? 0,
++      op: "mkdir",
++      path: String(call[0]),
++    })),
++    ...open.mock.calls.map((call, index) => ({
++      order: open.mock.invocationCallOrder[index] ?? 0,
++      op: "open",
++      path: String(call[0]),
++    })),
++    ...rename.mock.calls.map((call, index) => ({
++      order: rename.mock.invocationCallOrder[index] ?? 0,
++      op: "rename",
++      path: String(call[1]),
++    })),
++  ]
++    .sort((a, b) => a.order - b.order)
++    .filter(({ op, path }) => op === "rename" || watched.has(label(path)))
++    .map(({ op, path }) => `${op} ${label(path)}`);
++}
++
++const seedLiveDatabase = (filename: string) =>
++  Layer.build(NodeSqliteClient.layer({ filename })).pipe(
++    Effect.flatMap((context) => {
++      const sql = Context.get(context, SqlClient.SqlClient);
++      return sql`CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)`.pipe(
++        Effect.andThen(sql`INSERT INTO items (name) VALUES ('one'), ('two')`),
++      );
++    }),
++    Effect.scoped,
++  );
++
++// --- tests ----------------------------------------------------------------------------
++
++it.layer(NodeServices.layer)("managedRuntime", (it) => {
++  it.effect("stages a fresh release, publishes it last, and verifies it afterwards", () =>
++    Effect.gen(function* () {
++      const harness = yield* setup();
++      const { versionsDir, versionDir, entryPath } = harness;
++
++      const staged = yield* harness.stager.stage(VERSION);
++      assert.deepStrictEqual(staged, { version: VERSION, artifactId: expectedArtifactId });
++
++      // Only the published version remains: no lock, no staging sibling, no archive.
++      yield* Effect.promise(() => onlyPublished(versionsDir, VERSION));
++      assert.deepStrictEqual(
++        (yield* Effect.promise(() => NodeFSP.readdir(versionDir))).sort(),
++        [MANAGED_INSTALL_SENTINEL_FILE, MANAGED_ARTIFACT_RECORD_FILE, "node_modules"].sort(),
++      );
++      const sentinel = yield* Effect.promise(() =>
++        NodeFSP.readFile(NodePath.join(versionDir, MANAGED_INSTALL_SENTINEL_FILE)),
++      );
++      assert.deepStrictEqual([...sentinel], [...Buffer.from(`${VERSION}\n`)]);
++      const record = JSON.parse(
++        yield* Effect.promise(() =>
++          NodeFSP.readFile(NodePath.join(versionDir, MANAGED_ARTIFACT_RECORD_FILE), "utf8"),
++        ),
++      ) as unknown;
++      assert.deepStrictEqual(record, {
++        schemaVersion: 1,
++        version: VERSION,
++        artifactId: expectedArtifactId,
++        releaseArtifactId: "managed-server-darwin-arm64",
++        archiveSha256: sha256Hex(ARCHIVE),
++        archiveBytes: ARCHIVE.length,
++        manifestSha256: sha256Hex(documentsFor(ARCHIVE).manifestBytes),
++        releaseInputSha256: RELEASE_INPUT_SHA256,
++        platform: "darwin",
++        arch: "arm64",
++        launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++      });
++      // The pnpm layout survived: relative link, resolving inside the package.
++      const depLink = NodePath.join(versionDir, ...PKG.split("/"), "node_modules", "dep");
++      assert.strictEqual(yield* Effect.promise(() => NodeFSP.readlink(depLink)), DEP_LINK);
++      assert.strictEqual(
++        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(depLink, "index.js"), "utf8")),
++        "module.exports = 1;\n",
++      );
++
++      // Every probe ran against the private payload, never the final path.
++      assert.deepStrictEqual(harness.candidate.kinds(), [
++        "inspect-node",
++        "version",
++        "service-preflight",
++      ]);
++      const probed = harness.candidate.calls
++        .map((call) => call.entryPath)
++        .filter((path): path is string => path !== undefined);
++      assert.strictEqual(probed.length, 2);
++      for (const path of probed) {
++        assert.isTrue(path.startsWith(`${versionsDir}/.staging-`), path);
++        assert.isTrue(path.endsWith("/payload/node_modules/t3/dist/bin.mjs"), path);
++      }
++      assert.deepStrictEqual(harness.migration.probes, [
++        { entryPath: probed[0] as string, version: VERSION },
++      ]);
++      assert.strictEqual(harness.source.state.opened, 1);
++      assert.strictEqual(harness.source.state.closed, 1);
++
++      const paths = yield* harness.stager.verifyStaged(staged);
++      assert.deepStrictEqual(paths, {
++        versionDir,
++        entryPath,
++        sentinelPath: NodePath.join(versionDir, MANAGED_INSTALL_SENTINEL_FILE),
++      });
++      // Verification is the cheap identity recheck: no downloads, no processes.
++      assert.strictEqual(harness.candidate.calls.length, 3);
++      assert.strictEqual(harness.source.state.documentReads, 1);
++    }),
++  );
++
++  it.effect(
++    "writes the record, then the sentinel, then renames, and never publishes before migration",
++    () =>
++      Effect.gen(function* () {
++        let sawDuringMigration:
++          | { payload: boolean; sentinel: boolean; version: boolean }
++          | undefined;
++        const migration = fakeMigration({
++          onProbe: async (probe) => {
++            const payload = NodePath.resolve(probe.entryPath, "..", "..", "..", "..");
++            sawDuringMigration = {
++              payload: await exists(payload),
++              sentinel: await exists(NodePath.join(payload, MANAGED_INSTALL_SENTINEL_FILE)),
++              version: await exists(NodePath.resolve(payload, "..", "..", VERSION)),
++            };
++          },
++        });
++        const harness = yield* setup({ migration });
++        const rename = vi.mocked(NodeFSP.rename);
++        const realRename = rename.getMockImplementation();
++        assert.isDefined(realRename);
++        let atRename: { sentinel: string; record: boolean; destinationAbsent: boolean } | undefined;
++        rename.mockImplementationOnce(async (from, to) => {
++          atRename = {
++            sentinel: await NodeFSP.readFile(
++              NodePath.join(String(from), MANAGED_INSTALL_SENTINEL_FILE),
++              "utf8",
++            ),
++            record: await exists(NodePath.join(String(from), MANAGED_ARTIFACT_RECORD_FILE)),
++            destinationAbsent: !(await exists(String(to))),
++          };
++          return realRename(from, to);
++        });
++
++        yield* harness.stager.stage(VERSION);
++
++        assert.deepStrictEqual(sawDuringMigration, {
++          payload: true,
++          sentinel: false,
++          version: false,
++        });
++        assert.deepStrictEqual(atRename, {
++          sentinel: `${VERSION}\n`,
++          record: true,
++          destinationAbsent: true,
++        });
++        const opened = vi
++          .mocked(NodeFSP.open)
++          .mock.calls.map((call) => String(call[0]))
++          .filter(
++            (path) =>
++              path.endsWith(`/${MANAGED_ARTIFACT_RECORD_FILE}`) ||
++              path.endsWith(`/${MANAGED_INSTALL_SENTINEL_FILE}`),
++          )
++          .map((path) => NodePath.basename(path));
++        assert.deepStrictEqual(opened, [
++          MANAGED_ARTIFACT_RECORD_FILE,
++          MANAGED_INSTALL_SENTINEL_FILE,
++        ]);
++      }),
++  );
++
++  it.effect("refuses downloads that are short, long, or hash-mismatched before extracting", () =>
++    Effect.gen(function* () {
++      const flipped = Buffer.from(ARCHIVE);
++      flipped.writeUInt8((flipped.readUInt8(flipped.length - 1) ^ 0xff) & 0xff, flipped.length - 1);
++      const cases: Array<[string, Buffer, string]> = [
++        ["short", ARCHIVE.subarray(0, ARCHIVE.length - 1), "shorter"],
++        ["long", Buffer.concat([ARCHIVE, Buffer.from([0])]), "longer"],
++        ["hash", flipped, "hash does not match"],
++      ];
++      for (const [label, body, expected] of cases) {
++        const source = fakeSource({ body });
++        const harness = yield* setup({ source });
++        const error = yield* failure(harness.stager);
++        assert.strictEqual(error.step, "downloading the archive", label);
++        assert.include(error.reason, expected, label);
++        assert.strictEqual(harness.candidate.calls.length, 0, label);
++        assert.strictEqual(source.state.closed, 1, label);
++        yield* Effect.promise(() => onlyPublished(harness.versionsDir));
++      }
++      const oversized = yield* setup({ source: fakeSource() });
++      const stager = yield* makeManagedRuntimeStager({
++        baseDir: oversized.baseDir,
++        hostTarget: DARWIN,
++        candidate: oversized.candidate.candidate,
++        source: oversized.source.source,
++        validateMigration: oversized.migration.validate,
++        archiveLimits: { maxCompressedBytes: ARCHIVE.length - 1 },
++      });
++      const capped = yield* failure(stager);
++      assert.include(capped.reason, "compressed limit");
++      assert.strictEqual(oversized.source.state.opened, 0);
++    }),
++  );
++
++  it.effect(
++    "refuses the wrong version, protocol, host, or monitor header and publishes nothing",
++    () =>
++      Effect.gen(function* () {
++        const blocked = JSON.stringify({
++          status: "blocked",
++          version: VERSION,
++          reason: "old launcher",
++        });
++        const cases: Array<[string, Parameters<typeof fakeCandidate>[0], string, string]> = [
++          ["version", { stdout: { version: `t3 v${OTHER_VERSION}\n` } }, "version", "printed"],
++          [
++            "bare version",
++            { stdout: { version: `${VERSION}\n` } },
++            "checking the candidate version",
++            "printed",
++          ],
++          [
++            "preflight protocol",
++            {
++              stdout: {
++                "service-preflight": `${JSON.stringify({ status: "ready", version: VERSION, launcherProtocol: 1 })}\n`,
++              },
++            },
++            "service identity",
++            "not a service preflight result",
++          ],
++          [
++            "preflight version",
++            {
++              stdout: {
++                "service-preflight": `${JSON.stringify({ status: "ready", version: OTHER_VERSION, launcherProtocol: 2 })}\n`,
++              },
++            },
++            "service identity",
++            "reported version",
++          ],
++          [
++            "preflight blocked",
++            { stdout: { "service-preflight": `${blocked}\n` } },
++            "service identity",
++            "old launcher",
++          ],
++          [
++            "extra stdout",
++            { stdout: { "service-preflight": `warming up\n${READY_PREFLIGHT}` } },
++            "service identity",
++            "exactly one line",
++          ],
++          ["host", { identity: { platform: "linux", arch: "x64" } }, "Node runtime", "linux-x64"],
++        ];
++        for (const [label, overrides, step, reason] of cases) {
++          const candidate = fakeCandidate(overrides);
++          const harness = yield* setup({ candidate });
++          const error = yield* failure(harness.stager);
++          assert.include(error.step, step, label);
++          assert.include(error.reason, reason, label);
++          assert.strictEqual(harness.migration.probes.length, 0, label);
++          yield* Effect.promise(() => onlyPublished(harness.versionsDir));
++        }
++
++        const elf = yield* setup({
++          source: fakeSource({
++            body: buildArchive({ monitor: elfX64() }),
++            documents: documentsFor(buildArchive({ monitor: elfX64() })),
++          }),
++        });
++        const header = yield* failure(elf.stager);
++        assert.strictEqual(header.step, "verifying the runtime layout");
++        assert.include(header.reason, "Mach-O");
++        assert.strictEqual(elf.candidate.calls.length, 0);
++
++        const mismatched = buildArchive({ packageVersion: OTHER_VERSION });
++        const wrongPackage = yield* setup({
++          source: fakeSource({ body: mismatched, documents: documentsFor(mismatched) }),
++        });
++        const packageError = yield* failure(wrongPackage.stager);
++        assert.include(packageError.reason, "package version");
++
++        const migration = fakeMigration({ reject: "schema too new" });
++        const declined = yield* setup({ migration });
++        const migrationError = yield* failure(declined.stager);
++        assert.strictEqual(migrationError.reason, "schema too new");
++        yield* Effect.promise(() => onlyPublished(declined.versionsDir));
++      }),
++  );
++
++  it.effect(
++    "interruption waits for a held download, candidate, or migration before cleaning up",
++    () =>
++      Effect.gen(function* () {
++        // Download: closing the source scope is the cancellation.
++        const hang = yield* Deferred.make<void>();
++        const source = fakeSource({ hangAfterFirstChunk: hang });
++        const downloading = yield* setup({ source });
++        const downloadFiber = yield* Effect.forkChild(downloading.stager.stage(VERSION));
++        yield* Effect.promise(async () => {
++          while (source.state.opened === 0) await new Promise((resolve) => setImmediate(resolve));
++        });
++        yield* Fiber.interrupt(downloadFiber);
++        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(downloadFiber)));
++        assert.strictEqual(source.state.closed, 1);
++        yield* Effect.promise(() => onlyPublished(downloading.versionsDir));
++
++        // Candidate and migration: the payload stays until the child has exited.
++        const candidate = fakeCandidate({ holdKind: "service-preflight" });
++        const migrationHold = hold();
++        for (const [label, harness, held] of [
++          ["candidate", yield* setup({ candidate }), candidate.held],
++          [
++            "migration",
++            yield* setup({ migration: fakeMigration({ held: migrationHold }) }),
++            migrationHold,
++          ],
++        ] as const) {
++          const fiber = yield* Effect.forkChild(harness.stager.stage(VERSION));
++          const entryPath = yield* Deferred.await(held.entered);
++          const payload = NodePath.resolve(entryPath, "..", "..", "..", "..");
++          const interrupter = yield* Effect.forkChild(Fiber.interrupt(fiber), {
++            startImmediately: true,
++          });
++          assert.isTrue(yield* isPending(fiber), label);
++          assert.isTrue(yield* Effect.promise(() => exists(payload)), `${label}: payload retained`);
++          const entries = yield* Effect.promise(() => NodeFSP.readdir(harness.versionsDir));
++          assert.isTrue(
++            entries.includes(`.staging-lock-${VERSION}`),
++            `${label}: lock retained while held`,
++          );
++          yield* Deferred.succeed(held.release, undefined);
++          yield* Fiber.join(interrupter);
++          assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(fiber)), label);
++          assert.isFalse(yield* Effect.promise(() => exists(payload)), label);
++          yield* Effect.promise(() => onlyPublished(harness.versionsDir));
++        }
++      }),
++  );
++
++  it.effect("serializes staging and refuses a version another process holds", () =>
++    Effect.gen(function* () {
++      const candidate = fakeCandidate({ holdKind: "version" });
++      const first = yield* setup({ candidate });
++      const second = yield* makeManagedRuntimeStager({
++        baseDir: first.baseDir,
++        hostTarget: DARWIN,
++        candidate: fakeCandidate().candidate,
++        source: first.source.source,
++        validateMigration: first.migration.validate,
++      });
++      const firstFiber = yield* Effect.forkChild(first.stager.stage(VERSION));
++      yield* Deferred.await(candidate.held.entered);
++      const secondFiber = yield* Effect.forkChild(second.stage(VERSION));
++      assert.isTrue(yield* isPending(secondFiber));
++      assert.strictEqual(first.source.state.documentReads, 1);
++      yield* Deferred.succeed(candidate.held.release, undefined);
++      assert.deepStrictEqual(yield* Fiber.join(firstFiber), {
++        version: VERSION,
++        artifactId: expectedArtifactId,
++      });
++      // The second instance ran after the first and reused the published runtime.
++      assert.deepStrictEqual(yield* Fiber.join(secondFiber), {
++        version: VERSION,
++        artifactId: expectedArtifactId,
++      });
++      assert.strictEqual(first.source.state.opened, 1);
++      assert.strictEqual(first.migration.probes.length, 2);
++      assertPrivateEntry(first, first.migration.probes[1]?.entryPath, "reuse");
++
++      // A lock directory left by another process is busy, and is never removed.
++      const lockPath = NodePath.join(first.versionsDir, `.staging-lock-${OTHER_VERSION}`);
++      yield* Effect.promise(() => NodeFSP.mkdir(lockPath));
++      const busy = yield* failure(first.stager, OTHER_VERSION);
++      assert.strictEqual(busy.step, "claiming the version");
++      assert.include(busy.reason, "another staging");
++      assert.isTrue(yield* Effect.promise(() => exists(lockPath)));
++      assert.strictEqual(first.source.state.documentReads, 2);
++    }),
++  );
++
++  it.effect("refuses stock, incomplete, or different-content version directories untouched", () =>
++    Effect.gen(function* () {
++      const record = {
++        schemaVersion: 1,
++        version: VERSION,
++        artifactId: expectedArtifactId,
++        releaseArtifactId: "managed-server-darwin-arm64",
++        archiveSha256: sha256Hex(ARCHIVE),
++        archiveBytes: ARCHIVE.length,
++        manifestSha256: sha256Hex(documentsFor(ARCHIVE).manifestBytes),
++        releaseInputSha256: RELEASE_INPUT_SHA256,
++        platform: "darwin",
++        arch: "arm64",
++        launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++      };
++      const otherHash = sha256Hex("other archive");
++      const cases: Array<[string, Parameters<typeof writePublished>[1], string]> = [
++        ["stock sentinel", { sentinel: `${VERSION}\n` }, "no managed artifact record"],
++        ["incomplete", {}, "no install sentinel"],
++        ["padded sentinel", { sentinel: `${VERSION}\n\n`, record }, "exact version"],
++        [
++          "different content",
++          {
++            sentinel: `${VERSION}\n`,
++            record: {
++              ...record,
++              archiveSha256: otherHash,
++              artifactId: `managed-server-darwin-arm64@sha256:${otherHash}`,
++            },
++          },
++          "different content",
++        ],
++        [
++          "extra field",
++          { sentinel: `${VERSION}\n`, record: { ...record, downloadUrl: "https://evil" } },
++          "malformed",
++        ],
++        [
++          "other version",
++          { sentinel: `${VERSION}\n`, record: { ...record, version: OTHER_VERSION } },
++          "different version",
++        ],
++      ];
++      for (const [label, parts, expected] of cases) {
++        const harness = yield* setup();
++        yield* Effect.promise(() => writePublished(harness.versionDir, parts));
++        const before = yield* Effect.promise(() => snapshotTree(harness.versionDir));
++        const error = yield* failure(harness.stager);
++        assert.include(error.reason, expected, label);
++        assert.deepStrictEqual(
++          yield* Effect.promise(() => snapshotTree(harness.versionDir)),
++          before,
++          label,
++        );
++        assert.strictEqual(harness.candidate.calls.length, 0, label);
++        assert.strictEqual(harness.source.state.opened, 0, label);
++        yield* Effect.promise(() => onlyPublished(harness.versionsDir, VERSION));
++      }
++
++      // A matching record on a broken tree is refused by the layout proof, still untouched.
++      const broken = yield* setup();
++      yield* Effect.promise(() =>
++        writePublished(broken.versionDir, { sentinel: `${VERSION}\n`, record }),
++      );
++      const before = yield* Effect.promise(() => snapshotTree(broken.versionDir));
++      const layout = yield* failure(broken.stager);
++      assert.include(layout.step, "verifying the runtime");
++      assert.deepStrictEqual(yield* Effect.promise(() => snapshotTree(broken.versionDir)), before);
++      assert.strictEqual(broken.candidate.calls.length, 0);
++    }),
++  );
++
++  it.effect("re-proves a reused runtime against a fresh snapshot of the live database", () =>
++    Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const root = yield* fs.makeTempDirectoryScoped({ prefix: "managed-runtime-live-" });
++      const liveDatabasePath = NodePath.join(root, "state.sqlite");
++      yield* seedLiveDatabase(liveDatabasePath);
++      const liveBefore = yield* Effect.promise(() => NodeFSP.readFile(liveDatabasePath));
++
++      const seen: Array<{ path: string; size: number; private: boolean }> = [];
++      const candidate = fakeCandidate({
++        onMigration: async (snapshotPath) => {
++          const stats = await NodeFSP.stat(snapshotPath);
++          const parent = NodePath.dirname(snapshotPath);
++          seen.push({
++            path: snapshotPath,
++            size: stats.size,
++            private: ((await NodeFSP.stat(parent)).mode & 0o777) === 0o700,
++          });
++          // The candidate leaves its journal beside the snapshot; cleanup must take it too.
++          await NodeFSP.writeFile(`${snapshotPath}-wal`, "");
++        },
++      });
++      const validate = yield* makeSnapshotMigrationValidator({
++        liveDatabasePath,
++        candidate: candidate.candidate,
++      });
++      const harness = yield* setup({ candidate, migration: { validate, probes: [] } });
++
++      const first = yield* harness.stager.stage(VERSION);
++      const second = yield* harness.stager.stage(VERSION);
++      assert.deepStrictEqual(first, second);
++      assert.strictEqual(harness.source.state.opened, 1, "reuse downloads nothing");
++      assert.deepStrictEqual(harness.candidate.kinds(), [
++        "inspect-node",
++        "version",
++        "service-preflight",
++        "migration-preflight",
++        "inspect-node",
++        "version",
++        "service-preflight",
++        "migration-preflight",
++      ]);
++      const reuseCalls = harness.candidate.calls.slice(5);
++      assert.strictEqual(reuseCalls.length, 3);
++      for (const call of reuseCalls) {
++        assertPrivateEntry(harness, call.entryPath, call.kind);
++      }
++
++      assert.strictEqual(seen.length, 2);
++      assert.notStrictEqual(seen[0]?.path, seen[1]?.path, "each proof gets a fresh snapshot");
++      for (const snapshot of seen) {
++        assert.notStrictEqual(snapshot.path, liveDatabasePath);
++        assert.strictEqual(NodePath.basename(snapshot.path), MIGRATION_PREFLIGHT_SNAPSHOT_BASENAME);
++        assert.isTrue(
++          NodePath.basename(NodePath.dirname(snapshot.path)).startsWith(
++            MIGRATION_PREFLIGHT_DIRECTORY_PREFIX,
++          ),
++        );
++        assert.isTrue(snapshot.private);
++        assert.isAbove(snapshot.size, 0);
++        assert.isFalse(
++          yield* Effect.promise(() => exists(NodePath.dirname(snapshot.path))),
++          "snapshot directory removed after the candidate exited",
++        );
++      }
++      assert.deepStrictEqual(
++        yield* Effect.promise(() => NodeFSP.readFile(liveDatabasePath)),
++        liveBefore,
++        "the live database is only read",
++      );
++
++      // The real acceptance rule applies: a blocked rehearsal refuses reuse too.
++      const blocked = fakeCandidate({
++        stdout: {
++          "migration-preflight": `${JSON.stringify({ preflightProtocol: MIGRATION_PREFLIGHT_PROTOCOL, version: VERSION, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL, status: "blocked", reason: "needs a newer launcher" })}\n`,
++        },
++      });
++      const blockedValidate = yield* makeSnapshotMigrationValidator({
++        liveDatabasePath,
++        candidate: blocked.candidate,
++      });
++      const blockedStager = yield* makeManagedRuntimeStager({
++        baseDir: harness.baseDir,
++        hostTarget: DARWIN,
++        candidate: blocked.candidate,
++        source: harness.source.source,
++        validateMigration: blockedValidate,
++      });
++      const error = yield* failure(blockedStager);
++      assert.strictEqual(error.reason, "needs a newer launcher");
++
++      // A missing live database is a failed preparation, never an empty-database rehearsal.
++      const missingValidate = yield* makeSnapshotMigrationValidator({
++        liveDatabasePath: NodePath.join(root, "absent.sqlite"),
++        candidate: candidate.candidate,
++      });
++      const missing = yield* missingValidate({
++        entryPath: harness.entryPath,
++        version: VERSION,
++      }).pipe(Effect.flip);
++      assert.strictEqual(missing.step, "preparing the migration snapshot");
++      assert.strictEqual(harness.candidate.calls.length, 8);
++    }),
++  );
++
++  it.effect("leaves a published version alone when the parent sync fails after the rename", () =>
++    Effect.gen(function* () {
++      const harness = yield* setup();
++      const open = vi.mocked(NodeFSP.open);
++      const realOpen = open.getMockImplementation();
++      assert.isDefined(realOpen);
++      let renamed = false;
++      const rename = vi.mocked(NodeFSP.rename);
++      const realRename = rename.getMockImplementation();
++      assert.isDefined(realRename);
++      rename.mockImplementationOnce(async (from, to) => {
++        await realRename(from, to);
++        renamed = true;
++      });
++      open.mockImplementation((path, ...rest) => {
++        if (renamed && String(path) === harness.versionsDir) {
++          renamed = false;
++          return Promise.reject(new Error("EIO: simulated parent sync failure"));
++        }
++        return realOpen(path, ...rest);
++      });
++
++      const error = yield* failure(harness.stager);
++      assert.strictEqual(error.step, "syncing the versions directory");
++      assert.include(error.reason, "EIO");
++      yield* Effect.promise(() => onlyPublished(harness.versionsDir, VERSION));
++      assert.strictEqual(
++        yield* Effect.promise(() =>
++          NodeFSP.readFile(
++            NodePath.join(harness.versionDir, MANAGED_INSTALL_SENTINEL_FILE),
++            "utf8",
++          ),
++        ),
++        `${VERSION}\n`,
++      );
++
++      // The next attempt takes the full reuse path over the completed directory.
++      open.mockImplementation(realOpen);
++      const staged = yield* harness.stager.stage(VERSION);
++      assert.deepStrictEqual(staged, { version: VERSION, artifactId: expectedArtifactId });
++      assert.strictEqual(harness.source.state.opened, 1);
++      assert.strictEqual(harness.migration.probes.length, 2);
++      assertPrivateEntry(harness, harness.migration.probes[1]?.entryPath, "reuse");
++    }),
++  );
++
++  it.effect(
++    "verifyStaged checks identity against the record and never treats the id as a path",
++    () =>
++      Effect.gen(function* () {
++        const harness = yield* setup();
++        const rejected = yield* harness.stager
++          .verifyStaged({ version: VERSION, artifactId: expectedArtifactId })
++          .pipe(Effect.flip);
++        assert.include(rejected.reason, "does not exist");
++
++        yield* harness.stager.stage(VERSION);
++        const calls = harness.candidate.calls.length;
++        const cases: Array<[string, { version: string; artifactId: string }, string]> = [
++          [
++            "other artifact",
++            {
++              version: VERSION,
++              artifactId: `managed-server-darwin-arm64@sha256:${sha256Hex("x")}`,
++            },
++            "different artifact",
++          ],
++          [
++            "path-like id",
++            { version: VERSION, artifactId: "../../../etc/passwd" },
++            "different artifact",
++          ],
++          [
++            "linux id",
++            {
++              version: VERSION,
++              artifactId: expectedArtifactId.replace("darwin-arm64", "linux-x64"),
++            },
++            "different artifact",
++          ],
++          [
++            "other version",
++            { version: OTHER_VERSION, artifactId: expectedArtifactId },
++            "not staged",
++          ],
++          [
++            "not managed",
++            { version: "1.2.3", artifactId: expectedArtifactId },
++            "not a managed release version",
++          ],
++        ];
++        for (const [label, staged, expected] of cases) {
++          const error = yield* harness.stager.verifyStaged(staged).pipe(Effect.flip);
++          assert.include(error.reason, expected, label);
++        }
++        // Tampering with a required file after publication is caught by the cheap recheck.
++        const launcher = NodePath.join(
++          harness.versionDir,
++          ...PKG.split("/"),
++          "dist",
++          "service-launcher.mjs",
++        );
++        yield* Effect.promise(() => NodeFSP.rm(launcher));
++        const tampered = yield* harness.stager
++          .verifyStaged({ version: VERSION, artifactId: expectedArtifactId })
++          .pipe(Effect.flip);
++        assert.include(tampered.reason, "service-launcher.mjs is missing");
++        assert.strictEqual(harness.candidate.calls.length, calls);
++        assert.strictEqual(harness.source.state.documentReads, 1);
++
++        const sourceError = new ManagedArtifactSourceError({ reason: "offline" });
++        const offline = yield* makeManagedRuntimeStager({
++          baseDir: harness.baseDir,
++          hostTarget: DARWIN,
++          candidate: harness.candidate.candidate,
++          source: {
++            readDocuments: () => Effect.fail(sourceError),
++            openArchive: () => Effect.fail(sourceError),
++          },
++          validateMigration: harness.migration.validate,
++        });
++        const unreachable = yield* failure(offline);
++        assert.strictEqual(unreachable.step, "fetching release documents");
++        assert.include(unreachable.reason, "offline");
++      }),
++  );
++
++  it.effect(
++    "cleans up a staging directory or archive handle acquired across failure or interruption",
++    () =>
++      Effect.gen(function* () {
++        const chmod = vi.mocked(NodeFSP.chmod);
++        const realChmod = chmod.getMockImplementation();
++        assert.isDefined(realChmod);
++        const isStaging = (path: unknown) =>
++          NodePath.basename(String(path)).startsWith(".staging-");
++
++        // chmod fails right after mkdtemp: the acquisition removes its own directory.
++        const failing = yield* setup();
++        chmod.mockImplementationOnce((path, mode) =>
++          isStaging(path)
++            ? Promise.reject(new Error("EPERM: simulated chmod failure"))
++            : realChmod(path, mode),
++        );
++        const error = yield* failure(failing.stager);
++        assert.strictEqual(error.step, "creating the staging directory");
++        assert.include(error.reason, "EPERM");
++        assert.strictEqual(failing.source.state.opened, 0);
++        yield* Effect.promise(() => onlyPublished(failing.versionsDir));
++
++        // chmod still pending when the fiber is interrupted: the directory that
++        // mkdtemp already created is registered for cleanup all the same.
++        const chmodGate = gate();
++        const held = yield* setup();
++        chmod.mockImplementationOnce(async (path, mode) => {
++          if (!isStaging(path)) return realChmod(path, mode);
++          chmodGate.enter();
++          await chmodGate.released;
++          return realChmod(path, mode);
++        });
++        const heldFiber = yield* Effect.forkChild(held.stager.stage(VERSION));
++        yield* Effect.promise(() => chmodGate.entered);
++        const heldInterrupter = yield* Effect.forkChild(Fiber.interrupt(heldFiber), {
++          startImmediately: true,
++        });
++        assert.isTrue(yield* isPending(heldFiber));
++        const staging = (yield* Effect.promise(() => NodeFSP.readdir(held.versionsDir))).filter(
++          (name) => name.startsWith(".staging-") && !name.startsWith(".staging-lock-"),
++        );
++        assert.strictEqual(staging.length, 1, "the directory exists while chmod is pending");
++        chmodGate.release();
++        yield* Fiber.join(heldInterrupter);
++        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(heldFiber)));
++        assert.strictEqual(held.source.state.opened, 0);
++        yield* Effect.promise(() => onlyPublished(held.versionsDir));
++
++        // open resolves only after the interruption: the descriptor is still closed.
++        const open = vi.mocked(NodeFSP.open);
++        const realOpen = open.getMockImplementation();
++        assert.isDefined(realOpen);
++        const openGate = gate();
++        let closes = 0;
++        const opening = yield* setup();
++        open.mockImplementation(async (path, ...rest) => {
++          if (NodePath.basename(String(path)) !== "archive.tar.gz") return realOpen(path, ...rest);
++          openGate.enter();
++          await openGate.released;
++          const handle = await realOpen(path, ...rest);
++          const close = handle.close.bind(handle);
++          handle.close = () => {
++            closes += 1;
++            return close();
++          };
++          return handle;
++        });
++        const openFiber = yield* Effect.forkChild(opening.stager.stage(VERSION));
++        yield* Effect.promise(() => openGate.entered);
++        const openInterrupter = yield* Effect.forkChild(Fiber.interrupt(openFiber), {
++          startImmediately: true,
++        });
++        assert.isTrue(yield* isPending(openFiber));
++        assert.strictEqual(closes, 0);
++        openGate.release();
++        yield* Fiber.join(openInterrupter);
++        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(openFiber)));
++        assert.strictEqual(closes, 1, "the late handle was closed");
++        assert.strictEqual(opening.source.state.opened, 0);
++        yield* Effect.promise(() => onlyPublished(opening.versionsDir));
++      }),
++  );
++
++  it.effect("syncs each first-time parent directory before the record, sentinel, and rename", () =>
++    Effect.gen(function* () {
++      const harness = yield* setup();
++      clearLayoutTrace();
++
++      yield* harness.stager.stage(VERSION);
++
++      assert.deepStrictEqual(layoutTrace(harness), [
++        "mkdir runtime",
++        "open base",
++        "mkdir versions",
++        "open runtime",
++        `open ${MANAGED_ARTIFACT_RECORD_FILE}`,
++        `open ${MANAGED_INSTALL_SENTINEL_FILE}`,
++        `rename ${VERSION}`,
++        "open versions",
++      ]);
++    }),
++  );
++
++  it.effect("syncs a parent left behind by a failed sync before the retry publishes", () =>
++    Effect.gen(function* () {
++      const open = vi.mocked(NodeFSP.open);
++      const realOpen = open.getMockImplementation();
++      assert.isDefined(realOpen);
++      // Each parent's sync fails once after the entry below it was created, so
++      // the retry finds that entry already present and must still anchor it.
++      const cases: Array<["base" | "runtime", string, ReadonlyArray<string>]> = [
++        [
++          "base",
++          "runtime",
++          [
++            "open base",
++            "mkdir versions",
++            "open runtime",
++            `open ${MANAGED_ARTIFACT_RECORD_FILE}`,
++            `open ${MANAGED_INSTALL_SENTINEL_FILE}`,
++            `rename ${VERSION}`,
++            "open versions",
++          ],
++        ],
++        [
++          "runtime",
++          "versions",
++          [
++            "open base",
++            "open runtime",
++            `open ${MANAGED_ARTIFACT_RECORD_FILE}`,
++            `open ${MANAGED_INSTALL_SENTINEL_FILE}`,
++            `rename ${VERSION}`,
++            "open versions",
++          ],
++        ],
++      ];
++      for (const [parent, created, retryTrace] of cases) {
++        const harness = yield* setup();
++        const runtimeDir = NodePath.dirname(harness.versionsDir);
++        const parentPath = parent === "base" ? NodePath.dirname(runtimeDir) : runtimeDir;
++        const createdPath = created === "runtime" ? runtimeDir : harness.versionsDir;
++        let failing = true;
++        open.mockImplementation((path, ...rest) => {
++          if (failing && String(path) === parentPath) {
++            failing = false;
++            return Promise.reject(new Error("EIO: simulated parent sync failure"));
++          }
++          return realOpen(path, ...rest);
++        });
++
++        const error = yield* failure(harness.stager);
++        assert.strictEqual(error.step, "preparing the managed runtime directories", parent);
++        assert.include(error.reason, "EIO", parent);
++        assert.isTrue(yield* Effect.promise(() => exists(createdPath)), `${parent}: ${created}`);
++        assert.strictEqual(harness.source.state.opened, 0, parent);
++        assert.isFalse(yield* Effect.promise(() => exists(harness.versionDir)), parent);
++
++        // The retry re-syncs both parents before anything is written or published.
++        open.mockImplementation(realOpen);
++        clearLayoutTrace();
++        const staged = yield* harness.stager.stage(VERSION);
++        assert.deepStrictEqual(
++          staged,
++          { version: VERSION, artifactId: expectedArtifactId },
++          parent,
++        );
++        assert.deepStrictEqual(layoutTrace(harness), retryTrace, parent);
++        yield* Effect.promise(() => onlyPublished(harness.versionsDir, VERSION));
++      }
++    }),
++  );
++
++  it.effect("verifyStaged never syncs the layout parents", () =>
++    Effect.gen(function* () {
++      const harness = yield* setup();
++      const staged = yield* harness.stager.stage(VERSION);
++      clearLayoutTrace();
++      yield* harness.stager.verifyStaged(staged);
++      // Only the identity files are read; no parent is opened for a sync.
++      assert.deepStrictEqual(layoutTrace(harness), [
++        `open ${MANAGED_INSTALL_SENTINEL_FILE}`,
++        `open ${MANAGED_ARTIFACT_RECORD_FILE}`,
++      ]);
++    }),
++  );
++
++  it.effect("refuses a fresh runtime whose probes changed it and publishes nothing", () =>
++    Effect.gen(function* () {
++      const packageDir = (probe: ManagedMigrationProbe) =>
++        NodePath.resolve(probe.entryPath, "..", "..");
++      // The entry is payload/node_modules/t3/dist/bin.mjs; four levels up is the payload root.
++      const payloadDir = (probe: ManagedMigrationProbe) =>
++        NodePath.resolve(probe.entryPath, "..", "..", "..", "..");
++      const cases: Array<[string, (probe: ManagedMigrationProbe) => Promise<void>, string]> = [
++        [
++          "rewrite",
++          (probe) => NodeFSP.writeFile(probe.entryPath, "changed\n"),
++          "dist/bin.mjs changed",
++        ],
++        ["chmod", (probe) => NodeFSP.chmod(probe.entryPath, 0o644), "dist/bin.mjs changed"],
++        [
++          "chmod root",
++          (probe) => NodeFSP.chmod(payloadDir(probe), 0o755),
++          ". changed (directory mode=755, was directory mode=700)",
++        ],
++        [
++          "add",
++          (probe) => NodeFSP.writeFile(NodePath.join(packageDir(probe), "dist", "extra.mjs"), ""),
++          "dist/extra.mjs was added",
++        ],
++        [
++          "remove",
++          (probe) => NodeFSP.rm(NodePath.join(packageDir(probe), "dist", "service-launcher.mjs")),
++          "dist/service-launcher.mjs was removed",
++        ],
++        [
++          "relink",
++          async (probe) => {
++            const link = NodePath.join(packageDir(probe), "node_modules", "dep");
++            await NodeFSP.rm(link);
++            await NodeFSP.symlink(".pnpm", link);
++          },
++          "node_modules/dep changed",
++        ],
++      ];
++      for (const [label, onProbe, expected] of cases) {
++        const harness = yield* setup({ migration: fakeMigration({ onProbe }) });
++        const error = yield* failure(harness.stager);
++        assert.strictEqual(error.step, "verifying the runtime after the candidate probes", label);
++        assert.include(error.reason, expected, label);
++        assert.strictEqual(harness.migration.probes.length, 1, label);
++        yield* Effect.promise(() => onlyPublished(harness.versionsDir));
++      }
++    }),
++  );
++
++  it.effect(
++    "re-proves a reused runtime on a private copy and leaves the published bytes alone",
++    () =>
++      Effect.gen(function* () {
++        const harness = yield* setup();
++        yield* harness.stager.stage(VERSION);
++        const before = yield* Effect.promise(() => snapshotTree(harness.versionDir));
++        const publishedEntry = yield* Effect.promise(() => NodeFSP.lstat(harness.entryPath));
++        const untouched = (label: string) =>
++          Effect.gen(function* () {
++            assert.deepStrictEqual(
++              yield* Effect.promise(() => snapshotTree(harness.versionDir)),
++              before,
++              label,
++            );
++            yield* Effect.promise(() => onlyPublished(harness.versionsDir, VERSION));
++          });
++
++        // Success: the probes see a fresh private inode tree with its links intact.
++        let seen:
++          | {
++              entry: string;
++              ino: number;
++              nlink: number;
++              mode: number;
++              link: string;
++              stagingMode: number;
++              record: boolean;
++              sentinel: boolean;
++            }
++          | undefined;
++        const observing = fakeMigration({
++          onProbe: async (probe) => {
++            const stats = await NodeFSP.lstat(probe.entryPath);
++            const payload = NodePath.resolve(probe.entryPath, "..", "..", "..", "..");
++            seen = {
++              entry: probe.entryPath,
++              ino: stats.ino,
++              nlink: stats.nlink,
++              mode: stats.mode & 0o777,
++              link: await NodeFSP.readlink(
++                NodePath.join(payload, ...PKG.split("/"), "node_modules", "dep"),
++              ),
++              stagingMode: (await NodeFSP.lstat(NodePath.dirname(payload))).mode & 0o777,
++              record: await exists(NodePath.join(payload, MANAGED_ARTIFACT_RECORD_FILE)),
++              sentinel: await exists(NodePath.join(payload, MANAGED_INSTALL_SENTINEL_FILE)),
++            };
++          },
++        });
++        const observed = yield* sibling(harness, { validateMigration: observing.validate });
++        assert.deepStrictEqual(yield* observed.stage(VERSION), {
++          version: VERSION,
++          artifactId: expectedArtifactId,
++        });
++        assert.isDefined(seen);
++        assertPrivateEntry(harness, seen.entry, "observed");
++        assert.notStrictEqual(seen.ino, publishedEntry.ino, "a copy, not a link");
++        assert.strictEqual(seen.nlink, 1);
++        assert.strictEqual(seen.mode, 0o755);
++        assert.strictEqual(seen.link, DEP_LINK);
++        assert.strictEqual(seen.stagingMode, 0o700);
++        assert.isTrue(
++          seen.record && seen.sentinel,
++          "the copy carries the published record and sentinel",
++        );
++        assert.strictEqual(harness.source.state.opened, 1, "reuse downloads nothing");
++        yield* untouched("after a successful reuse");
++
++        // A rejected probe that wrote into its copy: the published bytes are still the originals.
++        const rejecting = fakeMigration({
++          onProbe: (probe) => NodeFSP.writeFile(probe.entryPath, "tampered\n"),
++          reject: "schema too new",
++        });
++        const rejected = yield* failure(
++          yield* sibling(harness, { validateMigration: rejecting.validate }),
++        );
++        assert.strictEqual(rejected.reason, "schema too new");
++        assertPrivateEntry(harness, rejecting.probes[0]?.entryPath, "rejecting");
++        yield* untouched("after a rejected reuse");
++
++        // A successful probe that wrote into its copy is refused as well.
++        const tampering = fakeMigration({
++          onProbe: (probe) => NodeFSP.writeFile(probe.entryPath, "tampered\n"),
++        });
++        const tampered = yield* failure(
++          yield* sibling(harness, { validateMigration: tampering.validate }),
++        );
++        assert.strictEqual(tampered.step, "verifying the runtime after the candidate probes");
++        assert.include(tampered.reason, "dist/bin.mjs changed");
++        yield* untouched("after a tampering reuse");
++
++        // A held candidate keeps its private copy until it has actually exited.
++        const heldCandidate = fakeCandidate({ holdKind: "service-preflight" });
++        const heldStager = yield* sibling(harness, { candidate: heldCandidate.candidate });
++        const fiber = yield* Effect.forkChild(heldStager.stage(VERSION));
++        const entryPath = yield* Deferred.await(heldCandidate.held.entered);
++        assertPrivateEntry(harness, entryPath, "held");
++        const payload = NodePath.resolve(entryPath, "..", "..", "..", "..");
++        const interrupter = yield* Effect.forkChild(Fiber.interrupt(fiber), {
++          startImmediately: true,
++        });
++        assert.isTrue(yield* isPending(fiber));
++        assert.isTrue(yield* Effect.promise(() => exists(payload)), "copy retained while held");
++        yield* Deferred.succeed(heldCandidate.held.release, undefined);
++        yield* Fiber.join(interrupter);
++        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(fiber)));
++        assert.isFalse(yield* Effect.promise(() => exists(payload)), "copy removed after exit");
++        yield* untouched("after an interrupted reuse");
++      }),
++  );
++});
+diff --git a/apps/server/src/cloud/managedRuntime.ts b/apps/server/src/cloud/managedRuntime.ts
+new file mode 100644
+index 000000000..124fecb88
+--- /dev/null
++++ b/apps/server/src/cloud/managedRuntime.ts
+@@ -0,0 +1,1212 @@
++// @effect-diagnostics nodeBuiltinImport:off - owns exclusive no-follow file creation, fsync of files and directories, and the rename that publishes a version; the Effect FileSystem does not expose these.
++import * as NodeCrypto from "node:crypto";
++import * as NodeFS from "node:fs";
++import * as NodeFSP from "node:fs/promises";
++import * as NodePath from "node:path";
++
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++import type * as Scope from "effect/Scope";
++import * as Semaphore from "effect/Semaphore";
++import * as Stream from "effect/Stream";
++
++import type { ManagedCandidateError, ManagedCandidateProcess } from "./managedCandidateProcess.ts";
++import {
++  acceptMigrationPreflightOutput,
++  withMigrationSnapshot,
++} from "./managedMigrationPreflight.ts";
++import {
++  MANAGED_SERVER_ENTRY,
++  managedArtifactContentId,
++  parseManagedReleaseVersion,
++  selectManagedServerArtifactId,
++  verifyManagedReleaseDocuments,
++  type ManagedServerTarget,
++  type VerifiedManagedServerAsset,
++} from "./managedRelease.ts";
++import {
++  DEFAULT_MANAGED_RUNTIME_ARCHIVE_LIMITS,
++  extractManagedRuntimeArchiveEffect,
++  type ManagedRuntimeArchiveLimits,
++} from "./managedRuntimeArchive.ts";
++import { pinnedRuntimePaths, type PinnedRuntimePaths } from "./pinnedRuntime.ts";
++import type { StagedArtifact } from "./queuedUpdate.ts";
++import { decodeServicePreflightResult } from "./servicePreflight.ts";
++import { SERVICE_LAUNCHER_FILE, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++/**
++ * Stages one exact managed release into the pinned runtime directory as an
++ * immutable transaction: authenticate the release documents, download and
++ * hash the archive into an exclusively owned file, extract it into a private
++ * sibling directory, prove the extracted server with isolated candidate
++ * probes and a migration rehearsal on a fresh snapshot, then publish with a
++ * single rename after the content record and the sentinel are durable.
++ *
++ * A version directory that already exists is never modified: it is either
++ * exactly the release being staged (same sentinel and content record) and is
++ * re-proven in full, or it is refused untouched. Nothing here installs from
++ * npm, accepts a version-only sentinel, or removes an incomplete directory.
++ */
++
++export const MANAGED_ARTIFACT_RECORD_FILE = ".managed-artifact.json";
++export const MANAGED_INSTALL_SENTINEL_FILE = ".install-complete";
++export const MANAGED_ARTIFACT_RECORD_SCHEMA_VERSION = 1;
++/** Root command name; the CLI prints `<name> v<version>` for `--version` on a non-TTY stdout. */
++const CLI_NAME = "t3";
++const PACKAGE_DIR = "node_modules/t3";
++const PACKAGE_NAME = "t3";
++const STAGING_PREFIX = ".staging-";
++const LOCK_PREFIX = ".staging-lock-";
++const PAYLOAD_DIR = "payload";
++const ARCHIVE_FILE = "archive.tar.gz";
++const MAX_RECORD_BYTES = 64 * 1024;
++const MAX_SENTINEL_BYTES = 4 * 1024;
++const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
++const HEADER_BYTES = 64;
++const READ_CHUNK_BYTES = 64 * 1024;
++const PERMISSION_BITS = 0o7777;
++const MH_MAGIC_64 = 0xfeedfacf;
++const MH_CPU_TYPE_ARM64 = 0x0100000c;
++const MH_EXECUTE = 2;
++const ELF_MAGIC = [0x7f, 0x45, 0x4c, 0x46] as const;
++const ELF_CLASS_64 = 2;
++const ELF_DATA_LITTLE_ENDIAN = 1;
++const ELF_TYPE_EXEC = 2;
++const ELF_TYPE_DYN = 3;
++const ELF_MACHINE_X86_64 = 0x3e;
++
++// Boot-service setup and remote update may build separate stagers; the whole
++// transaction is serialized across every instance in this process.
++const stagingLock = Semaphore.makeUnsafe(1);
++
++export class ManagedRuntimeStageError extends Schema.TaggedErrorClass<ManagedRuntimeStageError>()(
++  "ManagedRuntimeStageError",
++  {
++    step: Schema.String,
++    reason: Schema.String,
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    return `Managed runtime staging failed while ${this.step}: ${this.reason}`;
++  }
++}
++
++export class ManagedArtifactSourceError extends Schema.TaggedErrorClass<ManagedArtifactSourceError>()(
++  "ManagedArtifactSourceError",
++  {
++    reason: Schema.String,
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    return `Managed artifact source failed: ${this.reason}`;
++  }
++}
++
++export interface ManagedReleaseDocuments {
++  readonly manifestBytes: Uint8Array;
++  readonly sumsBytes: Uint8Array;
++}
++
++/**
++ * Trusted, bounded access to one release's documents and archive. The
++ * transaction verifies the documents and counts and hashes every archive byte
++ * itself; an implementation's own checksum is never consulted. Closing the
++ * archive scope must cancel the read and wait for its resources to go away.
++ */
++export interface ManagedArtifactSource {
++  readonly readDocuments: (
++    version: string,
++  ) => Effect.Effect<ManagedReleaseDocuments, ManagedArtifactSourceError>;
++  readonly openArchive: (
++    asset: VerifiedManagedServerAsset,
++  ) => Effect.Effect<
++    Stream.Stream<Uint8Array, ManagedArtifactSourceError>,
++    ManagedArtifactSourceError,
++    Scope.Scope
++  >;
++}
++
++export interface ManagedMigrationProbe {
++  /** Entry of the runtime under proof: always inside a private staging copy, never the published version directory. */
++  readonly entryPath: string;
++  readonly version: string;
++}
++
++/** Proves the runtime at `entryPath` migrates the current live database; required, never defaulted. */
++export type ManagedMigrationValidator = (
++  probe: ManagedMigrationProbe,
++) => Effect.Effect<void, ManagedRuntimeStageError>;
++
++export interface ManagedRuntimeStagerOptions {
++  /** Absolute, server-owned base; pinned runtimes live under its `runtime/versions`. */
++  readonly baseDir: string;
++  readonly hostTarget: ManagedServerTarget;
++  readonly candidate: ManagedCandidateProcess;
++  readonly source: ManagedArtifactSource;
++  readonly validateMigration: ManagedMigrationValidator;
++  readonly archiveLimits?: Partial<ManagedRuntimeArchiveLimits>;
++}
++
++export interface ManagedRuntimeStager {
++  readonly stage: (
++    targetVersion: string,
++  ) => Effect.Effect<StagedArtifact, ManagedRuntimeStageError>;
++  /** Cheap identity recheck of a published runtime against its record; no downloads, no candidate processes. */
++  readonly verifyStaged: (
++    staged: StagedArtifact,
++  ) => Effect.Effect<PinnedRuntimePaths, ManagedRuntimeStageError>;
++}
++
++// --- content record ------------------------------------------------------------------
++
++const Sha256Hex = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
++
++/** Identity of the published content. No configuration, URLs, live paths, or credentials. */
++export const ManagedArtifactRecord = Schema.Struct({
++  schemaVersion: Schema.Literal(MANAGED_ARTIFACT_RECORD_SCHEMA_VERSION),
++  version: Schema.String,
++  artifactId: Schema.String,
++  releaseArtifactId: Schema.Literals(["managed-server-darwin-arm64", "managed-server-linux-x64"]),
++  archiveSha256: Sha256Hex,
++  archiveBytes: Schema.Int,
++  manifestSha256: Sha256Hex,
++  releaseInputSha256: Sha256Hex,
++  platform: Schema.Literals(["darwin", "linux"]),
++  arch: Schema.Literals(["arm64", "x64"]),
++  launcherProtocol: Schema.Literal(SERVICE_LAUNCHER_PROTOCOL),
++});
++export type ManagedArtifactRecord = typeof ManagedArtifactRecord.Type;
++
++const decodeRecord = Schema.decodeUnknownEffect(ManagedArtifactRecord);
++const RECORD_KEYS = Object.keys(ManagedArtifactRecord.fields) as ReadonlyArray<
++  keyof ManagedArtifactRecord
++>;
++
++export function managedArtifactRecordFor(asset: VerifiedManagedServerAsset): ManagedArtifactRecord {
++  return {
++    schemaVersion: MANAGED_ARTIFACT_RECORD_SCHEMA_VERSION,
++    version: asset.version,
++    artifactId: managedArtifactContentId(asset),
++    releaseArtifactId: asset.releaseArtifactId,
++    archiveSha256: asset.sha256,
++    archiveBytes: asset.bytes,
++    manifestSha256: asset.manifestSha256,
++    releaseInputSha256: asset.releaseInputSha256,
++    platform: asset.platform,
++    arch: asset.arch,
++    launcherProtocol: asset.launcherProtocol,
++  };
++}
++
++function sameRecord(a: ManagedArtifactRecord, b: ManagedArtifactRecord): boolean {
++  return RECORD_KEYS.every((key) => a[key] === b[key]);
++}
++
++/** The five members that must be real regular files, using the host's resource monitor. */
++export function managedRuntimeRequiredFiles(target: ManagedServerTarget): ReadonlyArray<string> {
++  return [
++    `${PACKAGE_DIR}/package.json`,
++    MANAGED_SERVER_ENTRY,
++    `${PACKAGE_DIR}/dist/${SERVICE_LAUNCHER_FILE}`,
++    `${PACKAGE_DIR}/dist/client/index.html`,
++    `${PACKAGE_DIR}/dist/resource-monitor/${target.platform}-${target.arch}/t3-resource-monitor`,
++  ];
++}
++
++// --- errors ---------------------------------------------------------------------------
++
++const isStageError = Schema.is(ManagedRuntimeStageError);
++
++function describe(error: unknown): string {
++  return error instanceof Error ? error.message : String(error);
++}
++
++function stageError(step: string, reason: string, cause?: unknown): ManagedRuntimeStageError {
++  return new ManagedRuntimeStageError({
++    step,
++    reason,
++    ...(cause === undefined ? {} : { cause }),
++  });
++}
++
++function toStageError(step: string, error: unknown): ManagedRuntimeStageError {
++  return isStageError(error) ? error : stageError(step, describe(error), error);
++}
++
++/**
++ * Runs one filesystem step. Interruption aborts the signal and waits for the
++ * promise to settle, so cleanup never races a call still in flight.
++ */
++function fsStep<A>(
++  step: string,
++  start: (signal: AbortSignal) => Promise<A>,
++): Effect.Effect<A, ManagedRuntimeStageError> {
++  return Effect.callback<A, ManagedRuntimeStageError>((resume, signal) => {
++    const settled = start(signal).then(
++      (value) => resume(Effect.succeed(value)),
++      (error: unknown) => resume(Effect.fail(toStageError(step, error))),
++    );
++    return Effect.promise(() => settled);
++  });
++}
++
++const isEnoent = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
++
++// --- filesystem primitives --------------------------------------------------------------
++
++async function lstatOrUndefined(target: string): Promise<NodeFS.Stats | undefined> {
++  try {
++    return await NodeFSP.lstat(target);
++  } catch (error) {
++    if (isEnoent(error)) return undefined;
++    throw error;
++  }
++}
++
++/** Opens without following a final symlink; the caller owns the handle. */
++function openNoFollow(target: string): Promise<NodeFSP.FileHandle> {
++  return NodeFSP.open(target, NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW);
++}
++
++async function readBounded(step: string, target: string, maxBytes: number): Promise<Buffer> {
++  const handle = await openNoFollow(target);
++  try {
++    const stats = await handle.stat();
++    if (!stats.isFile()) throw stageError(step, `${target} is not a regular file`);
++    if (stats.size > maxBytes) throw stageError(step, `${target} is larger than ${maxBytes} bytes`);
++    const buffer = Buffer.alloc(stats.size);
++    let offset = 0;
++    while (offset < buffer.length) {
++      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
++      if (bytesRead === 0) throw stageError(step, `${target} changed while reading`);
++      offset += bytesRead;
++    }
++    return buffer;
++  } finally {
++    await handle.close();
++  }
++}
++
++async function readHeader(target: string): Promise<Buffer> {
++  const handle = await openNoFollow(target);
++  try {
++    const buffer = Buffer.alloc(HEADER_BYTES);
++    const { bytesRead } = await handle.read(buffer, 0, HEADER_BYTES, 0);
++    return buffer.subarray(0, bytesRead);
++  } finally {
++    await handle.close();
++  }
++}
++
++/** Reads a regular file of any size through `onChunk`, never following a final symlink. */
++async function readChunks(
++  target: string,
++  onChunk: (chunk: Buffer) => Promise<void>,
++): Promise<void> {
++  const handle = await openNoFollow(target);
++  try {
++    const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
++    for (;;) {
++      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
++      if (bytesRead === 0) return;
++      await onChunk(buffer.subarray(0, bytesRead));
++    }
++  } finally {
++    await handle.close();
++  }
++}
++
++async function writeAll(handle: NodeFSP.FileHandle, bytes: Uint8Array): Promise<void> {
++  let offset = 0;
++  while (offset < bytes.byteLength) {
++    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset);
++    offset += bytesWritten;
++  }
++}
++
++function decodeUtf8Strict(step: string, bytes: Uint8Array, label: string): string {
++  try {
++    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
++  } catch {
++    throw stageError(step, `${label} is not valid UTF-8`);
++  }
++}
++
++/** Strict UTF-8 then JSON; the shape is decoded by the caller's schema. */
++function parseJsonDocument(step: string, bytes: Uint8Array, label: string): unknown {
++  const text = decodeUtf8Strict(step, bytes, label);
++  try {
++    return JSON.parse(text) as unknown;
++  } catch {
++    throw stageError(step, `${label} is not valid JSON`);
++  }
++}
++
++function parseJsonLine(line: string): unknown | undefined {
++  try {
++    return JSON.parse(line) as unknown;
++  } catch {
++    return undefined;
++  }
++}
++
++const quote = (value: string): string => JSON.stringify(value);
++
++/** Creates the file exclusively, writes it whole, and fsyncs it before closing. */
++async function writeExclusiveSynced(target: string, content: string): Promise<void> {
++  const handle = await NodeFSP.open(
++    target,
++    NodeFS.constants.O_WRONLY |
++      NodeFS.constants.O_CREAT |
++      NodeFS.constants.O_EXCL |
++      NodeFS.constants.O_NOFOLLOW,
++    0o600,
++  );
++  try {
++    const bytes = Buffer.from(content, "utf8");
++    let offset = 0;
++    while (offset < bytes.length) {
++      const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset);
++      offset += bytesWritten;
++    }
++    await handle.sync();
++  } finally {
++    await handle.close();
++  }
++}
++
++async function syncPath(target: string): Promise<void> {
++  const handle = await openNoFollow(target);
++  try {
++    await handle.sync();
++  } finally {
++    await handle.close();
++  }
++}
++
++/** fsyncs every regular file and directory below `root` (root included); symlink entries are never followed. */
++async function syncTree(root: string, signal: AbortSignal): Promise<void> {
++  const pending: Array<string> = [root];
++  while (pending.length > 0) {
++    signal.throwIfAborted();
++    const directory = pending.pop() as string;
++    const entries = await NodeFSP.readdir(directory, { withFileTypes: true });
++    for (const entry of entries) {
++      signal.throwIfAborted();
++      const absolute = NodePath.join(directory, entry.name);
++      if (entry.isDirectory()) pending.push(absolute);
++      else if (entry.isFile()) await syncPath(absolute);
++    }
++    await syncPath(directory);
++  }
++}
++
++// --- tree inventory and private copies ----------------------------------------------------
++
++/** Relative entry path to its description; equal maps mean equal trees. */
++type TreeInventory = ReadonlyMap<string, string>;
++
++/** Inventory key of the root itself; its type and permission bits are published too. */
++const ROOT_ENTRY = ".";
++
++/**
++ * Describes `root` and every entry below it: type and permission bits, plus
++ * byte count and SHA-256 for files and the target for symlinks, which are
++ * never followed. Taken before the candidate probes and compared afterwards,
++ * so the bytes that get published are exactly the bytes that were
++ * authenticated and proven. The root is included because the payload
++ * directory becomes the version directory, so a probe widening its mode
++ * would otherwise be published unnoticed.
++ */
++async function inventoryTree(root: string, signal: AbortSignal): Promise<TreeInventory> {
++  const inventory = new Map<string, string>();
++  const rootStats = await NodeFSP.lstat(root);
++  inventory.set(
++    ROOT_ENTRY,
++    `${rootStats.isDirectory() ? "directory" : "non-directory"} mode=${(rootStats.mode & PERMISSION_BITS).toString(8)}`,
++  );
++  const pending: Array<string> = [root];
++  while (pending.length > 0) {
++    signal.throwIfAborted();
++    const directory = pending.pop() as string;
++    const entries = await NodeFSP.readdir(directory, { withFileTypes: true });
++    for (const entry of entries) {
++      signal.throwIfAborted();
++      const absolute = NodePath.join(directory, entry.name);
++      const relative = NodePath.relative(root, absolute);
++      const stats = await NodeFSP.lstat(absolute);
++      const mode = (stats.mode & PERMISSION_BITS).toString(8);
++      if (stats.isDirectory()) {
++        pending.push(absolute);
++        inventory.set(relative, `directory mode=${mode}`);
++      } else if (stats.isSymbolicLink()) {
++        inventory.set(relative, `symlink target=${quote(await NodeFSP.readlink(absolute))}`);
++      } else if (stats.isFile()) {
++        const hash = NodeCrypto.createHash("sha256");
++        let bytes = 0;
++        await readChunks(absolute, async (chunk) => {
++          bytes += chunk.byteLength;
++          hash.update(chunk);
++        });
++        inventory.set(relative, `file mode=${mode} bytes=${bytes} sha256=${hash.digest("hex")}`);
++      } else {
++        inventory.set(relative, "special file");
++      }
++    }
++  }
++  return inventory;
++}
++
++/** Names the first entry that differs, or undefined when the trees are identical. */
++function inventoryDifference(expected: TreeInventory, actual: TreeInventory): string | undefined {
++  for (const [relative, description] of expected) {
++    const found = actual.get(relative);
++    if (found === undefined) return `${relative} was removed`;
++    if (found !== description) return `${relative} changed (${found}, was ${description})`;
++  }
++  for (const relative of actual.keys()) {
++    if (!expected.has(relative)) return `${relative} was added`;
++  }
++  return undefined;
++}
++
++/** Re-writes one regular file into a new exclusive inode with the same permission bits. */
++async function copyFileNoFollow(source: string, destination: string, mode: number): Promise<void> {
++  const handle = await NodeFSP.open(
++    destination,
++    NodeFS.constants.O_WRONLY |
++      NodeFS.constants.O_CREAT |
++      NodeFS.constants.O_EXCL |
++      NodeFS.constants.O_NOFOLLOW,
++    mode,
++  );
++  try {
++    await handle.chmod(mode);
++    await readChunks(source, (chunk) => writeAll(handle, chunk));
++  } finally {
++    await handle.close();
++  }
++}
++
++/**
++ * Copies the tree at `source` into the new directory `destination` as fresh
++ * private inodes: files are re-written byte for byte (never hard-linked,
++ * never followed), symlinks keep their targets, and every entry keeps its
++ * permission bits. Directories are created writable and receive their final
++ * mode once their contents are in place.
++ */
++async function copyTree(source: string, destination: string, signal: AbortSignal): Promise<void> {
++  const step = "copying the published runtime";
++  const directories: Array<[string, number]> = [];
++  const rootMode = (await NodeFSP.lstat(source)).mode & PERMISSION_BITS;
++  await NodeFSP.mkdir(destination, { mode: 0o700 });
++  directories.push([destination, rootMode]);
++  const pending: Array<string> = [""];
++  while (pending.length > 0) {
++    signal.throwIfAborted();
++    const relative = pending.pop() as string;
++    const entries = await NodeFSP.readdir(NodePath.join(source, relative), { withFileTypes: true });
++    for (const entry of entries) {
++      signal.throwIfAborted();
++      const childRelative = NodePath.join(relative, entry.name);
++      const from = NodePath.join(source, childRelative);
++      const to = NodePath.join(destination, childRelative);
++      const stats = await NodeFSP.lstat(from);
++      const mode = stats.mode & PERMISSION_BITS;
++      if (stats.isDirectory()) {
++        await NodeFSP.mkdir(to, { mode: 0o700 });
++        directories.push([to, mode]);
++        pending.push(childRelative);
++      } else if (stats.isSymbolicLink()) {
++        await NodeFSP.symlink(await NodeFSP.readlink(from), to);
++      } else if (stats.isFile()) {
++        await copyFileNoFollow(from, to, mode);
++      } else {
++        throw stageError(step, `${childRelative} is not a file, directory, or symlink`);
++      }
++    }
++  }
++  for (const [directory, mode] of directories) {
++    signal.throwIfAborted();
++    await NodeFSP.chmod(directory, mode);
++  }
++}
++
++// --- layout -----------------------------------------------------------------------------
++
++function monitorHeaderProblem(head: Buffer, target: ManagedServerTarget): string | undefined {
++  if (target.platform === "darwin") {
++    if (head.length < 16 || head.readUInt32LE(0) !== MH_MAGIC_64) {
++      return "resource monitor is not a 64-bit Mach-O file";
++    }
++    if (head.readUInt32LE(4) !== MH_CPU_TYPE_ARM64)
++      return "resource monitor is not built for arm64";
++    if (head.readUInt32LE(12) !== MH_EXECUTE) return "resource monitor is not a Mach-O executable";
++    return undefined;
++  }
++  if (head.length < 20 || !ELF_MAGIC.every((byte, index) => head[index] === byte)) {
++    return "resource monitor is not an ELF file";
++  }
++  if (head[4] !== ELF_CLASS_64 || head[5] !== ELF_DATA_LITTLE_ENDIAN) {
++    return "resource monitor is not a little-endian 64-bit ELF file";
++  }
++  const elfType = head.readUInt16LE(16);
++  if (elfType !== ELF_TYPE_EXEC && elfType !== ELF_TYPE_DYN) {
++    return "resource monitor is not an ELF executable";
++  }
++  if (head.readUInt16LE(18) !== ELF_MACHINE_X86_64)
++    return "resource monitor is not built for x86-64";
++  return undefined;
++}
++
++/**
++ * Proves the five required members are real, nonempty, unlinked regular files
++ * naming the exact package and version, with an executable monitor built for
++ * the host. Runs on a fresh payload and again on every reuse.
++ */
++async function verifyRequiredFiles(
++  root: string,
++  target: ManagedServerTarget,
++  version: string,
++): Promise<void> {
++  const step = "verifying the runtime layout";
++  const required = managedRuntimeRequiredFiles(target);
++  for (const relative of required) {
++    const stats = await lstatOrUndefined(NodePath.join(root, ...relative.split("/")));
++    if (stats === undefined) throw stageError(step, `${relative} is missing`);
++    if (!stats.isFile()) throw stageError(step, `${relative} is not a regular file`);
++    if (stats.size === 0) throw stageError(step, `${relative} is empty`);
++    if (stats.nlink !== 1) throw stageError(step, `${relative} is hard-linked`);
++  }
++  const [packageJsonPath, , , , monitorPath] = required.map((relative) =>
++    NodePath.join(root, ...relative.split("/")),
++  ) as [string, string, string, string, string];
++
++  const manifest = parseJsonDocument(
++    step,
++    await readBounded(step, packageJsonPath, MAX_PACKAGE_JSON_BYTES),
++    "package.json",
++  );
++  if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
++    throw stageError(step, "package.json is not an object");
++  }
++  const record = manifest as Record<string, unknown>;
++  if (record.name !== PACKAGE_NAME) throw stageError(step, `package name is not ${PACKAGE_NAME}`);
++  if (record.version !== version) {
++    throw stageError(step, `package version ${String(record.version)} is not ${version}`);
++  }
++
++  const monitorStats = await NodeFSP.lstat(monitorPath);
++  if ((monitorStats.mode & 0o100) === 0)
++    throw stageError(step, "resource monitor is not executable");
++  const headerProblem = monitorHeaderProblem(await readHeader(monitorPath), target);
++  if (headerProblem !== undefined) throw stageError(step, headerProblem);
++}
++
++/**
++ * Walks the whole tree: only the expected top-level entries, `node_modules`
++ * holding exactly `t3`, ordinary files, directories, and relative symlinks
++ * whose final paths stay inside the package.
++ */
++async function verifyTree(
++  root: string,
++  expectedTopLevel: ReadonlySet<string>,
++  signal: AbortSignal,
++): Promise<void> {
++  const step = "verifying the runtime tree";
++  const realRoot = await NodeFSP.realpath(root);
++  const packagePrefix = `${NodePath.join(realRoot, ...PACKAGE_DIR.split("/"))}${NodePath.sep}`;
++
++  const topLevel = await NodeFSP.readdir(root, { withFileTypes: true });
++  const names = new Set(topLevel.map((entry) => entry.name));
++  for (const expected of expectedTopLevel) {
++    if (!names.has(expected)) throw stageError(step, `${expected} is missing`);
++  }
++  for (const entry of topLevel) {
++    if (!expectedTopLevel.has(entry.name)) throw stageError(step, `unexpected entry ${entry.name}`);
++    if (entry.name === "node_modules" ? !entry.isDirectory() : !entry.isFile()) {
++      throw stageError(step, `${entry.name} has the wrong type`);
++    }
++  }
++  const nodeModules = NodePath.join(root, "node_modules");
++  const packages = await NodeFSP.readdir(nodeModules, { withFileTypes: true });
++  if (packages.length !== 1 || packages[0]?.name !== PACKAGE_NAME || !packages[0].isDirectory()) {
++    throw stageError(step, `node_modules must contain exactly the ${PACKAGE_NAME} directory`);
++  }
++
++  const pending: Array<string> = [NodePath.join(nodeModules, PACKAGE_NAME)];
++  while (pending.length > 0) {
++    signal.throwIfAborted();
++    const directory = pending.pop() as string;
++    const entries = await NodeFSP.readdir(directory, { withFileTypes: true });
++    for (const entry of entries) {
++      const absolute = NodePath.join(directory, entry.name);
++      if (entry.isDirectory()) {
++        pending.push(absolute);
++      } else if (entry.isSymbolicLink()) {
++        signal.throwIfAborted();
++        const target = await NodeFSP.readlink(absolute);
++        if (NodePath.isAbsolute(target)) {
++          throw stageError(step, `${absolute} is an absolute symlink`);
++        }
++        const real = await NodeFSP.realpath(absolute).catch(() => undefined);
++        if (real === undefined || !real.startsWith(packagePrefix)) {
++          throw stageError(step, `${absolute} does not resolve inside the package`);
++        }
++      } else if (!entry.isFile()) {
++        throw stageError(step, `${absolute} is not a file, directory, or symlink`);
++      }
++    }
++  }
++}
++
++// --- published directory ----------------------------------------------------------------
++
++type ExistingVersion =
++  | { readonly kind: "absent" }
++  | { readonly kind: "present"; readonly record: ManagedArtifactRecord };
++
++/**
++ * Reads what a version directory claims to be. Anything that is not a real
++ * directory carrying the exact sentinel and a strictly decodable record is a
++ * refusal; the directory is never touched.
++ */
++const readPublished = Effect.fn("cloud.managed_runtime.read_published")(function* (
++  paths: PinnedRuntimePaths,
++  version: string,
++) {
++  const step = "inspecting the existing version directory";
++  const stats = yield* fsStep(step, () => lstatOrUndefined(paths.versionDir));
++  if (stats === undefined) return { kind: "absent" } as ExistingVersion;
++  if (!stats.isDirectory()) {
++    return yield* stageError(step, `${paths.versionDir} exists but is not a directory`);
++  }
++  const sentinel = yield* fsStep(step, async () => {
++    const stats = await lstatOrUndefined(paths.sentinelPath);
++    if (stats === undefined)
++      throw stageError(step, "the version directory has no install sentinel");
++    if (!stats.isFile()) throw stageError(step, "the install sentinel is not a regular file");
++    return readBounded(step, paths.sentinelPath, MAX_SENTINEL_BYTES);
++  });
++  if (!sentinel.equals(Buffer.from(`${version}\n`, "utf8"))) {
++    return yield* stageError(step, "the install sentinel does not name this exact version");
++  }
++  const recordPath = NodePath.join(paths.versionDir, MANAGED_ARTIFACT_RECORD_FILE);
++  const parsed = yield* fsStep(step, async () => {
++    const stats = await lstatOrUndefined(recordPath);
++    if (stats === undefined) {
++      throw stageError(step, "the version directory has no managed artifact record");
++    }
++    if (!stats.isFile())
++      throw stageError(step, "the managed artifact record is not a regular file");
++    return parseJsonDocument(
++      step,
++      await readBounded(step, recordPath, MAX_RECORD_BYTES),
++      "the managed artifact record",
++    );
++  });
++  const record = yield* decodeRecord(parsed, { onExcessProperty: "error" }).pipe(
++    Effect.mapError((error) =>
++      stageError(step, `the managed artifact record is malformed: ${error.message}`),
++    ),
++  );
++  if (record.version !== version) {
++    return yield* stageError(step, "the managed artifact record names a different version");
++  }
++  return { kind: "present", record } as ExistingVersion;
++});
++
++// --- candidate probes -------------------------------------------------------------------
++
++const candidateFailure =
++  (step: string) =>
++  (error: ManagedCandidateError): ManagedRuntimeStageError =>
++    stageError(step, error.message, error);
++
++/** Node identity, exact `--version`, and the service identity probe. */
++const probeCandidate = Effect.fn("cloud.managed_runtime.probe_candidate")(function* (input: {
++  readonly candidate: ManagedCandidateProcess;
++  readonly hostTarget: ManagedServerTarget;
++  readonly entryPath: string;
++  readonly version: string;
++}) {
++  const identity = yield* input.candidate.inspectNode.pipe(
++    Effect.mapError(candidateFailure("inspecting the candidate Node runtime")),
++  );
++  if (identity.platform !== input.hostTarget.platform || identity.arch !== input.hostTarget.arch) {
++    return yield* stageError(
++      "inspecting the candidate Node runtime",
++      `Node runs on ${identity.platform}-${identity.arch}, not the selected ${input.hostTarget.platform}-${input.hostTarget.arch}`,
++    );
++  }
++
++  const versionStep = "checking the candidate version";
++  const versionOutput = yield* input.candidate
++    .run({ entryPath: input.entryPath, operation: { kind: "version" } })
++    .pipe(Effect.mapError(candidateFailure(versionStep)));
++  if (versionOutput.code !== 0) {
++    return yield* stageError(versionStep, `exited with code ${versionOutput.code}`);
++  }
++  const expectedVersionLine = `${CLI_NAME} v${input.version}\n`;
++  if (versionOutput.stdout !== expectedVersionLine) {
++    return yield* stageError(
++      versionStep,
++      `printed ${quote(versionOutput.stdout)} instead of ${quote(expectedVersionLine)}`,
++    );
++  }
++
++  const preflightStep = "checking the candidate service identity";
++  const preflight = yield* input.candidate
++    .run({ entryPath: input.entryPath, operation: { kind: "service-preflight" } })
++    .pipe(Effect.mapError(candidateFailure(preflightStep)));
++  if (preflight.code !== 0) {
++    return yield* stageError(preflightStep, `exited with code ${preflight.code}`);
++  }
++  const lines = preflight.stdout.split("\n");
++  if (lines.length !== 2 || lines[1] !== "") {
++    return yield* stageError(preflightStep, "did not print exactly one line");
++  }
++  const parsed = parseJsonLine(lines[0] as string);
++  if (parsed === undefined) return yield* stageError(preflightStep, "output is not JSON");
++  const result = decodeServicePreflightResult(parsed);
++  if (result === undefined) {
++    return yield* stageError(preflightStep, "output is not a service preflight result");
++  }
++  if (result.status !== "ready") return yield* stageError(preflightStep, result.reason);
++  if (result.version !== input.version) {
++    return yield* stageError(preflightStep, `reported version ${result.version}`);
++  }
++  if (result.launcherProtocol !== SERVICE_LAUNCHER_PROTOCOL) {
++    return yield* stageError(
++      preflightStep,
++      `reported launcher protocol ${result.launcherProtocol}`,
++    );
++  }
++});
++
++/**
++ * The production migration validator: snapshots the live database through
++ * the existing helper, runs the candidate's migration rehearsal against that
++ * snapshot only, and accepts the result with the existing acceptance rule.
++ * The runner never sees the live path.
++ */
++export const makeSnapshotMigrationValidator = Effect.fn(
++  "cloud.managed_runtime.make_snapshot_migration_validator",
++)(function* (input: {
++  readonly liveDatabasePath: string;
++  readonly candidate: ManagedCandidateProcess;
++}) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const step = "rehearsing migrations on a database snapshot";
++  const validator: ManagedMigrationValidator = (probe) =>
++    withMigrationSnapshot({
++      liveDatabasePath: input.liveDatabasePath,
++      use: (snapshotPath) =>
++        input.candidate
++          .run({
++            entryPath: probe.entryPath,
++            operation: { kind: "migration-preflight", snapshotPath },
++          })
++          .pipe(
++            Effect.mapError(candidateFailure(step)),
++            Effect.flatMap((output) => {
++              const acceptance = acceptMigrationPreflightOutput({
++                output,
++                expectedVersion: probe.version,
++                expectedLauncherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++              });
++              return acceptance.accepted
++                ? Effect.void
++                : Effect.fail(stageError(step, acceptance.reason));
++            }),
++          ),
++    }).pipe(
++      Effect.catchTag("MigrationSnapshotError", (error) =>
++        Effect.fail(stageError("preparing the migration snapshot", error.message, error)),
++      ),
++      Effect.provideService(FileSystem.FileSystem, fs),
++      Effect.provideService(Path.Path, path),
++    );
++  return validator;
++});
++
++// --- directories ------------------------------------------------------------------------
++
++interface RuntimeLayout {
++  /** Canonical base; ordinary outer aliases such as /tmp -> /private/tmp are resolved here. */
++  readonly baseDir: string;
++  readonly versionsDir: string;
++}
++
++/**
++ * Canonicalizes the base and requires `runtime` and `runtime/versions` to be
++ * real directories directly under it; a symlink there would redirect the
++ * install and is refused. Missing parents are created privately. When
++ * creating is allowed, the directory holding each entry is synced on every
++ * resolution, not only after a mkdir: an entry left behind by an attempt
++ * whose parent sync failed would otherwise never be anchored, and a later
++ * install could publish on top of it without durable ancestry. The
++ * read-only resolution used to verify a staged runtime syncs nothing.
++ */
++async function resolveLayout(baseDir: string, create: boolean): Promise<RuntimeLayout> {
++  const step = "preparing the managed runtime directories";
++  if (!NodePath.isAbsolute(baseDir)) throw stageError(step, "base directory is not absolute");
++  const realBase = await NodeFSP.realpath(baseDir);
++  const runtimeDir = NodePath.join(realBase, "runtime");
++  const versionsDir = NodePath.join(runtimeDir, "versions");
++  for (const [parent, directory] of [
++    [realBase, runtimeDir],
++    [runtimeDir, versionsDir],
++  ] as const) {
++    let stats = await lstatOrUndefined(directory);
++    if (stats === undefined) {
++      if (!create) throw stageError(step, `${directory} does not exist`);
++      await NodeFSP.mkdir(directory, { mode: 0o700 });
++      stats = await NodeFSP.lstat(directory);
++    }
++    if (!stats.isDirectory()) throw stageError(step, `${directory} is not a real directory`);
++    if (create) await syncPath(parent);
++  }
++  return { baseDir: realBase, versionsDir };
++}
++
++/**
++ * A private transaction directory beside the version directories. Creation is
++ * one uninterruptible acquisition: a directory whose chmod fails is removed by
++ * the acquire itself, and once acquired it is removed when the scope closes,
++ * which is only after everything running inside it has settled.
++ */
++const acquireStagingDirectory = (versionsDir: string) =>
++  Effect.acquireRelease(
++    fsStep("creating the staging directory", async () => {
++      const directory = await NodeFSP.mkdtemp(NodePath.join(versionsDir, STAGING_PREFIX));
++      try {
++        await NodeFSP.chmod(directory, 0o700);
++      } catch (error) {
++        await NodeFSP.rm(directory, { recursive: true, force: true }).catch(() => {});
++        throw error;
++      }
++      return directory;
++    }),
++    (directory) =>
++      Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true }).catch(() => {})),
++  );
++
++// --- stager -----------------------------------------------------------------------------
++
++export const makeManagedRuntimeStager = Effect.fn("cloud.managed_runtime.make")(function* (
++  options: ManagedRuntimeStagerOptions,
++) {
++  const path = yield* Path.Path;
++  const archiveLimits: ManagedRuntimeArchiveLimits = {
++    ...DEFAULT_MANAGED_RUNTIME_ARCHIVE_LIMITS,
++    ...options.archiveLimits,
++  };
++  const requiredFiles = managedRuntimeRequiredFiles(options.hostTarget);
++
++  const validateVersion = (step: string, version: string) =>
++    parseManagedReleaseVersion(version) === undefined
++      ? Effect.fail(stageError(step, `${JSON.stringify(version)} is not a managed release version`))
++      : Effect.void;
++
++  /** Tree and required-file proof of a runtime rooted at `root`; reads only. */
++  const proveLayout = (root: string, version: string, topLevel: ReadonlySet<string>) =>
++    fsStep("verifying the runtime tree", (signal) => verifyTree(root, topLevel, signal)).pipe(
++      Effect.andThen(
++        fsStep("verifying the runtime layout", () =>
++          verifyRequiredFiles(root, options.hostTarget, version),
++        ),
++      ),
++    );
++
++  const takeInventory = (root: string) =>
++    fsStep("taking the runtime inventory", (signal) => inventoryTree(root, signal));
++
++  /**
++   * Candidate probes and the migration rehearsal against the private runtime
++   * at `root`, which must hold exactly `inventory` afterwards: bytes a probe
++   * changed are not the bytes that were authenticated, so any difference
++   * refuses the runtime.
++   */
++  const proveCandidate = Effect.fn("cloud.managed_runtime.prove_candidate")(function* (input: {
++    readonly root: string;
++    readonly version: string;
++    readonly inventory: TreeInventory;
++  }) {
++    const entryPath = NodePath.join(input.root, ...MANAGED_SERVER_ENTRY.split("/"));
++    yield* probeCandidate({
++      candidate: options.candidate,
++      hostTarget: options.hostTarget,
++      entryPath,
++      version: input.version,
++    });
++    yield* options.validateMigration({ entryPath, version: input.version });
++    const step = "verifying the runtime after the candidate probes";
++    const after = yield* fsStep(step, (signal) => inventoryTree(input.root, signal));
++    const difference = inventoryDifference(input.inventory, after);
++    if (difference !== undefined) {
++      return yield* stageError(step, `the candidate probes changed the runtime: ${difference}`);
++    }
++  });
++
++  /** Streams the archive into an exclusively created file, counting and hashing every byte. */
++  const download = Effect.fn("cloud.managed_runtime.download")(function* (
++    asset: VerifiedManagedServerAsset,
++    archivePath: string,
++  ) {
++    const step = "downloading the archive";
++    if (asset.bytes > archiveLimits.maxCompressedBytes) {
++      return yield* stageError(step, "the archive is larger than the compressed limit");
++    }
++    // Opened and registered for closing in one uninterruptible step, so a
++    // descriptor that arrives after interruption is still closed.
++    const handle = yield* Effect.acquireRelease(
++      fsStep(step, () =>
++        NodeFSP.open(
++          archivePath,
++          NodeFS.constants.O_WRONLY |
++            NodeFS.constants.O_CREAT |
++            NodeFS.constants.O_EXCL |
++            NodeFS.constants.O_NOFOLLOW,
++          0o600,
++        ),
++      ),
++      (handle) => Effect.promise(() => handle.close().catch(() => {})),
++    );
++    const stream = yield* options.source
++      .openArchive(asset)
++      .pipe(Effect.mapError((error) => stageError(step, error.message, error)));
++    const hash = NodeCrypto.createHash("sha256");
++    let received = 0;
++    yield* Stream.runForEach(stream, (chunk) =>
++      Effect.suspend(() => {
++        received += chunk.byteLength;
++        if (received > asset.bytes) {
++          return Effect.fail(stageError(step, "the archive is longer than the manifest declares"));
++        }
++        hash.update(chunk);
++        return fsStep(step, async () => {
++          let offset = 0;
++          while (offset < chunk.byteLength) {
++            const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset);
++            offset += bytesWritten;
++          }
++        });
++      }),
++    ).pipe(
++      Effect.mapError((error) =>
++        isStageError(error) ? error : stageError(step, error.message, error),
++      ),
++    );
++    if (received !== asset.bytes) {
++      return yield* stageError(step, "the archive is shorter than the manifest declares");
++    }
++    if (hash.digest("hex") !== asset.sha256) {
++      return yield* stageError(step, "the archive hash does not match the manifest");
++    }
++  }, Effect.scoped);
++
++  /**
++   * Fresh staging inside a private sibling of the version directory. The
++   * finalizer removes only this transaction's directory; once the payload has
++   * been renamed out, the version directory is never touched again.
++   */
++  const transact = Effect.fn("cloud.managed_runtime.transact")(function* (input: {
++    readonly layout: RuntimeLayout;
++    readonly paths: PinnedRuntimePaths;
++    readonly asset: VerifiedManagedServerAsset;
++    readonly record: ManagedArtifactRecord;
++  }) {
++    const { layout, paths, asset } = input;
++    const transactionDir = yield* acquireStagingDirectory(layout.versionsDir);
++    const archivePath = NodePath.join(transactionDir, ARCHIVE_FILE);
++    const payloadDir = NodePath.join(transactionDir, PAYLOAD_DIR);
++
++    yield* download(asset, archivePath);
++    yield* extractManagedRuntimeArchiveEffect({
++      archivePath,
++      destination: payloadDir,
++      limits: archiveLimits,
++      requiredFiles,
++    }).pipe(Effect.mapError((error) => stageError("extracting the archive", error.message, error)));
++    yield* fsStep("removing the archive", () => NodeFSP.rm(archivePath, { force: true }));
++
++    yield* proveLayout(payloadDir, asset.version, new Set(["node_modules"]));
++    // The inventory covers the extracted bytes only; the record and sentinel
++    // join the payload after the probes have left it unchanged.
++    const inventory = yield* takeInventory(payloadDir);
++    yield* proveCandidate({ root: payloadDir, version: asset.version, inventory });
++
++    yield* fsStep("syncing the payload", (signal) => syncTree(payloadDir, signal));
++    // Finite bookkeeping that must not be abandoned half-done: record, then
++    // sentinel last, then the rename that publishes and the parent sync that
++    // makes the rename durable.
++    yield* Effect.uninterruptible(
++      Effect.gen(function* () {
++        yield* fsStep("recording the managed artifact", () =>
++          writeExclusiveSynced(
++            NodePath.join(payloadDir, MANAGED_ARTIFACT_RECORD_FILE),
++            `${JSON.stringify(input.record, null, 2)}\n`,
++          ),
++        );
++        yield* fsStep("recording the completed install", () =>
++          writeExclusiveSynced(
++            NodePath.join(payloadDir, MANAGED_INSTALL_SENTINEL_FILE),
++            `${asset.version}\n`,
++          ),
++        );
++        yield* fsStep("syncing the payload directory", () => syncPath(payloadDir));
++        yield* fsStep("publishing the managed runtime", async () => {
++          if ((await lstatOrUndefined(paths.versionDir)) !== undefined) {
++            throw stageError(
++              "publishing the managed runtime",
++              "the version directory appeared during staging",
++            );
++          }
++          await NodeFSP.rename(payloadDir, paths.versionDir);
++        });
++        // Published: from here the version directory is complete and is left alone whatever happens.
++        yield* fsStep("syncing the versions directory", () => syncPath(layout.versionsDir));
++      }),
++    );
++  }, Effect.scoped);
++
++  /**
++   * Re-proves a published runtime without touching it. After the read-only
++   * layout proof, the probes run against a private byte-for-byte copy in a
++   * staging sibling that is proven equal to the published tree first and is
++   * removed only once every probe has settled.
++   */
++  const reuse = Effect.fn("cloud.managed_runtime.reuse")(function* (input: {
++    readonly layout: RuntimeLayout;
++    readonly paths: PinnedRuntimePaths;
++    readonly version: string;
++  }) {
++    const { layout, paths, version } = input;
++    yield* proveLayout(
++      paths.versionDir,
++      version,
++      new Set(["node_modules", MANAGED_ARTIFACT_RECORD_FILE, MANAGED_INSTALL_SENTINEL_FILE]),
++    );
++    const published = yield* takeInventory(paths.versionDir);
++    const transactionDir = yield* acquireStagingDirectory(layout.versionsDir);
++    const copyDir = NodePath.join(transactionDir, PAYLOAD_DIR);
++    const step = "copying the published runtime";
++    yield* fsStep(step, (signal) => copyTree(paths.versionDir, copyDir, signal));
++    const copied = yield* fsStep(step, (signal) => inventoryTree(copyDir, signal));
++    const difference = inventoryDifference(published, copied);
++    if (difference !== undefined) {
++      return yield* stageError(
++        step,
++        `the private copy differs from the published runtime: ${difference}`,
++      );
++    }
++    yield* proveCandidate({ root: copyDir, version, inventory: published });
++  }, Effect.scoped);
++
++  const stage: ManagedRuntimeStager["stage"] = (targetVersion) =>
++    stagingLock.withPermit(
++      Effect.gen(function* () {
++        yield* validateVersion("validating the requested version", targetVersion);
++        const layout = yield* fsStep("preparing the managed runtime directories", () =>
++          resolveLayout(options.baseDir, true),
++        );
++        const paths = pinnedRuntimePaths(path, layout.baseDir, targetVersion);
++
++        // Cooperating processes see this directory; an existing one means busy
++        // and is never removed or aged out here.
++        const lockPath = NodePath.join(layout.versionsDir, `${LOCK_PREFIX}${targetVersion}`);
++        yield* Effect.acquireRelease(
++          fsStep("claiming the version", async () => {
++            try {
++              await NodeFSP.mkdir(lockPath, { mode: 0o700 });
++            } catch (error) {
++              if ((error as NodeJS.ErrnoException).code === "EEXIST") {
++                throw stageError(
++                  "claiming the version",
++                  `another staging of ${targetVersion} owns ${lockPath}`,
++                );
++              }
++              throw error;
++            }
++          }),
++          () => Effect.promise(() => NodeFSP.rmdir(lockPath).catch(() => {})),
++        );
++
++        const documents = yield* options.source
++          .readDocuments(targetVersion)
++          .pipe(
++            Effect.mapError((error) =>
++              stageError("fetching release documents", error.message, error),
++            ),
++          );
++        const asset = yield* verifyManagedReleaseDocuments({
++          manifestBytes: documents.manifestBytes,
++          sumsBytes: documents.sumsBytes,
++          targetVersion,
++          hostTarget: options.hostTarget,
++        }).pipe(
++          Effect.mapError((error) =>
++            stageError("verifying release documents", error.message, error),
++          ),
++        );
++        const record = managedArtifactRecordFor(asset);
++        const staged: StagedArtifact = { version: asset.version, artifactId: record.artifactId };
++
++        const existing = yield* readPublished(paths, targetVersion);
++        if (existing.kind === "present") {
++          if (!sameRecord(existing.record, record)) {
++            return yield* stageError(
++              "inspecting the existing version directory",
++              "the version directory holds different content for this version",
++            );
++          }
++          yield* reuse({ layout, paths, version: targetVersion });
++          return staged;
++        }
++
++        yield* transact({ layout, paths, asset, record });
++        return staged;
++      }).pipe(Effect.scoped, Effect.withSpan("cloud.managed_runtime.stage")),
++    );
++
++  const verifyStaged = Effect.fn("cloud.managed_runtime.verify_staged")(function* (
++    staged: StagedArtifact,
++  ) {
++    const step = "verifying the staged runtime";
++    yield* validateVersion(step, staged.version);
++    const layout = yield* fsStep(step, () => resolveLayout(options.baseDir, false));
++    const paths = pinnedRuntimePaths(path, layout.baseDir, staged.version);
++    const existing = yield* readPublished(paths, staged.version);
++    if (existing.kind === "absent") {
++      return yield* stageError(step, `${staged.version} is not staged`);
++    }
++    const { record } = existing;
++    if (record.artifactId !== staged.artifactId) {
++      return yield* stageError(step, "the staged runtime holds a different artifact");
++    }
++    if (
++      record.releaseArtifactId !== selectManagedServerArtifactId(options.hostTarget) ||
++      record.platform !== options.hostTarget.platform ||
++      record.arch !== options.hostTarget.arch ||
++      record.artifactId !==
++        managedArtifactContentId({
++          releaseArtifactId: record.releaseArtifactId,
++          sha256: record.archiveSha256,
++        })
++    ) {
++      return yield* stageError(step, "the managed artifact record does not describe this host");
++    }
++    yield* fsStep(step, () =>
++      verifyRequiredFiles(paths.versionDir, options.hostTarget, staged.version),
++    );
++    return paths;
++  });
++
++  return { stage, verifyStaged } satisfies ManagedRuntimeStager;
++});

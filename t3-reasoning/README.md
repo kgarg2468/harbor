@@ -87,6 +87,10 @@ What this component does not do:
   probes with a private home and replacement environment. It retains owned
   files until actual child exit and pipe settlement; staging and activation
   remain separate updater work.
+- `patches/0019-managed-runtime-transaction.patch`: stages exact managed archives,
+  checks isolated candidate probes and migration snapshots, then publishes a
+  complete version atomically. Reuse proves a private copy; live download
+  sources and activation remain separate work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
