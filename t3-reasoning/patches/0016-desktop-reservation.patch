@@ -1,9 +1,9 @@
 diff --git a/apps/desktop/src/updates/desktopUpdateReservation.test.ts b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
 new file mode 100644
-index 000000000..e40740937
+index 000000000..f1e9799f5
 --- /dev/null
 +++ b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,892 @@
 +import { assert, describe, it } from "@effect/vitest";
 +import type {
 +  DesktopUpdateReservationCommand,
@@ -100,6 +100,15 @@ index 000000000..e40740937
 +    backends: FrozenDesktopBackends,
 +  ) => Effect.Effect<DesktopUpdateFreezeResult>;
 +  readonly answer?: Answer;
++  /** Runs after the fence is logged as retained; a throw models a failing lifecycle latch. */
++  readonly retain?: () => void;
++  /**
++   * Runs after the report is logged. Called eagerly, exactly like the real
++   * dependency: a returned defect models a failing disposition channel, a
++   * throw models the factory failing before it returns an effect.
++   */
++  readonly publish?: (report: DesktopUpdateDispositionReport) => Effect.Effect<void>;
++  /** Runs after the stop is logged; eager like `publish`. */
 +  readonly install?: (runs: ReadonlyArray<OwnedBackendRun>) => Effect.Effect<void, InstallFailure>;
 +}
 +
@@ -115,6 +124,7 @@ index 000000000..e40740937
 +      }),
 +      retainUntilProcessExit: () => {
 +        log.push("retain");
++        options.retain?.();
 +      },
 +    };
 +    const controller = yield* make<InstallFailure>(
@@ -130,16 +140,15 @@ index 000000000..e40740937
 +          log.push(`${command.action} ${label(run)}`);
 +          return (options.answer ?? cooperative)(entry);
 +        },
-+        publishDisposition: (report) =>
-+          Effect.sync(() => {
-+            dispositions.push(report);
-+            log.push(`publish ${report.disposition}`);
-+          }),
-+        stopAndInstall: (runs) =>
-+          Effect.suspend(() => {
-+            log.push(`install ${runs.map(label).join(",")}`);
-+            return options.install === undefined ? Effect.void : options.install(runs);
-+          }),
++        publishDisposition: (report) => {
++          dispositions.push(report);
++          log.push(`publish ${report.disposition}`);
++          return options.publish === undefined ? Effect.void : options.publish(report);
++        },
++        stopAndInstall: (runs) => {
++          log.push(`install ${runs.map(label).join(",")}`);
++          return options.install === undefined ? Effect.void : options.install(runs);
++        },
 +      },
 +      { attemptIdPrefix: "test" },
 +    );
@@ -683,6 +692,199 @@ index 000000000..e40740937
 +      }),
 +  );
 +
++  it.effect(
++    "a defect while reporting acceptance installs nothing and binds the request to an uncertain result",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          publish: (report) =>
++            report.disposition === "accepted"
++              ? Effect.die(new Error("disposition channel crashed"))
++              : Effect.void,
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        // The owner sees the defect, but the decision already happened: the
++        // gates are committed, the fence is retained and no stop was issued.
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++          "publish accepted",
++        ]);
++
++        // A duplicate request replays the retained disposition instead of
++        // freezing, exchanging or stopping again under a latched fence.
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, [primary, secondary]);
++        assert.deepEqual(replay.unconfirmed, []);
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.deepEqual(
++          fake.dispositions.map((report) => report.disposition),
++          ["accepted"],
++        );
++      }),
++  );
++
++  it.effect(
++    "a retain that throws at the commit boundary reopens nothing and keeps the request bound",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          retain: () => {
++            throw new Error("lifecycle latch failed");
++          },
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, ["reserve primary#3", "retain"]);
++
++        // The fence state is unknown, so the reserved run is neither aborted
++        // nor committed and the same request does not start a fresh attempt.
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, []);
++        assert.deepEqual(replay.unconfirmed, [primary]);
++        assert.deepEqual(fake.log, ["reserve primary#3", "retain"]);
++        assert.deepEqual(fake.dispositions, []);
++      }),
++  );
++
++  // The three post-commit dependencies are factories that may throw before
++  // they return an effect. Such a throw escapes the step it was meant to
++  // build, so the record must be settled by the region, not by the step.
++  it.effect(
++    "a commit exchange factory that throws keeps earlier commits and binds the request as uncertain",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: except({ run: secondary, action: "commit" }, () => {
++            throw new Error("control pipe encoder crashed");
++          }),
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++        ]);
++
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, [primary]);
++        assert.deepEqual(replay.unconfirmed, [secondary]);
++        // No second commit, no abort, no release, no stop, no report.
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++        assert.deepEqual(fake.dispositions, []);
++      }),
++  );
++
++  it.effect(
++    "an acceptance report factory that throws installs nothing and binds the request as uncertain",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          publish: (report) => {
++            if (report.disposition === "accepted") throw new Error("disposition encoder crashed");
++            return Effect.void;
++          },
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++          "publish accepted",
++        ]);
++
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, [primary, secondary]);
++        assert.deepEqual(replay.unconfirmed, []);
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.equal(fake.log.filter((entry) => entry === "publish accepted").length, 1);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++      }),
++  );
++
++  it.effect(
++    "a stop/install factory that throws after acceptance was reported keeps the accepted disposition",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          install: () => {
++            throw new Error("installer handle missing");
++          },
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "retain",
++          "commit primary#3",
++          "publish accepted",
++          "install primary#3",
++        ]);
++
++        // Acceptance was already published; a later observer defect cannot
++        // revoke it, and the duplicate neither reserves nor installs again.
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "accepted");
++        if (replay._tag !== "accepted") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.runs, [primary]);
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry.startsWith("install")).length, 1);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.isFalse(fake.log.includes("release"));
++        assert.deepEqual(
++          fake.dispositions.map((report) => report.disposition),
++          ["accepted"],
++        );
++      }),
++  );
++
 +  it.effect("accepts an empty owned set without any exchange", () =>
 +    Effect.gen(function* () {
 +      const fake = yield* makeFake({ runs: [] });
@@ -696,10 +898,10 @@ index 000000000..e40740937
 +});
 diff --git a/apps/desktop/src/updates/desktopUpdateReservation.ts b/apps/desktop/src/updates/desktopUpdateReservation.ts
 new file mode 100644
-index 000000000..d295ff5d1
+index 000000000..ee627d01a
 --- /dev/null
 +++ b/apps/desktop/src/updates/desktopUpdateReservation.ts
-@@ -0,0 +1,448 @@
+@@ -0,0 +1,468 @@
 +import type {
 +  DesktopUpdateCommitDisposition,
 +  DesktopUpdateReservationCommand,
@@ -818,6 +1020,11 @@ index 000000000..d295ff5d1
 +      /** Aborts that were sent but not acknowledged; those gates may still be held. */
 +      readonly unconfirmedAborts: ReadonlyArray<OwnedBackendRun>;
 +    }
++  /**
++   * Committed, but never accepted: a commit acknowledgement is missing, or
++   * every run acknowledged and the acceptance report failed. Nothing was
++   * stopped; the fence and every gate stay retained until process exit.
++   */
 +  | {
 +      readonly _tag: "uncertain";
 +      readonly attemptId: string;
@@ -1004,52 +1211,67 @@ index 000000000..d295ff5d1
 +          // acknowledgement are masked; the waits themselves are
 +          // interruptible, because an owner that stops observing must still
 +          // exit finitely. A commit interrupted or never sent leaves its run
-+          // reserved and unconfirmed, never aborted.
-+          backends.retainUntilProcessExit();
++          // reserved and unconfirmed, never aborted. A retain that throws
++          // leaves the fence in an unknown state, so nothing is released or
++          // aborted and every reserved run stays unconfirmed.
++          //
++          // `retained` is the disposition the decision has reached so far.
++          // Every exit of the region below other than a recorded result,
++          // whether a failing dependency effect, an interruption or a
++          // dependency factory throwing before it even returned its effect,
++          // settles the record to it under this attempt id. An unsettled
++          // record would let the request start a fresh attempt against
++          // gates and a fence that are already latched.
 +          const committed: Array<OwnedBackendRun> = [];
-+          const unconfirmed: Array<OwnedBackendRun> = [];
-+          let stopped: Cause.Cause<never> | undefined;
-+          for (const run of backends.runs) {
-+            if (stopped !== undefined) {
-+              unconfirmed.push(run);
-+              continue;
++          let accepted = false;
++          const retained = (): Result =>
++            accepted
++              ? { _tag: "accepted", attemptId, runs: backends.runs }
++              : {
++                  _tag: "uncertain",
++                  attemptId,
++                  committed: [...committed],
++                  unconfirmed: backends.runs.filter(
++                    (run) => !committed.some((done) => sameRun(done, run)),
++                  ),
++                };
++          return yield* Effect.gen(function* () {
++            yield* Effect.sync(() => backends.retainUntilProcessExit());
++            for (const run of backends.runs) {
++              const exchange = yield* restore(deps.exchange(run, command("commit")));
++              if (answered(run, exchange, "committed")) committed.push(run);
 +            }
-+            const exchangeExit = yield* restore(deps.exchange(run, command("commit"))).pipe(
++            if (committed.length !== backends.runs.length) return yield* finish(retained());
++
++            // Acceptance is recorded before the first stop and is never
++            // inferred from the stop or install having happened. An owner
++            // interrupted while the stop or install is pending keeps the
++            // accepted disposition and every retained gate; the process
++            // owner, not this observer, is responsible for the lifetime of
++            // the child. A report that fails leaves every gate committed but
++            // nothing accepted: the attempt stays uncertain and no stop is
++            // issued.
++            yield* publish("accepted");
++            accepted = true;
++            const installExit = yield* restore(deps.stopAndInstall(backends.runs)).pipe(
 +              Effect.exit,
 +            );
-+            if (Exit.isFailure(exchangeExit)) {
-+              stopped = exchangeExit.cause;
-+              unconfirmed.push(run);
-+              continue;
++            if (Exit.isSuccess(installExit)) return yield* finish(retained());
++            const failure = Cause.findError(installExit.cause);
++            if (Result.isSuccess(failure)) {
++              return yield* finish({
++                _tag: "install-failed",
++                attemptId,
++                runs: backends.runs,
++                error: failure.success,
++              });
 +            }
-+            (answered(run, exchangeExit.value, "committed") ? committed : unconfirmed).push(run);
-+          }
-+          if (unconfirmed.length > 0) {
-+            const result = yield* finish({ _tag: "uncertain", attemptId, committed, unconfirmed });
-+            return stopped === undefined ? result : yield* Effect.failCause(stopped);
-+          }
-+
-+          // Acceptance is recorded before the first stop and is never
-+          // inferred from the stop or install having happened. An owner
-+          // interrupted while the stop or install is pending keeps the
-+          // accepted disposition and every retained gate; the process owner,
-+          // not this observer, is responsible for the lifetime of the child.
-+          yield* publish("accepted");
-+          const installExit = yield* restore(deps.stopAndInstall(backends.runs)).pipe(Effect.exit);
-+          if (Exit.isSuccess(installExit)) {
-+            return yield* finish({ _tag: "accepted", attemptId, runs: backends.runs });
-+          }
-+          const failure = Cause.findError(installExit.cause);
-+          if (Result.isSuccess(failure)) {
-+            return yield* finish({
-+              _tag: "install-failed",
-+              attemptId,
-+              runs: backends.runs,
-+              error: failure.success,
-+            });
-+          }
-+          yield* finish({ _tag: "accepted", attemptId, runs: backends.runs });
-+          return yield* Effect.failCause(failure.failure);
++            return yield* Effect.failCause(failure.failure);
++          }).pipe(
++            Effect.onExit((exit) =>
++              Exit.isFailure(exit) ? Deferred.succeed(record, retained()) : Effect.void,
++            ),
++          );
 +        }),
 +      );
 +
@@ -1150,10 +1372,10 @@ index 000000000..d295ff5d1
 +  });
 diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
 new file mode 100644
-index 000000000..d062ab629
+index 000000000..26f2112fe
 --- /dev/null
 +++ b/packages/contracts/src/resourceTelemetry.test.ts
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,216 @@
 +import * as Schema from "effect/Schema";
 +import { describe, expect, it } from "vite-plus/test";
 +
@@ -1244,6 +1466,45 @@ index 000000000..d062ab629
 +      }),
 +    ).toThrow();
 +  });
++
++  it("accepts a rejected disposition alongside its attempt id", () => {
++    const report = decode({
++      version: 1,
++      type: "desktopUpdateStatus",
++      attemptId: "attempt-1",
++      commitDisposition: "rejected",
++      state: updateState,
++    });
++
++    expect(report.commitDisposition).toBe("rejected");
++    expect(encode(report)).toMatchObject({
++      attemptId: "attempt-1",
++      commitDisposition: "rejected",
++    });
++  });
++
++  it("rejects an attempt id without its disposition, and vice versa", () => {
++    const attemptOnly = {
++      version: 1,
++      type: "desktopUpdateStatus",
++      attemptId: "attempt-1",
++      state: updateState,
++    };
++    const dispositionOnly = {
++      version: 1,
++      type: "desktopUpdateStatus",
++      commitDisposition: "accepted",
++      state: updateState,
++    };
++
++    for (const partial of [attemptOnly, dispositionOnly]) {
++      expect(() => decode(partial)).toThrow(/supplied together/);
++      expect(() => decodeHostMessage(partial)).toThrow();
++      // The invariant is enforced on the way out too, so a locally built
++      // report cannot publish half of the pair.
++      expect(() => encode(partial as DesktopUpdateStatusReport)).toThrow(/supplied together/);
++    }
++  });
 +});
 +
 +describe("DesktopUpdateReservationCommand", () => {
@@ -1332,7 +1593,7 @@ index 000000000..d062ab629
 +  });
 +});
 diff --git a/packages/contracts/src/resourceTelemetry.ts b/packages/contracts/src/resourceTelemetry.ts
-index 3ec1e4de3..a885c2ef9 100644
+index 3ec1e4de3..9012303dc 100644
 --- a/packages/contracts/src/resourceTelemetry.ts
 +++ b/packages/contracts/src/resourceTelemetry.ts
 @@ -253,6 +253,17 @@ export const DesktopUpdateRemoteOutcome = Schema.Literals([
@@ -1353,7 +1614,7 @@ index 3ec1e4de3..a885c2ef9 100644
  /**
   * Desktop main -> server: the desktop app's update state. Sent once when the
   * backend attaches and again on every state change, so the server always
-@@ -268,10 +279,58 @@ export const DesktopUpdateStatusReport = Schema.Struct({
+@@ -268,10 +279,64 @@ export const DesktopUpdateStatusReport = Schema.Struct({
    // Terminal marker for a server-triggered run; absent while it is working.
    outcome: Schema.optionalKey(DesktopUpdateRemoteOutcome),
    reason: Schema.optionalKey(TrimmedNonEmptyString),
@@ -1363,7 +1624,14 @@ index 3ec1e4de3..a885c2ef9 100644
 +  attemptId: Schema.optionalKey(TrimmedNonEmptyString),
 +  commitDisposition: Schema.optionalKey(DesktopUpdateCommitDisposition),
    state: DesktopUpdateStateSchema,
- });
+-});
++}).check(
++  Schema.makeFilter(
++    (input) =>
++      (input.attemptId === undefined) === (input.commitDisposition === undefined) ||
++      "attemptId and commitDisposition must be supplied together",
++  ),
++);
  export type DesktopUpdateStatusReport = typeof DesktopUpdateStatusReport.Type;
  
 +export const DesktopUpdateReservationAction = Schema.Literals(["reserve", "abort", "commit"]);

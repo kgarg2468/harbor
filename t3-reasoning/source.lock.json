@@ -46,7 +46,7 @@
     {
       "id": "desktop-reservation",
       "path": "patches/0016-desktop-reservation.patch",
-      "sha256": "904ec05842726d8de79741a7bf180858120e5477d3aec7aa75c108fa96d27658"
+      "sha256": "d3e8d52a8997e393cd63b37cbb433a0e4593ad0b86529ae9923fccb8688b7c48"
     },
     {
       "id": "candidate-process",
