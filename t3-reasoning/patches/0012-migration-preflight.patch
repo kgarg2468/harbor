@@ -19,7 +19,7 @@ index 0a2e40915..43ce870b2 100644
        triageCommand,
        cloudEnabled ? connectCommand : connectUnavailableCommand,
 diff --git a/apps/server/src/cli/invocation.test.ts b/apps/server/src/cli/invocation.test.ts
-index c01a2caa4..c0bf7e1f9 100644
+index 370a8977f..7b5591cc5 100644
 --- a/apps/server/src/cli/invocation.test.ts
 +++ b/apps/server/src/cli/invocation.test.ts
 @@ -1,5 +1,26 @@
@@ -46,10 +46,10 @@ index c01a2caa4..c0bf7e1f9 100644
 +} from "../cloud/migrationPreflight.ts";
 +import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 +import { migrationManifest } from "../persistence/Migrations.ts";
- import { detectCliRunner, formatCliCommand, suggestedPackageSpec } from "./invocation.ts";
+ import { formatCliCommand } from "./invocation.ts";
  
- it("detects package runners from their cache entry paths", () => {
-@@ -72,3 +93,135 @@ it("formats serve suggestions to match the launching command", () => {
+ it("formats package runner commands from their cache entry paths", () => {
+@@ -85,3 +106,135 @@ it("formats serve suggestions to match the launching command", () => {
      "t3 serve",
    );
  });
@@ -803,7 +803,7 @@ index 000000000..a4e2bdbd0
 +}
 diff --git a/apps/server/src/cloud/migrationPreflight.test.ts b/apps/server/src/cloud/migrationPreflight.test.ts
 new file mode 100644
-index 00000000..690aa844
+index 000000000..690aa8449
 --- /dev/null
 +++ b/apps/server/src/cloud/migrationPreflight.test.ts
 @@ -0,0 +1,491 @@
@@ -1300,7 +1300,7 @@ index 00000000..690aa844
 +});
 diff --git a/apps/server/src/cloud/migrationPreflight.ts b/apps/server/src/cloud/migrationPreflight.ts
 new file mode 100644
-index 00000000..674e3fd5
+index 000000000..674e3fd53
 --- /dev/null
 +++ b/apps/server/src/cloud/migrationPreflight.ts
 @@ -0,0 +1,219 @@

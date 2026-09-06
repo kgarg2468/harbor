@@ -1,9 +1,9 @@
 diff --git a/apps/mobile/src/lib/threadActivity.test.ts b/apps/mobile/src/lib/threadActivity.test.ts
-index df3dd3197d0d09b3edca0f6c51a61f7443f832a1..1889e374d064c15b4b5f307a9a4f079ae92159d9 100644
+index 8e31719b4..07073dc61 100644
 --- a/apps/mobile/src/lib/threadActivity.test.ts
 +++ b/apps/mobile/src/lib/threadActivity.test.ts
-@@ -2652,4 +2652,26 @@ describe("quiet timeline: nested agents", () => {
-       { type: "activity-group", id: "nested-done" },
+@@ -3272,4 +3272,26 @@ describe("quiet timeline: nested agents", () => {
+       },
      ]);
    });
 +
@@ -30,17 +30,19 @@ index df3dd3197d0d09b3edca0f6c51a61f7443f832a1..1889e374d064c15b4b5f307a9a4f079a
 +  });
  });
 diff --git a/apps/mobile/src/lib/threadActivity.ts b/apps/mobile/src/lib/threadActivity.ts
-index ef75fce56af49044f1d2e82bc8d9e958c41d988b..35306cb6008b80fe688aa2049078ddea4cc8d274 100644
+index 42e0db669..4a2cc3d6f 100644
 --- a/apps/mobile/src/lib/threadActivity.ts
 +++ b/apps/mobile/src/lib/threadActivity.ts
-@@ -1,5 +1,6 @@
- import {
-   ApprovalRequestId,
-+  isReasoningMessage,
-   isToolLifecycleItemType,
-   ProviderApprovalOption,
-   ProviderRequestKind,
-@@ -2002,12 +2003,13 @@ export function buildThreadFeed(
+@@ -2,7 +2,7 @@ import {
+   requestKindFromRequestType,
+   type PendingApproval,
+ } from "@t3tools/client-runtime/pending-requests";
+-import { isToolLifecycleItemType } from "@t3tools/contracts";
++import { isReasoningMessage, isToolLifecycleItemType } from "@t3tools/contracts";
+ import type {
+   OrchestrationLatestTurn,
+   OrchestrationThread,
+@@ -2157,12 +2157,13 @@ export function buildThreadFeed(
      readonly localMessages?: ReadonlyArray<OrchestrationThread["messages"][number]>;
    },
  ): ThreadFeedEntry[] {
@@ -57,10 +59,10 @@ index ef75fce56af49044f1d2e82bc8d9e958c41d988b..35306cb6008b80fe688aa2049078ddea
    const entries = Arr.sortWith(
      [
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
-index 2f2c4b30525b6a4bbe58f9dd08468fa3e7d33248..dcb319af2844f545ecf4322b7697fc7eecddaaef 100644
+index 9e1416007..93329d150 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
-@@ -528,6 +528,26 @@ describe("CheckpointReactor", () => {
+@@ -534,6 +534,26 @@ describe("CheckpointReactor", () => {
          checkpointTurnCount: 0,
        });
  
@@ -87,7 +89,7 @@ index 2f2c4b30525b6a4bbe58f9dd08468fa3e7d33248..dcb319af2844f545ecf4322b7697fc7e
        NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
        const largeFileLineCount = 25_000;
        NodeFS.writeFileSync(
-@@ -556,6 +576,7 @@ describe("CheckpointReactor", () => {
+@@ -562,6 +582,7 @@ describe("CheckpointReactor", () => {
        );
        expect(thread?.checkpoints[0]).toMatchObject({
          checkpointTurnCount: 1,
@@ -96,7 +98,7 @@ index 2f2c4b30525b6a4bbe58f9dd08468fa3e7d33248..dcb319af2844f545ecf4322b7697fc7e
            { path: "large.txt", kind: "modified", additions: largeFileLineCount, deletions: 0 },
            { path: "README.md", kind: "modified", additions: 1, deletions: 1 },
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index 108abd5d06bbee3f9006500fcca8a2580850eb5a..1ba50d5e0da381c38f8903e0ba387b4b20cf991f 100644
+index eb7734818..df19830f6 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -3,10 +3,12 @@ import {
@@ -112,7 +114,7 @@ index 108abd5d06bbee3f9006500fcca8a2580850eb5a..1ba50d5e0da381c38f8903e0ba387b4b
    type ProviderRuntimeEvent,
    type VcsStatusLocalResult,
  } from "@t3tools/contracts";
-@@ -226,6 +228,7 @@ const make = Effect.gen(function* () {
+@@ -224,6 +226,7 @@ const make = Effect.gen(function* () {
        readonly messages: ReadonlyArray<{
          readonly id: MessageId;
          readonly role: string;
@@ -120,7 +122,7 @@ index 108abd5d06bbee3f9006500fcca8a2580850eb5a..1ba50d5e0da381c38f8903e0ba387b4b
          readonly turnId: TurnId | null;
        }>;
      };
-@@ -300,7 +303,12 @@ const make = Effect.gen(function* () {
+@@ -303,7 +306,12 @@ const make = Effect.gen(function* () {
        input.assistantMessageId ??
        input.thread.messages
          .toReversed()
@@ -135,10 +137,10 @@ index 108abd5d06bbee3f9006500fcca8a2580850eb5a..1ba50d5e0da381c38f8903e0ba387b4b
  
      yield* orchestrationEngine.dispatch({
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd51716cac6178 100644
+index 1a989958f..e88e47ab3 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-@@ -177,8 +177,9 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -365,8 +365,9 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
            threadId: ThreadId.make("thread-1"),
            messageId: MessageId.make("message-1"),
            role: "assistant",
@@ -149,7 +151,7 @@ index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd5171
            streaming: false,
            createdAt: now,
            updatedAt: now,
-@@ -205,13 +206,21 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -393,13 +394,21 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
        const messageRows = yield* sql<{
          readonly messageId: string;
          readonly text: string;
@@ -173,7 +175,7 @@ index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd5171
  
        const stateRows = yield* sql<{
          readonly projector: string;
-@@ -3171,7 +3180,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -3412,7 +3421,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
      }),
    );
  
@@ -182,7 +184,7 @@ index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd5171
      Effect.gen(function* () {
        const projectionPipeline = yield* OrchestrationProjectionPipeline;
        const eventStore = yield* OrchestrationEventStore;
-@@ -3330,6 +3339,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -3571,6 +3580,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
            threadId: ThreadId.make("thread-revert"),
            messageId: MessageId.make("assistant-remove"),
            role: "assistant",
@@ -190,7 +192,7 @@ index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd5171
            text: "removed",
            turnId: TurnId.make("turn-2"),
            streaming: false,
-@@ -3378,6 +3388,485 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -3619,6 +3629,861 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
    );
  });
  
@@ -673,34 +675,406 @@ index 0249844864fbb2a35770f667cc43338eedd595ea..8140caa5b75d0a2e7379907cb5cd5171
 +  },
 +);
 +
++it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-revert-imported-")))(
++  "OrchestrationProjectionPipeline revert imported and reasoning retention",
++  (it) => {
++    // Builds a projected thread and returns typed helpers that append and
++    // project message/checkpoint/revert events with unique ids.
++    const makeRevertFixture = (prefix: string, threadId: ThreadId, createdAt: string) =>
++      Effect.gen(function* () {
++        const projectionPipeline = yield* OrchestrationProjectionPipeline;
++        const eventStore = yield* OrchestrationEventStore;
++        const sql = yield* SqlClient.SqlClient;
++        const projectId = ProjectId.make(`project-${prefix}`);
++        let sequence = 0;
++        const nextIds = () => {
++          sequence += 1;
++          return {
++            eventId: EventId.make(`evt-${prefix}-${sequence}`),
++            commandId: CommandId.make(`cmd-${prefix}-${sequence}`),
++            causationEventId: null,
++            correlationId: CorrelationId.make(`cmd-${prefix}-${sequence}`),
++            metadata: {},
++          } as const;
++        };
++        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
++          eventStore
++            .append(event)
++            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
++
++        yield* appendAndProject({
++          type: "project.created",
++          ...nextIds(),
++          aggregateKind: "project",
++          aggregateId: projectId,
++          occurredAt: createdAt,
++          payload: {
++            projectId,
++            title: `Project ${prefix}`,
++            workspaceRoot: `/tmp/project-${prefix}`,
++            defaultModelSelection: null,
++            scripts: [],
++            createdAt,
++            updatedAt: createdAt,
++          },
++        });
++        yield* appendAndProject({
++          type: "thread.created",
++          ...nextIds(),
++          aggregateKind: "thread",
++          aggregateId: threadId,
++          occurredAt: createdAt,
++          payload: {
++            threadId,
++            projectId,
++            title: `Thread ${prefix}`,
++            modelSelection: {
++              instanceId: ProviderInstanceId.make("codex"),
++              model: "gpt-5-codex",
++            },
++            runtimeMode: "full-access",
++            branch: null,
++            worktreePath: null,
++            createdAt,
++            updatedAt: createdAt,
++          },
++        });
++
++        const sendMessage = (message: {
++          readonly messageId: string;
++          readonly role: "user" | "assistant" | "system";
++          readonly channel?: "reasoning";
++          readonly text: string;
++          readonly turnId: string | null;
++          readonly createdAt: string;
++        }) =>
++          appendAndProject({
++            type: "thread.message-sent",
++            ...nextIds(),
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: message.createdAt,
++            payload: {
++              threadId,
++              messageId: MessageId.make(message.messageId),
++              role: message.role,
++              ...(message.channel === undefined ? {} : { channel: message.channel }),
++              text: message.text,
++              turnId: message.turnId === null ? null : TurnId.make(message.turnId),
++              streaming: false,
++              createdAt: message.createdAt,
++              updatedAt: message.createdAt,
++            },
++          });
++        const completeTurn = (turn: {
++          readonly turnId: string;
++          readonly checkpointTurnCount: number;
++          readonly assistantMessageId: string | null;
++          readonly completedAt: string;
++        }) =>
++          appendAndProject({
++            type: "thread.turn-diff-completed",
++            ...nextIds(),
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: turn.completedAt,
++            payload: {
++              threadId,
++              turnId: TurnId.make(turn.turnId),
++              checkpointTurnCount: turn.checkpointTurnCount,
++              checkpointRef: CheckpointRef.make(
++                `refs/t3/checkpoints/${threadId}/turn/${turn.checkpointTurnCount}`,
++              ),
++              status: "ready",
++              files: [],
++              assistantMessageId:
++                turn.assistantMessageId === null ? null : MessageId.make(turn.assistantMessageId),
++              completedAt: turn.completedAt,
++            },
++          });
++        const revert = (turnCount: number, occurredAt: string) =>
++          appendAndProject({
++            type: "thread.reverted",
++            ...nextIds(),
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt,
++            payload: { threadId, turnCount },
++          });
++        const listMessageIds = () =>
++          sql<{ readonly messageId: string }>`
++            SELECT message_id AS "messageId"
++            FROM projection_thread_messages
++            WHERE thread_id = ${threadId}
++            ORDER BY message_id ASC
++          `.pipe(Effect.map((rows) => rows.map((row) => row.messageId)));
++
++        return { sendMessage, completeTurn, revert, listMessageIds };
++      });
++
++    // Combined regression: the retained assistant count must skip imported
++    // rows AND reasoning rows. Either exclusion alone lets the turnless
++    // substantive answer for the kept turn be dropped on revert.
++    it.effect(
++      "imported history and retained reasoning never consume the live assistant quota on revert",
++      () =>
++        Effect.gen(function* () {
++          const fixture = yield* makeRevertFixture(
++            "import-reason",
++            ThreadId.make("thread-import-reason"),
++            "2026-02-28T12:00:00.000Z",
++          );
++
++          yield* fixture.sendMessage({
++            messageId: "import:codex:session-1:000000",
++            role: "user",
++            text: "imported prompt",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:00.100Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "import:codex:session-1:000001",
++            role: "assistant",
++            text: "imported answer",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:00.200Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "user-live-1",
++            role: "user",
++            text: "kept prompt",
++            turnId: "turn-live-1",
++            createdAt: "2026-02-28T12:00:01.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "reasoning-live-1",
++            role: "assistant",
++            channel: "reasoning",
++            text: "thinking about the kept prompt",
++            turnId: "turn-live-1",
++            createdAt: "2026-02-28T12:00:01.100Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "assistant-live-1",
++            role: "assistant",
++            text: "substantive kept answer",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:01.200Z",
++          });
++          yield* fixture.completeTurn({
++            turnId: "turn-live-1",
++            checkpointTurnCount: 1,
++            assistantMessageId: null,
++            completedAt: "2026-02-28T12:00:01.500Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "user-live-2",
++            role: "user",
++            text: "discarded prompt",
++            turnId: "turn-live-2",
++            createdAt: "2026-02-28T12:00:02.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "reasoning-discarded",
++            role: "assistant",
++            channel: "reasoning",
++            text: "thinking about discarded work",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:02.100Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "assistant-live-2",
++            role: "assistant",
++            text: "discarded answer",
++            turnId: "turn-live-2",
++            createdAt: "2026-02-28T12:00:02.200Z",
++          });
++          yield* fixture.completeTurn({
++            turnId: "turn-live-2",
++            checkpointTurnCount: 2,
++            assistantMessageId: "assistant-live-2",
++            completedAt: "2026-02-28T12:00:02.500Z",
++          });
++
++          yield* fixture.revert(1, "2026-02-28T12:00:03.000Z");
++
++          assert.deepEqual(yield* fixture.listMessageIds(), [
++            "assistant-live-1",
++            "import:codex:session-1:000000",
++            "import:codex:session-1:000001",
++            "reasoning-live-1",
++            "user-live-1",
++          ]);
++        }),
++    );
++
++    // Imported/system retention takes precedence over the reasoning
++    // exclusion: an imported reasoning row survives a checkpoint-zero revert
++    // while every unbound live prompt, reasoning segment, and answer is removed.
++    it.effect(
++      "checkpoint-zero revert keeps imported and system history including imported reasoning",
++      () =>
++        Effect.gen(function* () {
++          const fixture = yield* makeRevertFixture(
++            "import-zero",
++            ThreadId.make("thread-import-zero"),
++            "2026-02-28T13:00:00.000Z",
++          );
++
++          yield* fixture.sendMessage({
++            messageId: "import:codex:session-2:000000",
++            role: "user",
++            text: "imported prompt",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:00.100Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "import:codex:session-2:000001",
++            role: "assistant",
++            channel: "reasoning",
++            text: "imported reasoning",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:00.200Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "import:codex:session-2:000002",
++            role: "assistant",
++            text: "imported answer",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:00.300Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "system-note",
++            role: "system",
++            text: "system note",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:00.400Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "user-live",
++            role: "user",
++            text: "new work",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:01.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "reasoning-live",
++            role: "assistant",
++            channel: "reasoning",
++            text: "thinking about new work",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:01.100Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "assistant-live",
++            role: "assistant",
++            text: "new answer",
++            turnId: null,
++            createdAt: "2026-02-28T13:00:01.200Z",
++          });
++
++          yield* fixture.revert(0, "2026-02-28T13:00:02.000Z");
++
++          assert.deepEqual(yield* fixture.listMessageIds(), [
++            "import:codex:session-2:000000",
++            "import:codex:session-2:000001",
++            "import:codex:session-2:000002",
++            "system-note",
++          ]);
++        }),
++    );
++
++    // The fallback answer is chosen by absolute time, not lexical timestamp
++    // order, and earlier imported/reasoning rows never take that slot.
++    it.effect(
++      "fallback assistant selection uses absolute time and skips imported and reasoning decoys",
++      () =>
++        Effect.gen(function* () {
++          const fixture = yield* makeRevertFixture(
++            "import-offset",
++            ThreadId.make("thread-import-offset"),
++            "2026-04-01T06:00:00.000Z",
++          );
++
++          yield* fixture.sendMessage({
++            messageId: "import:codex:session-3:000001",
++            role: "assistant",
++            text: "imported answer",
++            turnId: null,
++            createdAt: "2026-04-01T07:00:00.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "user-kept",
++            role: "user",
++            text: "kept prompt",
++            turnId: "turn-kept",
++            createdAt: "2026-04-01T08:00:00.000Z",
++          });
++          yield* fixture.completeTurn({
++            turnId: "turn-kept",
++            checkpointTurnCount: 1,
++            assistantMessageId: null,
++            completedAt: "2026-04-01T08:05:00.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "reasoning-early",
++            role: "assistant",
++            channel: "reasoning",
++            text: "earliest turnless reasoning",
++            turnId: null,
++            createdAt: "2026-04-01T08:10:00.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "answer-later-in-utc",
++            role: "assistant",
++            text: "lexically first, later in absolute time",
++            turnId: null,
++            createdAt: "2026-04-01T09:00:00.000Z",
++          });
++          yield* fixture.sendMessage({
++            messageId: "answer-earlier-by-offset",
++            role: "assistant",
++            text: "lexically last, earlier in absolute time",
++            turnId: null,
++            createdAt: "2026-04-01T10:30:00.000+02:00",
++          });
++
++          yield* fixture.revert(1, "2026-04-01T11:00:00.000Z");
++
++          assert.deepEqual(yield* fixture.listMessageIds(), [
++            "answer-earlier-by-offset",
++            "import:codex:session-3:000001",
++            "user-kept",
++          ]);
++        }),
++    );
++  },
++);
++
  it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(
    "OrchestrationProjectionPipeline pending turn cleanup",
    (it) => {
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
-index 77dfb5e3b88dafad77176aca8c628938da417e93..447e60c8b321f9c3450aa6486419745a326b2a53 100644
+index 050ad1a90..aff406ef6 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
-@@ -3,6 +3,7 @@ import {
+@@ -4,6 +4,7 @@ import {
    type ChatAttachment,
    type OrchestrationEvent,
    type OrchestrationSessionStatus,
 +  isReasoningMessage,
    ThreadId,
  } from "@t3tools/contracts";
- import * as Effect from "effect/Effect";
-@@ -281,7 +282,10 @@ function retainProjectionMessagesAfterRevert(
-   }
- 
-   const retainedAssistantCount = messages.filter(
--    (message) => message.role === "assistant" && retainedMessageIds.has(message.messageId),
-+    (message) =>
-+      message.role === "assistant" &&
+ import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
+@@ -262,6 +263,7 @@ function retainProjectionMessagesAfterRevert(
+     (message) =>
+       message.role === "assistant" &&
+       !isImportedAgentSessionMessageId(message.messageId) &&
 +      message.channel !== "reasoning" &&
-+      retainedMessageIds.has(message.messageId),
+       retainedMessageIds.has(message.messageId),
    ).length;
    const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-   if (missingAssistantCount > 0) {
-@@ -289,6 +293,7 @@ function retainProjectionMessagesAfterRevert(
+@@ -270,6 +272,7 @@ function retainProjectionMessagesAfterRevert(
        .filter(
          (message) =>
            message.role === "assistant" &&
@@ -708,7 +1082,7 @@ index 77dfb5e3b88dafad77176aca8c628938da417e93..447e60c8b321f9c3450aa6486419745a
            !retainedMessageIds.has(message.messageId) &&
            (message.turnId === null || retainedTurnIds.has(message.turnId)),
        )
-@@ -1032,6 +1037,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+@@ -1022,6 +1025,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                threadId: event.payload.threadId,
                turnId: event.payload.turnId,
                role: event.payload.role,
@@ -716,7 +1090,7 @@ index 77dfb5e3b88dafad77176aca8c628938da417e93..447e60c8b321f9c3450aa6486419745a
                text: event.payload.text,
                ...(attachments !== undefined ? { attachments: [...attachments] } : {}),
                createdAt: event.payload.createdAt,
-@@ -1060,6 +1066,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+@@ -1050,6 +1054,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
              threadId: event.payload.threadId,
              turnId: event.payload.turnId,
              role: event.payload.role,
@@ -724,7 +1098,7 @@ index 77dfb5e3b88dafad77176aca8c628938da417e93..447e60c8b321f9c3450aa6486419745a
              text: nextText,
              ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
              isStreaming: false,
-@@ -1453,7 +1460,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+@@ -1443,7 +1448,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
          }
  
          case "thread.message-sent": {
@@ -738,10 +1112,10 @@ index 77dfb5e3b88dafad77176aca8c628938da417e93..447e60c8b321f9c3450aa6486419745a
            }
            // A completed assistant message only settles the turn once the
 diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
-index 6330c38ca0c337fa7c6da68158fb472b09e64feb..c43c43698bdc9729a09880bd4ac11902908585bd 100644
+index e262bce34..d15c2ec79 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
-@@ -125,21 +125,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+@@ -146,21 +146,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
            thread_id,
            turn_id,
            role,
@@ -787,7 +1161,7 @@ index 6330c38ca0c337fa7c6da68158fb472b09e64feb..c43c43698bdc9729a09880bd4ac11902
        `;
  
        yield* sql`
-@@ -341,6 +355,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+@@ -364,6 +378,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
            titleRegeneration: null,
            deletedAt: null,
            messages: [
@@ -805,10 +1179,10 @@ index 6330c38ca0c337fa7c6da68158fb472b09e64feb..c43c43698bdc9729a09880bd4ac11902
                id: asMessageId("message-1"),
                role: "assistant",
 diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
-index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990b629ea3a 100644
+index 5f82a26e2..f899c5d86 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
-@@ -6,6 +6,7 @@ import {
+@@ -7,6 +7,7 @@ import {
    MessageId,
    NonNegativeInt,
    OrchestrationCheckpointFile,
@@ -816,7 +1190,7 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
    OrchestrationProposedPlanId,
    OrchestrationReadModel,
    OrchestrationThreadSearchSource,
-@@ -93,6 +94,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
+@@ -105,6 +106,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
  const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
    Struct.assign({
      isStreaming: Schema.Number,
@@ -824,7 +1198,7 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
      attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
    }),
  );
-@@ -590,6 +592,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+@@ -620,6 +622,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -832,7 +1206,7 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -1087,6 +1090,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+@@ -1177,6 +1180,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -840,7 +1214,7 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -1444,6 +1448,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+@@ -1534,6 +1538,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -848,7 +1222,7 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -1843,6 +1848,7 @@ pending_approval_requests AS (
+@@ -1933,6 +1938,7 @@ pending_approval_requests AS (
                  threadMessages.push({
                    id: row.messageId,
                    role: row.role,
@@ -856,7 +1230,7 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
                    text: row.text,
                    ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                    turnId: row.turnId,
-@@ -3051,6 +3057,7 @@ pending_approval_requests AS (
+@@ -3206,6 +3212,7 @@ pending_approval_requests AS (
            const message = {
              id: row.messageId,
              role: row.role,
@@ -865,10 +1239,10 @@ index 91d09bf571936b2b8fcf186bbdc672b3cf7d9a22..ed044ac5a2770b42d848ec10272a1990
              turnId: row.turnId,
              streaming: row.isStreaming === 1,
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-index 4d35c5b04dd47ecb831587b44b220a32390c02e5..2433ebc05301253bbe9e00363ce714ec4f2a3ee3 100644
+index d93fec5a3..51aef1fb8 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-@@ -1440,6 +1440,17 @@ describe("ProviderCommandReactor", () => {
+@@ -1477,6 +1477,17 @@ describe("ProviderCommandReactor", () => {
          createdAt: now,
        }),
      );
@@ -887,7 +1261,7 @@ index 4d35c5b04dd47ecb831587b44b220a32390c02e5..2433ebc05301253bbe9e00363ce714ec
        harness.engine.dispatch({
          type: "thread.message.assistant.delta",
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index b8e457e34ebbd6a67a68916e2d9e1c9229bf4322..a0024e695bbdd3a2c59c9ea04e5c6dad07e51e26 100644
+index 5c1086b9e..b355205a7 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 @@ -1,5 +1,7 @@
@@ -914,7 +1288,7 @@ index b8e457e34ebbd6a67a68916e2d9e1c9229bf4322..a0024e695bbdd3a2c59c9ea04e5c6dad
    }
    const text = assistantCitationsToPlainText(message.text).trim();
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97e25f907f 100644
+index 1094ab48b..14588c2fd 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -22,6 +22,7 @@ import {
@@ -937,17 +1311,17 @@ index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97
      unknown
    > | null = null;
    let scope: Scope.Closeable | null = null;
-@@ -286,7 +290,8 @@ describe("ProviderRuntimeIngestion", () => {
-       Layer.provide(RepositoryIdentityResolver.layer),
-       Layer.provide(SqlitePersistenceMemory),
-     );
+@@ -297,7 +301,8 @@ describe("ProviderRuntimeIngestion", () => {
+         });
+       }),
+     ).pipe(Layer.provide(projectionSnapshotLayer));
 -    const layer = ProviderRuntimeIngestionLive.pipe(
 +    const serverSettingsLayer = makeTestServerSettingsLayer(options?.serverSettings);
 +    const ingestionLayer = ProviderRuntimeIngestionLive.pipe(
        Layer.provideMerge(orchestrationLayer),
-       Layer.provideMerge(projectionSnapshotLayer),
+       Layer.provideMerge(ingestionProjectionSnapshotLayer),
        // Single shared liveness instance across ingestion (writer), the
-@@ -295,18 +300,20 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -306,18 +311,20 @@ describe("ProviderRuntimeIngestion", () => {
        Layer.provideMerge(ThreadPlanProgress.layer),
        Layer.provideMerge(SqlitePersistenceMemory),
        Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
@@ -969,7 +1343,7 @@ index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97
      scope = await Effect.runPromise(Scope.make("sequential"));
      await testRuntime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
      const drain = () => testRuntime.runPromise(ingestion.drain);
-@@ -384,6 +391,8 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -395,6 +402,8 @@ describe("ProviderRuntimeIngestion", () => {
        emitAndDrain,
        sqlCount: sqlCounter.count,
        setProviderSession: provider.setSession,
@@ -978,7 +1352,7 @@ index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97
        drain,
      };
    }
-@@ -1228,7 +1237,7 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -1322,7 +1331,7 @@ describe("ProviderRuntimeIngestion", () => {
      const harness = await createHarness();
      const initial = await harness.readModel();
  
@@ -987,7 +1361,7 @@ index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97
        harness.emit({
          type: "content.delta",
          eventId: asEventId(`evt-ignored-${streamKind}`),
-@@ -4217,4 +4226,870 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -4366,4 +4375,926 @@ describe("ProviderRuntimeIngestion", () => {
      expect(thread.session?.status).toBe("error");
      expect(thread.session?.lastError).toBe("runtime still processed");
    });
@@ -1067,6 +1441,62 @@ index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97
 +    expect(
 +      messageTimes.every((time, index) => index === 0 || time > messageTimes[index - 1]!),
 +    ).toBe(true);
++  });
++
++  it("completes a buffered answer whose delta omitted the turn id after reasoning in that turn", async () => {
++    const harness = await createHarness();
++    const turnId = asTurnId("turn-reasoning-then-turnless-answer");
++    const itemId = asItemId("answer-after-reasoning-turnless-delta");
++
++    await harness.emitAndDrain([
++      {
++        type: "turn.started",
++        eventId: asEventId("evt-reasoning-turnless-answer-turn-started"),
++        provider: ProviderDriverKind.make("codex"),
++        createdAt: "2026-05-01T00:00:00.000Z",
++        threadId: asThreadId("thread-1"),
++        turnId,
++      },
++      {
++        type: "content.delta",
++        eventId: asEventId("evt-reasoning-turnless-answer-reasoning"),
++        provider: ProviderDriverKind.make("codex"),
++        createdAt: "2026-05-01T00:00:00.000Z",
++        threadId: asThreadId("thread-1"),
++        turnId,
++        payload: { streamKind: "reasoning_text", delta: "Thinking" },
++      },
++      // The event contract allows a delta without a turn id; it buffers under
++      // the item id only, so completion cannot find a per-turn assistant segment.
++      {
++        type: "content.delta",
++        eventId: asEventId("evt-reasoning-turnless-answer-delta"),
++        provider: ProviderDriverKind.make("codex"),
++        createdAt: "2026-05-01T00:00:01.000Z",
++        threadId: asThreadId("thread-1"),
++        itemId,
++        payload: { streamKind: "assistant_text", delta: "Answer" },
++      },
++      {
++        type: "item.completed",
++        eventId: asEventId("evt-reasoning-turnless-answer-completed"),
++        provider: ProviderDriverKind.make("codex"),
++        createdAt: "2026-05-01T00:00:02.000Z",
++        threadId: asThreadId("thread-1"),
++        turnId,
++        itemId,
++        payload: { itemType: "assistant_message", status: "completed" },
++      },
++    ]);
++
++    const readModel = await harness.readModel();
++    const thread = readModel.threads.find((entry) => entry.id === asThreadId("thread-1"));
++    expect(
++      thread?.messages.map((message) => [message.channel, message.text, message.streaming]),
++    ).toEqual([
++      ["reasoning", "Thinking", false],
++      [undefined, "Answer", false],
++    ]);
 +  });
 +
 +  it("preserves buffered reasoning duration through finalization", async () => {
@@ -1859,10 +2289,10 @@ index dd6a0b179a8fd602e13f505ed1e5595270114915..2d258a4f7e43a9322d74b775c4fe4c97
 +  });
  });
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486e8334867 100644
+index 8d34fee4f..d21ffcb00 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-@@ -9,6 +9,7 @@ import {
+@@ -8,6 +8,7 @@ import {
    CheckpointRef,
    classifyTaskAgentKind,
    EventId,
@@ -1870,7 +2300,19 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
    isToolLifecycleItemType,
    ThreadId,
    type ThreadTokenUsageSnapshot,
-@@ -97,6 +98,17 @@ interface AssistantSegmentState {
+@@ -36,7 +37,10 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
+ import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
+ import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
+ import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+-import { ProjectionThreadMessageRepository } from "../../persistence/Services/ProjectionThreadMessages.ts";
++import {
++  ProjectionThreadMessageRepository,
++  type ProjectionThreadMessage,
++} from "../../persistence/Services/ProjectionThreadMessages.ts";
+ import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
+ import { ProjectionThreadProposedPlanRepository } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+ import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
+@@ -97,6 +101,17 @@ interface AssistantSegmentState {
    activeMessageId: MessageId | null;
  }
  
@@ -1888,31 +2330,22 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
  const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
  const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
  const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
-@@ -148,7 +160,7 @@ function hasAssistantMessageForTurn(
-     if (!message) {
-       continue;
-     }
--    if (message.role !== "assistant" || message.turnId !== turnId) {
-+    if (message.role !== "assistant" || isReasoningMessage(message) || message.turnId !== turnId) {
-       continue;
-     }
-     if (options?.streamingOnly === true && !message.streaming) {
-@@ -172,6 +184,25 @@ function findMessageById(
-   return undefined;
+@@ -138,6 +153,25 @@ function sameId(left: string | null | undefined, right: string | null | undefine
+   return left === right;
  }
  
 +function nextReasoningSegmentIndex(
-+  messages: ReadonlyArray<OrchestrationMessage>,
++  messages: ReadonlyArray<Pick<ProjectionThreadMessage, "messageId" | "channel">>,
 +  threadId: ThreadId,
 +  turnId: TurnId | null,
 +): number {
 +  const prefix = `reasoning:${threadId}:${turnId ?? "turnless"}:segment:`;
 +  let nextIndex = 0;
 +  for (const message of messages) {
-+    if (!isReasoningMessage(message) || !message.id.startsWith(prefix)) {
++    if (!isReasoningMessage(message) || !message.messageId.startsWith(prefix)) {
 +      continue;
 +    }
-+    const segmentIndex = Number(message.id.slice(prefix.length));
++    const segmentIndex = Number(message.messageId.slice(prefix.length));
 +    if (Number.isSafeInteger(segmentIndex) && segmentIndex >= nextIndex) {
 +      nextIndex = segmentIndex + 1;
 +    }
@@ -1920,10 +2353,10 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +  return nextIndex;
 +}
 +
- function findProposedPlanById(
-   proposedPlans: ReadonlyArray<
-     Pick<OrchestrationProposedPlan, "id" | "createdAt" | "implementedAt" | "implementationThreadId">
-@@ -965,6 +996,11 @@ const make = Effect.gen(function* () {
+ function hasCheckpointForTurn(
+   checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
+   turnId: TurnId,
+@@ -915,6 +949,11 @@ const make = Effect.gen(function* () {
        Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
      );
  
@@ -1935,7 +2368,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
    const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
      capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
      timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
-@@ -986,6 +1022,16 @@ const make = Effect.gen(function* () {
+@@ -936,6 +975,16 @@ const make = Effect.gen(function* () {
        ),
    });
  
@@ -1952,8 +2385,8 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
    const bufferedProposedPlanById = yield* Cache.make<string, { text: string; createdAt: string }>({
      capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
      timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
-@@ -1030,6 +1076,25 @@ const make = Effect.gen(function* () {
-       .pipe(Effect.map(Option.getOrUndefined));
+@@ -981,6 +1030,26 @@ const make = Effect.gen(function* () {
+     );
    });
  
 +  const nextMessageStamp = Effect.fn("nextMessageStamp")(function* (
@@ -1962,8 +2395,9 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +  ) {
 +    let lastStampMs = lastMessageStampMsByThreadId.get(threadId);
 +    if (lastStampMs === undefined) {
-+      const thread = yield* resolveThreadDetail(threadId);
-+      lastStampMs = thread?.messages.reduce(
++      // Cold path only: the map is seeded once per thread and cleared at turn end.
++      const messages = yield* projectionThreadMessages.listByThreadId({ threadId });
++      lastStampMs = messages.reduce(
 +        (latest, message) =>
 +          Math.max(latest, DateTime.toEpochMillis(DateTime.makeUnsafe(message.createdAt))),
 +        Number.NEGATIVE_INFINITY,
@@ -1978,7 +2412,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
    const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
      Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
        Effect.flatMap((existingIds) =>
-@@ -1231,7 +1296,7 @@ const make = Effect.gen(function* () {
+@@ -1173,7 +1242,7 @@ const make = Effect.gen(function* () {
          messageId: input.messageId,
          delta: bufferedText,
          ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -1987,7 +2421,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
        });
        return true;
      });
-@@ -1298,7 +1363,7 @@ const make = Effect.gen(function* () {
+@@ -1240,7 +1309,7 @@ const make = Effect.gen(function* () {
            messageId: input.messageId,
            delta: text,
            ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -1996,7 +2430,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          });
        }
  
-@@ -1309,7 +1374,7 @@ const make = Effect.gen(function* () {
+@@ -1251,7 +1320,7 @@ const make = Effect.gen(function* () {
            threadId: input.threadId,
            messageId: input.messageId,
            ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2005,7 +2439,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          });
        }
        yield* clearAssistantMessageState(input.messageId);
-@@ -1357,6 +1422,139 @@ const make = Effect.gen(function* () {
+@@ -1299,6 +1368,141 @@ const make = Effect.gen(function* () {
        }
      });
  
@@ -2031,7 +2465,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +      const segmentIndex = sameTurn
 +        ? existing.nextSegmentIndex
 +        : nextReasoningSegmentIndex(
-+            (yield* resolveThreadDetail(input.threadId))?.messages ?? [],
++            yield* projectionThreadMessages.listByThreadId({ threadId: input.threadId }),
 +            input.threadId,
 +            input.turnId,
 +          );
@@ -2064,9 +2498,11 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +    turnId?: TurnId | null;
 +  }) =>
 +    Effect.gen(function* () {
-+      const messages = (yield* resolveThreadDetail(input.threadId))?.messages ?? [];
++      const messages = yield* projectionThreadMessages.listByThreadId({
++        threadId: input.threadId,
++      });
 +      for (const message of messages) {
-+        if (!isReasoningMessage(message) || !message.streaming) {
++        if (!isReasoningMessage(message) || !message.isStreaming) {
 +          continue;
 +        }
 +        if (
@@ -2080,7 +2516,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +          type: "thread.message.assistant.complete",
 +          commandId: yield* providerCommandId(input.event, "reasoning-recover-complete"),
 +          threadId: input.threadId,
-+          messageId: message.id,
++          messageId: message.messageId,
 +          channel: "reasoning",
 +          ...(message.turnId !== null ? { turnId: message.turnId } : {}),
 +          createdAt: yield* nextMessageStamp(input.threadId, input.event.createdAt),
@@ -2092,7 +2528,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +  // segment opened by that turn. `recoverProjected` also settles reasoning
 +  // rows left streaming in the projection when the in-memory state was lost
 +  // (restart, TTL, capacity eviction); only terminal/pause boundaries pass it
-+  // so hot paths never load thread detail.
++  // so hot paths never list projected messages.
 +  const finalizeActiveReasoningSegment = (input: {
 +    event: ProviderRuntimeEvent;
 +    threadId: ThreadId;
@@ -2142,10 +2578,10 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +      yield* Cache.set(reasoningSegmentByThreadId, input.threadId, { ...state, active: null });
 +    });
 +
-   const upsertProposedPlan = (input: {
+   const finalizeBufferedProposedPlan = Effect.fn("finalizeBufferedProposedPlan")(function* (input: {
      event: ProviderRuntimeEvent;
      threadId: ThreadId;
-@@ -1470,6 +1668,9 @@ const make = Effect.gen(function* () {
+@@ -1374,6 +1578,9 @@ const make = Effect.gen(function* () {
              : Effect.void,
          { concurrency: 1 },
        ).pipe(Effect.asVoid);
@@ -2155,7 +2591,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
        yield* Effect.forEach(
          proposedPlanKeys,
          (key) =>
-@@ -1564,7 +1765,12 @@ const make = Effect.gen(function* () {
+@@ -1476,7 +1683,12 @@ const make = Effect.gen(function* () {
  
    const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
      Effect.gen(function* () {
@@ -2169,7 +2605,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          return;
        }
  
-@@ -1652,6 +1858,31 @@ const make = Effect.gen(function* () {
+@@ -1554,6 +1766,31 @@ const make = Effect.gen(function* () {
            ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
            : null;
  
@@ -2201,7 +2637,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
        if (
          event.type === "session.started" ||
          event.type === "session.state.changed" ||
-@@ -1686,14 +1917,9 @@ const make = Effect.gen(function* () {
+@@ -1588,14 +1825,9 @@ const make = Effect.gen(function* () {
          const nextActiveTurnId =
            event.type === "turn.started"
              ? (eventTurnId ?? null)
@@ -2218,7 +2654,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          const lastError =
            event.type === "session.state.changed" && event.payload.state === "error"
              ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-@@ -1750,11 +1976,22 @@ const make = Effect.gen(function* () {
+@@ -1652,11 +1884,22 @@ const make = Effect.gen(function* () {
          event.type === "content.delta" && event.payload.streamKind === "assistant_text"
            ? event.payload.delta
            : undefined;
@@ -2241,7 +2677,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          const assistantMessageId = yield* getOrCreateAssistantMessageId({
            threadId: thread.id,
            event,
-@@ -1764,10 +2001,7 @@ const make = Effect.gen(function* () {
+@@ -1666,10 +1909,7 @@ const make = Effect.gen(function* () {
            yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
          }
  
@@ -2253,7 +2689,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          if (assistantDeliveryMode === "buffered") {
            const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
            if (spillChunk.length > 0) {
-@@ -1778,7 +2012,7 @@ const make = Effect.gen(function* () {
+@@ -1680,7 +1920,7 @@ const make = Effect.gen(function* () {
                messageId: assistantMessageId,
                delta: spillChunk,
                ...(turnId ? { turnId } : {}),
@@ -2262,16 +2698,16 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
              });
            }
          } else {
-@@ -1789,22 +2023,84 @@ const make = Effect.gen(function* () {
+@@ -1691,8 +1931,64 @@ const make = Effect.gen(function* () {
              messageId: assistantMessageId,
              delta: assistantDelta,
              ...(turnId ? { turnId } : {}),
 -            createdAt: now,
 +            createdAt: yield* nextMessageStamp(thread.id, now),
-           });
-         }
-       }
- 
++          });
++        }
++      }
++
 +      if (reasoningDelta && reasoningDelta.length > 0) {
 +        const turnId = toTurnId(event.turnId) ?? activeTurnId;
 +        const openSegment = yield* getReasoningSegmentState(thread.id);
@@ -2283,7 +2719,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +        // orphan (restart, TTL, capacity eviction). Settle it before the
 +        // replacement below repopulates the cache — after that the terminal
 +        // recoverProjected path can no longer see the loss. This scans the
-+        // projection only on the cold path, which loads thread detail anyway.
++        // projection only on the cold path, which lists projected messages anyway.
 +        if (openSegment === undefined) {
 +          yield* completeProjectedStreamingReasoning({
 +            event,
@@ -2317,7 +2753,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +            channel: "reasoning",
 +            ...(turnId !== null ? { turnId } : {}),
 +            createdAt: yield* nextMessageStamp(thread.id, buffered ? active.firstDeltaAt : now),
-+          });
+           });
 +          // A projected segment gets a completion even when its text is whitespace only.
 +          if (!active.hasProjectedMessage) {
 +            yield* Cache.set(reasoningSegmentByThreadId, thread.id, {
@@ -2325,25 +2761,29 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
 +              active: { ...active, hasProjectedMessage: true },
 +            });
 +          }
-+        }
-+      }
-+
-       const pauseForUserTurnId =
-         event.type === "request.opened" ||
-         (event.type === "user-input.requested" && event.payload.responseMode !== "message")
+         }
+       }
+ 
+@@ -1702,15 +1998,23 @@ const make = Effect.gen(function* () {
            ? toTurnId(event.turnId)
            : undefined;
        if (pauseForUserTurnId) {
 +        // A user-facing pause also settles in-flight reasoning so it does not
 +        // stay "Thinking" or absorb human wait time; tool_user_input requests
-+        // emit no activity, so nothing later would close it.
++        // emit no activity, so nothing later would close it. It runs before the
++        // streaming check below so a settled reasoning row is not mistaken for
++        // an open assistant message.
 +        yield* finalizeActiveReasoningSegment({
 +          event,
 +          threadId: thread.id,
 +          turnId: pauseForUserTurnId,
 +          recoverProjected: true,
 +        });
-         const detailedThread = yield* getLoadedThreadDetail();
+         const hasProjectedMessage = yield* projectionThreadMessages.hasAssistantMessageForTurn({
+           threadId: thread.id,
+           turnId: pauseForUserTurnId,
+           streamingOnly: true,
+         });
 -        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
 -          serverSettingsService.getSettings,
 -          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
@@ -2352,20 +2792,19 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
          const flushedMessageIds =
            assistantDeliveryMode === "buffered"
              ? yield* flushBufferedAssistantMessagesForTurn({
-@@ -1864,6 +2160,12 @@ const make = Effect.gen(function* () {
-           : undefined;
+@@ -1767,6 +2071,11 @@ const make = Effect.gen(function* () {
  
        if (assistantCompletion) {
-+        const completionTurnId = toTurnId(event.turnId);
+         const turnId = toTurnId(event.turnId);
 +        yield* finalizeActiveReasoningSegment({
 +          event,
 +          threadId: thread.id,
-+          ...(completionTurnId !== undefined ? { turnId: completionTurnId } : {}),
++          ...(turnId !== undefined ? { turnId } : {}),
 +        });
-         const detailedThread = yield* getLoadedThreadDetail();
-         const messages = detailedThread?.messages ?? [];
-         const turnId = toTurnId(event.turnId);
-@@ -2210,6 +2512,13 @@ const make = Effect.gen(function* () {
+         const activeAssistantMessageId = turnId
+           ? yield* getActiveAssistantMessageIdForTurn(thread.id, turnId)
+           : Option.none<MessageId>();
+@@ -2127,6 +2436,13 @@ const make = Effect.gen(function* () {
        }
  
        const activities = runtimeEventToActivities(activityEvent, taskTitle);
@@ -2379,7 +2818,7 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
        yield* Effect.forEach(activities, (activity) =>
          providerCommandId(event, "thread-activity-append").pipe(
            Effect.flatMap((commandId) =>
-@@ -2223,6 +2532,10 @@ const make = Effect.gen(function* () {
+@@ -2140,6 +2456,10 @@ const make = Effect.gen(function* () {
            ),
          ),
        ).pipe(Effect.asVoid);
@@ -2391,10 +2830,10 @@ index cf59d00a248b8bdcced605916af5d39429159630..826dea90162ee22b4a19db74e2d90486
  
    const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
-index b336053ac9e1de0542abe304e50ac63bbafd9517..a9bbc51e5daae8fd9804fe4593797870ab4f2ef0 100644
+index 9dc55e119..3d235638a 100644
 --- a/apps/server/src/orchestration/decider.ts
 +++ b/apps/server/src/orchestration/decider.ts
-@@ -1289,6 +1289,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+@@ -1399,6 +1399,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
            threadId: command.threadId,
            messageId: command.messageId,
            role: "assistant",
@@ -2402,7 +2841,7 @@ index b336053ac9e1de0542abe304e50ac63bbafd9517..a9bbc51e5daae8fd9804fe4593797870
            text: command.delta,
            turnId: command.turnId ?? null,
            streaming: true,
-@@ -1316,6 +1317,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+@@ -1432,6 +1433,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
            threadId: command.threadId,
            messageId: command.messageId,
            role: "assistant",
@@ -2411,7 +2850,7 @@ index b336053ac9e1de0542abe304e50ac63bbafd9517..a9bbc51e5daae8fd9804fe4593797870
            turnId: command.turnId ?? null,
            streaming: false,
 diff --git a/apps/server/src/orchestration/projector.test.ts b/apps/server/src/orchestration/projector.test.ts
-index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e96afcc42 100644
+index e973b5232..15e3de089 100644
 --- a/apps/server/src/orchestration/projector.test.ts
 +++ b/apps/server/src/orchestration/projector.test.ts
 @@ -1,3 +1,4 @@
@@ -2419,7 +2858,15 @@ index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e
  import {
    CommandId,
    EventId,
-@@ -448,6 +449,7 @@ describe("orchestration projector", () => {
+@@ -7,7 +8,6 @@ import {
+   type OrchestrationEvent,
+ } from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
+-import { it as effectIt } from "@effect/vitest";
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ import { createEmptyReadModel, projectEvent } from "./projector.ts";
+@@ -636,6 +636,7 @@ describe("orchestration projector", () => {
              threadId: "thread-1",
              messageId: "assistant:msg-1",
              role: "assistant",
@@ -2427,7 +2874,7 @@ index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e
              text: "hello",
              turnId: "turn-1",
              streaming: true,
-@@ -472,6 +474,7 @@ describe("orchestration projector", () => {
+@@ -660,6 +661,7 @@ describe("orchestration projector", () => {
              threadId: "thread-1",
              messageId: "assistant:msg-1",
              role: "assistant",
@@ -2435,7 +2882,7 @@ index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e
              text: "",
              turnId: "turn-1",
              streaming: false,
-@@ -484,12 +487,13 @@ describe("orchestration projector", () => {
+@@ -672,12 +674,13 @@ describe("orchestration projector", () => {
  
      const message = afterComplete.threads[0]?.messages[0];
      expect(message?.id).toBe("assistant:msg-1");
@@ -2450,7 +2897,7 @@ index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e
      const createdAt = "2026-02-23T10:00:00.000Z";
      const model = createEmptyReadModel(createdAt);
  
-@@ -625,6 +629,7 @@ describe("orchestration projector", () => {
+@@ -813,6 +816,7 @@ describe("orchestration projector", () => {
            threadId: "thread-1",
            messageId: "assistant-msg-2",
            role: "assistant",
@@ -2458,7 +2905,7 @@ index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e
            text: "Updated README to v3.\n",
            turnId: "turn-2",
            streaming: false,
-@@ -857,6 +862,356 @@ describe("orchestration projector", () => {
+@@ -1045,6 +1049,798 @@ describe("orchestration projector", () => {
      ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
    });
  
@@ -2812,26 +3259,464 @@ index dad3d07370f9252552624436b4d05c3fee1735a7..1b69ad86669bdf2c3c29d3979b8d135e
 +      }),
 +  );
 +
++  // Combined regression: the retained assistant count must skip imported rows
++  // AND reasoning rows. Either exclusion alone lets the turnless substantive
++  // answer for the kept turn be dropped on revert.
++  effectIt.effect(
++    "imported history and retained reasoning never consume the live assistant quota on revert",
++    () =>
++      Effect.gen(function* () {
++        const threadId = "thread-import-reason";
++        const createdAt = "2026-02-28T12:00:00.000Z";
++        let sequence = 1;
++        const messageSent = (payload: {
++          messageId: string;
++          role: "user" | "assistant" | "system";
++          channel?: "reasoning";
++          text: string;
++          turnId: string | null;
++          createdAt: string;
++        }) => {
++          sequence += 1;
++          return makeEvent({
++            sequence,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: payload.createdAt,
++            commandId: `cmd-import-reason-${sequence}`,
++            payload: {
++              threadId,
++              streaming: false,
++              updatedAt: payload.createdAt,
++              ...payload,
++            },
++          });
++        };
++        const turnDiffCompleted = (payload: {
++          turnId: string;
++          checkpointTurnCount: number;
++          assistantMessageId: string | null;
++          completedAt: string;
++        }) => {
++          sequence += 1;
++          return makeEvent({
++            sequence,
++            type: "thread.turn-diff-completed",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: payload.completedAt,
++            commandId: `cmd-import-reason-${sequence}`,
++            payload: {
++              threadId,
++              checkpointRef: `refs/t3/checkpoints/${threadId}/turn/${payload.checkpointTurnCount}`,
++              status: "ready",
++              files: [],
++              ...payload,
++            },
++          });
++        };
++
++        const events: ReadonlyArray<OrchestrationEvent> = [
++          makeEvent({
++            sequence: 1,
++            type: "thread.created",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: createdAt,
++            commandId: "cmd-import-reason-create",
++            payload: {
++              threadId,
++              projectId: "project-1",
++              title: "demo",
++              modelSelection: {
++                provider: ProviderDriverKind.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt,
++              updatedAt: createdAt,
++            },
++          }),
++          messageSent({
++            messageId: "import:codex:session-1:000000",
++            role: "user",
++            text: "imported prompt",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:00.100Z",
++          }),
++          messageSent({
++            messageId: "import:codex:session-1:000001",
++            role: "assistant",
++            text: "imported answer",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:00.200Z",
++          }),
++          messageSent({
++            messageId: "user-live-1",
++            role: "user",
++            text: "kept prompt",
++            turnId: "turn-live-1",
++            createdAt: "2026-02-28T12:00:01.000Z",
++          }),
++          messageSent({
++            messageId: "reasoning-live-1",
++            role: "assistant",
++            channel: "reasoning",
++            text: "thinking about the kept prompt",
++            turnId: "turn-live-1",
++            createdAt: "2026-02-28T12:00:01.100Z",
++          }),
++          messageSent({
++            messageId: "assistant-live-1",
++            role: "assistant",
++            text: "substantive kept answer",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:01.200Z",
++          }),
++          turnDiffCompleted({
++            turnId: "turn-live-1",
++            checkpointTurnCount: 1,
++            assistantMessageId: null,
++            completedAt: "2026-02-28T12:00:01.500Z",
++          }),
++          messageSent({
++            messageId: "user-live-2",
++            role: "user",
++            text: "discarded prompt",
++            turnId: "turn-live-2",
++            createdAt: "2026-02-28T12:00:02.000Z",
++          }),
++          messageSent({
++            messageId: "reasoning-discarded",
++            role: "assistant",
++            channel: "reasoning",
++            text: "thinking about discarded work",
++            turnId: null,
++            createdAt: "2026-02-28T12:00:02.100Z",
++          }),
++          messageSent({
++            messageId: "assistant-live-2",
++            role: "assistant",
++            text: "discarded answer",
++            turnId: "turn-live-2",
++            createdAt: "2026-02-28T12:00:02.200Z",
++          }),
++          turnDiffCompleted({
++            turnId: "turn-live-2",
++            checkpointTurnCount: 2,
++            assistantMessageId: "assistant-live-2",
++            completedAt: "2026-02-28T12:00:02.500Z",
++          }),
++        ];
++        sequence += 1;
++        const revert = makeEvent({
++          sequence,
++          type: "thread.reverted",
++          aggregateKind: "thread",
++          aggregateId: threadId,
++          occurredAt: "2026-02-28T12:00:03.000Z",
++          commandId: "cmd-import-reason-revert",
++          payload: { threadId, turnCount: 1 },
++        });
++
++        let model = createEmptyReadModel(createdAt);
++        for (const event of [...events, revert]) {
++          model = yield* projectEvent(model, event);
++        }
++
++        expect(model.threads[0]?.messages.map((message) => message.id)).toEqual([
++          "import:codex:session-1:000000",
++          "import:codex:session-1:000001",
++          "user-live-1",
++          "reasoning-live-1",
++          "assistant-live-1",
++        ]);
++      }),
++  );
++
++  // Imported/system retention takes precedence over the reasoning exclusion:
++  // an imported reasoning row survives a checkpoint-zero revert while every
++  // unbound live prompt, reasoning segment, and answer is removed.
++  effectIt.effect(
++    "checkpoint-zero revert keeps imported and system history including imported reasoning",
++    () =>
++      Effect.gen(function* () {
++        const threadId = "thread-import-zero";
++        const createdAt = "2026-02-28T13:00:00.000Z";
++        let sequence = 1;
++        const messageSent = (payload: {
++          messageId: string;
++          role: "user" | "assistant" | "system";
++          channel?: "reasoning";
++          text: string;
++          createdAt: string;
++        }) => {
++          sequence += 1;
++          return makeEvent({
++            sequence,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: payload.createdAt,
++            commandId: `cmd-import-zero-${sequence}`,
++            payload: {
++              threadId,
++              turnId: null,
++              streaming: false,
++              updatedAt: payload.createdAt,
++              ...payload,
++            },
++          });
++        };
++
++        const events: ReadonlyArray<OrchestrationEvent> = [
++          makeEvent({
++            sequence: 1,
++            type: "thread.created",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: createdAt,
++            commandId: "cmd-import-zero-create",
++            payload: {
++              threadId,
++              projectId: "project-1",
++              title: "demo",
++              modelSelection: {
++                provider: ProviderDriverKind.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt,
++              updatedAt: createdAt,
++            },
++          }),
++          messageSent({
++            messageId: "import:codex:session-2:000000",
++            role: "user",
++            text: "imported prompt",
++            createdAt: "2026-02-28T13:00:00.100Z",
++          }),
++          messageSent({
++            messageId: "import:codex:session-2:000001",
++            role: "assistant",
++            channel: "reasoning",
++            text: "imported reasoning",
++            createdAt: "2026-02-28T13:00:00.200Z",
++          }),
++          messageSent({
++            messageId: "import:codex:session-2:000002",
++            role: "assistant",
++            text: "imported answer",
++            createdAt: "2026-02-28T13:00:00.300Z",
++          }),
++          messageSent({
++            messageId: "system-note",
++            role: "system",
++            text: "system note",
++            createdAt: "2026-02-28T13:00:00.400Z",
++          }),
++          messageSent({
++            messageId: "user-live",
++            role: "user",
++            text: "new work",
++            createdAt: "2026-02-28T13:00:01.000Z",
++          }),
++          messageSent({
++            messageId: "reasoning-live",
++            role: "assistant",
++            channel: "reasoning",
++            text: "thinking about new work",
++            createdAt: "2026-02-28T13:00:01.100Z",
++          }),
++          messageSent({
++            messageId: "assistant-live",
++            role: "assistant",
++            text: "new answer",
++            createdAt: "2026-02-28T13:00:01.200Z",
++          }),
++        ];
++        sequence += 1;
++        const revert = makeEvent({
++          sequence,
++          type: "thread.reverted",
++          aggregateKind: "thread",
++          aggregateId: threadId,
++          occurredAt: "2026-02-28T13:00:02.000Z",
++          commandId: "cmd-import-zero-revert",
++          payload: { threadId, turnCount: 0 },
++        });
++
++        let model = createEmptyReadModel(createdAt);
++        for (const event of [...events, revert]) {
++          model = yield* projectEvent(model, event);
++        }
++
++        expect(model.threads[0]?.messages.map((message) => message.id)).toEqual([
++          "import:codex:session-2:000000",
++          "import:codex:session-2:000001",
++          "import:codex:session-2:000002",
++          "system-note",
++        ]);
++      }),
++  );
++
++  // The fallback answer is chosen by absolute time, not lexical timestamp
++  // order, and earlier imported/reasoning rows never take that slot.
++  effectIt.effect(
++    "fallback assistant selection uses absolute time and skips imported and reasoning decoys",
++    () =>
++      Effect.gen(function* () {
++        const threadId = "thread-import-offset";
++        const createdAt = "2026-04-01T06:00:00.000Z";
++        let sequence = 1;
++        const messageSent = (payload: {
++          messageId: string;
++          role: "user" | "assistant";
++          channel?: "reasoning";
++          text: string;
++          turnId: string | null;
++          createdAt: string;
++        }) => {
++          sequence += 1;
++          return makeEvent({
++            sequence,
++            type: "thread.message-sent",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: payload.createdAt,
++            commandId: `cmd-import-offset-${sequence}`,
++            payload: {
++              threadId,
++              streaming: false,
++              updatedAt: payload.createdAt,
++              ...payload,
++            },
++          });
++        };
++
++        const events: ReadonlyArray<OrchestrationEvent> = [
++          makeEvent({
++            sequence: 1,
++            type: "thread.created",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: createdAt,
++            commandId: "cmd-import-offset-create",
++            payload: {
++              threadId,
++              projectId: "project-1",
++              title: "demo",
++              modelSelection: {
++                provider: ProviderDriverKind.make("codex"),
++                model: "gpt-5-codex",
++              },
++              runtimeMode: "full-access",
++              branch: null,
++              worktreePath: null,
++              createdAt,
++              updatedAt: createdAt,
++            },
++          }),
++          messageSent({
++            messageId: "import:codex:session-3:000001",
++            role: "assistant",
++            text: "imported answer",
++            turnId: null,
++            createdAt: "2026-04-01T07:00:00.000Z",
++          }),
++          messageSent({
++            messageId: "user-kept",
++            role: "user",
++            text: "kept prompt",
++            turnId: "turn-kept",
++            createdAt: "2026-04-01T08:00:00.000Z",
++          }),
++          makeEvent({
++            sequence: (sequence += 1),
++            type: "thread.turn-diff-completed",
++            aggregateKind: "thread",
++            aggregateId: threadId,
++            occurredAt: "2026-04-01T08:05:00.000Z",
++            commandId: "cmd-import-offset-turn",
++            payload: {
++              threadId,
++              turnId: "turn-kept",
++              checkpointTurnCount: 1,
++              checkpointRef: `refs/t3/checkpoints/${threadId}/turn/1`,
++              status: "ready",
++              files: [],
++              assistantMessageId: null,
++              completedAt: "2026-04-01T08:05:00.000Z",
++            },
++          }),
++          messageSent({
++            messageId: "reasoning-early",
++            role: "assistant",
++            channel: "reasoning",
++            text: "earliest turnless reasoning",
++            turnId: null,
++            createdAt: "2026-04-01T08:10:00.000Z",
++          }),
++          messageSent({
++            messageId: "answer-later-in-utc",
++            role: "assistant",
++            text: "lexically first, later in absolute time",
++            turnId: null,
++            createdAt: "2026-04-01T09:00:00.000Z",
++          }),
++          messageSent({
++            messageId: "answer-earlier-by-offset",
++            role: "assistant",
++            text: "lexically last, earlier in absolute time",
++            turnId: null,
++            createdAt: "2026-04-01T10:30:00.000+02:00",
++          }),
++        ];
++        sequence += 1;
++        const revert = makeEvent({
++          sequence,
++          type: "thread.reverted",
++          aggregateKind: "thread",
++          aggregateId: threadId,
++          occurredAt: "2026-04-01T11:00:00.000Z",
++          commandId: "cmd-import-offset-revert",
++          payload: { threadId, turnCount: 1 },
++        });
++
++        let model = createEmptyReadModel(createdAt);
++        for (const event of [...events, revert]) {
++          model = yield* projectEvent(model, event);
++        }
++
++        expect(model.threads[0]?.messages.map((message) => message.id)).toEqual([
++          "import:codex:session-3:000001",
++          "user-kept",
++          "answer-earlier-by-offset",
++        ]);
++      }),
++  );
++
    it("caps message and checkpoint retention for long-lived threads", async () => {
      const createdAt = "2026-03-01T10:00:00.000Z";
      const model = createEmptyReadModel(createdAt);
 diff --git a/apps/server/src/orchestration/projector.ts b/apps/server/src/orchestration/projector.ts
-index 3cea194bbb446caa2bf44e69742fd44bc0c3297f..2e73bdad23a72e1bc4e0a3b87ea5dd48c47b1952 100644
+index c048247f4..eae78f1a0 100644
 --- a/apps/server/src/orchestration/projector.ts
 +++ b/apps/server/src/orchestration/projector.ts
-@@ -149,7 +149,10 @@ function retainThreadMessagesAfterRevert(
-   }
- 
-   const retainedAssistantCount = messages.filter(
--    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-+    (message) =>
-+      message.role === "assistant" &&
+@@ -158,6 +158,7 @@ function retainThreadMessagesAfterRevert(
+     (message) =>
+       message.role === "assistant" &&
+       !isImportedAgentSessionMessageId(message.id) &&
 +      message.channel !== "reasoning" &&
-+      retainedMessageIds.has(message.id),
+       retainedMessageIds.has(message.id),
    ).length;
    const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-   if (missingAssistantCount > 0) {
-@@ -157,6 +160,7 @@ function retainThreadMessagesAfterRevert(
+@@ -166,6 +167,7 @@ function retainThreadMessagesAfterRevert(
        .filter(
          (message) =>
            message.role === "assistant" &&
@@ -2839,7 +3724,7 @@ index 3cea194bbb446caa2bf44e69742fd44bc0c3297f..2e73bdad23a72e1bc4e0a3b87ea5dd48
            !retainedMessageIds.has(message.id) &&
            (message.turnId === null || retainedTurnIds.has(message.turnId)),
        )
-@@ -550,6 +554,7 @@ export function projectEvent(
+@@ -569,6 +571,7 @@ export function projectEvent(
            {
              id: payload.messageId,
              role: payload.role,
@@ -2847,7 +3732,7 @@ index 3cea194bbb446caa2bf44e69742fd44bc0c3297f..2e73bdad23a72e1bc4e0a3b87ea5dd48
              text: payload.text,
              ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
              turnId: payload.turnId,
-@@ -575,6 +580,7 @@ export function projectEvent(
+@@ -594,6 +597,7 @@ export function projectEvent(
                      streaming: message.streaming,
                      updatedAt: message.updatedAt,
                      turnId: message.turnId,
@@ -2855,8 +3740,72 @@ index 3cea194bbb446caa2bf44e69742fd44bc0c3297f..2e73bdad23a72e1bc4e0a3b87ea5dd48
                      ...(message.attachments !== undefined
                        ? { attachments: message.attachments }
                        : {}),
+diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
+index 12f4db91f..0f6c2c742 100644
+--- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
++++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
+@@ -276,4 +276,59 @@ layer("ProjectionThreadMessageRepository", (it) => {
+       );
+     }),
+   );
++
++  it.effect("does not count reasoning rows as assistant messages for a turn", () =>
++    Effect.gen(function* () {
++      const repository = yield* ProjectionThreadMessageRepository;
++      const threadId = ThreadId.make("thread-assistant-turn-reasoning-only");
++      const turnId = TurnId.make("turn-assistant-reasoning-only");
++      const createdAt = "2026-03-01T00:00:00.000Z";
++
++      yield* repository.upsert({
++        messageId: MessageId.make("message-reasoning-settled"),
++        threadId,
++        turnId,
++        role: "assistant",
++        channel: "reasoning",
++        text: "settled reasoning",
++        isStreaming: false,
++        createdAt,
++        updatedAt: createdAt,
++      });
++      yield* repository.appendStreaming({
++        messageId: MessageId.make("message-reasoning-streaming"),
++        threadId,
++        turnId,
++        role: "assistant",
++        channel: "reasoning",
++        text: "streaming reasoning",
++        createdAt,
++        updatedAt: createdAt,
++      });
++
++      for (const streamingOnly of [false, true]) {
++        assert.equal(
++          yield* repository.hasAssistantMessageForTurn({ threadId, turnId, streamingOnly }),
++          false,
++        );
++      }
++
++      yield* repository.appendStreaming({
++        messageId: MessageId.make("message-answer-streaming"),
++        threadId,
++        turnId,
++        role: "assistant",
++        text: "answer",
++        createdAt,
++        updatedAt: createdAt,
++      });
++
++      for (const streamingOnly of [false, true]) {
++        assert.equal(
++          yield* repository.hasAssistantMessageForTurn({ threadId, turnId, streamingOnly }),
++          true,
++        );
++      }
++    }),
++  );
+ });
 diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
-index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c506d58ce8 100644
+index eae7189de..4637c0ce5 100644
 --- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
 +++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
 @@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
@@ -2868,7 +3817,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
  
  import { toPersistenceSqlError } from "../Errors.ts";
  import {
-@@ -21,6 +21,7 @@ import {
+@@ -22,6 +22,7 @@ import {
  const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
    Struct.assign({
      isStreaming: Schema.Number,
@@ -2876,7 +3825,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
      attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
    }),
  );
-@@ -33,6 +34,7 @@ function toProjectionThreadMessage(
+@@ -35,6 +36,7 @@ function toProjectionThreadMessage(
      threadId: row.threadId,
      turnId: row.turnId,
      role: row.role,
@@ -2884,7 +3833,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
      text: row.text,
      isStreaming: row.isStreaming === 1,
      createdAt: row.createdAt,
-@@ -55,6 +57,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -57,6 +59,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id,
            turn_id,
            role,
@@ -2892,7 +3841,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            text,
            attachments_json,
            is_streaming,
-@@ -66,6 +69,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -68,6 +71,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            ${row.threadId},
            ${row.turnId},
            ${row.role},
@@ -2900,7 +3849,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            ${row.text},
            COALESCE(
              ${nextAttachmentsJson},
-@@ -84,6 +88,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -86,6 +90,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id = excluded.thread_id,
            turn_id = excluded.turn_id,
            role = excluded.role,
@@ -2908,7 +3857,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            text = excluded.text,
            attachments_json = COALESCE(
              excluded.attachments_json,
-@@ -107,6 +112,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -109,6 +114,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id,
            turn_id,
            role,
@@ -2916,7 +3865,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            text,
            attachments_json,
            is_streaming,
-@@ -118,6 +124,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -120,6 +126,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            ${row.threadId},
            ${row.turnId},
            ${row.role},
@@ -2924,7 +3873,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            ${row.text},
            ${nextAttachmentsJson},
            1,
-@@ -129,6 +136,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -131,6 +138,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id = excluded.thread_id,
            turn_id = excluded.turn_id,
            role = excluded.role,
@@ -2932,7 +3881,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            text = projection_thread_messages.text || excluded.text,
            attachments_json = COALESCE(
              excluded.attachments_json,
-@@ -150,6 +158,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -152,6 +160,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -2940,7 +3889,24 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -171,6 +180,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -163,6 +172,8 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+       `,
+   });
+ 
++  // Reasoning rows share the assistant role but are not answers; counting one
++  // would let ingestion treat an answer completion as redundant and drop it.
+   const hasProjectionThreadAssistantMessageRow = SqlSchema.findOne({
+     Request: HasProjectionThreadAssistantMessageInput,
+     Result: ProjectionThreadMessageExistsDbRowSchema,
+@@ -174,6 +185,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           WHERE thread_id = ${threadId}
+             AND turn_id = ${turnId}
+             AND role = 'assistant'
++            AND (channel IS NULL OR channel <> 'reasoning')
+             AND (${streamingOnly ? 1 : 0} = 0 OR is_streaming = 1)
+           LIMIT 1
+         ) AS "exists"
+@@ -190,6 +202,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -2949,7 +3915,7 @@ index ce28e11b86016b55f5e5a88a4665515415e55f59..ecfbdd4efff58d4f2c0b5362414907c5
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
 diff --git a/apps/server/src/persistence/Migrations.ts b/apps/server/src/persistence/Migrations.ts
-index 92dc18291057bd692f390a6b994ecc34a8ba7975..dd8f7d18d470d2a113791a485b8966798cb70df0 100644
+index c95f746d3..eddabea5e 100644
 --- a/apps/server/src/persistence/Migrations.ts
 +++ b/apps/server/src/persistence/Migrations.ts
 @@ -11,6 +11,12 @@
@@ -2965,7 +3931,7 @@ index 92dc18291057bd692f390a6b994ecc34a8ba7975..dd8f7d18d470d2a113791a485b896679
  // Import all migrations statically
  import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
  import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
-@@ -149,15 +155,41 @@ export interface RunMigrationsOptions {
+@@ -153,15 +159,41 @@ export interface RunMigrationsOptions {
   *
   * Returns array of [id, name] tuples for migrations that were run.
   *
@@ -3009,7 +3975,7 @@ index 92dc18291057bd692f390a6b994ecc34a8ba7975..dd8f7d18d470d2a113791a485b896679
  });
 diff --git a/apps/server/src/persistence/ReasoningSchema.test.ts b/apps/server/src/persistence/ReasoningSchema.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..45ddbaa4b041f84c95f1ffe0d06a3b6e154d2bfd
+index 000000000..45ddbaa4b
 --- /dev/null
 +++ b/apps/server/src/persistence/ReasoningSchema.test.ts
 @@ -0,0 +1,264 @@
@@ -3279,7 +4245,7 @@ index 0000000000000000000000000000000000000000..45ddbaa4b041f84c95f1ffe0d06a3b6e
 +});
 diff --git a/apps/server/src/persistence/ReasoningSchema.ts b/apps/server/src/persistence/ReasoningSchema.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d953ba2f3ea0287f8c004a769af5d5611c50b225
+index 000000000..d953ba2f3
 --- /dev/null
 +++ b/apps/server/src/persistence/ReasoningSchema.ts
 @@ -0,0 +1,109 @@
@@ -3393,7 +4359,7 @@ index 0000000000000000000000000000000000000000..d953ba2f3ea0287f8c004a769af5d561
 +  return true;
 +});
 diff --git a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
-index a41737564382c9bc47700a510bed7f77312457d0..34ebf8b74e4b5d180dc7597dbdbc5a99c39b1282 100644
+index a7e258ad5..8c246e547 100644
 --- a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
 +++ b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
 @@ -10,6 +10,7 @@ import {
@@ -3413,7 +4379,7 @@ index a41737564382c9bc47700a510bed7f77312457d0..34ebf8b74e4b5d180dc7597dbdbc5a99
    attachments: Schema.optional(Schema.Array(ChatAttachment)),
    isStreaming: Schema.Boolean,
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-index 84cc03b75a6ddb3e7f017b50ed1acacf18e4fc46..3c9bef6a6e497d10356e8ca83fa7aa2e35ba0713 100644
+index 13b44c166..94d4de9e9 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 @@ -574,6 +574,50 @@ describe("ClaudeAdapterLive", () => {
@@ -3468,10 +4434,10 @@ index 84cc03b75a6ddb3e7f017b50ed1acacf18e4fc46..3c9bef6a6e497d10356e8ca83fa7aa2e
      const harness = makeHarness();
      return Effect.gen(function* () {
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index a005f583066f88e386a2f4e6c6841c8ece7f1e35..8df6ef494d0025d42d0b6748b2d4c3e38c016eaa 100644
+index 1ecde618e..478aebff5 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-@@ -4678,6 +4678,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4641,6 +4641,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
          ...(newSessionId ? { sessionId: newSessionId } : {}),
          includePartialMessages: true,
@@ -3481,10 +4447,10 @@ index a005f583066f88e386a2f4e6c6841c8ece7f1e35..8df6ef494d0025d42d0b6748b2d4c3e3
          onUserDialog,
          supportedDialogKinds: ["resume_return"],
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-index fd4d66dd497b59e20ffdf466ae49adc6373d61c2..0698c77a19aba446e5fdb00f685390dfc19bf2ef 100644
+index 0136c3fbf..2cffc4fee 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-@@ -120,6 +120,7 @@ describe("buildTurnStartParams", () => {
+@@ -116,6 +116,7 @@ describe("buildTurnStartParams", () => {
        ],
        model: "gpt-5.3-codex",
        effort: "medium",
@@ -3492,7 +4458,7 @@ index fd4d66dd497b59e20ffdf466ae49adc6373d61c2..0698c77a19aba446e5fdb00f685390df
        collaborationMode: {
          mode: "plan",
          settings: {
-@@ -169,6 +170,7 @@ describe("buildTurnStartParams", () => {
+@@ -165,6 +166,7 @@ describe("buildTurnStartParams", () => {
          },
        ],
        model: "gpt-5.3-codex",
@@ -3500,7 +4466,7 @@ index fd4d66dd497b59e20ffdf466ae49adc6373d61c2..0698c77a19aba446e5fdb00f685390df
        collaborationMode: {
          mode: "default",
          settings: {
-@@ -220,6 +222,7 @@ describe("buildTurnStartParams", () => {
+@@ -216,6 +218,7 @@ describe("buildTurnStartParams", () => {
              text: "Ship it",
            },
          ],
@@ -3508,7 +4474,7 @@ index fd4d66dd497b59e20ffdf466ae49adc6373d61c2..0698c77a19aba446e5fdb00f685390df
        });
      }),
    );
-@@ -246,6 +249,7 @@ describe("buildTurnStartParams", () => {
+@@ -242,6 +245,7 @@ describe("buildTurnStartParams", () => {
            text: "Review",
          },
        ],
@@ -3517,7 +4483,7 @@ index fd4d66dd497b59e20ffdf466ae49adc6373d61c2..0698c77a19aba446e5fdb00f685390df
    });
  });
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index 4b88b7ce01c0f4c9d95d19f80402d0141406364a..95b619f20117304cd08e2cae70b105013ded041e 100644
+index 4b88b7ce0..95b619f20 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 @@ -636,6 +636,8 @@ export function buildTurnStartParams(input: {
@@ -3530,10 +4496,10 @@ index 4b88b7ce01c0f4c9d95d19f80402d0141406364a..95b619f20117304cd08e2cae70b10501
    }).pipe(
      Effect.mapError((cause) =>
 diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
-index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e30badb859 100644
+index e1cf7f0dc..2ff4ab313 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
 +++ b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
-@@ -7,10 +7,12 @@ import {
+@@ -24,10 +24,12 @@ import {
    deriveMessagesTimelineRowsWithState,
    liveWorkEntryLabel,
    normalizeCompactToolLabel,
@@ -3544,9 +4510,9 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
    shouldPreserveAssistantLineBreaks,
 +  toggleReasoningDisclosureExpansion,
    type MessagesTimelineRow,
+   type MessagesTimelineRowsProjection,
    workEntryDisplayLabel,
- } from "./MessagesTimeline.logic";
-@@ -531,6 +533,29 @@ describe("work entry labels", () => {
+@@ -806,6 +808,29 @@ describe("work entry labels", () => {
    );
  });
  
@@ -3576,7 +4542,7 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
  describe("shouldPreserveAssistantLineBreaks", () => {
    it("preserves Claude insight formatting without changing regular markdown", () => {
      expect(
-@@ -616,7 +641,10 @@ describe("computeMessageDurationStart", () => {
+@@ -891,7 +916,10 @@ describe("computeMessageDurationStart", () => {
      );
    });
  
@@ -3588,7 +4554,7 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
      const result = computeMessageDurationStart([
        {
          id: "u1",
-@@ -628,9 +656,10 @@ describe("computeMessageDurationStart", () => {
+@@ -903,9 +931,10 @@ describe("computeMessageDurationStart", () => {
        {
          id: "a1",
          role: "assistant",
@@ -3600,7 +4566,7 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
        },
        {
          id: "a2",
-@@ -1269,6 +1298,489 @@ describe("deriveMessagesTimelineRows", () => {
+@@ -1542,6 +1571,489 @@ describe("deriveMessagesTimelineRows", () => {
      expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-1", "assistant-final-entry"]);
    });
  
@@ -4090,7 +5056,7 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
    it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
      // A steer ends the previous turn early: its only message completes the
      // instant it is created, and trailing work entries land after it. The
-@@ -2211,6 +2723,21 @@ describe("deriveMessagesTimelineRows", () => {
+@@ -2484,6 +2996,21 @@ describe("deriveMessagesTimelineRows", () => {
              streaming: false,
            },
          },
@@ -4112,7 +5078,7 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
        ],
        expandedTurnIds: new Set(["turn-1" as never]),
        isWorking: false,
-@@ -2224,7 +2751,8 @@ describe("deriveMessagesTimelineRows", () => {
+@@ -2497,7 +3024,8 @@ describe("deriveMessagesTimelineRows", () => {
          row.kind === "message" && row.message.role === "assistant",
      );
  
@@ -4123,10 +5089,10 @@ index 94727086f1868769e1cfa7c6530c91f512db2937..692b0e5eff3d2de0590f80b988df64e3
  
    it("withholds assistant metadata while the active turn is still in progress", () => {
 diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.ts b/apps/web/src/components/chat/MessagesTimeline.logic.ts
-index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbdaca7dc578 100644
+index 08e4f8d26..7160e4516 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.logic.ts
 +++ b/apps/web/src/components/chat/MessagesTimeline.logic.ts
-@@ -29,7 +29,13 @@ import {
+@@ -28,7 +28,13 @@ import {
    type WorkLogEntry,
  } from "../../session-logic";
  import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
@@ -4140,8 +5106,8 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
 +} from "@t3tools/contracts";
  import { formatWorkspaceRelativePath } from "../../filePathDisplay";
  
- export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
-@@ -169,6 +175,24 @@ export function shouldPreserveAssistantLineBreaks(text: string): boolean {
+ const TIMELINE_MINIMAP_ITEM_SPACING = 8;
+@@ -168,6 +174,24 @@ export function shouldPreserveAssistantLineBreaks(text: string): boolean {
    return /^★ Insight(?:\s|─)/mu.test(text);
  }
  
@@ -4166,7 +5132,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
  export function resolveTimelineMinimapHeightStyle(itemCount: number): string {
    const naturalHeight = Math.max(1, (itemCount - 1) * TIMELINE_MINIMAP_ITEM_SPACING);
    return `min(${naturalHeight}px, ${TIMELINE_MINIMAP_MAX_HEIGHT_CSS})`;
-@@ -267,6 +291,7 @@ function maxIsoTimestamp(a: string | null, b: string | null): string | null {
+@@ -266,6 +290,7 @@ function maxIsoTimestamp(a: string | null, b: string | null): string | null {
  export interface TimelineDurationMessage {
    id: string;
    role: "user" | "assistant" | "system";
@@ -4174,7 +5140,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
    createdAt: string;
    updatedAt: string;
    streaming: boolean;
-@@ -380,7 +405,7 @@ export function computeMessageDurationStart(
+@@ -379,7 +404,7 @@ export function computeMessageDurationStart(
        lastBoundary = message.createdAt;
      }
      result.set(message.id, lastBoundary ?? message.createdAt);
@@ -4183,7 +5149,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
        lastBoundary = message.updatedAt;
      }
    }
-@@ -442,7 +467,7 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
+@@ -441,7 +466,7 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
        nullTurnResponseIndex += 1;
        continue;
      }
@@ -4192,7 +5158,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
        continue;
      }
  
-@@ -501,6 +526,15 @@ function timelineEntryTurnId(entry: TimelineEntry): TurnId | null {
+@@ -500,6 +525,15 @@ function timelineEntryTurnId(entry: TimelineEntry): TurnId | null {
    return entry.kind === "work" ? (entry.entry.turnId ?? null) : null;
  }
  
@@ -4208,9 +5174,9 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
  /**
   * A promptless provider restart replaces the native turn without adding a
   * user message. Keep every provider turn since the latest user message in one
-@@ -790,10 +824,17 @@ export function deriveMessagesTimelineRows(input: {
-   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
- }): MessagesTimelineRow[] {
+@@ -842,10 +876,17 @@ export function deriveMessagesTimelineRows(input: {
+       : {},
+   });
    const nextRows: MessagesTimelineRow[] = [];
 +  // A whitespace-only completed reasoning message renders no row, so every
 +  // derivation below (folds, forward/backward work-group scans, the row loop)
@@ -4228,7 +5194,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
    const unsettledTurnId = deriveUnsettledTurnId(
      input.latestTurn ?? null,
      input.runningTurnId ?? null,
-@@ -804,7 +845,7 @@ export function deriveMessagesTimelineRows(input: {
+@@ -856,7 +897,7 @@ export function deriveMessagesTimelineRows(input: {
      isWorking: input.isWorking,
    });
    const foldsByAnchorEntryId = deriveTurnFolds({
@@ -4237,7 +5203,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
      terminalAssistantMessageIds,
      latestTurn: input.latestTurn ?? null,
      unfoldedTurnIds: activeVisualResponseTurnIds,
-@@ -818,9 +859,9 @@ export function deriveMessagesTimelineRows(input: {
+@@ -870,9 +911,9 @@ export function deriveMessagesTimelineRows(input: {
      }
    }
  
@@ -4249,7 +5215,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
      activeTurnHeaderIndex = latestUserMessageIndex + 1;
    }
    const entryBelongsToActiveTurn = (entry: TimelineEntry, index: number) =>
-@@ -832,9 +873,21 @@ export function deriveMessagesTimelineRows(input: {
+@@ -884,9 +925,21 @@ export function deriveMessagesTimelineRows(input: {
      unsettledTurnId !== null &&
      entry.toolLifecycleStatus === "inProgress" &&
      entry.turnId === unsettledTurnId;
@@ -4273,7 +5239,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
      if (
        !entryBelongsToActiveTurn(entry, index) ||
        entry.kind !== "work" ||
-@@ -915,8 +968,8 @@ export function deriveMessagesTimelineRows(input: {
+@@ -967,8 +1020,8 @@ export function deriveMessagesTimelineRows(input: {
      );
    };
  
@@ -4284,7 +5250,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
      if (!timelineEntry) {
        continue;
      }
-@@ -975,8 +1028,8 @@ export function deriveMessagesTimelineRows(input: {
+@@ -1027,8 +1080,8 @@ export function deriveMessagesTimelineRows(input: {
        }
        const groupedEntries = [timelineEntry.entry];
        let cursor = index + 1;
@@ -4295,7 +5261,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
          if (
            !nextEntry ||
            nextEntry.kind !== "work" ||
-@@ -1145,10 +1198,14 @@ export function deriveMessagesTimelineRows(input: {
+@@ -1197,10 +1250,14 @@ export function deriveMessagesTimelineRows(input: {
      });
    }
  
@@ -4313,7 +5279,7 @@ index 36c90c89563cce79c4ecc52e45f334f82b749c68..5717c2cdefd99ac8f5c57f1aa066fbda
        kind: "thinking",
        id: LIVE_ACTIVITY_ROW_ID,
 diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
-index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf88906c11 100644
+index a113157ac..270c8a541 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.tsx
 +++ b/apps/web/src/components/chat/MessagesTimeline.tsx
 @@ -1,4 +1,5 @@
@@ -4322,7 +5288,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    type AssistantCitation,
    type EnvironmentId,
    type MessageId,
-@@ -55,6 +56,7 @@ import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
+@@ -56,6 +57,7 @@ import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
  import {
    createMessageAttachmentPreviewProjector,
    deriveTimelineEntries,
@@ -4330,7 +5296,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    selectMessageImageResources,
    workEntryDisplayIndicatesToolFailure,
    workEntrySignalsSevereFailure,
-@@ -129,6 +131,7 @@ import {
+@@ -133,6 +135,7 @@ import {
    type MessagesTimelineRowsProjection,
    liveWorkEntryLabel,
    resolveAssistantMessageCopyState,
@@ -4338,7 +5304,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    resolveTimelineIsAtEnd,
    resolveTimelineMinimapHasPersistentGutter,
    resolveTimelineMinimapHeightStyle,
-@@ -139,6 +142,7 @@ import {
+@@ -143,6 +146,7 @@ import {
    resolveWorkGroupScrollIndex,
    shouldFollowWorkGroupAppend,
    shouldPreserveAssistantLineBreaks,
@@ -4346,7 +5312,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    toolGroupAction,
    workEntryDisplayLabel,
    workEntryIsVisibleInGroup,
-@@ -209,6 +213,12 @@ interface TimelineRowSharedState {
+@@ -213,6 +217,12 @@ interface TimelineRowSharedState {
    onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
    onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
    workGroupViewState: WorkGroupViewState;
@@ -4359,7 +5325,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    agentPanelModel: AgentPanelModel;
    onOpenAgents: () => void;
  }
-@@ -400,6 +410,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -410,6 +420,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
      () => ({ scrollPositions: new Map(), expandedEntries: new Set() }),
      [routeThreadKey],
    );
@@ -4369,7 +5335,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
    const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
    const disclosureAnchorKeyRef = useRef<string | null>(null);
-@@ -487,6 +500,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -497,6 +510,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
      },
      [expandedWorkGroupIds, suspendEndScrollMaintenanceForDisclosure],
    );
@@ -4385,7 +5351,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
  
    // An in-session interrupt leaves its turn expanded so the user keeps their
    // place; the next turn (or a reload, since this is local state) folds it.
-@@ -684,6 +706,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -739,6 +761,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
        onToggleWorkGroup,
        onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
        workGroupViewState,
@@ -4394,7 +5360,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
        agentPanelModel,
        onOpenAgents,
      }),
-@@ -708,6 +732,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -763,6 +787,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
        onToggleWorkGroup,
        suspendEndScrollMaintenanceForDisclosure,
        workGroupViewState,
@@ -4403,7 +5369,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
        agentPanelModel,
        onOpenAgents,
      ],
-@@ -832,7 +858,9 @@ function keyExtractor(item: MessagesTimelineRow) {
+@@ -888,7 +914,9 @@ function keyExtractor(item: MessagesTimelineRow) {
  }
  
  function getItemType(item: MessagesTimelineRow) {
@@ -4414,7 +5380,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
  }
  
  interface TimelineMinimapItem {
-@@ -883,7 +911,7 @@ function resolveFinalAssistantTextForTurn(
+@@ -939,7 +967,7 @@ function resolveFinalAssistantTextForTurn(
      if (row.message.role === "user") {
        break;
      }
@@ -4423,7 +5389,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
        finalAssistantText = row.message.text ?? null;
      }
    }
-@@ -1167,7 +1195,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
+@@ -1223,7 +1251,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
        {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
        {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
        {row.kind === "message" && row.message.role === "assistant" ? (
@@ -4436,7 +5402,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
        ) : null}
        {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
        {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
-@@ -1498,6 +1530,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
+@@ -1556,6 +1588,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
    );
  }
  
@@ -4482,7 +5448,7 @@ index 07da22709bfd803dff9cdf245c6cf29d4089322e..7d7ec5de0ab173c8c8965b90e47f52bf
    const ctx = use(TimelineRowCtx);
    const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
 diff --git a/docs/README.md b/docs/README.md
-index 4e6f82bfb82655293965a492db6c86889cc6efd7..9cf8ea1a5c9f1e02899303e5f0efcc393029788a 100644
+index 4e6f82bfb..9cf8ea1a5 100644
 --- a/docs/README.md
 +++ b/docs/README.md
 @@ -5,6 +5,7 @@
@@ -4494,7 +5460,7 @@ index 4e6f82bfb82655293965a492db6c86889cc6efd7..9cf8ea1a5c9f1e02899303e5f0efcc39
  - [Terminal history](./user/terminal.md)
  - [Source control](./user/source-control.md)
 diff --git a/docs/internals/glossary.md b/docs/internals/glossary.md
-index f7cb61259c0e3423a0a1aae69f5a730d70b3fa5e..589fb38bc8e265cf0171d5ba38c34f287a8de31f 100644
+index f7cb61259..589fb38bc 100644
 --- a/docs/internals/glossary.md
 +++ b/docs/internals/glossary.md
 @@ -5,17 +5,18 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
@@ -4528,7 +5494,7 @@ index f7cb61259c0e3423a0a1aae69f5a730d70b3fa5e..589fb38bc8e265cf0171d5ba38c34f28
  ## Orchestration
  
 diff --git a/docs/user/providers-claude.md b/docs/user/providers-claude.md
-index b43b58e5262761f7caa18d40bac3d27d608a3412..d8d4cb60e0b38f599e380a0dda47f1be53c8cd46 100644
+index b43b58e52..d8d4cb60e 100644
 --- a/docs/user/providers-claude.md
 +++ b/docs/user/providers-claude.md
 @@ -49,6 +49,12 @@ You can also send `/compact` in an existing conversation. Web and desktop offer
@@ -4546,7 +5512,7 @@ index b43b58e5262761f7caa18d40bac3d27d608a3412..d8d4cb60e0b38f599e380a0dda47f1be
  If your Claude subscription runs out of usage mid-turn, the thread shows which
 diff --git a/docs/user/reasoning.md b/docs/user/reasoning.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..64a8d2fa4bc47dddf8b9df852f6a9f4b7839b07e
+index 000000000..64a8d2fa4
 --- /dev/null
 +++ b/docs/user/reasoning.md
 @@ -0,0 +1,23 @@
@@ -4574,10 +5540,10 @@ index 0000000000000000000000000000000000000000..64a8d2fa4bc47dddf8b9df852f6a9f4b
 +For Claude, what you read is a summary of the thinking rather than the model's raw words. Recent
 +Claude Code versions do not hand out raw thinking, so T3 Code asks for the summarized form.
 diff --git a/packages/client-runtime/src/state/threadReducer.test.ts b/packages/client-runtime/src/state/threadReducer.test.ts
-index 401980997663b48b61937319943241186ae752c9..59b64eccd756eda31c0fab23b754caecf42ec982 100644
+index 38afce2d5..6cd1f5e6e 100644
 --- a/packages/client-runtime/src/state/threadReducer.test.ts
 +++ b/packages/client-runtime/src/state/threadReducer.test.ts
-@@ -630,6 +630,58 @@ describe("applyThreadDetailEvent", () => {
+@@ -718,6 +718,58 @@ describe("applyThreadDetailEvent", () => {
          expect(result.thread.checkpoints[0]?.assistantMessageId).toBe("msg-2");
        }
      });
@@ -4636,8 +5602,304 @@ index 401980997663b48b61937319943241186ae752c9..59b64eccd756eda31c0fab23b754caec
    });
  
    describe("thread.session-set", () => {
+@@ -1360,6 +1412,295 @@ describe("applyThreadDetailEvent", () => {
+       }
+     });
+ 
++    // Combined regression: the retained assistant count must skip imported
++    // messages AND reasoning messages. Either exclusion alone lets the turnless
++    // substantive answer for the kept turn be dropped on revert.
++    it("imported history and retained reasoning never consume the live assistant quota", () => {
++      const message = (input: {
++        id: string;
++        role: "user" | "assistant";
++        channel?: "reasoning";
++        turnId: string | null;
++        createdAt: string;
++      }): OrchestrationThread["messages"][number] => ({
++        id: MessageId.make(input.id),
++        role: input.role,
++        ...(input.channel === undefined ? {} : { channel: input.channel }),
++        text: input.id,
++        turnId: input.turnId === null ? null : TurnId.make(input.turnId),
++        streaming: false,
++        createdAt: input.createdAt,
++        updatedAt: input.createdAt,
++      });
++      const thread: OrchestrationThread = {
++        ...baseThread,
++        messages: [
++          message({
++            id: "import:codex:session-1:000000",
++            role: "user",
++            turnId: null,
++            createdAt: "2026-03-01T00:00:00.000Z",
++          }),
++          message({
++            id: "import:codex:session-1:000001",
++            role: "assistant",
++            turnId: null,
++            createdAt: "2026-03-01T00:01:00.000Z",
++          }),
++          message({
++            id: "user-live-1",
++            role: "user",
++            turnId: "turn-live-1",
++            createdAt: "2026-04-01T01:00:00.000Z",
++          }),
++          message({
++            id: "reasoning-live-1",
++            role: "assistant",
++            channel: "reasoning",
++            turnId: "turn-live-1",
++            createdAt: "2026-04-01T01:01:00.000Z",
++          }),
++          message({
++            id: "assistant-live-1",
++            role: "assistant",
++            turnId: null,
++            createdAt: "2026-04-01T01:02:00.000Z",
++          }),
++          message({
++            id: "user-live-2",
++            role: "user",
++            turnId: "turn-live-2",
++            createdAt: "2026-04-01T02:00:00.000Z",
++          }),
++          message({
++            id: "reasoning-discarded",
++            role: "assistant",
++            channel: "reasoning",
++            turnId: null,
++            createdAt: "2026-04-01T02:01:00.000Z",
++          }),
++          message({
++            id: "assistant-live-2",
++            role: "assistant",
++            turnId: "turn-live-2",
++            createdAt: "2026-04-01T02:02:00.000Z",
++          }),
++        ],
++        checkpoints: [
++          {
++            turnId: TurnId.make("turn-live-1"),
++            checkpointTurnCount: 1,
++            checkpointRef: CheckpointRef.make("ref-1"),
++            status: "ready",
++            files: [],
++            assistantMessageId: null,
++            completedAt: "2026-04-01T01:30:00.000Z",
++          },
++          {
++            turnId: TurnId.make("turn-live-2"),
++            checkpointTurnCount: 2,
++            checkpointRef: CheckpointRef.make("ref-2"),
++            status: "ready",
++            files: [],
++            assistantMessageId: MessageId.make("assistant-live-2"),
++            completedAt: "2026-04-01T02:30:00.000Z",
++          },
++        ],
++      };
++
++      const result = applyThreadDetailEvent(thread, {
++        ...baseEventFields,
++        sequence: 14,
++        occurredAt: "2026-04-01T03:00:00.000Z",
++        aggregateKind: "thread",
++        aggregateId: ThreadId.make("thread-1"),
++        type: "thread.reverted",
++        payload: { threadId: ThreadId.make("thread-1"), turnCount: 1 },
++      });
++
++      expect(result.kind).toBe("updated");
++      if (result.kind === "updated") {
++        expect(result.thread.messages.map((message) => message.id)).toEqual([
++          "import:codex:session-1:000000",
++          "import:codex:session-1:000001",
++          "user-live-1",
++          "reasoning-live-1",
++          "assistant-live-1",
++        ]);
++      }
++    });
++
++    // Imported/system retention takes precedence over the reasoning exclusion:
++    // an imported reasoning message survives a checkpoint-zero revert while
++    // every unbound live prompt, reasoning segment, and answer is removed.
++    it("keeps imported and system history including imported reasoning at checkpoint zero", () => {
++      const message = (input: {
++        id: string;
++        role: "user" | "assistant" | "system";
++        channel?: "reasoning";
++        createdAt: string;
++      }): OrchestrationThread["messages"][number] => ({
++        id: MessageId.make(input.id),
++        role: input.role,
++        ...(input.channel === undefined ? {} : { channel: input.channel }),
++        text: input.id,
++        turnId: null,
++        streaming: false,
++        createdAt: input.createdAt,
++        updatedAt: input.createdAt,
++      });
++      const thread: OrchestrationThread = {
++        ...baseThread,
++        messages: [
++          message({
++            id: "import:codex:session-2:000000",
++            role: "user",
++            createdAt: "2026-03-01T00:00:00.000Z",
++          }),
++          message({
++            id: "import:codex:session-2:000001",
++            role: "assistant",
++            channel: "reasoning",
++            createdAt: "2026-03-01T00:01:00.000Z",
++          }),
++          message({
++            id: "import:codex:session-2:000002",
++            role: "assistant",
++            createdAt: "2026-03-01T00:02:00.000Z",
++          }),
++          message({ id: "system-note", role: "system", createdAt: "2026-03-01T00:03:00.000Z" }),
++          message({ id: "user-live", role: "user", createdAt: "2026-04-01T01:00:00.000Z" }),
++          message({
++            id: "reasoning-live",
++            role: "assistant",
++            channel: "reasoning",
++            createdAt: "2026-04-01T01:01:00.000Z",
++          }),
++          message({
++            id: "assistant-live",
++            role: "assistant",
++            createdAt: "2026-04-01T01:02:00.000Z",
++          }),
++        ],
++      };
++
++      const result = applyThreadDetailEvent(thread, {
++        ...baseEventFields,
++        sequence: 14,
++        occurredAt: "2026-04-01T02:00:00.000Z",
++        aggregateKind: "thread",
++        aggregateId: ThreadId.make("thread-1"),
++        type: "thread.reverted",
++        payload: { threadId: ThreadId.make("thread-1"), turnCount: 0 },
++      });
++
++      expect(result.kind).toBe("updated");
++      if (result.kind === "updated") {
++        expect(result.thread.messages.map((message) => message.id)).toEqual([
++          "import:codex:session-2:000000",
++          "import:codex:session-2:000001",
++          "import:codex:session-2:000002",
++          "system-note",
++        ]);
++      }
++    });
++
++    // The fallback answer is chosen by absolute time with the message id as
++    // the tie breaker, earlier imported/reasoning messages never take that
++    // slot, and the surviving messages keep their original order.
++    it("fallback assistant selection uses absolute time, id ties, and skips reasoning decoys", () => {
++      const message = (input: {
++        id: string;
++        role: "user" | "assistant";
++        channel?: "reasoning";
++        turnId: string | null;
++        createdAt: string;
++      }): OrchestrationThread["messages"][number] => ({
++        id: MessageId.make(input.id),
++        role: input.role,
++        ...(input.channel === undefined ? {} : { channel: input.channel }),
++        text: input.id,
++        turnId: input.turnId === null ? null : TurnId.make(input.turnId),
++        streaming: false,
++        createdAt: input.createdAt,
++        updatedAt: input.createdAt,
++      });
++      const thread: OrchestrationThread = {
++        ...baseThread,
++        messages: [
++          message({
++            id: "import:codex:session-3:000001",
++            role: "assistant",
++            turnId: null,
++            createdAt: "2026-04-01T07:00:00.000Z",
++          }),
++          message({
++            id: "user-kept",
++            role: "user",
++            turnId: "turn-kept",
++            createdAt: "2026-04-01T08:00:00.000Z",
++          }),
++          message({
++            id: "reasoning-early",
++            role: "assistant",
++            channel: "reasoning",
++            turnId: null,
++            createdAt: "2026-04-01T08:10:00.000Z",
++          }),
++          message({
++            id: "answer-later-in-utc",
++            role: "assistant",
++            turnId: null,
++            createdAt: "2026-04-01T09:00:00.000Z",
++          }),
++          // Both offset answers are 08:30:00Z; "answer-a" wins the id tie
++          // even though "answer-z" appears first.
++          message({
++            id: "answer-z",
++            role: "assistant",
++            turnId: null,
++            createdAt: "2026-04-01T10:30:00.000+02:00",
++          }),
++          message({
++            id: "answer-a",
++            role: "assistant",
++            turnId: null,
++            createdAt: "2026-04-01T09:30:00.000+01:00",
++          }),
++        ],
++        checkpoints: [
++          {
++            turnId: TurnId.make("turn-kept"),
++            checkpointTurnCount: 1,
++            checkpointRef: CheckpointRef.make("ref-kept"),
++            status: "ready",
++            files: [],
++            assistantMessageId: null,
++            completedAt: "2026-04-01T08:05:00.000Z",
++          },
++        ],
++      };
++
++      const result = applyThreadDetailEvent(thread, {
++        ...baseEventFields,
++        sequence: 14,
++        occurredAt: "2026-04-01T11:00:00.000Z",
++        aggregateKind: "thread",
++        aggregateId: ThreadId.make("thread-1"),
++        type: "thread.reverted",
++        payload: { threadId: ThreadId.make("thread-1"), turnCount: 1 },
++      });
++
++      expect(result.kind).toBe("updated");
++      if (result.kind === "updated") {
++        expect(result.thread.messages.map((message) => message.id)).toEqual([
++          "import:codex:session-3:000001",
++          "user-kept",
++          "answer-a",
++        ]);
++      }
++    });
++
+     it("filters entities to retained turns", () => {
+       const threadWithData: OrchestrationThread = {
+         ...baseThread,
 diff --git a/packages/client-runtime/src/state/threadReducer.ts b/packages/client-runtime/src/state/threadReducer.ts
-index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de4d3584c6 100644
+index a3481fdc7..d5c34c863 100644
 --- a/packages/client-runtime/src/state/threadReducer.ts
 +++ b/packages/client-runtime/src/state/threadReducer.ts
 @@ -1,16 +1,17 @@
@@ -4666,9 +5928,9 @@ index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de
 +  type OrchestrationThreadActivity,
 +  type TurnId,
  } from "@t3tools/contracts";
- 
- export type ThreadDetailReducerResult =
-@@ -305,6 +306,7 @@ export function applyThreadDetailEvent(
+ import { isImportedAgentSessionMessageId } from "@t3tools/contracts";
+ import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
+@@ -316,6 +317,7 @@ export function applyThreadDetailEvent(
        const message: OrchestrationMessage = {
          id: event.payload.messageId,
          role: event.payload.role,
@@ -4676,7 +5938,7 @@ index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de
          text: event.payload.text,
          ...(event.payload.attachments !== undefined
            ? { attachments: event.payload.attachments }
-@@ -328,6 +330,7 @@ export function applyThreadDetailEvent(
+@@ -339,6 +341,7 @@ export function applyThreadDetailEvent(
                        ? message.text
                        : entry.text,
                    streaming: message.streaming,
@@ -4684,7 +5946,7 @@ index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de
                    ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
                    ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
                    ...(message.attachments !== undefined
-@@ -350,6 +353,7 @@ export function applyThreadDetailEvent(
+@@ -361,6 +364,7 @@ export function applyThreadDetailEvent(
        const latestTurn = reuseLatestTurn(
          thread.latestTurn,
          event.payload.role === "assistant" &&
@@ -4692,7 +5954,7 @@ index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de
            event.payload.turnId !== null &&
            (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
            ? {
-@@ -382,7 +386,9 @@ export function applyThreadDetailEvent(
+@@ -393,7 +397,9 @@ export function applyThreadDetailEvent(
        // Rebind checkpoint assistant message IDs for assistant messages. The
        // helper hands back the same array when the entry is already bound.
        const checkpoints =
@@ -4703,8 +5965,24 @@ index 690c74bdea0a769a410ca5405d6271cc4312aae4..2d67750b41e4dca22b4f4c26052a14de
            ? rebindCheckpointAssistantMessage(
                thread.checkpoints,
                event.payload.turnId,
+@@ -775,6 +781,7 @@ function retainMessagesAfterRevert(
+       (message) =>
+         message.role === role &&
+         !isImportedAgentSessionMessageId(message.id) &&
++        (role !== "assistant" || !isReasoningMessage(message)) &&
+         retainedMessageIds.has(message.id),
+     ).length;
+     const missingCount = Math.max(0, turnCount - retainedCount);
+@@ -782,6 +789,7 @@ function retainMessagesAfterRevert(
+       .filter(
+         (message) =>
+           message.role === role &&
++          (role !== "assistant" || !isReasoningMessage(message)) &&
+           !retainedMessageIds.has(message.id) &&
+           (message.turnId === null || retainedTurnIds.has(message.turnId)),
+       )
 diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
-index 17cadc6d1d7f935d2bcb0756e9bb7ef67eda8769..4486d3058e6377fb59e58f02e7f65b54baf3459f 100644
+index 37f5476fe..dc752384e 100644
 --- a/packages/contracts/src/orchestration.ts
 +++ b/packages/contracts/src/orchestration.ts
 @@ -351,9 +351,13 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
@@ -4734,7 +6012,7 @@ index 17cadc6d1d7f935d2bcb0756e9bb7ef67eda8769..4486d3058e6377fb59e58f02e7f65b54
  export const OrchestrationProposedPlanId = TrimmedNonEmptyString;
  export type OrchestrationProposedPlanId = typeof OrchestrationProposedPlanId.Type;
  
-@@ -1109,6 +1119,7 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
+@@ -1125,6 +1135,7 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
    threadId: ThreadId,
    messageId: MessageId,
    delta: Schema.String,
@@ -4742,7 +6020,7 @@ index 17cadc6d1d7f935d2bcb0756e9bb7ef67eda8769..4486d3058e6377fb59e58f02e7f65b54
    turnId: Schema.optional(TurnId),
    createdAt: IsoDateTime,
  });
-@@ -1118,6 +1129,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
+@@ -1134,6 +1145,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
    commandId: CommandId,
    threadId: ThreadId,
    messageId: MessageId,
@@ -4750,7 +6028,7 @@ index 17cadc6d1d7f935d2bcb0756e9bb7ef67eda8769..4486d3058e6377fb59e58f02e7f65b54
    turnId: Schema.optional(TurnId),
    createdAt: IsoDateTime,
  });
-@@ -1372,6 +1384,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
+@@ -1425,6 +1437,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
    threadId: ThreadId,
    messageId: MessageId,
    role: OrchestrationMessageRole,
