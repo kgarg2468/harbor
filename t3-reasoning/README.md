@@ -66,6 +66,10 @@ What this component does not do:
 - `patches/0012-migration-preflight.patch`: rehearses candidate migrations on a
   disposable snapshot and checks the candidate response. Downloading, invoking
   the staged candidate, and activating it remain separate updater work.
+- `patches/0014-managed-runtime-stager.patch`: validates managed release documents
+  and extracts verified archives into a confined private tree, preserving safe
+  internal dependency links. Cancellation waits for cleanup; downloading and
+  activating a runtime remain separate updater work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
