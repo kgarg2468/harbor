@@ -184,4 +184,6 @@ prevents new work from falling back to the local embedded server.
 
 The common `patches/0009-activity-wiring.patch` tracks queued commands, required
 event delivery, reactor work and detached children, including fork handoff.
-Native provider lifecycle and updater activation remain separate changes.
+The common `patches/0015-native-activity.patch` extends ownership through native
+provider exit, ingress draining, finalization, and independent server roots.
+Updater activation and retiring idle provider processes remain separate work.
