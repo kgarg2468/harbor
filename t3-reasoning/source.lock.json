@@ -59,6 +59,11 @@
       "sha256": "d3e8d52a8997e393cd63b37cbb433a0e4593ad0b86529ae9923fccb8688b7c48"
     },
     {
+      "id": "server-reservation",
+      "path": "patches/0017-server-reservation.patch",
+      "sha256": "9ae2f154e170c5e1353b65a3e27aefb4aa4f250e1b7ed3f2699c277f11be8fe9"
+    },
+    {
       "id": "candidate-process",
       "path": "patches/0018-candidate-process.patch",
       "sha256": "d0850e428f54a4e18e43af07b048d84e35769fd9fc5bf51551e8060633c7b606"
@@ -81,6 +86,7 @@
       "idle-coordinator",
       "managed-runtime-stager",
       "desktop-reservation",
+      "server-reservation",
       "candidate-process"
     ],
     "reasoning": [
@@ -94,6 +100,7 @@
       "idle-coordinator",
       "managed-runtime-stager",
       "desktop-reservation",
+      "server-reservation",
       "candidate-process",
       "reasoning-identity"
     ]
