@@ -31,7 +31,12 @@ while IFS= read -r f; do
   # The rule is here to keep a real person's address out of a public repository, and no
   # spelling of an algorithm name is that, so they are excluded rather than the rule
   # weakened for every domain.
-  bad="$(grep -oIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- "${f}" | grep -v '@example\.com$' | grep -v '@openssh\.com$' || true)"
+  #
+  # git@github.com is not an address either. It is the fixed SSH login half of every
+  # GitHub remote URL, the same three words GitHub prints in its own clone command, and
+  # it is excluded exactly rather than by domain, so a real person's address at
+  # github.com is still reported.
+  bad="$(grep -oIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- "${f}" | grep -v '@example\.com$' | grep -v '@openssh\.com$' | grep -vx 'git@github\.com' || true)"
   if [ -n "${bad}" ]; then
     printf '%s: email outside example.com: %s\n' "${f}" "${bad}"
     status=1

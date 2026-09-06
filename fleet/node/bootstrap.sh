@@ -59,6 +59,11 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/firewall.sh"
 # shellcheck source=../lib/power.sh
 . "${HARBOR_ROOT}/lib/power.sh"
+# lib/tailscale.sh reads the lock through lib/versions.sh, journals through
+# lib/journal.sh, and does every package inspection and every apt call through
+# lib/apt.sh, so it is sourced after all three rather than beside the rows it serves.
+# shellcheck source=../lib/tailscale.sh
+. "${HARBOR_ROOT}/lib/tailscale.sh"
 # shellcheck source=../lib/state.sh
 . "${HARBOR_ROOT}/lib/state.sh"
 # The operator account of design section 5.2 when --operator names none.
@@ -476,8 +481,9 @@ harbor_bootstrap_row() {
 # packages before the account that needs openssh-server, the account before the
 # runtime that is probed as it, the authorized key before the drop-in that takes
 # password authentication away from that account, the sshd assertions before the
-# firewall that starts filtering, and the firewall before the power policy that
-# keeps a lid-closed node up (design section 6.2).
+# firewall that starts filtering, the firewall before the power policy that keeps a
+# lid-closed node up, and the firewall's tagged tailscale0 rule before the Tailscale
+# that puts this node on a tailnet at all (design section 6.2).
 #
 # Each row is one journaled transaction of design section 3.7, and each is decided
 # by inspection first (section 6.1), so a rerun on a healthy node makes no mutating
@@ -487,7 +493,9 @@ harbor_bootstrap_row() {
 # than a second message of its own.
 harbor_bootstrap_steps() {
   local root operator admin etc bindir prefix home uid gid lock_sha nodejs probe=0
+  local drift=0 grant=0
   local firewall_args=()
+  local tailscale_args=()
   root="${HARBOR_BOOTSTRAP_STATE_ROOT}"
   operator="${HARBOR_BOOTSTRAP_OPERATOR}"
   etc="${HARBOR_BOOTSTRAP_ETC}"
@@ -558,16 +566,52 @@ harbor_bootstrap_steps() {
   # up with its lid closed.
   harbor_bootstrap_row power "the firewall is applied and the logind lid policy under ${etc}/systemd/logind.conf.d/ and the four masked sleep targets are being written; linger is untouched"
   harbor_power_configure "${root}" "${etc}"
-  # The Tailscale install row of the design section 5.2 table sits here, between
-  # Power and Linger. It is slice 3d and belongs to lib/tailscale.sh and its own
-  # commits, so this release applies nothing for it and journals nothing for it.
+  # Tailscale: the pinned install of the design section 5.2 Tailscale install row,
+  # after the firewall and never before it, since the tagged tailscale0 rule is what
+  # makes the tailnet a way into this node and it is in place before the daemon that
+  # could put the node on one. Nothing here logs the node in: that is attended and is
+  # design section 5.3's harbor auth tailscale, which the operator row below names
+  # when the daemon is not running.
   #
+  # --adopt-tailscale reaches this row and the operator row below through one list,
+  # because a run adopts either the whole of this node's Tailscale or none of it, and
+  # it is built here, at the first of the two rows to need it.
+  harbor_bootstrap_row tailscale-install "the power policy is applied and the tailscale ${HARBOR_VERSIONS_FILE} pins is being installed from its vendor channel; linger, the operator grant, and the state record are untouched"
+  ! harbor_bootstrap_has_flag --adopt-tailscale \
+    || tailscale_args[${#tailscale_args[@]}]=--adopt-tailscale
+  # A Tailscale this node already had, at another version and installed by somebody
+  # other than Harbor, is preserved exactly as found and returns 1 rather than being
+  # moved to the pin. That is a precondition for whoever owns it and not a failure of
+  # this row: the package is journaled as observed, nothing under the configuration
+  # root was written, and the node is a usable one, so it is the degraded exit 1 of
+  # design section 6.2 and every row below still runs. Only 2 would say the row could
+  # not be applied, and it was: applying it here means leaving the installation alone.
+  harbor_tailscale_install "${root}" "${etc}" ${tailscale_args[@]+"${tailscale_args[@]}"} \
+    || drift="$?"
+  [ "${drift}" = 0 ] \
+    || harbor_bootstrap_degraded tailscale.drift "the tailscale ${HARBOR_TAILSCALE_VERSION} this node already had is not one Harbor installed and is not the version ${HARBOR_VERSIONS_FILE} pins; Harbor preserved it and changed nothing, so either leave it as it is or rerun with --adopt-tailscale to have Harbor install the pinned version over it and journal the version it replaced"
   # Linger, so the operator's user manager runs without a login session.
-  harbor_bootstrap_row linger "the power policy is applied and linger is being enabled for ${operator}"
+  harbor_bootstrap_row linger "the Tailscale install row is done and linger is being enabled for ${operator}; the operator grant and the state record are untouched"
   harbor_user_linger "${root}" "${operator}"
-  # The Tailscale operator row of the design section 5.2 table sits here, between
-  # Linger and the state record, and belongs to slice 3d with the row above it.
+  # The Tailscale operator grant, the last row before the record: the operator reads
+  # tailscaled's status without sudo, which is what every later operator command
+  # stands on and what design section 5.4's provision preflight checks first. Harbor
+  # makes the grant on a daemon it installed; on one it did not, and without
+  # --adopt-tailscale, the row changes no preference at all and returns 3, having
+  # printed the sudo tailscale set the owner runs outside Harbor.
   #
+  # That 3 is the row's own report code and not this run's exit status: the node is
+  # bootstrapped and usable and only the grant is missing, which is somebody's to act
+  # on, so it contributes the degraded exit 1 of design section 6.2, exactly as the
+  # firewall's LAN warning and the Node.js probe do. The closing report the row prints
+  # for a daemon that is not Running contributes nothing at all and is narration: a
+  # Tailscale Harbor has only just installed cannot be logged in yet, because logging
+  # it in is attended, so counting it would make every fresh node a degraded one.
+  harbor_bootstrap_row tailscale-operator "linger is enabled and ${operator} is being granted the Tailscale operator role; only the state record is left"
+  harbor_tailscale_operator "${root}" "${operator}" ${tailscale_args[@]+"${tailscale_args[@]}"} \
+    || grant="$?"
+  [ "${grant}" = 0 ] \
+    || harbor_bootstrap_degraded tailscale.operator "${operator} cannot read tailscaled's status without sudo, and Harbor changes the operator preference of a Tailscale installation it did not install only with --adopt-tailscale; the row above printed the sudo tailscale set --operator=${operator} that grants it outside Harbor, and a rerun after that records the grant and needs no flag"
   # The state record, the last row of the table: bootstrap.json, mode 0644, carrying
   # the values the rows above already proved rather than any this row goes looking for
   # again. The lock hash is the hash of the very file the preflight loaded, the flag
@@ -575,11 +619,16 @@ harbor_bootstrap_steps() {
   # Node.js row proved the prefix reports, and the operator name, uid, gid, and home
   # are the account as the operator-user row left it.
   #
-  # Tailscale ownership is pre-existing, and there is no version to record beside it:
-  # this release installs no Tailscale and adopts none, so pre-existing is the only
-  # ownership it can truthfully name. Slice 3d, which owns the two Tailscale rows
-  # above, is what makes harbor-installed and adopted reachable and what adds the
-  # installed version beside the ownership.
+  # The Tailscale ownership is the word the install row read out of the root journal,
+  # harbor-installed, adopted, or pre-existing, and that row sets it on every path it
+  # can return through, the preserved drift included, so the record names what this
+  # node really has rather than a second reading of its own.
+  #
+  # Design section 5.2 has the record carry the installed version beside a
+  # harbor-installed or adopted ownership as well. harbor_state_record takes no
+  # parameter for one, so this row passes the ten values the record holds and no
+  # eleventh: the version the install row proved stays in HARBOR_TAILSCALE_VERSION
+  # until lib/state.sh has a key for it.
   harbor_bootstrap_row state-record "every row of the design section 5.2 table is applied and ${root}/bootstrap.json is being written; until it names this release, every command but bootstrap and journal resolve refuses to run against this node"
   # Both values are read into variables of their own rather than substituted into the
   # call, for the reason the preflight reads the locked release into one: a failure
@@ -588,7 +637,7 @@ harbor_bootstrap_steps() {
     || harbor_die 2 bootstrap.lock_hash "the sha256 of ${HARBOR_VERSIONS_FILE} cannot be computed, so the record cannot name the lock this node was bootstrapped from; every row above is applied, so fix the cause and rerun"
   nodejs="$(harbor_version_require nodejs_version)" || exit "$?"
   harbor_state_record "${root}" "${HARBOR_BOOTSTRAP_TAG}" "${HARBOR_BOOTSTRAP_LINK}" \
-    "${lock_sha}" "${HARBOR_BOOTSTRAP_FLAG_SET}" "${nodejs}" pre-existing \
+    "${lock_sha}" "${HARBOR_BOOTSTRAP_FLAG_SET}" "${nodejs}" "${HARBOR_TAILSCALE_OWNERSHIP}" \
     "${operator}" "${uid}" "${gid}" "${home}"
   # Every row is applied, so a failure after this point is no longer one row's.
   # Read by the ERR trap of lib/log.sh, never in this file.
@@ -625,7 +674,7 @@ harbor_bootstrap_main() {
   # this is a printed line and never a runuser, an su, or a login of any kind. The
   # command is design section 5.4's, run as the operator over SSH from the Mac; the
   # Tailscale login of design section 5.3 that comes before it on a Harbor-installed
-  # Tailscale is reported by the Tailscale operator row, which is slice 3d's.
+  # Tailscale is the one the Tailscale operator row above has already reported.
   harbor_msg "this node is bootstrapped; next, as ${HARBOR_BOOTSTRAP_OPERATOR} over SSH: harbor provision"
   # Read by the EXIT trap of lib/log.sh, which turns a zero exit without it into the
   # exit 2 of a command that stopped before it finished.
