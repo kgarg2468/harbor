@@ -6228,10 +6228,10 @@ index 15d4f925c..3c69acc81 100644
                  error,
 diff --git a/apps/server/src/provider/claudeQueryRuntime.test.ts b/apps/server/src/provider/claudeQueryRuntime.test.ts
 new file mode 100644
-index 000000000..af86f73d8
+index 000000000..a59c0d9bb
 --- /dev/null
 +++ b/apps/server/src/provider/claudeQueryRuntime.test.ts
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,404 @@
 +// @effect-diagnostics nodeBuiltinImport:off
 +import * as NodeEvents from "node:events";
 +import * as NodeStream from "node:stream";
@@ -6365,6 +6365,9 @@ index 000000000..af86f73d8
 +
 +const baseOptions: Options = { pathToClaudeCodeExecutable: "/opt/claude/cli.js" };
 +
++/** The runtime's stderr drain grace, mirrored so the tests can step past it. */
++const STDERR_GRACE_MS = 200;
++
 +/** Whether a promise has settled by the time the event loop turns once. */
 +const settledState = (promise: Promise<void>) =>
 +  Promise.race([
@@ -6480,6 +6483,65 @@ index 000000000..af86f73d8
 +    assert.ok(child.stderr.destroyed, "stderr is released after delivery");
 +  });
 +
++  it("flushes an incomplete UTF-8 stderr tail before the grace-delivered exit, once", async () => {
++    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
++    const events: Array<string> = [];
++    const { child, query, runtime } = start({
++      options: { ...baseOptions, stderr: (text) => events.push(`stderr:${text}`) },
++    });
++    query.spawned.on("exit", (code, signal) => events.push(`sdk-exit:${code}:${signal}`));
++
++    // The first two bytes of the three-byte euro sign stay inside the decoder.
++    child.stderr.write(Buffer.concat([Buffer.from("warn "), Buffer.from([0xe2, 0x82])]));
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    assert.deepEqual(events, ["stderr:warn "]);
++
++    child.exit(1, null);
++    assert.equal(await settledState(runtime.waitForExit()), "resolved");
++    assert.deepEqual(events, ["stderr:warn "], "the raw proof does not wait for the drain");
++
++    vi.advanceTimersByTime(199);
++    assert.deepEqual(events, ["stderr:warn "]);
++    vi.advanceTimersByTime(1);
++    assert.deepEqual(events, ["stderr:warn ", "stderr:�", "sdk-exit:1:null"]);
++
++    assert.ok(child.stderr.destroyed, "stderr is released after delivery");
++    await new Promise<void>((resolve) => child.stderr.once("close", () => resolve()));
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    vi.advanceTimersByTime(STDERR_GRACE_MS);
++    assert.deepEqual(
++      events,
++      ["stderr:warn ", "stderr:�", "sdk-exit:1:null"],
++      "the destroy-induced close forwards neither the tail nor the exit again",
++    );
++  });
++
++  it("flushes an incomplete UTF-8 stderr tail before the exit when stderr closes naturally", async () => {
++    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
++    const events: Array<string> = [];
++    const { child, query } = start({
++      options: { ...baseOptions, stderr: (text) => events.push(`stderr:${text}`) },
++    });
++    query.spawned.on("exit", (code, signal) => events.push(`sdk-exit:${code}:${signal}`));
++
++    child.stderr.write(Buffer.concat([Buffer.from("warn "), Buffer.from([0xe2, 0x82])]));
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    child.exit(0, null);
++    assert.deepEqual(events, ["stderr:warn "]);
++
++    child.stderr.end();
++    await new Promise<void>((resolve) => child.stderr.once("close", () => resolve()));
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    assert.deepEqual(events, ["stderr:warn ", "stderr:�", "sdk-exit:0:null"]);
++
++    vi.advanceTimersByTime(STDERR_GRACE_MS);
++    assert.deepEqual(
++      events,
++      ["stderr:warn ", "stderr:�", "sdk-exit:0:null"],
++      "the cleared grace neither repeats the tail nor the exit",
++    );
++  });
++
 +  it("lets the SDK remove its exit observer", () => {
 +    const { child, query } = start();
 +    const observed: Array<string> = [];
@@ -6576,10 +6638,10 @@ index 000000000..af86f73d8
 +});
 diff --git a/apps/server/src/provider/claudeQueryRuntime.ts b/apps/server/src/provider/claudeQueryRuntime.ts
 new file mode 100644
-index 000000000..750130630
+index 000000000..d340e237b
 --- /dev/null
 +++ b/apps/server/src/provider/claudeQueryRuntime.ts
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,269 @@
 +// @effect-diagnostics nodeBuiltinImport:off - the SDK hook hands over a raw Node spawn
 +// @effect-diagnostics globalTimers:off - the stderr grace mirrors the SDK's own plain timer
 +/**
@@ -6725,14 +6787,27 @@ index 000000000..750130630
 +const wrapForSdk = (child: ClaudeChildProcess, stderr: Options["stderr"]): SpawnedProcess => {
 +  const decoder = new NodeStringDecoder.StringDecoder("utf8");
 +  let delivered = false;
++  let drained = false;
 +  let stderrClosed = false;
 +  let exited = false;
 +  let grace: NodeJS.Timeout | undefined;
++
++  // Finalizes the decoder once, whether stderr closed on its own or the grace
++  // cut the drain short, so a buffered partial sequence still reaches the
++  // callback before the SDK sees the exit and the destroy-induced close
++  // cannot forward it a second time.
++  const drain = (): void => {
++    if (drained) return;
++    drained = true;
++    const rest = decoder.end();
++    if (rest.length > 0) stderr?.(rest);
++  };
 +
 +  const deliver = (): void => {
 +    if (delivered) return;
 +    delivered = true;
 +    if (grace !== undefined) clearTimeout(grace);
++    drain();
 +    child.emit(DRAINED_EXIT_EVENT, child.exitCode, child.signalCode);
 +    if (!stderrClosed) child.stderr.destroy();
 +  };
@@ -6745,9 +6820,8 @@ index 000000000..750130630
 +  // A failed stderr read only ends the drain; the process outcome is the child's.
 +  child.stderr.on("error", () => {});
 +  child.stderr.once("close", () => {
-+    const rest = decoder.end();
-+    if (rest.length > 0 && !delivered) stderr?.(rest);
 +    stderrClosed = true;
++    drain();
 +    if (exited) deliver();
 +  });
 +  child.once("exit", () => {

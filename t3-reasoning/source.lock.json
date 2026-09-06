@@ -51,7 +51,7 @@
     {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
-      "sha256": "07c11a96a970c96478ff217f0ea490a51aebd525c04810cdeb45ace626e5637c"
+      "sha256": "9c4961954d5be9392d98bebf7812a8f4984f1555d55498a42429ca4284ac607c"
     },
     {
       "id": "reasoning-identity",
