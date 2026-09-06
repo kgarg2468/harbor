@@ -39,6 +39,11 @@
       "sha256": "edb3d72c3dcf506bb256d858149c345486d0f9beee3a756770777d4b3dbc8f77"
     },
     {
+      "id": "managed-runtime-stager",
+      "path": "patches/0014-managed-runtime-stager.patch",
+      "sha256": "708040bf48daeda0742ad9b187caef85a3d53b7805cda8455a58539319579e03"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -52,7 +57,8 @@
       "queued-update",
       "update-activity",
       "thread-fork-backend",
-      "migration-preflight"
+      "migration-preflight",
+      "managed-runtime-stager"
     ],
     "reasoning": [
       "reasoning-full",
@@ -62,6 +68,7 @@
       "update-activity",
       "thread-fork-backend",
       "migration-preflight",
+      "managed-runtime-stager",
       "reasoning-identity"
     ]
   }
