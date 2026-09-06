@@ -734,7 +734,6 @@ describe("source.lock.json", () => {
     "apps/server/src/os-jank.ts",
   ];
   const IDENTITY_FILES = [
-    "apps/desktop/src/app/DesktopClerk.test.ts",
     "apps/desktop/src/app/DesktopEnvironment.test.ts",
     "apps/desktop/src/app/DesktopEnvironment.ts",
     "apps/desktop/src/electron/ElectronProtocol.test.ts",
