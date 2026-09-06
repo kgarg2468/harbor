@@ -95,7 +95,7 @@ export const SUPPORTED_TARGETS = Object.freeze({
     arch: "arm64",
     rustTarget: "aarch64-apple-darwin",
     fffPackage: "@ff-labs/fff-bin-darwin-arm64",
-    fffLibrary: "fff_c.dylib",
+    fffLibrary: "libfff_c.dylib",
     ffiPackage: "@yuuang/ffi-rs-darwin-arm64",
     msgpackrPackage: "@msgpackr-extract/msgpackr-extract-darwin-arm64",
   }),
@@ -111,6 +111,9 @@ export const SUPPORTED_TARGETS = Object.freeze({
 });
 export const MONITOR_BINARY = "t3-resource-monitor";
 export const MONITOR_MANIFEST = "native/resource-monitor/Cargo.toml";
+// Cargo's build cache for the monitor. Any prior entry here, like any prior
+// node_modules, is ignored by git yet feeds the build, so it must be absent.
+export const MONITOR_TARGET_DIRECTORY = "native/resource-monitor/target";
 // Direct production roots of apps/server. All are deployed; the Bun-only
 // entries are resolved but never loaded on Node.
 export const BUN_ONLY_ROOTS = Object.freeze(["@effect/platform-bun", "@effect/sql-sqlite-bun"]);
@@ -469,6 +472,28 @@ async function refuseExistingEnvFiles(source) {
       if (name.startsWith(".env") && name !== ".env.example") {
         fail(`source already contains ${path.join(dir, name)}; the builder only works on a fresh tree without env files`);
       }
+    }
+  }
+}
+
+// Refuses a tree that already carries installed dependencies (any
+// node_modules entry, root or nested workspace, of any type including a
+// dangling symlink) or the monitor's Cargo target. Git ignores both, so the
+// content comparison cannot see them, yet the frozen install and Cargo
+// reuse what is there. Symlinks are never followed and nothing is removed:
+// the operator prepares a fresh tree instead. Git metadata is skipped.
+export async function refusePriorBuildState(source) {
+  const pending = ["."];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    const entries = await readdir(path.join(source, dir), { withFileTypes: true }).catch((error) => fail(`cannot read ${dir} in source: ${error.message}`));
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      if (entry.name === ".git") continue;
+      const relative = dir === "." ? entry.name : `${dir}/${entry.name}`;
+      if (entry.name === "node_modules" || relative === MONITOR_TARGET_DIRECTORY) {
+        fail(`source already contains ${relative}; a fresh prepared source tree without installed dependencies or native build output is required`);
+      }
+      if (entry.isDirectory()) pending.push(relative);
     }
   }
 }
@@ -834,6 +859,7 @@ export async function buildManagedServerRuntime({
   checkServerManifest(serverManifest, `${SERVER_IMPORTER}/package.json`);
   await checkLinkerSettings(sourceDir);
   await refuseExistingEnvFiles(sourceDir);
+  await refusePriorBuildState(sourceDir);
   if (await exists(destination)) fail(`destination ${destination} already exists; an artifact directory is never rewritten`);
   const childEnv = buildChildEnvironment(env, publicConfig);
   const pnpmVersion = (

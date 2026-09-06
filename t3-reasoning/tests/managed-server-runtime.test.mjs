@@ -9,7 +9,7 @@
 // Rust, or touches the network.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,6 +59,14 @@ const PUBLIC_CONFIG = {
 const HOSTS = {
   "darwin-arm64": { platform: "darwin", arch: "arm64", nodeVersion: PINNED_NODE_VERSION },
   "linux-x64": { platform: "linux", arch: "x64", nodeVersion: PINNED_NODE_VERSION, glibcVersionRuntime: "2.39" },
+};
+// The library file each pinned @ff-labs/fff-bin-* package actually ships
+// (fff-node's platform.js prefixes `lib` everywhere but Windows). Kept
+// independent of the builder's constants so the fixture cannot mirror a
+// wrong spelling.
+const PINNED_FFF_LIBRARIES = {
+  "darwin-arm64": "libfff_c.dylib",
+  "linux-x64": "libfff_c.so",
 };
 const ROOTS = {
   "@anthropic-ai/claude-agent-sdk": "0.3.260",
@@ -263,6 +271,7 @@ async function fakeCargo(fx, args, opts) {
 // and stub packages under .pnpm reached only through relative links.
 async function fakeDeploy(fx, targetDir, opts) {
   const target = SUPPORTED_TARGETS[fx.target];
+  const fffLibrary = opts.fffLibrary ?? PINNED_FFF_LIBRARIES[fx.target];
   const manifest = JSON.parse(await readFile(path.join(fx.source, "apps/server/package.json"), "utf8"));
   const lock = JSON.parse(await readFile(path.join(fx.source, "pnpm-lock.yaml"), "utf8"));
   const resolved = Object.fromEntries(Object.keys(manifest.dependencies).map((name) => [name, lock.importers["apps/server"].dependencies[name].version]));
@@ -301,7 +310,7 @@ async function fakeDeploy(fx, targetDir, opts) {
       "dist/src/index.js": `import { existsSync } from "node:fs";\nimport { createRequire } from "node:module";\nimport path from "node:path";
 export function findBinary() {
   const require = createRequire(import.meta.url);
-  try { return [path.join(path.dirname(require.resolve(${JSON.stringify(`${target.fffPackage}/package.json`)})), ${JSON.stringify(target.fffLibrary)})].find((p) => existsSync(p)) ?? null; } catch { return null; }
+  try { return [path.join(path.dirname(require.resolve(${JSON.stringify(`${target.fffPackage}/package.json`)})), ${JSON.stringify(fffLibrary)})].find((p) => existsSync(p)) ?? null; } catch { return null; }
 }\n`,
     },
   };
@@ -338,7 +347,7 @@ export function findBinary() {
   const hoisted = path.join(nm, ".pnpm", "node_modules");
   if (!opts.omitNative) await place(hoisted, target.msgpackrPackage, "3.0.4", { "index.js": "", "node.napi.glibc.node": "native\n" });
   if (!opts.omitFfiNative) await place(hoisted, target.ffiPackage, "1.3.2", { "index.js": "", "ffi-rs.node": "native\n" });
-  if (!opts.omitFffBin) await place(hoisted, target.fffPackage, "0.9.4", { [target.fffLibrary]: "native\n" });
+  if (!opts.omitFffBin) await place(hoisted, target.fffPackage, "0.9.4", { [fffLibrary]: "native\n" });
   if (opts.includeElectron) await place(path.join(nm, ".pnpm", "electron@38.0.0", "node_modules"), "electron", "38.0.0");
   if (opts.includeWorkspace) await place(nm, "@t3tools/web", "0.0.38");
   if (opts.escapingLink) await symlink("../../../../../..", path.join(nm, "escape"));
@@ -434,6 +443,8 @@ describe("target resolution", () => {
     const linux = resolveTarget("linux", "x64", HOSTS["linux-x64"]);
     assert.equal(linux.rustTarget, "x86_64-unknown-linux-gnu");
     assert.equal(linux.artifact.id, "managed-server-linux-x64");
+    assert.equal(darwin.fffLibrary, PINNED_FFF_LIBRARIES["darwin-arm64"], "the probe expects the file the pinned Darwin package ships");
+    assert.equal(linux.fffLibrary, PINNED_FFF_LIBRARIES["linux-x64"], "the probe expects the file the pinned Linux package ships");
     throws(() => resolveTarget("linux", "arm64", { ...HOSTS["linux-x64"], arch: "arm64" }), /not supported/);
     throws(() => resolveTarget("win32", "x64", { ...HOSTS["linux-x64"], platform: "win32" }), /not supported/);
     throws(() => resolveTarget("linux", "x64", HOSTS["darwin-arm64"]), /must be built on a linux-x64 host/);
@@ -800,15 +811,87 @@ describe("refusals before any mutation", () => {
     assert.ok(fx.calls.every((c) => c.command === "git" || c.args[0] === "--version"));
     await rm(fx.root, { recursive: true, force: true });
 
-    // Ignored build outputs do not count as content drift; a Reasoning-identity tree does.
+    // Stale dist output is an accepted rebuilt output, not content drift; a Reasoning-identity tree is drift.
     const clean = await makeFixture();
-    await write(clean.source, { "node_modules/.stale": "", "apps/server/dist/old.mjs": "" });
+    await write(clean.source, { "apps/server/dist/old.mjs": "", "apps/web/dist/old.html": "" });
     await build(clean);
+    assert.ok(!(await readdir(path.join(clean.source, "apps/server/dist"))).includes("old.mjs"), "stale dist is replaced by the build");
     await rm(clean.root, { recursive: true, force: true });
     const reasoning = await makeFixture();
     await git(reasoning.source, ["apply"], PATCHES["reasoning-identity"]);
     await rejects(() => build(reasoning), /content differs .* M\tidentity/);
     await rm(reasoning.root, { recursive: true, force: true });
+  });
+
+  it("a prepared tree that already carries installed dependencies or the monitor's Cargo target", async () => {
+    // Each case: refused before any command runs, the offending entry and
+    // its bytes or link target are untouched, nothing stamped or written.
+    const priorState = async (relative, setup, expectedPath = relative) => {
+      const fx = await makeFixture();
+      const external = path.join(fx.root, "external");
+      await write(external, { "sentinel.txt": "external bytes\n" });
+      const snapshot = await setup(fx, external);
+      const pattern = new RegExp(`source already contains ${expectedPath.replace(/[/.]/g, "\\$&")}; a fresh prepared source tree without installed dependencies or native build output is required`);
+      await refusal(fx, {}, pattern, { beforeMutation: true });
+      assert.deepEqual(fx.calls, [], `${relative}: refused before pnpm, git, or cargo ran`);
+      assert.deepEqual(await snapshot(), await snapshot.expected, `${relative}: prior entry is preserved`);
+      assert.equal(await readFile(path.join(external, "sentinel.txt"), "utf8"), "external bytes\n", `${relative}: link targets are never followed`);
+      await rm(fx.root, { recursive: true, force: true });
+    };
+    const fileSnapshot = (fx, relative, content) => {
+      const snapshot = () => readFile(path.join(fx.source, relative), "utf8");
+      snapshot.expected = content;
+      return snapshot;
+    };
+    const linkSnapshot = (fx, relative, target) => {
+      const snapshot = async () => ({ link: await readlink(path.join(fx.source, relative)), isLink: (await lstat(path.join(fx.source, relative))).isSymbolicLink() });
+      snapshot.expected = { link: target, isLink: true };
+      return snapshot;
+    };
+
+    await priorState("node_modules", async (fx) => {
+      await write(fx.source, { "node_modules/.modules.yaml": "hoistPattern: []\n", "node_modules/.pnpm/lock.yaml": "" });
+      return fileSnapshot(fx, "node_modules/.modules.yaml", "hoistPattern: []\n");
+    });
+    await priorState("apps/server/node_modules", async (fx) => {
+      await write(fx.source, { "apps/server/node_modules/yaml/index.js": "module.exports = 'stale';\n" });
+      return fileSnapshot(fx, "apps/server/node_modules/yaml/index.js", "module.exports = 'stale';\n");
+    });
+    await priorState("packages/contracts/node_modules", async (fx) => {
+      await write(fx.source, { "packages/contracts/node_modules/.modules.yaml": "stale\n" });
+      return fileSnapshot(fx, "packages/contracts/node_modules/.modules.yaml", "stale\n");
+    });
+    await priorState("scripts/node_modules", async (fx) => {
+      await write(fx.source, { "scripts/node_modules": "a plain file named node_modules\n" });
+      return fileSnapshot(fx, "scripts/node_modules", "a plain file named node_modules\n");
+    });
+    await priorState("apps/web/node_modules", async (fx, external) => {
+      await mkdir(path.join(fx.source, "apps/web"), { recursive: true });
+      await symlink(external, path.join(fx.source, "apps/web/node_modules"));
+      return linkSnapshot(fx, "apps/web/node_modules", external);
+    });
+    await priorState("apps/desktop/node_modules", async (fx) => {
+      await symlink("../../missing-store/node_modules", path.join(fx.source, "apps/desktop/node_modules"));
+      return linkSnapshot(fx, "apps/desktop/node_modules", "../../missing-store/node_modules");
+    });
+    const staleBinary = "native/resource-monitor/target/aarch64-apple-darwin/release/t3-resource-monitor";
+    await priorState(staleBinary, async (fx) => {
+      await write(fx.source, { [staleBinary]: HEADERS["darwin-arm64"] });
+      await chmod(path.join(fx.source, staleBinary), 0o755);
+      const snapshot = async () => ({ bytes: (await readFile(path.join(fx.source, staleBinary))).toString("hex"), mode: (await lstat(path.join(fx.source, staleBinary))).mode & 0o777 });
+      snapshot.expected = { bytes: HEADERS["darwin-arm64"].toString("hex"), mode: 0o755 };
+      return snapshot;
+    }, "native/resource-monitor/target");
+    await priorState("native/resource-monitor/target (empty)", async (fx) => {
+      await mkdir(path.join(fx.source, "native/resource-monitor/target"));
+      const snapshot = async () => (await lstat(path.join(fx.source, "native/resource-monitor/target"))).isDirectory();
+      snapshot.expected = true;
+      return snapshot;
+    }, "native/resource-monitor/target");
+    await priorState("native/resource-monitor/target", async (fx, external) => {
+      await symlink(external, path.join(fx.source, "native/resource-monitor/target"));
+      return linkSnapshot(fx, "native/resource-monitor/target", external);
+    });
   });
 });
 
@@ -834,6 +917,7 @@ describe("failures after mutation publish nothing and clean up", () => {
     ["the target fff library is missing", { omitFffBin: true }, /native runtime probe failed .*did not resolve/],
     ["the target ffi-rs addon is missing", { omitFfiNative: true }, /native runtime probe failed .*ffi-rs-/],
     ["node-pty cannot load its addon", { ptyThrows: true }, /native runtime probe failed .*pty\.node/],
+    ["the fff library carries the unprefixed spelling", { fffLibrary: "fff_c.dylib" }, /did not resolve libfff_c\.dylib for this target/],
     ["the CLI reports another version", { bin: { version: "0.0.38" } }, /reports version "t3 v0\.0\.38", expected "t3 v0\.0\.39-nightly\.20260905\.1284\.managed\.1\.p[0-9a-f]+"/],
     ["the CLI reports another command name", { bin: { name: "t3-nightly" } }, /reports version "t3-nightly v0\.0\.39-nightly/],
     ["the CLI prints a bare version without its name", { bin: { name: null } }, /reports version "0\.0\.39-nightly[^"]*", expected "t3 v0\.0\.39-nightly/],
@@ -853,6 +937,12 @@ describe("failures after mutation publish nothing and clean up", () => {
   it("a deployed monitor for the wrong target is refused even when the source build passed", async () => {
     const fx = await makeFixture({ target: "linux-x64" });
     await refusal(fx, { badHeader: true }, /not an ELF 64-bit/);
+    await rm(fx.root, { recursive: true, force: true });
+  });
+
+  it("the Linux fff library must be libfff_c.so exactly", async () => {
+    const fx = await makeFixture({ target: "linux-x64" });
+    await refusal(fx, { fffLibrary: "fff_c.so" }, /did not resolve libfff_c\.so for this target/);
     await rm(fx.root, { recursive: true, force: true });
   });
 });
