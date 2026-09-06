@@ -86,6 +86,16 @@ stale_count() {
   pa="${PAUSED_PID}"
   paused_resolve lock-acquired "${BATS_TEST_TMPDIR}/b.out"
   pb="${PAUSED_PID}"
+  # A contender's exit is not the point at which the winner is quiescent. The loser
+  # can lose at the gate mkdir rather than at the lock, and that happens while the
+  # winner is still inside harbor_lock_acquire, before it has created lock.d or
+  # written its holder record: asserting on the loser's exit alone races the winner
+  # and fails on whichever runner is fast enough to land in that window.
+  # harbor_step logs its step before harbor_test_hook pauses, and lock-acquired is
+  # stepped after harbor_lock_gate_release, so this log line is exactly the point at
+  # which the holder record is written and the gate is gone. Wait for it first, and
+  # wait_for_one_exit below then waits for the loser, the winner being paused.
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   wait_for_one_exit "${pa}" "${pb}"
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -d "${FIX_ROOT}/reclaim.d" ]
@@ -116,6 +126,10 @@ stale_count() {
   pa="${PAUSED_PID}"
   paused_resolve lock-acquired "${BATS_TEST_TMPDIR}/b.out"
   pb="${PAUSED_PID}"
+  # Same reason as the test above, and one window wider here: the winner reclaims by
+  # renaming lock.d aside before it makes its own, so there is a moment in a stale
+  # reclaim when lock.d does not exist at all.
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   wait_for_one_exit "${pa}" "${pb}"
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -d "${FIX_ROOT}/reclaim.d" ]

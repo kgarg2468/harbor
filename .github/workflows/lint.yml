@@ -33,11 +33,13 @@ jobs:
         run: >
           shellcheck -s bash -x -a -S warning -P 'SCRIPTDIR/..:SCRIPTDIR/../..'
           --enable=require-variable-braces
-          fleet/bin/harbor fleet/lib/*.sh fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim
+          fleet/bin/harbor fleet/lib/*.sh fleet/node/*.sh fleet/tests/run_unit.sh
+          fleet/tests/shims/bin/harbor-shim
           fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
       - name: shfmt
         run: >
-          shfmt -i 2 -ci -bn -d fleet/bin/harbor fleet/lib fleet/tests/run_unit.sh fleet/tests/shims/bin/harbor-shim
+          shfmt -i 2 -ci -bn -d fleet/bin/harbor fleet/lib fleet/node fleet/tests/run_unit.sh
+          fleet/tests/shims/bin/harbor-shim
           fleet/tests/lint/placeholder_scan.sh fleet/tests/unit/test_helper.bash
       - name: Placeholder scan
         run: fleet/tests/lint/placeholder_scan.sh

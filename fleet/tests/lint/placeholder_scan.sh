@@ -25,7 +25,18 @@ while IFS= read -r f; do
     printf '%s: MagicDNS name outside the placeholder list: %s\n' "${f}" "${bad}"
     status=1
   fi
-  bad="$(grep -oIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- "${f}" | grep -v '@example\.com$' || true)"
+  # @openssh.com is not an address. OpenSSH names its certificate and security-key
+  # algorithms with it, ssh-ed25519-cert-v01@openssh.com and sk-ssh-ed25519@openssh.com
+  # among them, and those names are protocol constants that have to be written exactly.
+  # The rule is here to keep a real person's address out of a public repository, and no
+  # spelling of an algorithm name is that, so they are excluded rather than the rule
+  # weakened for every domain.
+  #
+  # git@github.com is not an address either. It is the fixed SSH login half of every
+  # GitHub remote URL, the same three words GitHub prints in its own clone command, and
+  # it is excluded exactly rather than by domain, so a real person's address at
+  # github.com is still reported.
+  bad="$(grep -oIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- "${f}" | grep -v '@example\.com$' | grep -v '@openssh\.com$' | grep -vx 'git@github\.com' || true)"
   if [ -n "${bad}" ]; then
     printf '%s: email outside example.com: %s\n' "${f}" "${bad}"
     status=1
