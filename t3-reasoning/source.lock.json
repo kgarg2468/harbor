@@ -39,6 +39,11 @@
       "sha256": "edb3d72c3dcf506bb256d858149c345486d0f9beee3a756770777d4b3dbc8f77"
     },
     {
+      "id": "desktop-reservation",
+      "path": "patches/0016-desktop-reservation.patch",
+      "sha256": "904ec05842726d8de79741a7bf180858120e5477d3aec7aa75c108fa96d27658"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "2b2ab3f46fff149f81c3de355579a7fc97e52f6aa4e82cc32f0c554498cff201"
@@ -52,7 +57,8 @@
       "queued-update",
       "update-activity",
       "thread-fork-backend",
-      "migration-preflight"
+      "migration-preflight",
+      "desktop-reservation"
     ],
     "reasoning": [
       "reasoning-full",
@@ -62,6 +68,7 @@
       "update-activity",
       "thread-fork-backend",
       "migration-preflight",
+      "desktop-reservation",
       "reasoning-identity"
     ]
   }

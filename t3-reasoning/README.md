@@ -66,6 +66,10 @@ What this component does not do:
 - `patches/0012-migration-preflight.patch`: rehearses candidate migrations on a
   disposable snapshot and checks the candidate response. Downloading, invoking
   the staged candidate, and activating it remain separate updater work.
+- `patches/0016-desktop-reservation.patch`: the desktop reservation transaction
+  and shared command/reply contracts. It correlates backend generations and
+  orders abort, commit and installation; transport and installer integration
+  remain separate work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
