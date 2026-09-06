@@ -7,10 +7,10 @@ pin is in `docs/nightly-port.md`.
 
 ## Status
 
-Reproducible port of the existing Reasoning feature set onto the latest
+Reproducible port of the existing Reasoning feature set onto the pinned
 Nightly, materialized as one of two build variants. `source.lock.json` pins
-upstream commit `9cb40178a53cca279c67a9079afab3cddf6b6ddb`, which is tag
-`v0.0.39-nightly.20260905.1284`, a catalog of checksummed patches, and
+upstream commit `98469159dd9e162a9c2f5cc4bbb2fbe89b3c4f67`, which is tag
+`v0.0.39-nightly.20260906.1316`, a catalog of checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;

@@ -10,19 +10,26 @@ maintenance record for the current pin.
 | Item | Value |
 | --- | --- |
 | Upstream repository | `https://github.com/pingdotgg/t3code.git` |
-| Upstream commit | `9cb40178a53cca279c67a9079afab3cddf6b6ddb` |
-| Upstream tag at that commit | `v0.0.39-nightly.20260905.1284` |
-| Patch `reasoning-full` | `patches/0001-reasoning.patch` (34 files) |
+| Upstream commit | `98469159dd9e162a9c2f5cc4bbb2fbe89b3c4f67` |
+| Upstream tag at that commit | `v0.0.39-nightly.20260906.1316` |
+| Patch `reasoning-full` | `patches/0001-reasoning.patch` (35 files) |
 | Patch `desktop-runtime-common` | `patches/0002-desktop-runtime-common.patch` (4 files) |
-| Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (8 files) |
+| Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (7 files) |
 | Upstream license | `UPSTREAM-LICENSE` (MIT, T3 Tools Inc., copied unchanged) |
 
-These three patches together change exactly the 46 files that the ported
-feature commit changes against the upstream commit. They were originally
-exported as two patches; the desktop patch was split by whole file on
-2026-09-05 into the common runtime fix and the Reasoning identity, so the
-`managed-nightly` variant in `build-variants.md` can leave the identity out.
-The tag was confirmed on the upstream remote at the pinned SHA on 2026-09-05.
+The current port preserves upstream's repository-backed runtime ingestion,
+imported-history revert behavior, and shared mobile request helpers. Reasoning
+rows do not count as substantive assistant replies, including when a buffered
+delta and its completion carry different turn metadata. Migration preflight
+keeps the current CLI imports; the identity patch omits an upstream-removed
+helper test. The other common patches apply unchanged.
+
+The tag was confirmed at this commit on 2026-09-06. The Reasoning patch was
+exported from source commit `351dff8d9f2cbf7e3825fecebebd9009e8e7b82c`
+over that upstream parent. Both catalog variants prepare; they differ only
+in the seven current identity files, with identical server, web, and shared
+package sources. The initial import history below remains provenance for the
+original feature baseline.
 
 ## Provenance
 
@@ -40,7 +47,7 @@ the two revisions that matter for this port are:
   sync work began. It carries the same 46-file surface as the port, except
   that the old numbered migration `044_ProjectionThreadMessagesChannel` was
   replaced by `ReasoningSchema.ts` (see the migration section below).
-- Port commit: `f3e26496cc51495a8ab59639748adf9a1c75dc92`
+- Initial port commit: `f3e26496cc51495a8ab59639748adf9a1c75dc92`
   (`Port existing reasoning and desktop identity to nightly 20260905`),
   authored on 2026-09-05 in a working clone with the pinned upstream commit
   as its only parent. That clone is not a Harbor artifact. The patch files
