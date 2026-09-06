@@ -240,17 +240,25 @@ async function verifyPatches(patches, lockPath) {
   return verified;
 }
 
-// Runs git; `input`, when given, is written to git's stdin.
+// Runs git; `input`, when given, is written to git's stdin. A failure carries
+// git's exit status as `exitCode` (a number when git exited, otherwise null
+// for a signal or a spawn failure) and git's complete `stderr`, so callers
+// can read git's own verdict. Git runs with LC_ALL=C so that verdict is in
+// git's untranslated wording wherever the tool runs.
 async function git(cwd, args, input) {
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
   try {
     const pending = execFileAsync("git", args, { cwd, env, maxBuffer: 64 * 1024 * 1024 });
     pending.child.stdin.on("error", () => {}); // a failing git may close stdin early
     pending.child.stdin.end(input);
     return await pending;
   } catch (error) {
-    const detail = (error.stderr || error.message || "").trim().split("\n").slice(-3).join(" ");
-    fail(`git ${args[0]} failed: ${detail}`);
+    const stderr = String(error.stderr ?? "");
+    const detail = (stderr || error.message || "").trim().split("\n").slice(-3).join(" ");
+    const failure = new PrepareError(`git ${args[0]} failed: ${detail}`);
+    failure.exitCode = Number.isInteger(error.code) ? error.code : null;
+    failure.stderr = stderr;
+    throw failure;
   }
 }
 
@@ -275,12 +283,68 @@ function describePatch(patch) {
   return patch.id === undefined ? patch.path : `${patch.id} (${patch.path})`;
 }
 
+// A conflict between the catalog and the source is `git apply` parsing a
+// patch and rejecting it against the tree. Git's exit status 1 alone does not
+// prove that: apply.c reports a preimage it could not read (a permission or
+// I/O error) through the same status and the same closing "patch does not
+// apply" line. What separates the two is the verdict git prints first. These
+// are git's tree-rejection verdicts, in its untranslated wording: a hunk that
+// did not match, a preimage that does not exist, a file to create that
+// already exists, an index mismatch, a type mismatch, a deletion that would
+// leave content behind. A run is a conflict only when git exited 1, printed
+// at least one of these, and printed no other `error:` line. Anything else,
+// "unable to open or read", "failed to read", "unable to write", an
+// unrecognized message, exit 128 for a corrupt or empty patch or a fatal
+// error, a signal, git not spawning, is an operational failure.
+const GIT_APPLY_REJECTED = 1;
+const GIT_TREE_VERDICTS = [
+  /^error: patch failed: .+:\d+$/,
+  /^error: .+: already exists in (?:working directory|index)$/,
+  /^error: .+: does not (?:exist in|match) index$/,
+  /^error: .+: No such file or directory$/,
+  /^error: .+: wrong type$/,
+  /^error: .+ has type [0-7]+, expected [0-7]+$/,
+  /^error: removal patch leaves file contents$/,
+];
+// Git's per-file closing line, printed after a verdict and after a read
+// failure alike. It is permitted but is not itself evidence of a conflict.
+const GIT_APPLY_SUMMARY = /^error: .+: patch does not apply$/;
+
+// True when `failure`, from `git apply`, is git rejecting the patch against
+// the tree (see GIT_TREE_VERDICTS); false for every operational failure.
+function isTreeRejection(failure) {
+  if (failure.exitCode !== GIT_APPLY_REJECTED) return false;
+  const errors = String(failure.stderr ?? "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.startsWith("error:"));
+  const isVerdict = (line) => GIT_TREE_VERDICTS.some((verdict) => verdict.test(line));
+  const verdicts = errors.filter(isVerdict);
+  const unrecognized = errors.filter((line) => !isVerdict(line) && !GIT_APPLY_SUMMARY.test(line));
+  return verdicts.length > 0 && unrecognized.length === 0;
+}
+
+// A tree rejection is the one failure downstream tooling treats as a normal
+// conflict rather than an error. It is reported two ways: the human line
+// ("patch <path> does not apply cleanly: ...", like every other diagnostic),
+// and a machine marker carried on the error as `conflict`, which main prints
+// as its own stderr line: CONFLICT_MARKER_PREFIX followed by the single-line
+// JSON `{"patch": <path>}`. The marker is the protocol; the prose is not. A
+// patch path may contain spaces, colons, or the words of the human line, so
+// only the JSON names the path unambiguously, and only this branch sets it.
+const CONFLICT_MARKER_PREFIX = "prepare-source-conflict: ";
+
 async function applyPatches(staging, patches) {
   for (const patch of patches) {
     // Apply the verified bytes from memory via stdin, never re-reading the file.
-    await git(staging, ["apply"], patch.content).catch((error) =>
-      fail(`patch ${patch.path} does not apply cleanly: ${error.message}`),
-    );
+    await git(staging, ["apply"], patch.content).catch((error) => {
+      if (isTreeRejection(error)) {
+        const conflict = new PrepareError(`patch ${patch.path} does not apply cleanly: ${error.message}`);
+        conflict.conflict = { patch: patch.path };
+        throw conflict;
+      }
+      fail(`patch ${patch.path}: ${error.message}`);
+    });
     console.log(`prepare-source: applied ${describePatch(patch)}`);
   }
 }
@@ -369,8 +433,17 @@ async function prepareInto(destination, parent, options, lock, repository, varia
   }
 }
 
+// Every stderr line this tool prints begins with "prepare-source: ", except
+// the conflict marker, which begins with CONFLICT_MARKER_PREFIX. Diagnostics
+// are printed one prefixed line at a time, so text that reached them from a
+// lock, a patch path, or an argument, newlines included, can never open a
+// line of its own; the marker is printed only from a conflict's own error, as
+// single-line JSON that escapes any newline in the path.
 main().catch((error) => {
   const message = error instanceof PrepareError ? error.message : error.stack || String(error);
-  console.error(`prepare-source: ${message}`);
+  if (error instanceof PrepareError && error.conflict !== undefined) {
+    console.error(`${CONFLICT_MARKER_PREFIX}${JSON.stringify(error.conflict)}`);
+  }
+  for (const line of message.split("\n")) console.error(`prepare-source: ${line}`);
   process.exit(1);
 });

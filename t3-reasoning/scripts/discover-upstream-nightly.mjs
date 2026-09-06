@@ -362,16 +362,49 @@ async function gitRun(run, cwd, args, env) {
   }
 }
 
+// The preparer's machine marker for a patch that `git apply` parsed and
+// rejected against the tree: one stderr line, this prefix followed by the
+// single-line JSON `{"patch": <path>}`. The preparer prints it only when git
+// exited 1 and every error git printed is one of its tree-rejection verdicts
+// (a failed hunk, a missing preimage, a file that already exists, ...); a
+// corrupt patch, an unreadable preimage, an unwritable tree, a fatal git
+// error, or a killed git gets no marker. Every other preparer stderr line
+// begins with "prepare-source: ", so no path, lock text, or argument echoed in
+// a diagnostic can produce this line, and the human "does not apply cleanly"
+// prose is never consulted: a patch path may itself contain those words or
+// whitespace. The marker must come from a preparer that exited 1 by its own
+// error path; a preparer that died some other way has no verdict.
+const PREPARER_CONFLICT_PREFIX = "prepare-source-conflict: ";
+const PREPARER_FAILURE_EXIT = 1;
+
+function parsePreparerConflict(line) {
+  let record;
+  try {
+    record = JSON.parse(line.slice(PREPARER_CONFLICT_PREFIX.length));
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(record) || typeof record.patch !== "string" || record.patch === "") return null;
+  return record;
+}
+
 function classifyPreparerFailure(error) {
-  const stderr = String(error?.stderr ?? "");
-  const match = /patch (\S+) does not apply cleanly/.exec(stderr);
-  if (match === null) return null;
-  return { failedPatch: match[1], diagnostics: boundedLines(stderr) };
+  if (error?.code !== PREPARER_FAILURE_EXIT) return null;
+  const lines = String(error?.stderr ?? "")
+    .split("\n")
+    .map((line) => line.trimEnd());
+  const isMarker = (line) => line.startsWith(PREPARER_CONFLICT_PREFIX);
+  const markers = lines.filter(isMarker);
+  if (markers.length !== 1) return null;
+  const record = parsePreparerConflict(markers[0]);
+  if (record === null) return null;
+  return { failedPatch: record.patch, diagnostics: boundedLines(lines.filter((line) => !isMarker(line)).join("\n")) };
 }
 
 // Runs the real preparer for one variant into a fresh destination. Returns
-// `{ ok: true }` or `{ ok: false, conflict }` for a clean-apply failure; any
-// other preparer failure is an error.
+// `{ ok: true }` or `{ ok: false, conflict }` when the preparer reported a
+// patch that does not apply cleanly; any other preparer failure, including a
+// malformed patch or an operational git failure, is an error.
 async function runPreparer({ run, preparerScript, candidateLock, destination, variant, repository, cwd }) {
   const args = [preparerScript, "--lock", candidateLock, "--destination", destination, "--variant", variant];
   if (repository !== null) args.push("--repository", repository);

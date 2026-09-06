@@ -81,6 +81,28 @@ Exit codes:
 | 2 | `conflict`; a patch did not apply cleanly, and the destination holds only the report |
 | 1 | any other error (usage, lock or provenance validation, API failure, moved tag, preparer failure other than a clean-apply rejection); no destination is created |
 
+A `conflict` is exactly the preparer reporting that `git apply` parsed a patch
+and rejected it against the candidate tree: a failed hunk, a file the patch
+expects that is missing, or a file it would create that already exists. Git's
+exit status 1 alone does not establish that, because git uses the same status
+and the same closing "patch does not apply" line when it could not read a
+preimage (a permission or I/O error). The preparer therefore requires exit 1
+plus git's own tree-rejection verdict lines, in git's untranslated wording
+(`patch failed: <path>:<line>`, `No such file or directory`, `already exists in
+working directory`, and the like), with no other `error:` line present. For such a rejection the
+preparer prints, besides its human diagnostic, one machine-readable stderr
+line: `prepare-source-conflict: {"patch":"<path>"}`, with the catalog path
+JSON-encoded on that single line. Every other `git apply` outcome, such as an
+unreadable preimage, an unwritable tree, a corrupt or empty patch, any
+unrecognized error, or a killed git, gets no marker and is reported as an
+ordinary failure, which the helper treats as an error: exit 1, no destination,
+and the stage removed. The helper classifies only on that exact marker line
+from a preparer that exited 1; it never reads git's stderr and never parses
+the human prose, because a catalog path may itself contain spaces or the words
+"does not apply cleanly". Every other preparer stderr line begins with the
+`prepare-source:` prefix, so no path or argument echoed in a diagnostic can
+forge the marker.
+
 The `gh` binary must be on `PATH`. A workflow supplies its normal token to gh
 the usual way; the helper never reads, prints, or persists it, and every gh
 call is a `GET` built from argv, never an interpolated shell string.

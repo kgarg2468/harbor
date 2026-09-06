@@ -87,6 +87,15 @@ new file mode 100644
 @@ -0,0 +1 @@
 +variant identity
 `;
+// Checksums fine but is not a patch git can parse: the hunk header promises a
+// `+` line the text never provides, so `git apply` dies with "corrupt patch"
+// (exit 128) instead of rejecting it against the tree (exit 1).
+const PATCH_CORRUPT = `diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-one
+`;
 
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -418,8 +427,8 @@ describe("resolveRepositoryPath", () => {
     assert.equal(resolveRepositoryPath("mirrors/t3code"), path.resolve("mirrors/t3code"));
     assert.equal(resolveRepositoryPath("/abs/mirror"), "/abs/mirror");
     assert.equal(resolveRepositoryPath(UPSTREAM_REPOSITORY), UPSTREAM_REPOSITORY);
-    assert.equal(resolveRepositoryPath("ssh://git@github.com/pingdotgg/t3code.git"), "ssh://git@github.com/pingdotgg/t3code.git");
-    assert.equal(resolveRepositoryPath("git@github.com:pingdotgg/t3code.git"), "git@github.com:pingdotgg/t3code.git");
+    assert.equal(resolveRepositoryPath("ssh://git@example.com/pingdotgg/t3code.git"), "ssh://git@example.com/pingdotgg/t3code.git");
+    assert.equal(resolveRepositoryPath("git@example.com:pingdotgg/t3code.git"), "git@example.com:pingdotgg/t3code.git");
     assert.equal(resolveRepositoryPath(null), null);
   });
 });
@@ -471,15 +480,90 @@ async function readJson(file) {
 }
 
 // A runner that records every argv and delegates to the real execFile with an
-// isolated git configuration.
-function recordingRun() {
+// isolated git configuration plus any extra environment a case needs.
+function recordingRun(env = {}) {
   const commands = [];
   const run = async (command, args, options = {}) => {
     commands.push({ command, args: [...args], cwd: options.cwd ?? null });
-    return defaultRun(command, args, { ...options, env: { ...gitEnv, ...options.env } });
+    return defaultRun(command, args, { ...options, env: { ...gitEnv, ...env, ...options.env } });
   };
   run.commands = commands;
   return run;
+}
+
+// A copy of the fixture component whose `one` catalog entry is replaced by
+// `{ path, text }`, checksummed in its lock so every local verification passes
+// and only the preparer's `git apply` can refuse it. Returns the copy's lock path.
+async function componentWithOne(dir, { path: onePath, text }) {
+  const copy = path.join(dir, "component");
+  for (const patch of lockObject.patches) {
+    const target = path.join(copy, patch.id === "one" ? onePath : patch.path);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, patch.id === "one" ? text : await readFile(path.join(componentDir, patch.path)));
+  }
+  const lock = {
+    ...lockObject,
+    patches: lockObject.patches.map((patch) => (patch.id === "one" ? { ...patch, path: onePath, sha256: sha256(text) } : patch)),
+  };
+  const lockFile = path.join(copy, LOCK_FILE);
+  await writeFile(lockFile, `${JSON.stringify(lock, null, 2)}\n`);
+  return lockFile;
+}
+
+// The fixture component with its first catalog patch replaced by PATCH_CORRUPT.
+function corruptComponent(dir) {
+  return componentWithOne(dir, { path: "patches/0001-one.patch", text: PATCH_CORRUPT });
+}
+
+// Catalog paths the lock accepts that prose-based classification mishandles:
+// an ordinary name with a space, and a name spelling out the preparer's own
+// conflict wording. Both are valid, unbanned paths inside the component.
+const SPACED_PATCH_PATH = "patches/0001 one.patch";
+const MARKER_WORDS_PATCH_PATH = "patches/a does not apply cleanly: b.patch";
+const CONFLICT_MARKER_PREFIX = "prepare-source-conflict: ";
+
+// What real git prints, verbatim, when it cannot read a patch's preimage in the
+// working tree (git 2.50, hello.txt with mode 000): exit status 1, the same
+// status and closing line as a hunk conflict, and no tree-rejection verdict.
+const GIT_UNREADABLE_PREIMAGE = [
+  "error: unable to open or read hello.txt",
+  "error: failed to read hello.txt",
+  "error: hello.txt: patch does not apply",
+];
+
+// A `git` on PATH that is the real git for everything but `apply`, which it
+// fails according to GIT_SHIM_MODE:
+//   kill        the process is SIGKILL'd
+//   fatal       git's exit 128 for an unwritable tree, with its own wording
+//   read        exit 1 with GIT_UNREADABLE_PREIMAGE, replayed deterministically
+//   unreadable  makes hello.txt unreadable, then runs the REAL git apply;
+//               exits 99 if mode bits are not enforced (root, some filesystems)
+// Returns the environment that puts the shim first on PATH.
+async function failingApplyGit(dir, mode) {
+  const bin = path.join(dir, "bin");
+  await mkdir(bin, { recursive: true });
+  const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+  await writeFile(
+    path.join(bin, "git"),
+    `#!/bin/sh
+if [ "$1" = "apply" ]; then
+  case "$GIT_SHIM_MODE" in
+    kill) kill -KILL $$ ;;
+    fatal)
+      echo "warning: unable to unlink 'hello.txt': Permission denied" >&2
+      echo "error: unable to write file 'hello.txt' mode 100644: Permission denied" >&2
+      exit 128 ;;
+    read) printf '%s\\n' ${GIT_UNREADABLE_PREIMAGE.map((line) => `'${line}'`).join(" ")} >&2; exit 1 ;;
+    unreadable)
+      chmod 000 hello.txt
+      if [ -r hello.txt ]; then echo "GIT_SHIM: mode bits not enforced" >&2; exit 99; fi ;;
+  esac
+fi
+exec "$REAL_GIT" "$@"
+`,
+    { mode: 0o755 },
+  );
+  return { PATH: `${bin}${path.delimiter}${process.env.PATH}`, REAL_GIT: realGit, GIT_SHIM_MODE: mode };
 }
 
 function routesFor({ commit, listing, tagCommit = commit, rereadCommit = commit, reread }) {
@@ -512,8 +596,8 @@ async function freshCase() {
   return { dir, destination: path.join(dir, "candidate"), work: path.join(dir, "work") };
 }
 
-async function discover({ dir, destination, work }, { api, currentReleasePath = currentPath, lock = lockPath } = {}) {
-  const run = recordingRun();
+async function discover({ dir, destination, work }, { api, currentReleasePath = currentPath, lock = lockPath, env = {} } = {}) {
+  const run = recordingRun(env);
   const before = await snapshot(componentDir);
   let result;
   let error = null;
@@ -817,6 +901,16 @@ describe("prepareNightlyCandidate", () => {
     assert.ok(Array.isArray(result.conflict.diagnostics) && result.conflict.diagnostics.length > 0);
     assert.ok(result.conflict.diagnostics.length <= 12);
     assert.ok(result.conflict.diagnostics.every((line) => line.length <= 403));
+    // The classification rests on the preparer's own conflict line, which
+    // carries git's "patch failed" verdict that the hunk did not match the tree.
+    assert.ok(
+      result.conflict.diagnostics.some((line) =>
+        /^prepare-source: patch patches\/0001-one\.patch does not apply cleanly: git apply failed: error: patch failed: hello\.txt:1 error: hello\.txt: patch does not apply$/.test(line),
+      ),
+      result.conflict.diagnostics.join("\n"),
+    );
+    // The marker line the classification actually read stays out of the prose.
+    assert.ok(result.conflict.diagnostics.every((line) => !line.startsWith(CONFLICT_MARKER_PREFIX)));
     assert.equal(result.candidate.commit, firstConflict);
     assert.equal(result.candidate.version, NEWER_VERSION);
     assert.deepEqual(result.variants, {});
@@ -920,6 +1014,137 @@ describe("prepareNightlyCandidate", () => {
     assert.deepEqual(await entries(c.dir), ["work"]);
     assert.deepEqual(await entries(c.work), [], "an unexpected failure removes its stage");
   });
+
+  it("treats a malformed patch as an error, not a conflict, and removes the stage", async () => {
+    const c = await freshCase();
+    const corruptLock = await corruptComponent(c.dir);
+    const api = fakeApi(routesFor({ commit: clean, listing: fullListing() }));
+    const { error, result, run } = await discover(c, { api, lock: corruptLock });
+    assert.equal(result, undefined);
+    assert.ok(error instanceof DiscoveryError, error?.stack);
+    // The preparer reached git apply (the checksum matched) and git refused to
+    // parse the patch; that is the preparer's failure line, not its conflict line.
+    assert.match(error.message, /prepare-source --variant managed-nightly failed: .*patch patches\/0001-one\.patch: git apply failed: .*corrupt patch/);
+    assert.doesNotMatch(error.message, /does not apply cleanly/);
+    assert.equal(run.commands.filter((cmd) => cmd.command === process.execPath).length, 1);
+    assert.deepEqual(api.calls.map((call) => call.endpoint), [RELEASES_ENDPOINT, refFor(`v${NEWER_VERSION}`)], "no release re-read");
+    assert.deepEqual(await entries(c.dir), ["component", "work"], `${c.destination} must not exist`);
+    assert.deepEqual(await entries(c.work), [], "a malformed patch removes the owned stage");
+  });
+
+  it(
+    "treats an operational git apply failure as an error, not a conflict, and removes the stage",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async () => {
+      // `read` is git's exit 1, the status a hunk conflict also uses; what
+      // makes it operational is the read error git printed instead of a verdict.
+      const expected = {
+        kill: /git apply failed: /,
+        fatal: /git apply failed: .*unable to write file 'hello\.txt'/,
+        read: /git apply failed: error: unable to open or read hello\.txt error: failed to read hello\.txt error: hello\.txt: patch does not apply/,
+      };
+      for (const [mode, detail] of Object.entries(expected)) {
+        const c = await freshCase();
+        const env = await failingApplyGit(c.dir, mode);
+        const api = fakeApi(routesFor({ commit: clean, listing: fullListing() }));
+        const { error, result, run } = await discover(c, { api, env });
+        assert.equal(result, undefined, mode);
+        assert.ok(error instanceof DiscoveryError, `${mode}: ${error?.stack}`);
+        assert.match(error.message, /prepare-source --variant managed-nightly failed: .*patch patches\/0001-one\.patch: git apply failed: /, mode);
+        assert.match(error.message, detail, mode);
+        assert.doesNotMatch(error.message, /does not apply cleanly/, mode);
+        assert.equal(run.commands.filter((cmd) => cmd.command === process.execPath).length, 1, mode);
+        assert.deepEqual(await entries(c.dir), ["bin", "work"], `${mode}: ${c.destination} must not exist`);
+        assert.deepEqual(await entries(c.work), [], `${mode}: an operational failure removes the owned stage`);
+      }
+    },
+  );
+
+  it(
+    "treats real git's exit 1 for an unreadable preimage as an error, not a conflict, and removes the stage",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async (t) => {
+      // The checked-in fixture patches against the clean candidate, applied by
+      // the real git; only hello.txt's mode changes the moment git is invoked.
+      const c = await freshCase();
+      const env = await failingApplyGit(c.dir, "unreadable");
+      const api = fakeApi(routesFor({ commit: clean, listing: fullListing() }));
+      const { error, result, run } = await discover(c, { api, env });
+      if (/GIT_SHIM: mode bits not enforced/.test(error?.message ?? "")) {
+        t.skip("this user can read a mode 000 file, so the read failure cannot be produced");
+        return;
+      }
+      assert.equal(result, undefined);
+      assert.ok(error instanceof DiscoveryError, error?.stack);
+      assert.match(
+        error.message,
+        /prepare-source --variant managed-nightly failed: .*patch patches\/0001-one\.patch: git apply failed: error: unable to open or read hello\.txt error: failed to read hello\.txt error: hello\.txt: patch does not apply/,
+      );
+      assert.doesNotMatch(error.message, /does not apply cleanly/);
+      assert.equal(run.commands.filter((cmd) => cmd.command === process.execPath).length, 1);
+      assert.deepEqual(api.calls.map((call) => call.endpoint), [RELEASES_ENDPOINT, refFor(`v${NEWER_VERSION}`)], "no release re-read");
+      assert.deepEqual(await entries(c.dir), ["bin", "work"], `${c.destination} must not exist`);
+      assert.deepEqual(await entries(c.work), [], "an unreadable preimage removes the owned stage");
+    },
+  );
+
+  it("reports a conflict under the marker's full patch path, with spaces or the conflict wording in it", async () => {
+    for (const patchPath of [SPACED_PATCH_PATH, MARKER_WORDS_PATCH_PATH]) {
+      const c = await freshCase();
+      const lock = await componentWithOne(c.dir, { path: patchPath, text: PATCH_ONE });
+      const api = fakeApi(routesFor({ commit: firstConflict, listing: fullListing() }));
+      const { result, error, destination } = await discover(c, { api, lock });
+      assert.equal(error, null, `${patchPath}: ${error?.stack}`);
+      assert.equal(result.status, "conflict", patchPath);
+      assert.equal(result.conflict.variant, "managed-nightly");
+      assert.equal(result.conflict.failedPatch, patchPath);
+      assert.ok(
+        result.conflict.diagnostics.includes(
+          `prepare-source: patch ${patchPath} does not apply cleanly: git apply failed: error: patch failed: hello.txt:1 error: hello.txt: patch does not apply`,
+        ),
+        result.conflict.diagnostics.join("\n"),
+      );
+      assert.ok(result.conflict.diagnostics.every((line) => !line.startsWith(CONFLICT_MARKER_PREFIX)));
+      assert.deepEqual(await entries(destination), [RESULT_FILE]);
+      assert.deepEqual(await readJson(path.join(destination, RESULT_FILE)), result);
+    }
+  });
+
+  it(
+    "treats an unreadable preimage as an error, never a conflict, when the patch path spells the conflict wording",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async (t) => {
+      // The review's reproduction: the preparer's operational line reads
+      // "patch patches/a does not apply cleanly: b.patch: git apply failed: ..."
+      // and must not be mistaken for its conflict report. `read` replays git's
+      // wording deterministically; `unreadable` produces it with the real git.
+      for (const patchPath of [SPACED_PATCH_PATH, MARKER_WORDS_PATCH_PATH]) {
+        for (const mode of ["read", "unreadable"]) {
+          const c = await freshCase();
+          const lock = await componentWithOne(c.dir, { path: patchPath, text: PATCH_ONE });
+          const env = await failingApplyGit(c.dir, mode);
+          const api = fakeApi(routesFor({ commit: clean, listing: fullListing() }));
+          const { error, result, run } = await discover(c, { api, lock, env });
+          if (mode === "unreadable" && /GIT_SHIM: mode bits not enforced/.test(error?.message ?? "")) {
+            t.diagnostic("this user can read a mode 000 file; the real-git case was not exercised");
+            continue;
+          }
+          const label = `${mode} ${patchPath}`;
+          assert.equal(result, undefined, label);
+          assert.ok(error instanceof DiscoveryError, `${label}: ${error?.stack}`);
+          assert.ok(
+            error.message.includes(
+              `prepare-source --variant managed-nightly failed: prepare-source: patch ${patchPath}: git apply failed: error: unable to open or read hello.txt error: failed to read hello.txt error: hello.txt: patch does not apply`,
+            ),
+            `${label}: ${error.message}`,
+          );
+          assert.equal(run.commands.filter((cmd) => cmd.command === process.execPath).length, 1, label);
+          assert.deepEqual(await entries(c.dir), ["bin", "component", "work"], `${label}: ${c.destination} must not exist`);
+          assert.deepEqual(await entries(c.work), [], `${label}: an operational failure removes the owned stage`);
+        }
+      }
+    },
+  );
 });
 
 // --- CLI ------------------------------------------------------------------------------
@@ -1043,6 +1268,106 @@ if [ -f "$file" ]; then cat "$file"; else echo "gh: Not Found (HTTP 404)" >&2; e
     assert.equal(result.code, EXIT_CONFLICT, result.stderr);
     assert.match(result.stdout, /conflict; .* rejects patches\/0001-one\.patch in variant managed-nightly/);
     assert.equal((await readJson(path.join(c.destination, RESULT_FILE))).status, "conflict");
+  });
+
+  it("exits 1 on a malformed patch without creating the destination", async () => {
+    const c = await freshCase();
+    const corruptLock = await corruptComponent(c.dir);
+    const tag = `v${NEWER_VERSION}`;
+    const { env } = await ghShim(c.dir, {
+      [RELEASES_ENDPOINT]: fullListing(),
+      [refFor(tag)]: lightweightRef(tag, clean),
+    });
+    const result = await cli(
+      ["--lock", corruptLock, "--current-release", currentPath, "--destination", c.destination, "--repository", upstream, "--work", c.work],
+      env,
+    );
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /discover-upstream-nightly: prepare-source --variant managed-nightly failed: .*corrupt patch/);
+    assert.doesNotMatch(result.stdout, /conflict/);
+    assert.deepEqual(await entries(c.dir), ["bin", "component", "gh-fixtures", "gh.log", "work"]);
+    assert.deepEqual(await entries(c.work), []);
+  });
+
+  it("exits 1 on real git's exit 1 for an unreadable preimage without creating the destination", async (t) => {
+    const c = await freshCase();
+    const tag = `v${NEWER_VERSION}`;
+    const gh = await ghShim(c.dir, {
+      [RELEASES_ENDPOINT]: fullListing(),
+      [refFor(tag)]: lightweightRef(tag, clean),
+    });
+    // The git shim shares the gh shim's bin directory, so one PATH entry serves both.
+    const env = { ...gh.env, ...(await failingApplyGit(c.dir, "unreadable")) };
+    const result = await cli(
+      ["--lock", lockPath, "--current-release", currentPath, "--destination", c.destination, "--repository", upstream, "--work", c.work],
+      env,
+    );
+    if (/GIT_SHIM: mode bits not enforced/.test(result.stderr)) {
+      t.skip("this user can read a mode 000 file, so the read failure cannot be produced");
+      return;
+    }
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /discover-upstream-nightly: prepare-source --variant managed-nightly failed: .*git apply failed: error: unable to open or read hello\.txt/,
+    );
+    assert.doesNotMatch(result.stderr, /does not apply cleanly/);
+    assert.doesNotMatch(result.stdout, /conflict/);
+    assert.deepEqual(await entries(c.dir), ["bin", "gh-fixtures", "gh.log", "work"]);
+    assert.deepEqual(await entries(c.work), []);
+  });
+
+  it("exits 2 naming the full patch path when a spaced or conflict-worded patch genuinely conflicts", async () => {
+    for (const patchPath of [SPACED_PATCH_PATH, MARKER_WORDS_PATCH_PATH]) {
+      const c = await freshCase();
+      const lock = await componentWithOne(c.dir, { path: patchPath, text: PATCH_ONE });
+      const tag = `v${NEWER_VERSION}`;
+      const { env } = await ghShim(c.dir, {
+        [RELEASES_ENDPOINT]: fullListing(),
+        [refFor(tag)]: lightweightRef(tag, firstConflict),
+      });
+      const result = await cli(
+        ["--lock", lock, "--current-release", currentPath, "--destination", c.destination, "--repository", upstream, "--work", c.work],
+        env,
+      );
+      assert.equal(result.code, EXIT_CONFLICT, `${patchPath}: ${result.stderr}`);
+      assert.ok(result.stdout.includes(`rejects ${patchPath} in variant managed-nightly`), result.stdout);
+      const written = await readJson(path.join(c.destination, RESULT_FILE));
+      assert.equal(written.status, "conflict");
+      assert.equal(written.conflict.failedPatch, patchPath);
+    }
+  });
+
+  it("exits 1 on an unreadable preimage under a conflict-worded patch path without creating the destination", async (t) => {
+    for (const mode of ["read", "unreadable"]) {
+      const c = await freshCase();
+      const lock = await componentWithOne(c.dir, { path: MARKER_WORDS_PATCH_PATH, text: PATCH_ONE });
+      const tag = `v${NEWER_VERSION}`;
+      const gh = await ghShim(c.dir, {
+        [RELEASES_ENDPOINT]: fullListing(),
+        [refFor(tag)]: lightweightRef(tag, clean),
+      });
+      const env = { ...gh.env, ...(await failingApplyGit(c.dir, mode)) };
+      const result = await cli(
+        ["--lock", lock, "--current-release", currentPath, "--destination", c.destination, "--repository", upstream, "--work", c.work],
+        env,
+      );
+      if (mode === "unreadable" && /GIT_SHIM: mode bits not enforced/.test(result.stderr)) {
+        t.diagnostic("this user can read a mode 000 file; the real-git case was not exercised");
+        continue;
+      }
+      assert.equal(result.code, 1, `${mode}: ${result.stderr}`);
+      assert.ok(
+        result.stderr.includes(
+          `discover-upstream-nightly: prepare-source --variant managed-nightly failed: prepare-source: patch ${MARKER_WORDS_PATCH_PATH}: git apply failed: error: unable to open or read hello.txt`,
+        ),
+        `${mode}: ${result.stderr}`,
+      );
+      assert.doesNotMatch(result.stderr, /prepare-source-conflict/, mode);
+      assert.doesNotMatch(result.stdout, /conflict/, mode);
+      assert.deepEqual(await entries(c.dir), ["bin", "component", "gh-fixtures", "gh.log", "work"], mode);
+      assert.deepEqual(await entries(c.work), [], mode);
+    }
   });
 
   it("exits 1 on an API failure without creating the destination", async () => {
