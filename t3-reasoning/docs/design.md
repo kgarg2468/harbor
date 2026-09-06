@@ -17,8 +17,7 @@ Downloads and builds may run while agents work. Installation waits until the
 affected machine has no active agent work, then updates and reconnects/reopens.
 There is no timeout that forces an update while an agent is working.
 
-Reasoning adds a Fork action: select a conversation boundary, a new chat in the
-current workspace or a new git worktree, and an available harness/model.
+Conversation forking is handled by a separate skill, outside these app builds.
 
 ## Repository and release ownership
 
