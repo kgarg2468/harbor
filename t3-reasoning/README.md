@@ -72,6 +72,10 @@ What this component does not do:
   and extracts verified archives into a confined private tree, preserving safe
   internal dependency links. Cancellation waits for cleanup; downloading and
   activating a runtime remain separate updater work.
+- `patches/0016-desktop-reservation.patch`: the desktop reservation transaction
+  and shared command/reply contracts. It correlates backend generations and
+  orders abort, commit and installation; transport and installer integration
+  remain separate work.
 - `patches/0018-candidate-process.patch`: runs candidate version and preflight
   probes with a private home and replacement environment. It retains owned
   files until actual child exit and pipe settlement; staging and activation

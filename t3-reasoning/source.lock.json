@@ -49,6 +49,11 @@
       "sha256": "708040bf48daeda0742ad9b187caef85a3d53b7805cda8455a58539319579e03"
     },
     {
+      "id": "desktop-reservation",
+      "path": "patches/0016-desktop-reservation.patch",
+      "sha256": "d3e8d52a8997e393cd63b37cbb433a0e4593ad0b86529ae9923fccb8688b7c48"
+    },
+    {
       "id": "candidate-process",
       "path": "patches/0018-candidate-process.patch",
       "sha256": "d0850e428f54a4e18e43af07b048d84e35769fd9fc5bf51551e8060633c7b606"
@@ -69,6 +74,7 @@
       "nonwaiting-admission",
       "migration-preflight",
       "managed-runtime-stager",
+      "desktop-reservation",
       "candidate-process"
     ],
     "reasoning": [
@@ -80,6 +86,7 @@
       "nonwaiting-admission",
       "migration-preflight",
       "managed-runtime-stager",
+      "desktop-reservation",
       "candidate-process",
       "reasoning-identity"
     ]
