@@ -70,6 +70,10 @@ What this component does not do:
   and extracts verified archives into a confined private tree, preserving safe
   internal dependency links. Cancellation waits for cleanup; downloading and
   activating a runtime remain separate updater work.
+- `patches/0018-candidate-process.patch`: runs candidate version and preflight
+  probes with a private home and replacement environment. It retains owned
+  files until actual child exit and pipe settlement; staging and activation
+  remain separate updater work.
 - `UPSTREAM-LICENSE`: upstream's MIT license, copied unchanged.
 - `scripts/prepare-source.mjs`: the CLI that materializes the pin.
 - `tests/prepare-source.test.mjs`: tests that drive the CLI against a
