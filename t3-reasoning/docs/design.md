@@ -1,4 +1,4 @@
-# T3 Reasoning: shared conversations, queued updates, and forks
+# T3 Reasoning: shared conversations and queued updates
 
 Status: approved by the owner. No live installation or activation has occurred.
 
@@ -97,34 +97,8 @@ not a recovery plan for an incompatible migrated database.
 
 ## Conversation forks
 
-Capture a fixed message/turn boundary and preserve parent-thread lineage.
-Offer a new chat in the current workspace or a new git worktree. Default a new
-worktree to the selected completed turn's checkpoint. Preserve tracked and
-non-ignored untracked source changes included by that checkpoint; never mutate
-the source branch. Show the chosen file state before creating the fork.
-
-If no matching checkpoint exists, make the available branch/commit choice
-explicit. A non-git project can fork a chat but cannot offer a git worktree.
-Do not copy ignored secrets, dependency directories, or process state; use the
-project's existing workspace setup mechanism for dependencies and configuration.
-
-Reuse a native provider fork only when that adapter supports both the selected
-history boundary and target working directory. Otherwise start a fresh provider
-session with the captured conversation, relevant tool results, and supported
-attachments. Cross-harness forks always use this context-transfer path.
-Do not copy provider resume tokens across harnesses or represent a summary as an
-exact native fork. Disclose any context-limit reduction or unsupported attachment.
-
-Preserve history for display, but seed the destination model as historical
-context rather than automatically replaying old user commands. The new chat waits
-for its next prompt. A fork never cancels or changes its parent. Forking while a
-parent works captures the last selected completed boundary, not an unstable file
-copy from the active turn.
-
-Validate harness/model availability on the destination environment. Disable
-unavailable choices with a useful reason. A failed operation must be retryable
-without duplicate threads or abandoned worktrees; clean up only artifacts created
-by that operation.
+Conversation forking is handled by a separate skill. It is outside this app
+project and excluded from both managed build variants.
 
 ## Delivery and evidence
 
@@ -134,9 +108,7 @@ by that operation.
    starting concurrently with activation and with a busy remote machine.
 3. Nightly discovery/build pipeline and desktop restart integration, including
    patch conflict, failed launch, offline target, and database rollback cases.
-4. Fork orchestration/provider context transfer/worktree creation, followed by
-   Reasoning UI and an end-to-end Claude-to-Codex example.
-5. Staged activation on the real environments after integration verification and
+4. Staged activation on the real environments after integration verification and
    an idle cutover; confirm both clients see the same newly created conversation.
 
 Keep implementation PRs to one observable concern, generally under 600 changed

@@ -26,8 +26,8 @@ What this component does not do:
 - It does not install, update, launch, or synchronize anything, and it does
   not touch an existing T3 installation or its data. No shared live
   installation exists yet.
-- It does not implement the shared environments, queued updates, or
-  complete conversation-fork UI from `docs/design.md`. The backend is present.
+- Shared environments and queued updates still need production integration.
+- Conversation forking is handled by a separate skill and excluded from both builds.
 
 ## Layout
 
@@ -62,7 +62,7 @@ What this component does not do:
   updater integration remain separate work.
 - `patches/0006-thread-fork-backend.patch`: fork RPC, durable copied history and
   lineage, checkpoint worktrees, and fresh provider context on the first send.
-  See `docs/thread-forks.md`; the desktop action is a separate UI patch.
+  Retained as an inactive catalog entry; neither build variant includes it.
 - `patches/0012-migration-preflight.patch`: rehearses candidate migrations on a
   disposable snapshot and checks the candidate response. Downloading, invoking
   the staged candidate, and activating it remain separate updater work.
