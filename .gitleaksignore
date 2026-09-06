@@ -1,0 +1,4 @@
+# Public SSH clone URL fixtures, misclassified as email addresses.
+# Exact historical lines only; current and future content remains scanned.
+c5389e84e361234d3758c095ccb6f46bda7c1eb4:t3-reasoning/tests/discover-upstream-nightly.test.mjs:harbor-email:421
+c5389e84e361234d3758c095ccb6f46bda7c1eb4:t3-reasoning/tests/discover-upstream-nightly.test.mjs:harbor-email:422
