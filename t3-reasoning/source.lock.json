@@ -34,6 +34,11 @@
       "sha256": "a2a81bfcb5712ff623602b9ac8fc48a1238b1422db2a31d59a6b789739ac3c54"
     },
     {
+      "id": "nonwaiting-admission",
+      "path": "patches/0010-nonwaiting-admission.patch",
+      "sha256": "9224d603246a69485f4eade4d83119b68ea4ad5db95e2863518311152e6d3815"
+    },
+    {
       "id": "migration-preflight",
       "path": "patches/0012-migration-preflight.patch",
       "sha256": "734a2829c232339b88b8d1202dbe2eb0d08790bb262b259986ba137089841d4c"
@@ -61,6 +66,7 @@
       "update-admission",
       "queued-update",
       "update-activity",
+      "nonwaiting-admission",
       "migration-preflight",
       "managed-runtime-stager",
       "candidate-process"
@@ -71,6 +77,7 @@
       "update-admission",
       "queued-update",
       "update-activity",
+      "nonwaiting-admission",
       "migration-preflight",
       "managed-runtime-stager",
       "candidate-process",

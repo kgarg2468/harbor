@@ -63,6 +63,8 @@ What this component does not do:
 - `patches/0006-thread-fork-backend.patch`: fork RPC, durable copied history and
   lineage, checkpoint worktrees, and fresh provider context on the first send.
   Retained as an inactive catalog entry; neither build variant includes it.
+- `patches/0010-nonwaiting-admission.patch`: an atomic maintenance claim that
+  leaves requests open while a command is in flight. Updater wiring is pending.
 - `patches/0012-migration-preflight.patch`: rehearses candidate migrations on a
   disposable snapshot and checks the candidate response. Downloading, invoking
   the staged candidate, and activating it remain separate updater work.
