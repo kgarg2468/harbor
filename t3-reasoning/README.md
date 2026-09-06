@@ -20,9 +20,10 @@ scripts.
 
 What this component does not do:
 
-- It does not update automatically or discover new Nightlies. Moving to a
-  newer Nightly is a change to `source.lock.json`, and possibly to the
-  patches, made and reviewed by hand. See `docs/nightly-port.md`.
+- It does not update automatically. `scripts/discover-upstream-nightly.mjs`
+  discovers published Nightlies and checks both patch variants into a local
+  candidate report. Promotion, building and deployment remain separate work;
+  see `docs/nightly-automation.md`.
 - It does not install, update, launch, or synchronize anything, and it does
   not touch an existing T3 installation or its data. No shared live
   installation exists yet.
