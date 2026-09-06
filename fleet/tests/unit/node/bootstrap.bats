@@ -9,10 +9,10 @@ load '../test_helper'
 # lib/ssh.sh consult their own stand-ins, so no root code path can ever see one.
 #
 # Every vendor command the design section 5.2 rows reach (apt-get, dpkg-query,
-# getent, useradd, loginctl, systemctl, sshd, ufw, ip, runuser) is the PR 2 shim
-# under a link in this test's own fixture base, first on PATH, and no real package
-# manager, account database, unit manager, daemon, or firewall is ever asked
-# anything. The subject here is a subprocess rather than a sourced function, so the
+# getent, useradd, loginctl, systemctl, sshd, ufw, ip, curl, tailscale, runuser) is
+# the PR 2 shim under a link in this test's own fixture base, first on PATH, and no
+# real package manager, account database, unit manager, daemon, firewall, or vendor
+# host is ever asked anything. The subject here is a subprocess rather than a sourced function, so the
 # state a real command leaves behind is modeled by a wrapper script beside the shim
 # rather than by a shell function overriding it, exactly as tests/unit/lib/apt.bats,
 # power.bats, ssh.bats, and firewall.bats model it in-process: the shim is still
@@ -86,6 +86,15 @@ setup() {
   # row rather than proof of a default.
   OPUSER="${TEST_USER}"
   NODE_LOCKED="$(sed -n 's/^nodejs_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  # The two Tailscale rows read their pin and their channel from the same lock, and
+  # the vendor keyring and apt source lib/apt.sh writes for that channel land under
+  # the configuration root the install row is given, which is a fixture path here.
+  TS_LOCKED="$(sed -n 's/^tailscale_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  TS_CHANNEL="$(sed -n 's/^tailscale_apt_channel=//p' "${HARBOR_ROOT}/versions.lock")"
+  TS_KEYRING="${ETC}/apt/keyrings/tailscale-archive-keyring.gpg"
+  TS_SOURCE="${ETC}/apt/sources.list.d/tailscale.list"
+  TS_KEYRING_URL="https://pkgs.tailscale.com/${TS_CHANNEL}.noarmor.gpg"
+  TS_OTHER=1.99.0
   mkdir -p "${FIX_BASE}/var/lib" "${INSTALL}" "${BINDIR}" \
     "${HOMES}/${ADMIN}/.ssh"
   KEYSRC="${HOMES}/${ADMIN}/.ssh/authorized_keys"
@@ -322,7 +331,7 @@ WRAPPER
 vendor_init() {
   # Every vendor command of the design section 5.2 rows, answering from this test's
   # own fixture tree, with the state a real command would leave modeled beside it.
-  local unit
+  local unit pkgset
   REPO_FX="${HARBOR_ROOT}/tests/fixtures/shims"
   SHIM="${FIX_BASE}/shim"
   VST="${FIX_BASE}/vendor-state"
@@ -330,7 +339,7 @@ vendor_init() {
   VENDOR_ENV="${FIX_BASE}/vendor.env"
   mkdir -p "${SHIM}" "${VST}" "${FX}/apt-get" "${FX}/dpkg-query" \
     "${FX}/useradd/healthy" "${FX}/loginctl/healthy" "${FX}/systemctl/healthy" \
-    "${FX}/busctl/healthy" \
+    "${FX}/busctl/healthy" "${FX}/curl/healthy" "${FX}/tailscale/healthy" \
     "${FX}/sshd/healthy" "${FX}/ufw/healthy" "${FX}/ip/healthy" "${FX}/runuser/healthy"
   {
     printf 'FX="%s"\n' "${FX}"
@@ -345,6 +354,11 @@ vendor_init() {
     printf 'OPUSER="%s"\n' "${OPUSER}"
     printf 'ADMIN="%s"\n' "${ADMIN}"
     printf 'KEYSRC="%s"\n' "${KEYSRC}"
+    # The two replies a successful tailscale set --operator changes, named here so the
+    # wrapper that models it does not build a shim fixture key of its own.
+    printf 'PROBE="%s"\n' \
+      "${FX}/runuser/healthy/$(vkey -u "${OPUSER}" -- tailscale status --json)"
+    printf 'GET_OPERATOR="%s"\n' "${FX}/tailscale/healthy/$(vkey get operator)"
   } >"${VENDOR_ENV}"
   # The installation user's own key file belongs to the installation user, which is what
   # the --harden-sshd row reads it for and what this fixture cannot arrange with chown.
@@ -353,15 +367,41 @@ vendor_init() {
   # Packages: the repository's own dpkg-query and apt-get fixture sets, a node on
   # which none of the six is installed, and the installed set the mutating call
   # switches to, exactly as tests/unit/lib/apt.bats composes them.
-  ln -s "${REPO_FX}/dpkg-query/none" "${FX}/dpkg-query/healthy"
-  ln -s "${REPO_FX}/apt-get/none" "${FX}/apt-get/healthy"
+  # The sets are copied into this test's own fixture tree rather than linked as
+  # whole directories, because the Tailscale row's answers are written beside them
+  # below and nothing here may write into the repository. The two dpkg sets keep the
+  # names the swap below moves between; apt-get needs no swap, so its set is the
+  # scenario directory itself.
+  cp -R "${REPO_FX}/dpkg-query/none" "${FX}/dpkg-query/none"
+  cp -R "${REPO_FX}/dpkg-query/installed" "${FX}/dpkg-query/installed"
+  cp -R "${REPO_FX}/apt-get/none" "${FX}/apt-get/healthy"
+  # What dpkg says about tailscale is a package answer like the six beside it, but it
+  # changes on its own schedule, so in both sets it is a link to one pair of files
+  # under the vendor state: whoever rewrites that pair, this file before a run or the
+  # apt-get wrapper during one, changes the answer of whichever set is current.
+  for pkgset in none installed; do
+    ln -s "${VST}/dpkg-tailscale.out" "${FX}/dpkg-query/${pkgset}/-s_tailscale.out"
+    ln -s "${VST}/dpkg-tailscale.exit" "${FX}/dpkg-query/${pkgset}/-s_tailscale.exit"
+  done
+  ln -s "${FX}/dpkg-query/none" "${FX}/dpkg-query/healthy"
   vendor_direct dpkg-query
   vendor_wrapper apt-get <<'WRAPPER'
 rc=0
 "${SHIM}/apt-get" "$@" || rc="$?"
 if [ "${rc}" = 0 ] && [ "${1}" = install ]; then
-  rm -f "${FX}/dpkg-query/healthy"
-  ln -s "${REPO_FX}/dpkg-query/installed" "${FX}/dpkg-query/healthy"
+  case "${*}" in
+    *' tailscale='*)
+      # The pinned install of the Tailscale row: dpkg now reports the package, and
+      # the reply that says so was rendered before the run, so this models the
+      # install without carrying a second copy of a dpkg status block.
+      cp "${VST}/dpkg-tailscale-installed.out" "${VST}/dpkg-tailscale.out"
+      cp "${VST}/dpkg-tailscale-installed.exit" "${VST}/dpkg-tailscale.exit"
+      ;;
+    *)
+      rm -f "${FX}/dpkg-query/healthy"
+      ln -s "${FX}/dpkg-query/installed" "${FX}/dpkg-query/healthy"
+      ;;
+  esac
 fi
 exit "${rc}"
 WRAPPER
@@ -512,10 +552,139 @@ WRAPPER
   printf '2: eth0    inet 192.168.1.23/24 brd 192.168.1.255 scope global dynamic eth0\n' \
     >"${FX}/ip/healthy/$(vkey -o -4 addr show dev eth0).out"
   vendor_direct ip
-  # The report-only Node.js probe of the operator's own login shell.
+  # The report-only Node.js probe of the operator's own login shell, and the
+  # operator's unprivileged Tailscale read, which reach the same runuser.
   operator_sees_node "v${NODE_LOCKED}" 0
   vendor_direct runuser
+  # Tailscale: a node with no tailscale at all, the pinned install available from the
+  # vendor channel the lock names, and the keyring fetch over TLS that precedes it.
+  # The reply the install leaves behind is rendered here, once, for the apt-get
+  # wrapper above to copy into place.
+  dpkg_tailscale "${VST}/dpkg-tailscale-installed" "${TS_LOCKED}"
+  tailscale_package
+  tailscale_apt "${TS_LOCKED}"
+  printf 'fixture keyring bytes\n' \
+    >"${FX}/curl/healthy/$(vkey -fsSL --proto =https --tlsv1.2 "${TS_KEYRING_URL}").out"
+  # curl is reached by the Tailscale row alone: the Node.js prefix is seeded below, so
+  # that row's own download never runs.
+  vendor_direct curl
+  # tailscaled as a daemon Harbor has just installed answers: it talks to root, it is
+  # not logged in, it refuses the operator's unprivileged read, and it names no
+  # operator yet.
+  tailscale_backend NeedsLogin
+  tailscale_probe denied
+  tailscale_operator_is
+  : >"${FX}/tailscale/healthy/$(vkey set "--operator=${OPUSER}").out"
+  vendor_wrapper tailscale <<'WRAPPER'
+rc=0
+"${SHIM}/tailscale" "$@" || rc="$?"
+if [ "${rc}" = 0 ] && [ "${1}" = set ]; then
+  # What a successful tailscale set --operator=NAME does to the two reads the row
+  # then makes: the daemon lets NAME read its status without sudo, and the pinned
+  # CLI's get operator names NAME.
+  printf '{"BackendState": "NeedsLogin"}\n' >"${PROBE}.out"
+  printf '0\n' >"${PROBE}.exit"
+  printf '%s\n' "${2#--operator=}" >"${GET_OPERATOR}.out"
+  printf '0\n' >"${GET_OPERATOR}.exit"
+fi
+exit "${rc}"
+WRAPPER
   seed_node_prefix
+}
+
+dpkg_tailscale() {
+  # dpkg_tailscale FILE [VERSION]: what dpkg-query -s tailscale answers, as the pair
+  # of files the shim reads, FILE.out and FILE.exit: the status block of a package
+  # installed at VERSION, or the refusal dpkg makes for a package it does not have.
+  if [ -n "${2:-}" ]; then
+    printf 'Package: tailscale\nStatus: install ok installed\nArchitecture: amd64\nVersion: %s\n' \
+      "${2}" >"${1}.out"
+    printf '0\n' >"${1}.exit"
+    return 0
+  fi
+  printf "dpkg-query: package 'tailscale' is not installed and no information is available\n" \
+    >"${1}.out"
+  printf '1\n' >"${1}.exit"
+}
+
+tailscale_package() {
+  # tailscale_package [VERSION]: the tailscale this node already has, or none at all
+  dpkg_tailscale "${VST}/dpkg-tailscale" ${1+"$@"}
+}
+
+tailscale_apt() {
+  # tailscale_apt VERSION [PRIOR]: apt-get update succeeds and the pinned install of
+  # VERSION both simulates and runs, with and without --allow-downgrades, since which
+  # of the two forms the row uses is decided by what it found installed. With PRIOR
+  # the simulation prints the upgrade form, "Inst tailscale [PRIOR] (VERSION", which
+  # is what an install over a version already there prints and what the row reads the
+  # candidate version out of.
+  local sim variant
+  if [ -n "${2:-}" ]; then
+    sim="Inst tailscale [${2}] (${1} Tailscale:noble [amd64])"
+  else
+    sim="Inst tailscale (${1} Tailscale:noble [amd64])"
+  fi
+  printf 'Reading package lists...\nBuilding dependency tree...\n' \
+    >"${FX}/apt-get/healthy/update.out"
+  for variant in "$(vkey -s install "tailscale=${1}")" \
+    "$(vkey -s install --allow-downgrades "tailscale=${1}")"; do
+    printf 'Reading package lists...\n%s\nConf tailscale (%s Tailscale:noble [amd64])\n' \
+      "${sim}" "${1}" >"${FX}/apt-get/healthy/${variant}.out"
+  done
+  for variant in "$(vkey install -y "tailscale=${1}")" \
+    "$(vkey install -y --allow-downgrades "tailscale=${1}")"; do
+    printf 'Setting up tailscale (%s) ...\n' "${1}" \
+      >"${FX}/apt-get/healthy/${variant}.out"
+  done
+}
+
+tailscale_backend() {
+  # tailscale_backend STATE: the BackendState root's tailscale status --json reports,
+  # which is what decides the operator row's closing report and nothing else
+  printf '{\n  "BackendState": "%s",\n  "Self": {"HostName": "harbor-node"}\n}\n' "${1}" \
+    >"${FX}/tailscale/healthy/$(vkey status --json).out"
+}
+
+tailscale_probe() {
+  # tailscale_probe granted|denied: whether ${OPUSER} runs tailscale status --json
+  # without sudo, the read-access probe that is the operator row's own check
+  local key
+  key="${FX}/runuser/healthy/$(vkey -u "${OPUSER}" -- tailscale status --json)"
+  if [ "${1}" = granted ]; then
+    printf '{"BackendState": "NeedsLogin"}\n' >"${key}.out"
+    printf '0\n' >"${key}.exit"
+    return 0
+  fi
+  printf 'Access denied: watch IPN bus access denied, must set --operator or be root\n' \
+    >"${key}.out"
+  printf '1\n' >"${key}.exit"
+}
+
+tailscale_operator_is() {
+  # tailscale_operator_is [NAME]: what the pinned CLI's tailscale get operator prints,
+  # NAME or, with no argument, nothing at all, which is the preference unset
+  local key
+  key="${FX}/tailscale/healthy/$(vkey get operator)"
+  if [ -n "${1:-}" ]; then
+    printf '%s\n' "${1}" >"${key}.out"
+  else
+    : >"${key}.out"
+  fi
+  printf '0\n' >"${key}.exit"
+}
+
+pre_existing_tailscale() {
+  # pre_existing_tailscale [OPERATOR]: a tailscale this node already had, at a version
+  # that is not the pin and with no journal entry naming it, which is the pre-existing
+  # ownership of design section 5.2, its operator preference set to OPERATOR or unset.
+  # Its own apt answers are the upgrade form, since an install over it is what
+  # --adopt-tailscale asks for.
+  tailscale_package "${TS_OTHER}"
+  tailscale_apt "${TS_LOCKED}" "${TS_OTHER}"
+  tailscale_backend Running
+  tailscale_probe denied
+  tailscale_operator_is ${1+"$@"}
 }
 
 linger_state() {
@@ -677,6 +846,8 @@ mutating_calls() {
     | grep -v '^ufw status verbose$' \
     | grep -v '^ufw show added$' \
     | grep -v '^ip -o -4 ' \
+    | grep -v '^tailscale status --json$' \
+    | grep -v '^tailscale get operator$' \
     | grep -v '^runuser -u ' || true
 }
 
@@ -1080,7 +1251,11 @@ expected_rows() {
   for unit in ${TARGETS}; do
     printf '%s\n' "systemd-mask ${unit}"
   done
+  printf '%s\n' "file ${TS_KEYRING}"
+  printf '%s\n' "file ${TS_SOURCE}"
+  printf '%s\n' 'tailscale-install tailscale'
   printf '%s\n' "linger ${OPUSER}"
+  printf '%s\n' "tailscale-operator ${OPUSER}"
   printf '%s\n' "file ${STATE}/bootstrap.json"
 }
 
@@ -1205,7 +1380,7 @@ expected_rows() {
   assert_line 'systemctl restart systemd-logind.service'
 }
 
-@test "the linger row is the last row before the state record" {
+@test "the linger row runs between the two Tailscale rows" {
   install_form
   rows
   assert_success
@@ -1214,23 +1389,60 @@ expected_rows() {
   assert_equal "$(ownership_of linger "${OPUSER}")" created
 }
 
-@test "the Tailscale rows are not applied by this release, and the record says so" {
+@test "the Tailscale install row installs the pinned version from the channel the lock names" {
   install_form
   rows
   assert_success
-  # No entry of a tailscale-install, tailscale-operator, or tailscale-serve op, and
-  # no tailscale command at all: the flag set names the two Tailscale flags because
-  # it records the run's whole intent, and that is the only tailscale text here.
-  run journal_ops
-  refute_line --regexp '^tailscale'
+  # The vendor keyring is fetched over TLS and the apt source beside it names it, both
+  # under the configuration root this run was given and each its own journaled file
+  # entry, and only then is the pin installed.
   run vendor_calls
-  refute_line --regexp '^tailscale '
-  # This release installs no Tailscale and adopts none, so the ownership the record can
-  # honestly name is pre-existing and there is no version to name beside it. Slice 3d is
-  # what makes harbor-installed and adopted reachable and what adds the version key.
-  run cat "${STATE}/bootstrap.json"
-  assert_line '  "tailscale_ownership": "pre-existing",'
-  refute_output --partial 'tailscale_version'
+  assert_line "curl -fsSL --proto =https --tlsv1.2 ${TS_KEYRING_URL}"
+  assert_line 'apt-get update'
+  assert_line "apt-get -s install tailscale=${TS_LOCKED}"
+  assert_line "apt-get install -y tailscale=${TS_LOCKED}"
+  # Nothing on a fresh install is a downgrade, and nothing here ever logs the node in.
+  refute_output --partial '--allow-downgrades'
+  refute_line --regexp '^tailscale (up|login|logout)'
+  assert_equal "$(cat "${TS_SOURCE}")" \
+    "deb [signed-by=${TS_KEYRING}] https://pkgs.tailscale.com/${TS_CHANNEL%/*} ${TS_CHANNEL##*/} main"
+  assert_equal "$(ownership_of tailscale-install tailscale)" created
+  assert_equal "$(phase_of tailscale-install tailscale)" applied
+}
+
+@test "the Tailscale operator row grants the operator the role and reports the login it owes" {
+  install_form
+  rows
+  assert_success
+  # A Tailscale Harbor has just installed is not logged in, which the row reports and
+  # which is narration rather than a degraded run: bootstrap still exits 0.
+  assert_output --partial 'tailscale.needs_tailscale_login'
+  assert_output --partial 'harbor auth tailscale'
+  assert_output --partial "next, as ${OPUSER} over SSH: harbor provision"
+  refute_output --partial 'bootstrap.degraded'
+  # The grant is journaled created against the state a daemon Harbor installed fresh
+  # has, and the row's own check is the operator's unprivileged read.
+  assert_equal "$(ownership_of tailscale-operator "${OPUSER}")" created
+  assert_equal "$(phase_of tailscale-operator "${OPUSER}")" applied
+  assert_equal "$(entry_raw "${STATE}" "$(seq_of tailscale-operator "${OPUSER}")" pre_state)" '"absent"'
+  run vendor_calls
+  assert_line "tailscale set --operator=${OPUSER}"
+  assert_line "runuser -u ${OPUSER} -- tailscale status --json"
+}
+
+@test "the two Tailscale rows sit where the table puts them, around the linger row" {
+  install_form
+  rows
+  assert_success
+  run vendor_calls
+  local mask_at install_at linger_at set_at
+  mask_at="$(call_index 'systemctl mask sleep.target')"
+  install_at="$(call_index "apt-get install -y tailscale=${TS_LOCKED}")"
+  linger_at="$(call_index "loginctl enable-linger ${OPUSER}")"
+  set_at="$(call_index "tailscale set --operator=${OPUSER}")"
+  assert [ "${mask_at}" -lt "${install_at}" ]
+  assert [ "${install_at}" -lt "${linger_at}" ]
+  assert [ "${linger_at}" -lt "${set_at}" ]
 }
 
 # The state record, the last row of the design section 5.2 table
@@ -1251,8 +1463,9 @@ expected_rows() {
   assert_equal "$(phase_of file "${record}")" applied
   # Every value is the one the row that owns it proved: the tag of the executing release,
   # the absolute entrypoint, the hash of the lock the preflight loaded, the intent the
-  # flag binding recorded, the locked Node.js version, and the account the operator-user
-  # row created, uid, gid, and home as the name service now lists them.
+  # flag binding recorded, the locked Node.js version, the ownership the Tailscale
+  # install row read out of the journal, and the account the operator-user row created,
+  # uid, gid, and home as the name service now lists them.
   run cat "${record}"
   assert_line --index 0 '{'
   assert_line --index 1 "  \"release_tag\": \"${TAG}\","
@@ -1260,7 +1473,7 @@ expected_rows() {
   assert_line --index 3 "  \"lock_sha256\": \"${lock_sha}\","
   assert_line --index 4 "  \"flags\": \"${flags}\","
   assert_line --index 5 "  \"nodejs_version\": \"${NODE_LOCKED}\","
-  assert_line --index 6 '  "tailscale_ownership": "pre-existing",'
+  assert_line --index 6 '  "tailscale_ownership": "harbor-installed",'
   assert_line --index 7 "  \"operator\": \"${OPUSER}\","
   assert_line --index 8 '  "operator_uid": 4242,'
   assert_line --index 9 '  "operator_gid": 4242,'
@@ -1305,13 +1518,18 @@ expected_rows() {
   assert_success
   assert_output --partial "next, as ${OPUSER} over SSH: harbor provision"
   local switches
-  # The one runuser of the whole sequence is the report-only Node.js probe of the design
-  # section 5.2 Node.js row. Bootstrap starts no shell as the operator and no login of any
-  # kind: it prints the command and exits (design section 5.2).
-  switches="$(vendor_calls | grep -c '^runuser ' || true)"
-  assert_equal "${switches}" 1
+  # Every runuser of the whole sequence is a read made as the operator and nothing
+  # else: the report-only Node.js probe of the design section 5.2 Node.js row, and the
+  # unprivileged Tailscale read the operator row grants and then checks. Bootstrap
+  # starts no shell as the operator and no login of any kind: it prints the command and
+  # exits (design section 5.2).
+  switches="$(vendor_calls | grep '^runuser ' \
+    | grep -vc -e "^runuser -u ${OPUSER} -- sh -lc node --version\$" \
+      -e "^runuser -u ${OPUSER} -- tailscale status --json\$" || true)"
+  assert_equal "${switches}" 0
   run vendor_calls
   assert_line "runuser -u ${OPUSER} -- sh -lc node --version"
+  assert_line "runuser -u ${OPUSER} -- tailscale status --json"
   refute_line --regexp '^(su|login|sudo|machinectl) '
 }
 
@@ -1448,16 +1666,78 @@ expected_rows() {
   assert_output --partial "next, as ${OPUSER} over SSH: harbor provision"
 }
 
-@test "--tailscale-ssh and --adopt-tailscale are bound and consume no row here" {
+@test "--tailscale-ssh is bound and reaches no row of this table" {
   install_form
   rows --tailscale-ssh --adopt-tailscale
   assert_success
   assert_equal "$(entry_raw "${STATE}" 0002 target)" \
     "\"$(printf 'operator=%s authorized-key-source=%s adopt-firewall=no adopt-tailscale=yes allow-lan-ssh=no harden-sshd=no tailscale-ssh=yes' "${OPUSER}" "${KEYSRC}")\""
-  run journal_ops
-  refute_line --regexp '^tailscale'
+  # --tailscale-ssh is recorded for harbor auth tailscale (design section 5.2) and is
+  # passed to no row here: the only two tailscale calls this run makes are the reads
+  # and the operator grant of the row above, and none of them names it.
   run vendor_calls
-  refute_line --regexp '^tailscale '
+  refute_output --partial 'tailscale-ssh'
+  refute_output --partial '--ssh'
+}
+
+@test "--adopt-tailscale reaches both Tailscale rows and journals what each replaced" {
+  install_form
+  pre_existing_tailscale someone-else
+  rows --adopt-tailscale
+  assert_success
+  # The install row installs the pin over the version that was there, which apt refuses
+  # without --allow-downgrades, and journals the prior version so the reverse walk can
+  # name what it replaced.
+  run vendor_calls
+  assert_line "apt-get install -y --allow-downgrades tailscale=${TS_LOCKED}"
+  assert_line "tailscale set --operator=${OPUSER}"
+  assert_equal "$(ownership_of tailscale-install tailscale)" modified
+  assert_equal "$(entry_raw "${STATE}" "$(seq_of tailscale-install tailscale)" pre_state)" \
+    "{\"version\":\"${TS_OTHER}\",\"method\":\"apt\"}"
+  # The operator row adopts the preference the same way: modified, with the exact prior
+  # value the pinned CLI printed as its pre_state.
+  assert_equal "$(ownership_of tailscale-operator "${OPUSER}")" modified
+  assert_equal "$(entry_raw "${STATE}" "$(seq_of tailscale-operator "${OPUSER}")" pre_state)" \
+    '"someone-else"'
+  # An installation Harbor moved to the pin is adopted, not harbor-installed, and that
+  # is the word the record carries.
+  run cat "${STATE}/bootstrap.json"
+  assert_line '  "tailscale_ownership": "adopted",'
+}
+
+@test "a pre-existing Tailscale without --adopt-tailscale is degraded, not fatal" {
+  install_form
+  pre_existing_tailscale someone-else
+  rows
+  # Both Tailscale rows report a precondition: the install row preserves the version it
+  # found, and the operator row will not touch the preference of an installation Harbor
+  # does not own. Neither is a failure, so both are the degraded exit 1 of design
+  # section 6.2 and the rows after them still ran.
+  assert_equal "${status}" 1
+  assert_output --partial 'tailscale.drift'
+  assert_output --partial "${TS_OTHER}"
+  assert_output --partial 'tailscale.operator'
+  assert_output --partial "sudo tailscale set --operator=${OPUSER}"
+  assert_output --partial "next, as ${OPUSER} over SSH: harbor provision"
+  assert_equal "$(phase_of file "${STATE}/bootstrap.json")" applied
+  # Nothing was mutated for either row: the package is journaled exactly as found, no
+  # vendor source was written, and no preference was set.
+  assert_equal "$(ownership_of tailscale-install tailscale)" observed
+  assert_equal "$(phase_of tailscale-operator "${OPUSER}")" none
+  assert [ ! -e "${TS_KEYRING}" ]
+  assert [ ! -e "${TS_SOURCE}" ]
+  run vendor_calls
+  refute_output --partial 'apt-get install -y --allow-downgrades'
+  refute_output --partial 'apt-get update'
+  refute_output --partial 'tailscale set'
+  # No keyring was fetched either. The curl of the Packages row's own package list is
+  # a dpkg-query about a package that happens to be named curl, so what is refuted
+  # here is a line that is a curl invocation, not the word.
+  refute_line --regexp '^curl '
+  # The record names the installation for what it is, which is what a later command
+  # reads to know what Harbor may do to it.
+  run cat "${STATE}/bootstrap.json"
+  assert_line '  "tailscale_ownership": "pre-existing",'
 }
 
 # Step boundaries: HARBOR_FAIL_AFTER cuts each row between its mutation and its
@@ -1533,6 +1813,31 @@ expected_rows() {
   run vendor_calls
   refute_output --partial 'systemctl mask'
   refute_output --partial 'loginctl enable-linger'
+}
+
+@test "HARBOR_FAIL_AFTER cuts the Tailscale install row between apt-get and the applied write" {
+  install_form
+  HOOKS=tailscale-install
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of file "${LOGIND}")" applied
+  assert_equal "$(phase_of tailscale-install tailscale)" prepared
+  run vendor_calls
+  refute_output --partial 'loginctl enable-linger'
+  refute_output --partial 'tailscale set'
+}
+
+@test "HARBOR_FAIL_AFTER cuts the Tailscale operator row between the set and the applied write" {
+  install_form
+  HOOKS=tailscale-operator-set
+  rows
+  assert [ "${status}" -ne 0 ]
+  assert_equal "$(phase_of linger "${OPUSER}")" applied
+  assert_equal "$(phase_of tailscale-operator "${OPUSER}")" prepared
+  # A cut before the record row leaves the record naming the tag the mismatch form
+  # found there and journals nothing for it.
+  assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${OTHER_TAG}"
+  assert_equal "$(phase_of file "${STATE}/bootstrap.json")" none
 }
 
 @test "HARBOR_FAIL_AFTER cuts the linger row between loginctl and the applied write" {

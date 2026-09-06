@@ -27,11 +27,19 @@ regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'''
 [rules.allowlist]
 # OpenSSH names its certificate and security-key algorithms with @openssh.com.
 # These are protocol constants, not addresses; only the exact identifiers pass.
+#
+# git@github.com is the fixed SSH login of every GitHub remote, the account name
+# half of a URL rather than anyone's address, and it is not a secret: it is the
+# same three words in every clone command GitHub prints. It is allowlisted exactly,
+# so an actual address at github.com would still be reported. gitleaks detect reads
+# the whole history, so a remote URL written into any commit keeps failing the lane
+# for every branch afterwards even once the file holding it is gone.
 regexes = [
   '''@example\.com$''',
   '''^ssh-ed25519-cert-v01@openssh\.com$''',
   '''^sk-ssh-ed25519@openssh\.com$''',
   '''^-cert-v01@openssh\.com$''',
+  '''^git@github\.com$''',
 ]
 
 [[rules]]
