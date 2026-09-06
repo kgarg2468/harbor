@@ -36,7 +36,7 @@
     {
       "id": "migration-preflight",
       "path": "patches/0012-migration-preflight.patch",
-      "sha256": "edb3d72c3dcf506bb256d858149c345486d0f9beee3a756770777d4b3dbc8f77"
+      "sha256": "734a2829c232339b88b8d1202dbe2eb0d08790bb262b259986ba137089841d4c"
     },
     {
       "id": "managed-runtime-stager",
@@ -61,7 +61,6 @@
       "update-admission",
       "queued-update",
       "update-activity",
-      "thread-fork-backend",
       "migration-preflight",
       "managed-runtime-stager",
       "candidate-process"
@@ -72,7 +71,6 @@
       "update-admission",
       "queued-update",
       "update-activity",
-      "thread-fork-backend",
       "migration-preflight",
       "managed-runtime-stager",
       "candidate-process",

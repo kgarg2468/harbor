@@ -1,4 +1,7 @@
-# Conversation fork backend
+# Historical conversation fork backend
+
+This patch is inactive in both managed variants. Conversation forking has moved
+to a separate skill; the implementation and verification below are historical.
 
 A fork creates a new durable thread from a completed source turn. It copies
 history and attachments through that boundary, records its lineage, and can
@@ -34,6 +37,6 @@ The focused backend suite passes 54 tests using real SQLite and temporary git
 repositories; three fork RPC tests and ten handoff tests pass independently.
 Server and web package typechecks pass in a fresh checkout containing only
 the published patch stack and this backend patch.
-The source patch is shared by both managed variants and adds no new wire-event
-types. The desktop fork dialog is a separate patch, and no live app or data has
-been updated by this change.
+The source patch previously ran in both managed variants and added no new
+wire-event types. Neither current variant selects it or the desktop fork dialog.
+No live app or data was updated by this change.

@@ -803,10 +803,10 @@ index 000000000..a4e2bdbd0
 +}
 diff --git a/apps/server/src/cloud/migrationPreflight.test.ts b/apps/server/src/cloud/migrationPreflight.test.ts
 new file mode 100644
-index 000000000..8a3a83492
+index 00000000..690aa844
 --- /dev/null
 +++ b/apps/server/src/cloud/migrationPreflight.test.ts
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,491 @@
 +import * as NodeServices from "@effect/platform-node/NodeServices";
 +import { assert, describe, expect, it } from "@effect/vitest";
 +import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -821,7 +821,6 @@ index 000000000..8a3a83492
 +import * as SqlClient from "effect/unstable/sql/SqlClient";
 +
 +import packageJson from "../../package.json" with { type: "json" };
-+import { FORK_SCHEMA_COLUMNS } from "../persistence/ForkSchema.ts";
 +import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 +import {
 +  LEGACY_REASONING_MIGRATION_ID,
@@ -926,7 +925,7 @@ index 000000000..8a3a83492
 +        channelColumn,
 +        forkColumns: threadColumns
 +          .map((column) => column.name)
-+          .filter((name) => (FORK_SCHEMA_COLUMNS as ReadonlyArray<string>).includes(name)),
++          .filter((name) => name.startsWith("fork_") || name.startsWith("forked_")),
 +        channels: messages.map((row) => [row.message_id, row.channel] as const),
 +      };
 +      return state;
@@ -996,7 +995,7 @@ index 000000000..8a3a83492
 +          UPSTREAM_MIGRATION_NAME,
 +        );
 +        assert.isTrue(migrated.channelColumn);
-+        assert.deepStrictEqual([...migrated.forkColumns].sort(), [...FORK_SCHEMA_COLUMNS].sort());
++        assert.deepStrictEqual(migrated.forkColumns, []);
 +        assert.deepStrictEqual(migrated.channels, [
 +          ["answer-1", null],
 +          ["reasoning-1", "reasoning"],
@@ -1301,7 +1300,7 @@ index 000000000..8a3a83492
 +});
 diff --git a/apps/server/src/cloud/migrationPreflight.ts b/apps/server/src/cloud/migrationPreflight.ts
 new file mode 100644
-index 000000000..620f64033
+index 00000000..674e3fd5
 --- /dev/null
 +++ b/apps/server/src/cloud/migrationPreflight.ts
 @@ -0,0 +1,219 @@
@@ -1478,7 +1477,7 @@ index 000000000..620f64033
 +/**
 + * Builds and closes the full production persistence layer against the
 + * snapshot: same pragmas, the legacy Reasoning repair, every upstream
-+ * migration, then the Reasoning and fork schema. Migration logs are silenced so
++ * migration, then the Reasoning schema. Migration logs are silenced so
 + * the command's stdout carries exactly one JSON document.
 + */
 +const migrateSnapshot = Effect.fn("migrateMigrationPreflightSnapshot")(
