@@ -1,0 +1,199 @@
+name: integration
+
+# The integration lane of design section 7: the real bootstrap, at the real
+# paths, on an ephemeral ubuntu-24.04 VM with systemd as PID 1 and passwordless
+# sudo. Nothing here writes under a fixture root, because the machine is thrown
+# away when the job ends and that is the whole point.
+#
+# It reaches no vendor host on an ordinary run: Tailscale comes from a locally
+# built package served by a local file:// apt repository, the vendor keyring from
+# a local fixture, and the Node.js runtime from a locally built stand-in. The one
+# job that may reach pkgs.tailscale.com is the issue #63 status probe, and only
+# when a workflow_dispatch explicitly asks it to.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      measure_vendor_tailscale:
+        description: >-
+          Install the pinned Tailscale package from the vendor repository in the
+          isolated status-probe job and measure a real, never-logged-in daemon
+          (issue #63). Off by default, because ordinary runs reach no vendor host.
+        type: boolean
+        default: false
+
+# Read-only, and nothing else. The lane needs the checkout and nothing more: it
+# writes no comment, uploads no package, and touches no release.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # A real bootstrap from a clean checkout at an exact tag, once for each firewall
+  # pre-state, followed by the idempotency assertions. Both pre-states need their
+  # own runner: this release ships no teardown, so a node cannot be put back.
+  bootstrap:
+    # A pull request from a fork gets no credential and does not run this lane at
+    # all: it runs the real bootstrap as root on the runner.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [ufw-inactive, ufw-active]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Prepare the runner
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/setup.sh "${SCENARIO}"
+
+      - name: Bootstrap at the real paths
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/run_root.sh --from checkout
+
+      - name: Assert what the bootstrap did
+        run: |
+          set -euo pipefail
+          sudo bash fleet/tests/integration/assert_bootstrap.sh
+
+      - name: Second run makes no mutating call and journals nothing new
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/assert_rerun.sh
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          for log in /opt/harbor-it/state/shim.log /opt/harbor-it/state/mutations.log; do
+            printf '\n===== %s\n' "${log}"
+            if [ -f "${log}" ]; then cat "${log}"; else printf '(absent)\n'; fi
+          done
+          printf '\n===== /var/lib/harbor/bootstrap.log\n'
+          if sudo test -f /var/lib/harbor/bootstrap.log; then
+            sudo cat /var/lib/harbor/bootstrap.log
+          else
+            printf '(absent)\n'
+          fi
+          printf '\n===== journal\n'
+          if sudo test -d /var/lib/harbor/journal; then
+            sudo ls -la /var/lib/harbor/journal
+            sudo grep -r . /var/lib/harbor/journal
+          else
+            printf '(absent)\n'
+          fi
+
+  # Contract point 5: a SIGKILL at each row boundary of the design section 5.2
+  # table, and the rerun that has to converge. One boundary per runner, because
+  # each needs a node that has never been bootstrapped.
+  converge:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        step:
+          - bootstrap-flags
+          - release-prepared
+          - release-link-prepared
+          - reexec
+          - apt-install
+          - user-created
+          - node-link-node
+          - ssh-key-copied
+          - ssh-dropin-operator
+          - firewall-enable
+          - power-lid
+          - power-mask-sleep.target
+          - tailscale-install
+          - linger-enabled
+          - tailscale-operator-set
+          - state-record
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Prepare the runner
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/setup.sh ufw-inactive
+
+      - name: Crash at the boundary and converge on the rerun
+        env:
+          STEP: ${{ matrix.step }}
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/converge.sh "${STEP}"
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          printf '\n===== /var/lib/harbor/bootstrap.log\n'
+          if sudo test -f /var/lib/harbor/bootstrap.log; then
+            sudo cat /var/lib/harbor/bootstrap.log
+          else
+            printf '(absent)\n'
+          fi
+          printf '\n===== journal\n'
+          if sudo test -d /var/lib/harbor/journal; then
+            sudo grep -r . /var/lib/harbor/journal
+          else
+            printf '(absent)\n'
+          fi
+
+  # Issue #63. harbor_tailscale_status makes a non-zero "tailscale status --json"
+  # a fatal exit 2, and the operator row of every fresh bootstrap stands on it.
+  # This job measures what a real never-logged-in daemon answers rather than
+  # assuming it, and says so plainly when it could not measure.
+  tailscale-status-probe:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Measure a real daemon from the Ubuntu archive
+        if: ${{ inputs.measure_vendor_tailscale != true }}
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/tailscale_status_probe.sh archive
+
+      - name: Measure the real vendor daemon (opt-in, reaches the vendor host)
+        if: ${{ inputs.measure_vendor_tailscale == true }}
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/tailscale_status_probe.sh vendor
+
+      - name: Record what the lane's own stub answers (evidence of nothing)
+        run: |
+          set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get purge -y tailscale
+          # A vendor source written by the opt-in reading above must go before the
+          # local repository is built, or the local repository would inherit it.
+          sudo rm -f /etc/apt/sources.list.d/tailscale.list
+          fleet/tests/integration/tailscale_status_probe.sh stub
