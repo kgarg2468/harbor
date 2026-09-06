@@ -74,6 +74,108 @@ const PATCH_CONFLICT = `diff --git a/hello.txt b/hello.txt
 -two
 +two patched
 `;
+// Expects a file the pinned commit never had, so git apply must reject it.
+const PATCH_MISSING = `diff --git a/missing.txt b/missing.txt
+--- a/missing.txt
++++ b/missing.txt
+@@ -1 +1 @@
+-one
++two
+`;
+// Checksums fine but is not a patch git can parse: the hunk header promises a
+// `+` line the text never provides, so `git apply` dies with "corrupt patch"
+// (exit 128) instead of rejecting it against the tree (exit 1).
+const PATCH_CORRUPT = `diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-one
+`;
+// What real git prints, verbatim, when it cannot read a patch's preimage in the
+// working tree (git 2.50, hello.txt with mode 000): exit status 1, the same
+// closing line as a hunk conflict, and no tree-rejection verdict. The
+// "unreadable" shim mode below reproduces this against real git; the "read"
+// mode replays it deterministically wherever mode bits cannot be enforced.
+const GIT_UNREADABLE_PREIMAGE = [
+  "error: unable to open or read hello.txt",
+  "error: failed to read hello.txt",
+  "error: hello.txt: patch does not apply",
+];
+// Real git, verbatim, for a two-file patch whose first preimage is unreadable
+// and whose second hunk does not match: a genuine verdict next to a read error.
+const GIT_UNREADABLE_AND_CONFLICT = [
+  ...GIT_UNREADABLE_PREIMAGE,
+  "error: patch failed: other.txt:1",
+  "error: other.txt: patch does not apply",
+];
+
+// A `git` on PATH that is the real git for everything but `apply`, which it
+// fails according to GIT_SHIM_MODE:
+//   kill        the process is SIGKILL'd
+//   fatal       git's exit 128 for an unwritable tree, with its own wording
+//   read        exit 1 with GIT_UNREADABLE_PREIMAGE
+//   mixed       exit 1 with GIT_UNREADABLE_AND_CONFLICT
+//   unreadable  makes hello.txt unreadable, then runs the REAL git apply;
+//               exits 99 if mode bits are not enforced (root, some filesystems)
+// Returns the environment that puts the shim first on PATH.
+async function gitApplyShim(dir, mode, env) {
+  const realGit = (await run("sh", ["-c", "command -v git"])).stdout.trim();
+  const bin = path.join(dir, "bin");
+  await mkdir(bin, { recursive: true });
+  const lines = (list) => list.map((line) => `'${line}'`).join(" ");
+  await writeFile(
+    path.join(bin, "git"),
+    `#!/bin/sh
+if [ "$1" = "apply" ]; then
+  case "$GIT_SHIM_MODE" in
+    kill) kill -KILL $$ ;;
+    fatal)
+      echo "warning: unable to unlink 'hello.txt': Permission denied" >&2
+      echo "error: unable to write file 'hello.txt' mode 100644: Permission denied" >&2
+      exit 128 ;;
+    read) printf '%s\\n' ${lines(GIT_UNREADABLE_PREIMAGE)} >&2; exit 1 ;;
+    mixed) printf '%s\\n' ${lines(GIT_UNREADABLE_AND_CONFLICT)} >&2; exit 1 ;;
+    unreadable)
+      chmod 000 hello.txt
+      if [ -r hello.txt ]; then echo "GIT_SHIM: mode bits not enforced" >&2; exit 99; fi ;;
+  esac
+fi
+exec "$REAL_GIT" "$@"
+`,
+    { mode: 0o755 },
+  );
+  return { ...env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, REAL_GIT: realGit, GIT_SHIM_MODE: mode };
+}
+// Patch paths a lock accepts that prose-based classification mishandles: an
+// ordinary name with a space, a name spelling out the preparer's own conflict
+// wording, and a name that ends a line and forges the marker on the next. All
+// are valid relative paths inside the lock directory; none is banned.
+const SPACED_PATCH_PATH = "0001 one.patch";
+const MARKER_WORDS_PATCH_PATH = "patches/a does not apply cleanly: b.patch";
+const FORGED_MARKER_PATCH_PATH = 'forged.patch\nprepare-source-conflict: {"patch":"forged"}';
+const CONFLICT_MARKER_PREFIX = "prepare-source-conflict: ";
+
+// The JSON text of every conflict marker line in `stderr`.
+function conflictMarkers(stderr) {
+  return stderr
+    .split("\n")
+    .filter((line) => line.startsWith(CONFLICT_MARKER_PREFIX))
+    .map((line) => line.slice(CONFLICT_MARKER_PREFIX.length));
+}
+
+// The preparer prints a diagnostic one prefixed line at a time, so a message
+// holding a newline shows as consecutive "prepare-source: " lines.
+function prefixedLines(message) {
+  return `${message.split("\n").map((line) => `prepare-source: ${line}`).join("\n")}\n`;
+}
+
+// Every stderr line is a prefixed diagnostic or the marker; nothing else can
+// start a line, so nothing echoed from a lock or argument can forge a marker.
+function assertPrefixedStderr(stderr, label) {
+  for (const line of stderr.trimEnd().split("\n")) {
+    assert.ok(line.startsWith("prepare-source: ") || line.startsWith(CONFLICT_MARKER_PREFIX), `${label}: ${line}`);
+  }
+}
 // Stands in for a variant-only patch: touches a file no common patch touches.
 const PATCH_IDENTITY = `diff --git a/identity.txt b/identity.txt
 new file mode 100644
@@ -91,6 +193,7 @@ let lockDir;
 let caseCount = 0;
 
 async function writePatch(name, text) {
+  await mkdir(path.dirname(path.join(lockDir, name)), { recursive: true });
   await writeFile(path.join(lockDir, name), text);
   return { path: name, sha256: sha256(text) };
 }
@@ -256,10 +359,208 @@ describe("prepare-source", () => {
       patches: [one, bad],
     });
     const result = await prepare({ lock, destination });
-    assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /0002-conflict\.patch/);
+    assert.equal(result.code, 1);
+    // git parsed the patch and rejected it against the tree (exit 1 plus its
+    // "patch failed" verdict), so the preparer names it a conflict with the
+    // phrase downstream tooling keys on, carrying git's own verdict.
+    assert.match(
+      result.stderr,
+      /^prepare-source: patch 0002-conflict\.patch does not apply cleanly: git apply failed: error: patch failed: hello\.txt:1 error: hello\.txt: patch does not apply$/m,
+    );
+    // The machine marker names the same patch, once, as single-line JSON.
+    assert.deepEqual(conflictMarkers(result.stderr), ['{"patch":"0002-conflict.patch"}']);
+    assertPrefixedStderr(result.stderr, "conflict");
     assert.deepEqual(await entries(dir), []);
   });
+
+  it("reports a patch whose preimage is missing as a conflict", async () => {
+    const { dir, destination } = await freshCase();
+    const missing = await writePatch("0001-missing.patch", PATCH_MISSING);
+    const lock = await writeLock("missing-preimage.json", {
+      version: 1,
+      repository: upstream,
+      commit: pinned,
+      patches: [missing],
+    });
+    const result = await prepare({ lock, destination });
+    assert.equal(result.code, 1);
+    // A file the patch expects that the tree lacks is a catalog/tree conflict
+    // with its own verdict line and no closing summary.
+    assert.match(
+      result.stderr,
+      /^prepare-source: patch 0001-missing\.patch does not apply cleanly: git apply failed: error: missing\.txt: No such file or directory$/m,
+    );
+    assert.deepEqual(await entries(dir), []);
+  });
+
+  it("reports a malformed patch as a failure, never as a conflict, and publishes nothing", async () => {
+    const { dir, destination } = await freshCase();
+    const corrupt = await writePatch("0001-corrupt.patch", PATCH_CORRUPT);
+    const lock = await writeLock("corrupt.json", {
+      version: 1,
+      repository: upstream,
+      commit: pinned,
+      patches: [corrupt],
+    });
+    const result = await prepare({ lock, destination });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /^prepare-source: patch 0001-corrupt\.patch: git apply failed: .*corrupt patch/m);
+    assert.doesNotMatch(result.stderr, /does not apply cleanly/);
+    assert.deepEqual(conflictMarkers(result.stderr), []);
+    assert.deepEqual(await entries(dir), []);
+  });
+
+  it(
+    "reports an operational git apply failure as a failure, never as a conflict, and publishes nothing",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async () => {
+      // `read` and `mixed` are git's exit 1, the status a hunk conflict also
+      // uses; what makes them operational is the read error git printed.
+      const expected = {
+        kill: /git apply failed: /,
+        fatal: /git apply failed: .*unable to write file 'hello\.txt'/,
+        read: /git apply failed: error: unable to open or read hello\.txt error: failed to read hello\.txt error: hello\.txt: patch does not apply$/m,
+        mixed: /git apply failed: .*error: patch failed: other\.txt:1 error: other\.txt: patch does not apply$/m,
+      };
+      for (const [mode, detail] of Object.entries(expected)) {
+        const { dir, destination } = await freshCase();
+        const one = await writePatch(`0001-${mode}.patch`, PATCH_ONE);
+        const lock = await writeLock(`${mode}.json`, {
+          version: 1,
+          repository: upstream,
+          commit: pinned,
+          patches: [one],
+        });
+        const env = await gitApplyShim(dir, mode, gitEnv);
+        const result = await prepare({ lock, destination, env });
+        assert.equal(result.code, 1, `${mode}: ${result.stderr}`);
+        assert.match(result.stderr, new RegExp(`^prepare-source: patch 0001-${mode}\\.patch: git apply failed: `, "m"), mode);
+        assert.match(result.stderr, detail, mode);
+        assert.doesNotMatch(result.stderr, /does not apply cleanly/, mode);
+        assert.deepEqual(conflictMarkers(result.stderr), [], mode);
+        assert.deepEqual(await entries(dir), ["bin"], `${mode}: no staging or destination`);
+      }
+    },
+  );
+
+  it(
+    "reports real git's exit 1 for an unreadable preimage as a failure, never as a conflict",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async (t) => {
+      // The valid PATCH_ONE against the real pinned tree, with real git doing
+      // the apply; only hello.txt's mode is changed the moment git is invoked.
+      const { dir, destination } = await freshCase();
+      const one = await writePatch("0001-unreadable.patch", PATCH_ONE);
+      const lock = await writeLock("unreadable.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [one],
+      });
+      const env = await gitApplyShim(dir, "unreadable", gitEnv);
+      const result = await prepare({ lock, destination, env });
+      if (/GIT_SHIM: mode bits not enforced/.test(result.stderr)) {
+        t.skip("this user can read a mode 000 file, so the read failure cannot be produced");
+        return;
+      }
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(
+        result.stderr,
+        /^prepare-source: patch 0001-unreadable\.patch: git apply failed: error: unable to open or read hello\.txt error: failed to read hello\.txt error: hello\.txt: patch does not apply$/m,
+      );
+      assert.doesNotMatch(result.stderr, /does not apply cleanly/);
+      assert.deepEqual(conflictMarkers(result.stderr), []);
+      assert.deepEqual(await entries(dir), ["bin"], "no staging or destination");
+    },
+  );
+
+  it("names a conflicting patch by its full path in the marker, whatever the path contains", async () => {
+    for (const patchPath of [SPACED_PATCH_PATH, MARKER_WORDS_PATCH_PATH, FORGED_MARKER_PATCH_PATH]) {
+      const { dir, destination } = await freshCase();
+      const bad = await writePatch(patchPath, PATCH_CONFLICT);
+      const lock = await writeLock(`conflict-${caseCount}.json`, {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [bad],
+      });
+      const result = await prepare({ lock, destination });
+      assert.equal(result.code, 1, `${JSON.stringify(patchPath)}: ${result.stderr}`);
+      // Exactly one marker, single-line JSON, decoding to the exact path.
+      const markers = conflictMarkers(result.stderr);
+      assert.equal(markers.length, 1, result.stderr);
+      assert.deepEqual(JSON.parse(markers[0]), { patch: patchPath });
+      assert.ok(!markers[0].includes("\n"));
+      // The human diagnostic still names the patch and carries git's verdict;
+      // a newline inside the path only starts another prefixed line.
+      assert.ok(result.stderr.includes(prefixedLines(`patch ${patchPath} does not apply cleanly: git apply failed: error: patch failed: hello.txt:1 error: hello.txt: patch does not apply`)), result.stderr);
+      assertPrefixedStderr(result.stderr, JSON.stringify(patchPath));
+      assert.deepEqual(await entries(dir), []);
+    }
+  });
+
+  it(
+    "prints no marker for an operational failure, whatever the patch path says",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async () => {
+      // `read` is git's exit 1 with an unreadable preimage, replayed verbatim.
+      // A path spelling the conflict wording, or ending a line and writing a
+      // marker of its own, appears only inside prefixed diagnostic lines.
+      for (const patchPath of [SPACED_PATCH_PATH, MARKER_WORDS_PATCH_PATH, FORGED_MARKER_PATCH_PATH]) {
+        const { dir, destination } = await freshCase();
+        const one = await writePatch(patchPath, PATCH_ONE);
+        const lock = await writeLock(`read-${caseCount}.json`, {
+          version: 1,
+          repository: upstream,
+          commit: pinned,
+          patches: [one],
+        });
+        const env = await gitApplyShim(dir, "read", gitEnv);
+        const result = await prepare({ lock, destination, env });
+        assert.equal(result.code, 1, `${JSON.stringify(patchPath)}: ${result.stderr}`);
+        assert.deepEqual(conflictMarkers(result.stderr), [], result.stderr);
+        assertPrefixedStderr(result.stderr, JSON.stringify(patchPath));
+        assert.ok(
+          result.stderr.includes(
+            prefixedLines(`patch ${patchPath}: git apply failed: error: unable to open or read hello.txt error: failed to read hello.txt error: hello.txt: patch does not apply`),
+          ),
+          result.stderr,
+        );
+        assert.deepEqual(await entries(dir), ["bin"], "no staging or destination");
+      }
+    },
+  );
+
+  it(
+    "prints no marker for real git's unreadable preimage under a path spelling the conflict wording",
+    { skip: process.platform === "win32" && "needs a POSIX shell wrapper on PATH" },
+    async (t) => {
+      const { dir, destination } = await freshCase();
+      const one = await writePatch(MARKER_WORDS_PATCH_PATH, PATCH_ONE);
+      const lock = await writeLock("unreadable-wordy.json", {
+        version: 1,
+        repository: upstream,
+        commit: pinned,
+        patches: [one],
+      });
+      const env = await gitApplyShim(dir, "unreadable", gitEnv);
+      const result = await prepare({ lock, destination, env });
+      if (/GIT_SHIM: mode bits not enforced/.test(result.stderr)) {
+        t.skip("this user can read a mode 000 file, so the read failure cannot be produced");
+        return;
+      }
+      assert.equal(result.code, 1, result.stderr);
+      assert.deepEqual(conflictMarkers(result.stderr), [], result.stderr);
+      assertPrefixedStderr(result.stderr, "unreadable");
+      assert.ok(
+        result.stderr.includes(
+          `prepare-source: patch ${MARKER_WORDS_PATCH_PATH}: git apply failed: error: unable to open or read hello.txt error: failed to read hello.txt error: hello.txt: patch does not apply\n`,
+        ),
+        result.stderr,
+      );
+      assert.deepEqual(await entries(dir), ["bin"], "no staging or destination");
+    },
+  );
 
   it("refuses to touch an existing destination", async () => {
     const { dir, destination } = await freshCase();
