@@ -68,6 +68,9 @@ What this component does not do:
 - `patches/0012-migration-preflight.patch`: rehearses candidate migrations on a
   disposable snapshot and checks the candidate response. Downloading, invoking
   the staged candidate, and activating it remain separate updater work.
+- `patches/0013-idle-coordinator.patch`: claims idle admission and activity
+  together and retains them through accepted or uncertain restart handoffs.
+  Transport, shutdown, and production request wiring remain separate work.
 - `patches/0014-managed-runtime-stager.patch`: validates managed release documents
   and extracts verified archives into a confined private tree, preserving safe
   internal dependency links. Cancellation waits for cleanup; downloading and

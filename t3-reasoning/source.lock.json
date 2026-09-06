@@ -44,6 +44,11 @@
       "sha256": "734a2829c232339b88b8d1202dbe2eb0d08790bb262b259986ba137089841d4c"
     },
     {
+      "id": "idle-coordinator",
+      "path": "patches/0013-idle-coordinator.patch",
+      "sha256": "a3474c41ed4854fd3fd32919afc495ad11ed2aeb114c655a6840d302833d2a9a"
+    },
+    {
       "id": "managed-runtime-stager",
       "path": "patches/0014-managed-runtime-stager.patch",
       "sha256": "708040bf48daeda0742ad9b187caef85a3d53b7805cda8455a58539319579e03"
@@ -73,6 +78,7 @@
       "update-activity",
       "nonwaiting-admission",
       "migration-preflight",
+      "idle-coordinator",
       "managed-runtime-stager",
       "desktop-reservation",
       "candidate-process"
@@ -85,6 +91,7 @@
       "update-activity",
       "nonwaiting-admission",
       "migration-preflight",
+      "idle-coordinator",
       "managed-runtime-stager",
       "desktop-reservation",
       "candidate-process",
