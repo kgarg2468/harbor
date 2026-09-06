@@ -1,0 +1,3029 @@
+diff --git a/apps/server/package.json b/apps/server/package.json
+index 3d03fcd45..8f87e507f 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -31,6 +31,7 @@
+     "effect": "catalog:",
+     "msgpackr-extract": "3.0.4",
+     "node-pty": "^1.1.0",
++    "tar": "7.5.16",
+     "yaml": "catalog:",
+     "yauzl": "^3.4.0"
+   },
+diff --git a/apps/server/src/cloud/managedRelease.test.ts b/apps/server/src/cloud/managedRelease.test.ts
+new file mode 100644
+index 000000000..686dea73c
+--- /dev/null
++++ b/apps/server/src/cloud/managedRelease.test.ts
+@@ -0,0 +1,457 @@
++// @effect-diagnostics preferSchemaOverJson:off - tests mutate the golden manifest as plain JSON to forge tampered documents.
++import { assert, describe, it } from "@effect/vitest";
++import * as Effect from "effect/Effect";
++
++import {
++  canonicalJson,
++  computeReleaseInputDigest,
++  managedArtifactContentId,
++  MANAGED_RELEASE_MANIFEST_FILE,
++  parseManagedReleaseVersion,
++  sha256Hex,
++  verifyManagedReleaseDocuments,
++  type ManagedReleaseError,
++  type ManagedServerTarget,
++} from "./managedRelease.ts";
++
++// Golden cross-contract fixture: the exact `managed-release.json` and
++// `SHA256SUMS` that Harbor's write-managed-release-manifest.mjs published for
++// a descriptor resolved by resolve-managed-release.mjs (lock with two common
++// patches and one Reasoning identity patch, counter 1, four tiny artifacts).
++// Byte-for-byte; the checksum file covers these manifest bytes.
++const GOLDEN_VERSION = "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a";
++const GOLDEN_MANIFEST = `{
++  "artifacts": [
++    {
++      "arch": "arm64",
++      "bundleId": "com.t3tools.t3code",
++      "bytes": 12,
++      "embeddedServerVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++      "file": "nightly.zip",
++      "format": "zip",
++      "id": "managed-nightly-darwin-arm64",
++      "kind": "desktop",
++      "platform": "darwin",
++      "presentationVariant": "managed-nightly",
++      "productName": "T3 Code (Nightly)",
++      "sha256": "bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e",
++      "urlSchemes": [
++        "t3code",
++        "t3code-dev"
++      ],
++      "variant": "managed-nightly",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "arm64",
++      "bundleId": "com.t3tools.t3code.reasoning",
++      "bytes": 14,
++      "embeddedServerVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++      "file": "reasoning.zip",
++      "format": "zip",
++      "id": "reasoning-darwin-arm64",
++      "kind": "desktop",
++      "platform": "darwin",
++      "presentationVariant": "reasoning",
++      "productName": "T3 Code (Reasoning)",
++      "sha256": "a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20",
++      "urlSchemes": [
++        "t3code-reasoning"
++      ],
++      "variant": "reasoning",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "arm64",
++      "bytes": 14,
++      "entry": "node_modules/t3/dist/bin.mjs",
++      "file": "server-darwin-arm64.tar.gz",
++      "format": "tar.gz",
++      "id": "managed-server-darwin-arm64",
++      "kind": "server",
++      "launcherProtocol": 2,
++      "platform": "darwin",
++      "sha256": "416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492",
++      "variant": "common",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "x64",
++      "bytes": 13,
++      "entry": "node_modules/t3/dist/bin.mjs",
++      "file": "server-linux-x64.tar.gz",
++      "format": "tar.gz",
++      "id": "managed-server-linux-x64",
++      "kind": "server",
++      "launcherProtocol": 2,
++      "platform": "linux",
++      "sha256": "9d05e7ed6624ed87a42f2ec049544d34fa31341804ad2ab11846b1df5500e6b0",
++      "variant": "common",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    }
++  ],
++  "builderRevision": "fedcba9876543210fedcba9876543210fedcba98",
++  "presentationVariants": {
++    "managed-nightly": "managed-nightly",
++    "reasoning": "reasoning"
++  },
++  "publicConfigKeys": [
++    "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
++    "T3CODE_CLERK_JWT_TEMPLATE",
++    "T3CODE_CLERK_PUBLISHABLE_KEY",
++    "T3CODE_RELAY_URL"
++  ],
++  "publicConfigSha256": "2cee922b77e095709737110ab244615e0fe4230ace80231198c01a2cfb9b377e",
++  "releaseCounter": 1,
++  "releaseInputSha256": "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++  "releaseVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++  "schemaVersion": 1,
++  "upstreamCommit": "0123456789abcdef0123456789abcdef01234567",
++  "upstreamRepository": "https://github.com/pingdotgg/t3code",
++  "upstreamVersion": "0.0.38-nightly.20260905.3",
++  "variants": {
++    "managed-nightly": {
++      "patches": [
++        {
++          "id": "common-one",
++          "sha256": "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a"
++        },
++        {
++          "id": "common-two",
++          "sha256": "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79"
++        }
++      ]
++    },
++    "reasoning": {
++      "patches": [
++        {
++          "id": "common-one",
++          "sha256": "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a"
++        },
++        {
++          "id": "common-two",
++          "sha256": "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79"
++        },
++        {
++          "id": "reasoning-identity",
++          "sha256": "3f72debee6fc10edb75cf331347684c769d350ace0d667d7ff1246ef5c1de450"
++        }
++      ]
++    }
++  }
++}
++`;
++const GOLDEN_SUMS = `bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51  managed-release.json
++bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e  nightly.zip
++a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20  reasoning.zip
++416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492  server-darwin-arm64.tar.gz
++9d05e7ed6624ed87a42f2ec049544d34fa31341804ad2ab11846b1df5500e6b0  server-linux-x64.tar.gz
++`;
++
++const DARWIN: ManagedServerTarget = { platform: "darwin", arch: "arm64" };
++const LINUX: ManagedServerTarget = { platform: "linux", arch: "x64", libc: "glibc" };
++const encoder = new TextEncoder();
++
++type Json = Record<string, any>;
++
++/** Re-signs a (possibly tampered) manifest so only the tampering, not the checksum file, is under test. */
++function signSums(manifestText: string): string {
++  const manifest = JSON.parse(manifestText) as Json;
++  const entries: Array<{ file: string; sha256: string }> = [
++    ...(manifest.artifacts as Array<Json>).map((artifact) => ({
++      file: artifact.file as string,
++      sha256: artifact.sha256 as string,
++    })),
++    { file: MANAGED_RELEASE_MANIFEST_FILE, sha256: sha256Hex(manifestText) },
++  ];
++  return entries
++    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
++    .map(({ file, sha256 }) => `${sha256}  ${file}\n`)
++    .join("");
++}
++
++function forged(mutate: (manifest: Json) => void): {
++  manifestBytes: Uint8Array;
++  sumsBytes: Uint8Array;
++} {
++  const manifest = JSON.parse(GOLDEN_MANIFEST) as Json;
++  mutate(manifest);
++  const manifestText = canonicalJson(manifest);
++  return {
++    manifestBytes: encoder.encode(manifestText),
++    sumsBytes: encoder.encode(signSums(manifestText)),
++  };
++}
++
++const verify = (input: {
++  manifestBytes?: Uint8Array;
++  sumsBytes?: Uint8Array;
++  targetVersion?: string;
++  hostTarget?: ManagedServerTarget;
++}) =>
++  verifyManagedReleaseDocuments({
++    manifestBytes: input.manifestBytes ?? encoder.encode(GOLDEN_MANIFEST),
++    sumsBytes: input.sumsBytes ?? encoder.encode(GOLDEN_SUMS),
++    targetVersion: input.targetVersion ?? GOLDEN_VERSION,
++    hostTarget: input.hostTarget ?? DARWIN,
++  });
++
++const rejection = (input: Parameters<typeof verify>[0]) =>
++  verify(input).pipe(
++    Effect.flip,
++    Effect.map((error: ManagedReleaseError) => ({
++      document: error.document,
++      reason: error.reason,
++    })),
++  );
++
++describe("verifyManagedReleaseDocuments", () => {
++  it.effect("accepts the golden Harbor release and selects the host's server archive", () =>
++    Effect.gen(function* () {
++      const darwin = yield* verify({ hostTarget: DARWIN });
++      assert.deepStrictEqual(darwin, {
++        version: GOLDEN_VERSION,
++        releaseArtifactId: "managed-server-darwin-arm64",
++        file: "server-darwin-arm64.tar.gz",
++        bytes: 14,
++        sha256: "416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492",
++        manifestSha256: "bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51",
++        releaseInputSha256: "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++        platform: "darwin",
++        arch: "arm64",
++        entry: "node_modules/t3/dist/bin.mjs",
++        launcherProtocol: 2,
++      });
++      const linux = yield* verify({ hostTarget: LINUX });
++      assert.strictEqual(linux.releaseArtifactId, "managed-server-linux-x64");
++      assert.strictEqual(linux.file, "server-linux-x64.tar.gz");
++      assert.strictEqual(linux.bytes, 13);
++      assert.strictEqual(linux.platform, "linux");
++      assert.strictEqual(linux.arch, "x64");
++      assert.strictEqual(
++        managedArtifactContentId(darwin),
++        "managed-server-darwin-arm64@sha256:416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492",
++      );
++    }),
++  );
++
++  it("recomputes the release-input digest exactly as the Harbor resolver", () => {
++    const manifest = JSON.parse(GOLDEN_MANIFEST) as Json;
++    assert.strictEqual(
++      computeReleaseInputDigest({
++        upstreamRepository: manifest.upstreamRepository,
++        upstreamCommit: manifest.upstreamCommit,
++        upstreamVersion: manifest.upstreamVersion,
++        variants: {
++          "managed-nightly": manifest.variants["managed-nightly"].patches,
++          reasoning: manifest.variants.reasoning.patches,
++        },
++        builderRevision: manifest.builderRevision,
++        publicConfigSha256: manifest.publicConfigSha256,
++        presentationVariants: manifest.presentationVariants,
++      }),
++      manifest.releaseInputSha256,
++    );
++    assert.deepStrictEqual(parseManagedReleaseVersion(GOLDEN_VERSION), {
++      releaseVersion: GOLDEN_VERSION,
++      upstreamVersion: "0.0.38-nightly.20260905.3",
++      releaseCounter: 1,
++      releaseInputShort: "6d1933416d7a",
++    });
++    assert.isUndefined(
++      parseManagedReleaseVersion("0.0.38-nightly.20260905.3.managed.0.p6d1933416d7a"),
++    );
++    assert.isUndefined(parseManagedReleaseVersion("0.0.38-nightly.20260905.3"));
++    assert.isUndefined(parseManagedReleaseVersion("latest"));
++  });
++
++  it.effect("authenticates the original manifest bytes, not a reserialized object", () =>
++    Effect.gen(function* () {
++      // Same JSON value, different bytes: the golden checksum no longer covers it.
++      const reserialized = encoder.encode(JSON.stringify(JSON.parse(GOLDEN_MANIFEST)));
++      const mismatch = yield* rejection({ manifestBytes: reserialized });
++      assert.strictEqual(mismatch.document, "checksums");
++      assert.include(mismatch.reason, "manifest hash");
++      // The same bytes with a checksum file that covers them are fine.
++      const accepted = yield* verify({
++        manifestBytes: reserialized,
++        sumsBytes: encoder.encode(signSums(new TextDecoder().decode(reserialized))),
++      });
++      assert.strictEqual(accepted.version, GOLDEN_VERSION);
++      // A trailing byte is still a different document.
++      const appended = yield* rejection({ manifestBytes: encoder.encode(`${GOLDEN_MANIFEST}\n`) });
++      assert.strictEqual(appended.document, "checksums");
++    }),
++  );
++
++  it.effect("refuses digest inputs that were tampered with after resolution", () =>
++    Effect.gen(function* () {
++      const tampering: Array<[string, (manifest: Json) => void]> = [
++        ["repository", (m) => (m.upstreamRepository = "https://github.com/evil/t3code")],
++        [
++          "patch id",
++          (m) => {
++            m.variants["managed-nightly"].patches[0].id = "renamed";
++            m.variants.reasoning.patches[0].id = "renamed";
++          },
++        ],
++        ["patch hash", (m) => (m.variants.reasoning.patches[2].sha256 = "0".repeat(64))],
++        ["public config", (m) => (m.publicConfigSha256 = "1".repeat(64))],
++        ["builder revision", (m) => (m.builderRevision = "a".repeat(40))],
++        ["upstream commit", (m) => (m.upstreamCommit = "b".repeat(40))],
++      ];
++      for (const [label, mutate] of tampering) {
++        const result = yield* rejection(forged(mutate));
++        assert.strictEqual(result.document, "manifest", label);
++        assert.include(result.reason, "releaseInputSha256", label);
++      }
++      // Patch ids and hashes must agree on the common prefix; the identity suffix is required.
++      const prefix = yield* rejection(
++        forged((m) => (m.variants.reasoning.patches[0].sha256 = "2".repeat(64))),
++      );
++      assert.include(prefix.reason, "common prefix");
++      const suffix = yield* rejection(forged((m) => m.variants.reasoning.patches.pop()));
++      assert.include(suffix.reason, "identity patch");
++      const repeated = yield* rejection(
++        forged((m) => m.variants.reasoning.patches.push({ ...m.variants.reasoning.patches[2] })),
++      );
++      assert.include(repeated.reason, "repeats patch id");
++    }),
++  );
++
++  it.effect("requires exactly the four fixed artifacts with their fixed identities", () =>
++    Effect.gen(function* () {
++      const missing = yield* rejection(forged((m) => m.artifacts.splice(3, 1)));
++      assert.include(missing.reason, "missing artifact(s) managed-server-linux-x64");
++      const duplicate = yield* rejection(forged((m) => m.artifacts.push({ ...m.artifacts[2] })));
++      assert.include(duplicate.reason, "duplicate artifact");
++      const fifth = yield* rejection(
++        forged((m) => m.artifacts.push({ ...m.artifacts[3], id: "managed-server-windows-x64" })),
++      );
++      assert.include(fifth.reason, "outside the release set");
++      const platform = yield* rejection(forged((m) => (m.artifacts[3].platform = "darwin")));
++      assert.include(platform.reason, "platform must be");
++      const protocol = yield* rejection(forged((m) => (m.artifacts[2].launcherProtocol = 1)));
++      assert.include(protocol.reason, "launcherProtocol must be");
++      const entry = yield* rejection(
++        forged((m) => (m.artifacts[2].entry = "node_modules/t3/dist/evil.mjs")),
++      );
++      assert.include(entry.reason, "entry must be");
++      const version = yield* rejection(
++        forged(
++          (m) => (m.artifacts[2].version = "0.0.38-nightly.20260905.3.managed.2.p6d1933416d7a"),
++        ),
++      );
++      assert.include(version.reason, "version does not equal");
++      const embedded = yield* rejection(
++        forged((m) => (m.artifacts[0].embeddedServerVersion = "0.0.38-nightly.20260905.3")),
++      );
++      assert.include(embedded.reason, "embeddedServerVersion");
++      const url = yield* rejection(
++        forged((m) => (m.artifacts[2].url = "https://evil.example/server.tar.gz")),
++      );
++      assert.include(url.reason, "schema");
++      const extraTopLevel = yield* rejection(
++        forged((m) => (m.downloadBase = "https://evil.example/")),
++      );
++      assert.include(extraTopLevel.reason, "schema");
++      const schema = yield* rejection(forged((m) => (m.schemaVersion = 2)));
++      assert.include(schema.reason, "schema");
++      const bytes = yield* rejection(forged((m) => (m.artifacts[2].bytes = 0)));
++      assert.include(bytes.reason, "bytes");
++      const traversal = yield* rejection(forged((m) => (m.artifacts[2].file = "../server.tar.gz")));
++      assert.include(traversal.reason, "bare file name");
++      const extension = yield* rejection(forged((m) => (m.artifacts[2].file = "server.zip")));
++      assert.include(extension.reason, "must end with .tar.gz");
++      const reserved = yield* rejection(
++        forged((m) => {
++          m.artifacts[0].file = "SHA256SUMS.zip";
++          m.artifacts[1].file = "sha256sums.ZIP";
++        }),
++      );
++      assert.include(reserved.reason, "must end with .zip");
++      const collision = yield* rejection(forged((m) => (m.artifacts[1].file = "Nightly.zip")));
++      assert.include(collision.reason, "also used by");
++      const keys = yield* rejection(forged((m) => m.publicConfigKeys.push("T3CODE_SECRET")));
++      assert.include(keys.reason, "publicConfigKeys");
++    }),
++  );
++
++  it.effect("requires the manifest to name exactly the requested managed version", () =>
++    Effect.gen(function* () {
++      const other = yield* rejection({
++        targetVersion: "0.0.38-nightly.20260905.3.managed.2.p6d1933416d7a",
++      });
++      assert.strictEqual(other.document, "manifest");
++      assert.include(other.reason, "not the requested");
++      const malformed = yield* rejection({ targetVersion: "0.0.38-nightly.20260905.3" });
++      assert.strictEqual(malformed.document, "target");
++      const counterZero = yield* rejection({
++        targetVersion: "0.0.38-nightly.20260905.3.managed.0.p6d1933416d7a",
++      });
++      assert.strictEqual(counterZero.document, "target");
++      const range = yield* rejection({ targetVersion: "^0.0.38" });
++      assert.strictEqual(range.document, "target");
++      const counter = yield* rejection(forged((m) => (m.releaseCounter = 2)));
++      assert.include(counter.reason, "releaseCounter");
++      const upstream = yield* rejection(
++        forged((m) => (m.upstreamVersion = "0.0.38-nightly.20260905.4")),
++      );
++      assert.include(upstream.reason, "upstreamVersion");
++    }),
++  );
++
++  it.effect("requires a canonical five-line checksum closure", () =>
++    Effect.gen(function* () {
++      const lines = GOLDEN_SUMS.split("\n").filter((line) => line !== "");
++      const cases: Array<[string, string, string]> = [
++        ["missing line", `${lines.slice(0, 4).join("\n")}\n`, "expected exactly 5"],
++        ["extra line", `${GOLDEN_SUMS}${"0".repeat(64)}  zzz-extra.txt\n`, "expected exactly 5"],
++        ["duplicate", `${GOLDEN_SUMS}${lines[4]}\n`, "duplicate"],
++        ["unsorted", `${lines[1]}\n${lines[0]}\n${lines.slice(2).join("\n")}\n`, "sorted"],
++        ["traversal", `${GOLDEN_SUMS.replace("nightly.zip", "../nightly.zip")}`, "bare file name"],
++        ["no newline", GOLDEN_SUMS.slice(0, -1), "newline"],
++        ["uppercase hex", GOLDEN_SUMS.replace("bb2c21f9", "BB2C21F9"), "malformed line"],
++        [
++          "artifact hash",
++          GOLDEN_SUMS.replace("416e1222aee811fa", "416e1222aee811fb"),
++          "server-darwin-arm64.tar.gz disagrees",
++        ],
++        [
++          "manifest hash",
++          GOLDEN_SUMS.replace("bfe95af71fc00d76", "bfe95af71fc00d77"),
++          "manifest hash",
++        ],
++        [
++          "renamed artifact",
++          GOLDEN_SUMS.replace("  nightly.zip", "  nightly2.zip"),
++          "missing entry",
++        ],
++      ];
++      for (const [label, sums, expected] of cases) {
++        const result = yield* rejection({ sumsBytes: encoder.encode(sums) });
++        assert.strictEqual(result.document, "checksums", label);
++        assert.include(result.reason, expected, label);
++      }
++      const empty = yield* rejection({ sumsBytes: new Uint8Array() });
++      assert.strictEqual(empty.reason, "empty");
++      const invalidUtf8 = yield* rejection({ sumsBytes: new Uint8Array([0xff, 0xfe, 0x0a]) });
++      assert.include(invalidUtf8.reason, "UTF-8");
++    }),
++  );
++
++  it.effect("rejects manifests that are not bounded, well-formed JSON documents", () =>
++    Effect.gen(function* () {
++      const notJson = yield* rejection({ manifestBytes: encoder.encode("{") });
++      assert.include(notJson.reason, "JSON");
++      const invalidUtf8 = yield* rejection({ manifestBytes: new Uint8Array([0x7b, 0xff, 0x7d]) });
++      assert.include(invalidUtf8.reason, "UTF-8");
++      const empty = yield* rejection({ manifestBytes: new Uint8Array() });
++      assert.strictEqual(empty.reason, "empty");
++      const huge = yield* rejection({ manifestBytes: new Uint8Array(256 * 1024 + 1) });
++      assert.strictEqual(huge.reason, "too large");
++      const array = yield* rejection({ manifestBytes: encoder.encode("[]") });
++      assert.include(array.reason, "schema");
++    }),
++  );
++});
+diff --git a/apps/server/src/cloud/managedRelease.ts b/apps/server/src/cloud/managedRelease.ts
+new file mode 100644
+index 000000000..8f040bb51
+--- /dev/null
++++ b/apps/server/src/cloud/managedRelease.ts
+@@ -0,0 +1,630 @@
++import * as NodeCrypto from "node:crypto";
++
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++
++/**
++ * Source-side mirror of the Harbor managed-release contract
++ * (`write-managed-release-manifest.mjs` / `resolve-managed-release.mjs`).
++ *
++ * A managed release is closed over exactly four artifacts described by
++ * `managed-release.json` and covered, together with the manifest itself, by
++ * `SHA256SUMS`. This module authenticates the two downloaded documents as
++ * bytes, recomputes the release-input digest from the provenance the manifest
++ * carries, and selects the one server archive that fits the host. Nothing a
++ * manifest says becomes a URL or a path: the caller derives locations from a
++ * trusted release base plus the validated bare file name.
++ */
++
++export const MANAGED_RELEASE_MANIFEST_FILE = "managed-release.json";
++export const MANAGED_RELEASE_SUMS_FILE = "SHA256SUMS";
++export const MANAGED_RELEASE_SCHEMA_VERSION = 1;
++export const MANAGED_SERVER_ENTRY = "node_modules/t3/dist/bin.mjs";
++export const MAX_MANAGED_MANIFEST_BYTES = 256 * 1024;
++export const MAX_MANAGED_SUMS_BYTES = 16 * 1024;
++
++const MANAGED_NIGHTLY_VARIANT = "managed-nightly";
++const REASONING_VARIANT = "reasoning";
++const COMMON_VARIANT = "common";
++const RELEASE_INPUT_SCHEMA = "t3-managed-release-input/1";
++const SHORT_DIGEST_LENGTH = 12;
++
++const PRESENTATION_VARIANTS = Object.freeze({
++  [MANAGED_NIGHTLY_VARIANT]: MANAGED_NIGHTLY_VARIANT,
++  [REASONING_VARIANT]: REASONING_VARIANT,
++});
++export const MANAGED_PUBLIC_CONFIG_KEYS = Object.freeze([
++  "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
++  "T3CODE_CLERK_JWT_TEMPLATE",
++  "T3CODE_CLERK_PUBLISHABLE_KEY",
++  "T3CODE_RELAY_URL",
++]);
++
++const SHA256_RE = /^[0-9a-f]{64}$/;
++const COMMIT_RE = /^[0-9a-f]{40}$/;
++const NUMERIC = "(?:0|[1-9]\\d*)";
++const UPSTREAM_NIGHTLY_RE = new RegExp(
++  `^${NUMERIC}\\.${NUMERIC}\\.${NUMERIC}-nightly\\.[1-9]\\d{7}\\.${NUMERIC}$`,
++);
++const MANAGED_RELEASE_RE = new RegExp(
++  `^(${NUMERIC}\\.${NUMERIC}\\.${NUMERIC}-nightly\\.[1-9]\\d{7}\\.${NUMERIC})` +
++    `\\.managed\\.(${NUMERIC})\\.p([0-9a-f]{${SHORT_DIGEST_LENGTH}})$`,
++);
++const SUMS_LINE_RE = /^([0-9a-f]{64})  (.+)$/;
++
++export type ManagedServerReleaseArtifactId =
++  | "managed-server-darwin-arm64"
++  | "managed-server-linux-x64";
++
++export type ManagedServerTarget =
++  | { readonly platform: "darwin"; readonly arch: "arm64" }
++  | { readonly platform: "linux"; readonly arch: "x64"; readonly libc: "glibc" };
++
++/**
++ * The fixed identity of every artifact a managed release publishes, in the
++ * writer's canonical order. Records must restate these values exactly.
++ */
++const EXPECTED_ARTIFACTS = [
++  {
++    id: "managed-nightly-darwin-arm64",
++    kind: "desktop",
++    variant: MANAGED_NIGHTLY_VARIANT,
++    platform: "darwin",
++    arch: "arm64",
++    format: "zip",
++    bundleId: "com.t3tools.t3code",
++    productName: "T3 Code (Nightly)",
++    urlSchemes: ["t3code", "t3code-dev"],
++    presentationVariant: MANAGED_NIGHTLY_VARIANT,
++  },
++  {
++    id: "reasoning-darwin-arm64",
++    kind: "desktop",
++    variant: REASONING_VARIANT,
++    platform: "darwin",
++    arch: "arm64",
++    format: "zip",
++    bundleId: "com.t3tools.t3code.reasoning",
++    productName: "T3 Code (Reasoning)",
++    urlSchemes: ["t3code-reasoning"],
++    presentationVariant: REASONING_VARIANT,
++  },
++  {
++    id: "managed-server-darwin-arm64",
++    kind: "server",
++    variant: COMMON_VARIANT,
++    platform: "darwin",
++    arch: "arm64",
++    format: "tar.gz",
++    entry: MANAGED_SERVER_ENTRY,
++    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++  },
++  {
++    id: "managed-server-linux-x64",
++    kind: "server",
++    variant: COMMON_VARIANT,
++    platform: "linux",
++    arch: "x64",
++    format: "tar.gz",
++    entry: MANAGED_SERVER_ENTRY,
++    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++  },
++] as const;
++
++const RESERVED_FILES: ReadonlySet<string> = new Set([
++  MANAGED_RELEASE_MANIFEST_FILE,
++  MANAGED_RELEASE_SUMS_FILE,
++]);
++
++export class ManagedReleaseError extends Schema.TaggedErrorClass<ManagedReleaseError>()(
++  "ManagedReleaseError",
++  {
++    document: Schema.Literals(["manifest", "checksums", "target"]),
++    reason: Schema.String,
++  },
++) {
++  override get message(): string {
++    return `Managed release ${this.document} rejected: ${this.reason}`;
++  }
++}
++
++export interface VerifiedManagedServerAsset {
++  readonly version: string;
++  readonly releaseArtifactId: ManagedServerReleaseArtifactId;
++  /** Bare basename inside the trusted release directory; never a URL. */
++  readonly file: string;
++  readonly bytes: number;
++  readonly sha256: string;
++  /** SHA-256 of the original manifest bytes, as `SHA256SUMS` covers them. */
++  readonly manifestSha256: string;
++  readonly releaseInputSha256: string;
++  readonly platform: "darwin" | "linux";
++  readonly arch: "arm64" | "x64";
++  readonly entry: typeof MANAGED_SERVER_ENTRY;
++  readonly launcherProtocol: typeof SERVICE_LAUNCHER_PROTOCOL;
++}
++
++// --- schema --------------------------------------------------------------------
++
++const Sha256Hex = Schema.String.check(Schema.isPattern(SHA256_RE));
++const CommitSha = Schema.String.check(Schema.isPattern(COMMIT_RE));
++const PatchRecord = Schema.Struct({ id: Schema.NonEmptyString, sha256: Sha256Hex });
++const VariantRecord = Schema.Struct({ patches: Schema.Array(PatchRecord) });
++
++const DesktopArtifactRecord = Schema.Struct({
++  id: Schema.String,
++  kind: Schema.Literal("desktop"),
++  variant: Schema.String,
++  platform: Schema.String,
++  arch: Schema.String,
++  format: Schema.String,
++  bundleId: Schema.String,
++  productName: Schema.String,
++  urlSchemes: Schema.Array(Schema.String),
++  presentationVariant: Schema.String,
++  file: Schema.String,
++  version: Schema.String,
++  embeddedServerVersion: Schema.String,
++  bytes: Schema.Number,
++  sha256: Sha256Hex,
++});
++
++const ServerArtifactRecord = Schema.Struct({
++  id: Schema.String,
++  kind: Schema.Literal("server"),
++  variant: Schema.String,
++  platform: Schema.String,
++  arch: Schema.String,
++  format: Schema.String,
++  entry: Schema.String,
++  launcherProtocol: Schema.Number,
++  file: Schema.String,
++  version: Schema.String,
++  bytes: Schema.Number,
++  sha256: Sha256Hex,
++});
++
++/** Structural mirror of `buildManifest` in the Harbor writer. Unknown keys are refused at decode time. */
++const ManagedReleaseManifest = Schema.Struct({
++  schemaVersion: Schema.Literal(MANAGED_RELEASE_SCHEMA_VERSION),
++  releaseVersion: Schema.String,
++  upstreamVersion: Schema.String,
++  upstreamCommit: CommitSha,
++  upstreamRepository: Schema.NonEmptyString,
++  releaseCounter: Schema.Number,
++  releaseInputSha256: Sha256Hex,
++  publicConfigSha256: Sha256Hex,
++  publicConfigKeys: Schema.Array(Schema.String),
++  builderRevision: CommitSha,
++  presentationVariants: Schema.Struct({
++    [MANAGED_NIGHTLY_VARIANT]: Schema.String,
++    [REASONING_VARIANT]: Schema.String,
++  }),
++  variants: Schema.Struct({
++    [MANAGED_NIGHTLY_VARIANT]: VariantRecord,
++    [REASONING_VARIANT]: VariantRecord,
++  }),
++  artifacts: Schema.Array(Schema.Union([DesktopArtifactRecord, ServerArtifactRecord])),
++});
++type ManagedReleaseManifest = typeof ManagedReleaseManifest.Type;
++type ArtifactRecord = ManagedReleaseManifest["artifacts"][number];
++
++const decodeManifest = Schema.decodeUnknownEffect(ManagedReleaseManifest);
++
++// --- helpers ---------------------------------------------------------------------
++
++function fail(document: ManagedReleaseError["document"], reason: string): never {
++  throw new ManagedReleaseError({ document, reason });
++}
++
++function sameJson(a: unknown, b: unknown): boolean {
++  return JSON.stringify(a) === JSON.stringify(b);
++}
++
++function canonicalize(value: unknown): unknown {
++  if (Array.isArray(value)) return value.map(canonicalize);
++  if (typeof value === "object" && value !== null) {
++    const record = value as Record<string, unknown>;
++    return Object.fromEntries(
++      Object.keys(record)
++        .sort()
++        .map((key) => [key, canonicalize(record[key])]),
++    );
++  }
++  return value;
++}
++
++/** JSON with recursively sorted keys plus a trailing newline: the Harbor canonical form. */
++export function canonicalJson(value: unknown): string {
++  return `${JSON.stringify(canonicalize(value), null, 2)}\n`;
++}
++
++export function sha256Hex(bytes: Uint8Array | string): string {
++  return NodeCrypto.createHash("sha256").update(bytes).digest("hex");
++}
++
++export interface ManagedReleaseVersionParts {
++  readonly releaseVersion: string;
++  readonly upstreamVersion: string;
++  readonly releaseCounter: number;
++  readonly releaseInputShort: string;
++}
++
++/** `<upstream nightly>.managed.<counter>.p<12 hex>`; the counter must be a positive safe integer. */
++export function parseManagedReleaseVersion(
++  version: string,
++): ManagedReleaseVersionParts | undefined {
++  const match = MANAGED_RELEASE_RE.exec(version);
++  if (match === null) return undefined;
++  const releaseCounter = Number(match[2]);
++  if (!Number.isSafeInteger(releaseCounter) || releaseCounter < 1) return undefined;
++  return {
++    releaseVersion: version,
++    upstreamVersion: match[1] as string,
++    releaseCounter,
++    releaseInputShort: match[3] as string,
++  };
++}
++
++export function formatManagedReleaseVersion(
++  upstreamVersion: string,
++  releaseCounter: number,
++  releaseInputSha256: string,
++): string {
++  return `${upstreamVersion}.managed.${releaseCounter}.p${releaseInputSha256.slice(0, SHORT_DIGEST_LENGTH)}`;
++}
++
++export interface ReleaseInputDigestInput {
++  readonly upstreamRepository: string;
++  readonly upstreamCommit: string;
++  readonly upstreamVersion: string;
++  readonly variants: Readonly<
++    Record<string, ReadonlyArray<{ readonly id: string; readonly sha256: string }>>
++  >;
++  readonly builderRevision: string;
++  readonly publicConfigSha256: string;
++  readonly presentationVariants: Readonly<Record<string, string>>;
++}
++
++/**
++ * Exactly `computeReleaseInputDigest` in the Harbor resolver: the repository,
++ * commit, version, each variant's ordered `{ id, sha256 }` pairs, the builder
++ * revision, the public-config fingerprint, and the presentation variants,
++ * canonicalized under schema `t3-managed-release-input/1`.
++ */
++export function computeReleaseInputDigest(input: ReleaseInputDigestInput): string {
++  return sha256Hex(
++    canonicalJson({
++      schema: RELEASE_INPUT_SCHEMA,
++      upstreamRepository: input.upstreamRepository,
++      upstreamCommit: input.upstreamCommit,
++      upstreamVersion: input.upstreamVersion,
++      variants: Object.fromEntries(
++        Object.entries(input.variants).map(([name, patches]) => [
++          name,
++          patches.map(({ id, sha256 }) => ({ id, sha256 })),
++        ]),
++      ),
++      builderRevision: input.builderRevision,
++      publicConfigSha256: input.publicConfigSha256,
++      presentationVariants: input.presentationVariants,
++    }),
++  );
++}
++
++export function selectManagedServerArtifactId(
++  target: ManagedServerTarget,
++): ManagedServerReleaseArtifactId {
++  return target.platform === "darwin" ? "managed-server-darwin-arm64" : "managed-server-linux-x64";
++}
++
++/** Content identity for the queued-update record: stable name plus archive digest. */
++export function managedArtifactContentId(asset: {
++  readonly releaseArtifactId: ManagedServerReleaseArtifactId;
++  readonly sha256: string;
++}): string {
++  return `${asset.releaseArtifactId}@sha256:${asset.sha256}`;
++}
++
++function decodeUtf8Strict(bytes: Uint8Array, document: ManagedReleaseError["document"]): string {
++  try {
++    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
++  } catch {
++    return fail(document, "not valid UTF-8");
++  }
++}
++
++// --- manifest --------------------------------------------------------------------
++
++/** A bare, portable file name: the same rule the writer applies to inventory records. */
++function validateFileName(file: string, format: string, label: string): string {
++  if (file === "" || file.includes("/") || file.includes("\\") || file === "." || file === "..") {
++    fail("manifest", `${label}: file ${JSON.stringify(file)} must be a bare file name`);
++  }
++  if (/[\p{Cc}]/u.test(file) || file.startsWith("-") || file.trim() !== file) {
++    fail("manifest", `${label}: file ${JSON.stringify(file)} contains disallowed characters`);
++  }
++  if (!file.endsWith(`.${format}`) || file === `.${format}`) {
++    fail("manifest", `${label}: file ${JSON.stringify(file)} must end with .${format}`);
++  }
++  if (RESERVED_FILES.has(file)) {
++    fail("manifest", `${label}: file ${file} collides with a release document`);
++  }
++  return file;
++}
++
++function validateArtifacts(manifest: ManagedReleaseManifest): ReadonlyMap<string, ArtifactRecord> {
++  const byId = new Map<string, ArtifactRecord>();
++  for (const record of manifest.artifacts) {
++    if (record.id === "") fail("manifest", "artifact id must be non-empty");
++    if (byId.has(record.id)) fail("manifest", `duplicate artifact ${record.id}`);
++    byId.set(record.id, record);
++  }
++  const expectedIds: ReadonlyArray<string> = EXPECTED_ARTIFACTS.map((artifact) => artifact.id);
++  const missing = expectedIds.filter((id) => !byId.has(id));
++  const unexpected = [...byId.keys()].filter((id) => !expectedIds.includes(id));
++  if (missing.length > 0) fail("manifest", `missing artifact(s) ${missing.join(", ")}`);
++  if (unexpected.length > 0) {
++    fail("manifest", `artifact(s) outside the release set: ${unexpected.join(", ")}`);
++  }
++
++  const seenFiles = new Map<string, string>();
++  for (const expected of EXPECTED_ARTIFACTS) {
++    const record = byId.get(expected.id) as ArtifactRecord;
++    const label = `artifact ${expected.id}`;
++    for (const [key, value] of Object.entries(expected)) {
++      if (!sameJson((record as Record<string, unknown>)[key], value)) {
++        fail("manifest", `${label}: ${key} must be ${JSON.stringify(value)}`);
++      }
++    }
++    if (record.version !== manifest.releaseVersion) {
++      fail("manifest", `${label}: version does not equal release version`);
++    }
++    if (record.kind === "desktop" && record.embeddedServerVersion !== manifest.releaseVersion) {
++      fail("manifest", `${label}: embeddedServerVersion does not equal release version`);
++    }
++    if (!Number.isSafeInteger(record.bytes) || record.bytes < 1) {
++      fail("manifest", `${label}: bytes must be a positive safe integer`);
++    }
++    const file = validateFileName(record.file, expected.format, label);
++    const folded = file.toLowerCase();
++    const other = seenFiles.get(folded);
++    if (other !== undefined) fail("manifest", `${label}: file ${file} is also used by ${other}`);
++    seenFiles.set(folded, expected.id);
++  }
++  return byId;
++}
++
++function validateProvenance(manifest: ManagedReleaseManifest, targetVersion: string): void {
++  const parsed = parseManagedReleaseVersion(manifest.releaseVersion);
++  if (parsed === undefined) {
++    fail(
++      "manifest",
++      `releaseVersion ${JSON.stringify(manifest.releaseVersion)} is not a managed release version`,
++    );
++  }
++  if (manifest.releaseVersion !== targetVersion) {
++    fail(
++      "manifest",
++      `releaseVersion ${manifest.releaseVersion} is not the requested ${targetVersion}`,
++    );
++  }
++  if (!UPSTREAM_NIGHTLY_RE.test(manifest.upstreamVersion)) {
++    fail("manifest", "upstreamVersion is not an upstream nightly version");
++  }
++  if (manifest.upstreamVersion !== parsed.upstreamVersion) {
++    fail("manifest", "upstreamVersion does not match releaseVersion");
++  }
++  if (
++    !Number.isSafeInteger(manifest.releaseCounter) ||
++    manifest.releaseCounter < 1 ||
++    manifest.releaseCounter !== parsed.releaseCounter
++  ) {
++    fail("manifest", "releaseCounter does not match releaseVersion");
++  }
++  if (!sameJson(manifest.publicConfigKeys, MANAGED_PUBLIC_CONFIG_KEYS)) {
++    fail("manifest", `publicConfigKeys must be exactly ${MANAGED_PUBLIC_CONFIG_KEYS.join(", ")}`);
++  }
++  if (!sameJson(manifest.presentationVariants, PRESENTATION_VARIANTS)) {
++    fail("manifest", `presentationVariants must be ${JSON.stringify(PRESENTATION_VARIANTS)}`);
++  }
++
++  const common = manifest.variants[MANAGED_NIGHTLY_VARIANT].patches;
++  const reasoning = manifest.variants[REASONING_VARIANT].patches;
++  for (const [name, patches] of [
++    [MANAGED_NIGHTLY_VARIANT, common],
++    [REASONING_VARIANT, reasoning],
++  ] as const) {
++    if (patches.length === 0) fail("manifest", `variants.${name}.patches must be non-empty`);
++    const ids = new Set<string>();
++    for (const patch of patches) {
++      if (ids.has(patch.id)) fail("manifest", `variants.${name} repeats patch id ${patch.id}`);
++      ids.add(patch.id);
++    }
++  }
++  if (reasoning.length <= common.length) {
++    fail(
++      "manifest",
++      `variant ${REASONING_VARIANT} must extend ${MANAGED_NIGHTLY_VARIANT} with an identity patch`,
++    );
++  }
++  common.forEach((patch, position) => {
++    const counterpart = reasoning[position];
++    if (
++      counterpart === undefined ||
++      counterpart.id !== patch.id ||
++      counterpart.sha256 !== patch.sha256
++    ) {
++      fail("manifest", `variant ${REASONING_VARIANT}[${position}] differs from the common prefix`);
++    }
++  });
++
++  const digest = computeReleaseInputDigest({
++    upstreamRepository: manifest.upstreamRepository,
++    upstreamCommit: manifest.upstreamCommit,
++    upstreamVersion: manifest.upstreamVersion,
++    variants: { [MANAGED_NIGHTLY_VARIANT]: common, [REASONING_VARIANT]: reasoning },
++    builderRevision: manifest.builderRevision,
++    publicConfigSha256: manifest.publicConfigSha256,
++    presentationVariants: manifest.presentationVariants,
++  });
++  if (manifest.releaseInputSha256 !== digest) {
++    fail("manifest", "releaseInputSha256 does not match the digest recomputed from its provenance");
++  }
++  const expectedVersion = formatManagedReleaseVersion(
++    manifest.upstreamVersion,
++    manifest.releaseCounter,
++    digest,
++  );
++  if (manifest.releaseVersion !== expectedVersion) {
++    fail("manifest", `releaseVersion does not match the resolved ${expectedVersion}`);
++  }
++}
++
++// --- SHA256SUMS ------------------------------------------------------------------
++
++function parseSha256Sums(sumsBytes: Uint8Array): ReadonlyMap<string, string> {
++  if (sumsBytes.byteLength === 0) fail("checksums", "empty");
++  if (sumsBytes.byteLength > MAX_MANAGED_SUMS_BYTES) fail("checksums", "too large");
++  const text = decodeUtf8Strict(sumsBytes, "checksums");
++  if (!text.endsWith("\n")) fail("checksums", "must end with a newline");
++  const lines = text.slice(0, -1).split("\n");
++  const entries = new Map<string, string>();
++  let previous = "";
++  for (const line of lines) {
++    const match = SUMS_LINE_RE.exec(line);
++    if (match === null) fail("checksums", `malformed line ${JSON.stringify(line)}`);
++    const sha256 = match[1] as string;
++    const file = match[2] as string;
++    if (
++      file === "." ||
++      file === ".." ||
++      file.includes("/") ||
++      file.includes("\\") ||
++      /[\p{Cc}]/u.test(file) ||
++      file.startsWith("-") ||
++      file.trim() !== file
++    ) {
++      fail("checksums", `file name ${JSON.stringify(file)} is not a bare file name`);
++    }
++    if (entries.has(file)) fail("checksums", `duplicate entry for ${file}`);
++    if (file <= previous) fail("checksums", "entries must be sorted by file name");
++    previous = file;
++    entries.set(file, sha256);
++  }
++  return entries;
++}
++
++// --- entry point -----------------------------------------------------------------
++
++export interface VerifyManagedReleaseDocumentsInput {
++  /** The manifest exactly as downloaded; its hash must appear in `SHA256SUMS`. */
++  readonly manifestBytes: Uint8Array;
++  readonly sumsBytes: Uint8Array;
++  /** The exact managed version the caller asked for; the manifest must name it. */
++  readonly targetVersion: string;
++  readonly hostTarget: ManagedServerTarget;
++}
++
++/**
++ * Authenticates the two release documents against each other and the
++ * request, then returns the single server artifact record for the host.
++ * Pure apart from hashing: no network, no filesystem, no trusted URLs.
++ */
++export const verifyManagedReleaseDocuments = Effect.fn("cloud.managed_release.verify_documents")(
++  function* (input: VerifyManagedReleaseDocumentsInput) {
++    const prepared = yield* attempt(() => {
++      if (parseManagedReleaseVersion(input.targetVersion) === undefined) {
++        fail("target", `${JSON.stringify(input.targetVersion)} is not a managed release version`);
++      }
++      if (input.manifestBytes.byteLength === 0) fail("manifest", "empty");
++      if (input.manifestBytes.byteLength > MAX_MANAGED_MANIFEST_BYTES)
++        fail("manifest", "too large");
++      const text = decodeUtf8Strict(input.manifestBytes, "manifest");
++      try {
++        return JSON.parse(text) as unknown;
++      } catch {
++        return fail("manifest", "not valid JSON");
++      }
++    });
++    const manifest = yield* decodeManifest(prepared, { onExcessProperty: "error" }).pipe(
++      Effect.mapError(
++        (error) =>
++          new ManagedReleaseError({
++            document: "manifest",
++            reason: `does not match the managed release schema: ${error.message}`,
++          }),
++      ),
++    );
++    return yield* attempt(() => selectVerifiedAsset(manifest, input));
++  },
++);
++
++const isManagedReleaseError = Schema.is(ManagedReleaseError);
++
++/** Runs a synchronous validator, moving its typed refusals into the error channel. */
++function attempt<A>(evaluate: () => A): Effect.Effect<A, ManagedReleaseError> {
++  return Effect.suspend(() => {
++    try {
++      return Effect.succeed(evaluate());
++    } catch (error) {
++      return isManagedReleaseError(error) ? Effect.fail(error) : Effect.die(error);
++    }
++  });
++}
++
++function selectVerifiedAsset(
++  manifest: ManagedReleaseManifest,
++  input: VerifyManagedReleaseDocumentsInput,
++): VerifiedManagedServerAsset {
++  validateProvenance(manifest, input.targetVersion);
++  const artifacts = validateArtifacts(manifest);
++
++  const sums = parseSha256Sums(input.sumsBytes);
++  const expectedFiles = [
++    MANAGED_RELEASE_MANIFEST_FILE,
++    ...[...artifacts.values()].map((record) => record.file),
++  ];
++  if (sums.size !== expectedFiles.length) {
++    fail("checksums", `expected exactly ${expectedFiles.length} entries, found ${sums.size}`);
++  }
++  for (const file of expectedFiles) {
++    if (!sums.has(file)) fail("checksums", `missing entry for ${file}`);
++  }
++  const manifestSha256 = sha256Hex(input.manifestBytes);
++  if (sums.get(MANAGED_RELEASE_MANIFEST_FILE) !== manifestSha256) {
++    fail("checksums", "manifest hash does not match the downloaded manifest bytes");
++  }
++  for (const record of artifacts.values()) {
++    if (sums.get(record.file) !== record.sha256) {
++      fail("checksums", `hash for ${record.file} disagrees with the manifest`);
++    }
++  }
++
++  const releaseArtifactId = selectManagedServerArtifactId(input.hostTarget);
++  const record = artifacts.get(releaseArtifactId);
++  if (record === undefined || record.kind !== "server") {
++    return fail("manifest", `no server artifact for ${releaseArtifactId}`);
++  }
++  if (record.platform !== input.hostTarget.platform || record.arch !== input.hostTarget.arch) {
++    fail(
++      "target",
++      `${releaseArtifactId} does not target ${input.hostTarget.platform}/${input.hostTarget.arch}`,
++    );
++  }
++  return {
++    version: manifest.releaseVersion,
++    releaseArtifactId,
++    file: record.file,
++    bytes: record.bytes,
++    sha256: record.sha256,
++    manifestSha256,
++    releaseInputSha256: manifest.releaseInputSha256,
++    platform: input.hostTarget.platform,
++    arch: input.hostTarget.arch,
++    entry: MANAGED_SERVER_ENTRY,
++    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++  };
++}
+diff --git a/apps/server/src/cloud/managedRuntimeArchive.test.ts b/apps/server/src/cloud/managedRuntimeArchive.test.ts
+new file mode 100644
+index 000000000..0821a2652
+--- /dev/null
++++ b/apps/server/src/cloud/managedRuntimeArchive.test.ts
+@@ -0,0 +1,874 @@
++// @effect-diagnostics nodeBuiltinImport:off - builds tiny tar fixtures and inspects the extracted tree directly.
++import * as NodeFSP from "node:fs/promises";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import * as NodeZlib from "node:zlib";
++
++import { afterEach, assert, beforeEach, describe, it } from "@effect/vitest";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import { Header, type HeaderData } from "tar";
++import { vi } from "vite-plus/test";
++
++import {
++  extractManagedRuntimeArchive,
++  extractManagedRuntimeArchiveEffect,
++  type ExtractionInventory,
++  type ManagedRuntimeArchiveError,
++  type ManagedRuntimeArchiveLimits,
++} from "./managedRuntimeArchive.ts";
++
++// The late extraction phases (link creation, tree verification, closing the
++// archive) are held at a real filesystem call so cancellation can be delivered
++// deterministically while that call is in flight.
++vi.mock("node:fs/promises", async (importOriginal) => {
++  const actual = await importOriginal<typeof import("node:fs/promises")>();
++  return {
++    ...actual,
++    open: vi.fn(actual.open),
++    readdir: vi.fn(actual.readdir),
++    symlink: vi.fn(actual.symlink),
++  };
++});
++
++// --- tiny archive builder (headers via tar's own Header; meta blocks by hand) ---
++
++const BLOCK = 512;
++const RECORD = 10240;
++const PKG = "node_modules/t3";
++
++function pad(buffer: Buffer, unit = BLOCK): Buffer {
++  const remainder = buffer.length % unit;
++  return remainder === 0 ? buffer : Buffer.concat([buffer, Buffer.alloc(unit - remainder)]);
++}
++
++function headerBlock(data: HeaderData): Buffer {
++  // @effect-diagnostics-next-line globalDate:off - tar headers carry a plain mtime
++  const header = new Header({ mtime: new Date(0), uid: 0, gid: 0, uname: "", gname: "", ...data });
++  header.encode();
++  return Buffer.from(header.block as Buffer);
++}
++
++/** Re-signs a hand-edited raw header block so only the edited field is under test. */
++function withChecksum(block: Buffer): Buffer {
++  const copy = Buffer.from(block);
++  copy.fill(0x20, 148, 156);
++  let sum = 0;
++  for (const byte of copy) sum += byte;
++  copy.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "ascii");
++  return copy;
++}
++
++interface Member {
++  readonly path: string;
++  readonly type?: HeaderData["type"];
++  readonly body?: string | Buffer;
++  readonly linkpath?: string;
++  readonly mode?: number;
++  /** Declared size when it should disagree with the body. */
++  readonly size?: number;
++}
++
++function member(spec: Member): Buffer {
++  const body =
++    spec.body === undefined
++      ? Buffer.alloc(0)
++      : Buffer.isBuffer(spec.body)
++        ? spec.body
++        : Buffer.from(spec.body);
++  const type = spec.type ?? (spec.path.endsWith("/") ? "Directory" : "File");
++  const header = headerBlock({
++    path: spec.path,
++    type,
++    size: spec.size ?? body.length,
++    ...(spec.linkpath === undefined ? {} : { linkpath: spec.linkpath }),
++    mode: spec.mode ?? (type === "Directory" ? 0o755 : 0o644),
++  });
++  return Buffer.concat([header, pad(body)]);
++}
++
++function paxRecord(key: string, value: string): string {
++  const rest = ` ${key}=${value}\n`;
++  let length = Buffer.byteLength(rest) + 1;
++  while (String(length).length + Buffer.byteLength(rest) !== length) length += 1;
++  return `${length}${rest}`;
++}
++
++function paxMember(records: Record<string, string>, raw?: string | Buffer): Buffer {
++  const body = Buffer.from(
++    raw ??
++      Object.entries(records)
++        .map(([key, value]) => paxRecord(key, value))
++        .join(""),
++  );
++  return Buffer.concat([
++    headerBlock({ path: "PaxHeader/x", type: "ExtendedHeader", size: body.length }),
++    pad(body),
++  ]);
++}
++
++function gnuLongPath(path: string): Buffer {
++  const body = Buffer.from(`${path}\0`);
++  return Buffer.concat([
++    headerBlock({ path: "././@LongLink", type: "NextFileHasLongPath", size: body.length }),
++    pad(body),
++  ]);
++}
++
++function tar(parts: ReadonlyArray<Buffer>, options: { eof?: boolean; pad?: boolean } = {}): Buffer {
++  const chunks = [...parts];
++  if (options.eof !== false) chunks.push(Buffer.alloc(2 * BLOCK));
++  const joined = Buffer.concat(chunks);
++  return options.pad === false ? joined : pad(joined, RECORD);
++}
++
++const gz = (buffer: Buffer): Buffer => NodeZlib.gzipSync(buffer);
++
++const PACKAGE_JSON = member({ path: `${PKG}/package.json`, body: '{"name":"t3"}' });
++const BIN = member({ path: `${PKG}/dist/bin.mjs`, body: "#!/usr/bin/env node\n", mode: 0o755 });
++const minimal = (...extra: ReadonlyArray<Buffer>) => gz(tar([PACKAGE_JSON, BIN, ...extra]));
++
++// --- harness ------------------------------------------------------------------------
++
++let root = "";
++let archivePath = "";
++let destination = "";
++let sibling = "";
++
++beforeEach(async () => {
++  root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "managed-runtime-archive-"));
++  archivePath = NodePath.join(root, "server.tar.gz");
++  destination = NodePath.join(root, "staged");
++  sibling = NodePath.join(root, "keep.txt");
++  await NodeFSP.writeFile(sibling, "untouched");
++});
++
++afterEach(async () => {
++  vi.mocked(NodeFSP.open).mockReset();
++  vi.mocked(NodeFSP.readdir).mockReset();
++  vi.mocked(NodeFSP.symlink).mockReset();
++  await NodeFSP.rm(root, { recursive: true, force: true });
++});
++
++const exists = (path: string) =>
++  NodeFSP.lstat(path).then(
++    () => true,
++    () => false,
++  );
++
++interface Held {
++  /** Resolves once the extractor has entered the held call. */
++  readonly entered: Promise<void>;
++  /** Lets the real call proceed. */
++  readonly release: () => void;
++}
++
++function gate(): Held & { readonly enter: () => Promise<void> } {
++  let entered!: () => void;
++  let release!: () => void;
++  const enteredPromise = new Promise<void>((resolve) => {
++    entered = resolve;
++  });
++  const released = new Promise<void>((resolve) => {
++    release = resolve;
++  });
++  return {
++    entered: enteredPromise,
++    release,
++    enter: () => {
++      entered();
++      return released;
++    },
++  };
++}
++
++/** Pauses the extractor's next call of a mocked fs operation until released, then performs the real call. */
++function holdNext(operation: (...args: never[]) => Promise<unknown>): Held {
++  const mock = vi.mocked(operation);
++  const real = mock.getMockImplementation();
++  assert.isDefined(real);
++  const held = gate();
++  mock.mockImplementationOnce(async (...args) => {
++    await held.enter();
++    return real(...args);
++  });
++  return held;
++}
++
++/** Pauses the close of the next opened handle (the archive) until released. */
++function holdNextClose(): Held {
++  const mock = vi.mocked(NodeFSP.open);
++  const real = mock.getMockImplementation();
++  assert.isDefined(real);
++  const held = gate();
++  mock.mockImplementationOnce(async (...args) => {
++    const handle = await real(...args);
++    const close = handle.close.bind(handle);
++    handle.close = async () => {
++      await held.enter();
++      return close();
++    };
++    return handle;
++  });
++  return held;
++}
++
++/** True when the promise is still unsettled after a full turn; the held call is the only thing it can wait on. */
++const isPending = (promise: Promise<unknown>) =>
++  Promise.race([
++    promise.then(
++      () => false,
++      () => false,
++    ),
++    new Promise<boolean>((resolve) => setImmediate(() => resolve(true))),
++  ]);
++
++async function extract(
++  archive: Buffer,
++  options: {
++    limits?: Partial<ManagedRuntimeArchiveLimits>;
++    requiredFiles?: ReadonlyArray<string>;
++    signal?: AbortSignal;
++  } = {},
++): Promise<ExtractionInventory> {
++  await NodeFSP.writeFile(archivePath, archive);
++  return extractManagedRuntimeArchive({ archivePath, destination, ...options });
++}
++
++/** Extraction must fail with a typed error, remove the destination, and leave everything else alone. */
++async function refused(
++  archive: Buffer,
++  options: Parameters<typeof extract>[1] = {},
++): Promise<ManagedRuntimeArchiveError> {
++  let error: unknown;
++  try {
++    await extract(archive, options);
++  } catch (caught) {
++    error = caught;
++  }
++  assert.isDefined(error, "extraction succeeded but should have been refused");
++  const typed = error as ManagedRuntimeArchiveError;
++  assert.strictEqual(typed._tag, "ManagedRuntimeArchiveError");
++  assert.isFalse(await exists(destination), "destination should be removed");
++  assert.strictEqual(await NodeFSP.readFile(sibling, "utf8"), "untouched");
++  assert.isTrue(await exists(archivePath), "archive must not be touched");
++  return typed;
++}
++
++const at = (relative: string) => NodePath.join(destination, ...relative.split("/"));
++const modeOf = async (relative: string) => (await NodeFSP.lstat(at(relative))).mode & 0o7777;
++
++// --- tests ---------------------------------------------------------------------------
++
++describe("extractManagedRuntimeArchive", () => {
++  it("extracts a pnpm deploy layout with relative symlinks and hard links intact", async () => {
++    const effectDir = `${PKG}/node_modules/.pnpm/effect@1.0.0/node_modules`;
++    const depDir = `${PKG}/node_modules/.pnpm/dep@2.0.0/node_modules/dep`;
++    const inventory = await extract(
++      gz(
++        tar([
++          PACKAGE_JSON,
++          BIN,
++          member({ path: `${PKG}/dist/`, mode: 0o2775 }),
++          member({
++            path: `${PKG}/node_modules/effect`,
++            type: "SymbolicLink",
++            linkpath: ".pnpm/effect@1.0.0/node_modules/effect",
++          }),
++          member({ path: `${effectDir}/effect/index.js`, body: "export const effect = 1;\n" }),
++          member({ path: `${effectDir}/effect/package.json`, body: '{"name":"effect"}' }),
++          member({ path: `${depDir}/index.js`, body: "module.exports = 2;\n", mode: 0o4755 }),
++          member({
++            path: `${effectDir}/dep`,
++            type: "SymbolicLink",
++            linkpath: "../../dep@2.0.0/node_modules/dep",
++          }),
++          member({
++            path: `${PKG}/node_modules/.bin/t3`,
++            type: "SymbolicLink",
++            linkpath: "../../dist/bin.mjs",
++          }),
++          member({
++            path: `${depDir}/copy.js`,
++            type: "Link",
++            linkpath: `${effectDir}/effect/index.js`,
++          }),
++        ]),
++      ),
++    );
++
++    assert.strictEqual(inventory.files, 5);
++    assert.strictEqual(inventory.directories, 12);
++    assert.strictEqual(inventory.symlinks, 3);
++    assert.strictEqual(inventory.hardlinks, 1);
++    assert.strictEqual(inventory.members.size, 21);
++    assert.strictEqual(inventory.payloadBytes, 13 + 20 + 25 + 17 + 20);
++    assert.strictEqual(inventory.expandedBytes, RECORD);
++    assert.isTrue(inventory.members.get(`${PKG}/dist`)?.explicit);
++    assert.isFalse(inventory.members.get(`${PKG}/node_modules`)?.explicit);
++
++    assert.strictEqual((await NodeFSP.stat(destination)).mode & 0o7777, 0o700);
++    assert.strictEqual(await modeOf(`${PKG}/dist`), 0o755);
++    assert.strictEqual(await modeOf(`${PKG}/dist/bin.mjs`), 0o755);
++    assert.strictEqual(await modeOf(`${PKG}/package.json`), 0o644);
++    assert.strictEqual(await modeOf(`${depDir}/index.js`), 0o755);
++    assert.strictEqual(
++      await NodeFSP.readFile(at(`${PKG}/dist/bin.mjs`), "utf8"),
++      "#!/usr/bin/env node\n",
++    );
++    assert.strictEqual(
++      await NodeFSP.readlink(at(`${PKG}/node_modules/effect`)),
++      ".pnpm/effect@1.0.0/node_modules/effect",
++    );
++    // Links resolve through the real layout.
++    assert.strictEqual(
++      await NodeFSP.readFile(at(`${PKG}/node_modules/effect/index.js`), "utf8"),
++      "export const effect = 1;\n",
++    );
++    assert.strictEqual(
++      await NodeFSP.readFile(at(`${effectDir}/dep/index.js`), "utf8"),
++      "module.exports = 2;\n",
++    );
++    assert.strictEqual(
++      await NodeFSP.readFile(at(`${PKG}/node_modules/.bin/t3`), "utf8"),
++      "#!/usr/bin/env node\n",
++    );
++    const original = await NodeFSP.stat(at(`${effectDir}/effect/index.js`));
++    const copy = await NodeFSP.stat(at(`${depDir}/copy.js`));
++    assert.strictEqual(copy.ino, original.ino);
++    assert.strictEqual(copy.nlink, 2);
++  });
++
++  it("accepts ./-prefixed names, hard link chains, and a bare node_modules directory", async () => {
++    const inventory = await extract(
++      gz(
++        tar([
++          member({ path: "./node_modules/" }),
++          member({ path: `./${PKG}/` }),
++          member({ path: `./${PKG}/package.json`, body: "{}" }),
++          member({ path: `./${PKG}/dist/bin.mjs`, body: "x", mode: 0o700 }),
++          member({ path: `${PKG}/a`, type: "Link", linkpath: `./${PKG}/dist/bin.mjs` }),
++          member({ path: `${PKG}/b`, type: "Link", linkpath: `${PKG}/a` }),
++        ]),
++      ),
++    );
++    assert.strictEqual(inventory.hardlinks, 2);
++    assert.strictEqual(inventory.directories, 3);
++    // Only the execute bits the archive carried survive on top of the 0644 base.
++    assert.strictEqual(await modeOf(`${PKG}/dist/bin.mjs`), 0o744);
++    assert.strictEqual((await NodeFSP.stat(at(`${PKG}/b`))).nlink, 3);
++  });
++
++  it("refuses archives that are truncated, unterminated, or malformed instead of skipping members", async () => {
++    const truncatedGzip = await refused(minimal().subarray(0, 40));
++    assert.include(truncatedGzip.reason, "reading the archive");
++
++    const body = tar(
++      [PACKAGE_JSON, member({ path: `${PKG}/dist/bin.mjs`, body: "x".repeat(1000) })],
++      { eof: false, pad: false },
++    );
++    const truncatedBody = await refused(gz(body.subarray(0, body.length - 512)));
++    assert.include(truncatedBody.reason, "Truncated input");
++
++    const noEof = await refused(gz(tar([PACKAGE_JSON, BIN], { eof: false, pad: false })));
++    assert.include(noEof.reason, "end-of-archive marker");
++
++    const corrupt = Buffer.from(tar([PACKAGE_JSON, BIN]));
++    corrupt[3] = 0x5a;
++    const checksum = await refused(gz(corrupt));
++    assert.include(checksum.reason, "checksum failure");
++
++    const empty = await refused(Buffer.alloc(0));
++    assert.strictEqual(empty.reason, "archive is empty");
++
++    const notGzip = await refused(tar([PACKAGE_JSON, BIN]));
++    assert.include(notGzip.reason, "reading the archive");
++
++    const nested = await refused(gz(minimal()));
++    assert.include(nested.reason, "nested compression");
++
++    const trailing = await refused(
++      gz(Buffer.concat([tar([PACKAGE_JSON, BIN]), Buffer.from("GARBAGE")])),
++    );
++    assert.include(trailing.reason, "after the end-of-archive marker");
++  });
++
++  it("refuses effective paths from PAX and GNU long names that escape or misplace members", async () => {
++    const paxTraversal = await refused(
++      minimal(paxMember({ path: "../../evil" }), member({ path: `${PKG}/ok`, body: "x" })),
++    );
++    assert.include(paxTraversal.reason, ".. segment");
++    assert.strictEqual(paxTraversal.entryPath, "../../evil");
++
++    const paxAbsolute = await refused(
++      minimal(paxMember({ path: "/etc/passwd" }), member({ path: `${PKG}/ok`, body: "x" })),
++    );
++    assert.strictEqual(paxAbsolute.reason, "absolute path");
++
++    const gnuTraversal = await refused(
++      minimal(gnuLongPath(`${PKG}/../../evil`), member({ path: `${PKG}/ok`, body: "x" })),
++    );
++    assert.include(gnuTraversal.reason, ".. segment");
++
++    const gnuOutside = await refused(
++      minimal(
++        gnuLongPath(`node_modules/${"x".repeat(120)}/evil`),
++        member({ path: `${PKG}/ok`, body: "x" }),
++      ),
++    );
++    assert.include(gnuOutside.reason, "only node_modules/t3 may be extracted");
++
++    const paxLinkpath = await refused(
++      minimal(
++        paxMember({ linkpath: "../../../outside" }),
++        member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "dist" }),
++      ),
++    );
++    assert.include(paxLinkpath.reason, "escapes the package");
++
++    const control = await refused(
++      minimal(
++        paxMember({ path: `${PKG}/bad\u0007name` }),
++        member({ path: `${PKG}/ok`, body: "x" }),
++      ),
++    );
++    assert.include(control.reason, "control characters");
++
++    const backslash = await refused(minimal(member({ path: `${PKG}/a\\b`, body: "x" })));
++    assert.include(backslash.reason, "backslash");
++
++    const drive = await refused(
++      minimal(paxMember({ path: "C:/evil" }), member({ path: `${PKG}/ok`, body: "x" })),
++    );
++    assert.include(drive.reason, "drive-letter");
++
++    const deep = await refused(minimal(member({ path: `${PKG}/a/b/c/d`, body: "x" })), {
++      limits: { maxPathDepth: 5 },
++    });
++    assert.include(deep.reason, "nested too deeply");
++
++    const long = await refused(minimal(member({ path: `${PKG}/${"y".repeat(60)}`, body: "x" })), {
++      limits: { maxPathBytes: 64 },
++    });
++    assert.include(long.reason, "too long");
++  });
++
++  it("confines every member to node_modules/t3", async () => {
++    const stray = await refused(minimal(member({ path: ".install-complete", body: "" })));
++    assert.include(stray.reason, "only node_modules/t3 may be extracted");
++    const marker = await refused(
++      minimal(member({ path: `${PKG}/../.managed-artifact.json`, body: "{}" })),
++    );
++    assert.include(marker.reason, ".. segment");
++    const other = await refused(
++      minimal(member({ path: "node_modules/other/index.js", body: "x" })),
++    );
++    assert.include(other.reason, "only node_modules/t3 may be extracted");
++    const rootFile = await refused(minimal(member({ path: "node_modules", body: "x" })));
++    assert.strictEqual(rootFile.reason, "node_modules must be a directory");
++    const packageFile = await refused(gz(tar([member({ path: PKG, body: "x" })])));
++    assert.strictEqual(packageFile.reason, "node_modules/t3 must be a directory");
++    const dot = await refused(minimal(member({ path: "./", type: "Directory" })));
++    assert.include(dot.reason, "archive root");
++    const missingBin = await refused(gz(tar([PACKAGE_JSON])));
++    assert.include(missingBin.reason, "required file is missing");
++    assert.strictEqual(missingBin.entryPath, `${PKG}/dist/bin.mjs`);
++    const binIsLink = await refused(
++      gz(
++        tar([
++          PACKAGE_JSON,
++          member({ path: `${PKG}/real.mjs`, body: "x" }),
++          member({ path: `${PKG}/dist/bin.mjs`, type: "SymbolicLink", linkpath: "../real.mjs" }),
++        ]),
++      ),
++    );
++    assert.include(binIsLink.reason, "required file is missing");
++    const custom = await refused(minimal(), {
++      requiredFiles: [`${PKG}/dist/service-launcher.mjs`],
++    });
++    assert.strictEqual(custom.entryPath, `${PKG}/dist/service-launcher.mjs`);
++  });
++
++  it("refuses duplicate, aliased, and misparented members", async () => {
++    const duplicate = await refused(minimal(member({ path: `${PKG}/package.json`, body: "{}" })));
++    assert.strictEqual(duplicate.reason, "duplicate member");
++    const caseAlias = await refused(minimal(member({ path: `${PKG}/Dist/x`, body: "x" })));
++    assert.include(caseAlias.reason, "collides with");
++    const fileCase = await refused(minimal(member({ path: `${PKG}/PACKAGE.json`, body: "x" })));
++    assert.include(fileCase.reason, "collides with");
++    const nfd = await refused(
++      minimal(
++        member({ path: `${PKG}/caf\u00e9`, body: "x" }),
++        member({ path: `${PKG}/cafe\u0301`, body: "x" }),
++      ),
++    );
++    assert.include(nfd.reason, "normalization-insensitive");
++
++    const explicitTwice = await refused(
++      minimal(member({ path: `${PKG}/dist/` }), member({ path: `${PKG}/dist/` })),
++    );
++    assert.strictEqual(explicitTwice.reason, "duplicate member");
++    const explicitOnce = await extract(minimal(member({ path: `${PKG}/dist/` })));
++    assert.isTrue(explicitOnce.members.get(`${PKG}/dist`)?.explicit);
++    await NodeFSP.rm(destination, { recursive: true });
++
++    const fileAsDir = await refused(
++      minimal(member({ path: `${PKG}/package.json/child`, body: "x" })),
++    );
++    assert.include(fileAsDir.reason, "is a file, not a directory");
++    const dirAsFile = await refused(minimal(member({ path: `${PKG}/dist`, body: "x" })));
++    assert.strictEqual(dirAsFile.reason, "duplicate member");
++    const throughSymlink = await refused(
++      minimal(
++        member({ path: `${PKG}/lib`, type: "SymbolicLink", linkpath: "dist" }),
++        member({ path: `${PKG}/lib/evil.js`, body: "x" }),
++      ),
++    );
++    assert.include(throughSymlink.reason, "is a symlink, not a directory");
++    // tar's own header encoder forces directory sizes to zero, so a directory
++    // "body" is parsed as a corrupt header instead of being carried along.
++    const dirWithBody = await refused(minimal(member({ path: `${PKG}/d/`, body: "data" })));
++    assert.include(dirWithBody.reason, "tar parse error");
++    const invalidUtf8Meta = await refused(
++      minimal(
++        paxMember(
++          {},
++          Buffer.concat([Buffer.from("13 comment="), Buffer.from([0xff]), Buffer.from("\n")]),
++        ),
++        member({ path: `${PKG}/x`, body: "x" }),
++      ),
++    );
++    assert.include(invalidUtf8Meta.reason, "not valid UTF-8");
++    // tar turns a regular file whose name ends in "/" into a directory, so a
++    // file body behind such a name is parsed as a corrupt header.
++    const dirLikeFileName = await refused(
++      minimal(paxMember({ path: `${PKG}/trailing/` }), member({ path: `${PKG}/ok`, body: "x" })),
++    );
++    assert.include(dirLikeFileName.reason, "tar parse error");
++    const emptySegment = await refused(
++      minimal(paxMember({ path: `${PKG}/a//b` }), member({ path: `${PKG}/ok`, body: "x" })),
++    );
++    assert.include(emptySegment.reason, "empty segment");
++  });
++
++  it("refuses links that escape, dangle, cycle, or alias non-files", async () => {
++    const escape = await refused(
++      minimal(
++        member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "../../../../etc/passwd" }),
++      ),
++    );
++    assert.include(escape.reason, "escapes the package");
++    const toNodeModules = await refused(
++      minimal(member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: ".." })),
++    );
++    assert.include(toNodeModules.reason, "escapes the package");
++    const absolute = await refused(
++      minimal(member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "/tmp" })),
++    );
++    assert.strictEqual(absolute.reason, "symlink target: absolute path");
++    const trailing = await refused(
++      minimal(member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "dist/" })),
++    );
++    assert.include(trailing.reason, "not canonical");
++    const dangling = await refused(
++      minimal(member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "missing" })),
++    );
++    assert.include(dangling.reason, "does not exist");
++    const cycle = await refused(
++      minimal(
++        member({ path: `${PKG}/a`, type: "SymbolicLink", linkpath: "b" }),
++        member({ path: `${PKG}/b`, type: "SymbolicLink", linkpath: "a" }),
++      ),
++    );
++    assert.strictEqual(cycle.reason, "link cycle");
++    const self = await refused(
++      minimal(member({ path: `${PKG}/a`, type: "SymbolicLink", linkpath: "a" })),
++    );
++    assert.strictEqual(self.reason, "link cycle");
++    // A chain that climbs out through an intermediate symlink is caught during graph resolution.
++    const indirect = await refused(
++      minimal(
++        member({ path: `${PKG}/up`, type: "SymbolicLink", linkpath: "dist/../.." }),
++        member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "up/other" }),
++      ),
++    );
++    assert.include(indirect.reason, "escapes the package");
++    const fileAsDir = await refused(
++      minimal(member({ path: `${PKG}/l`, type: "SymbolicLink", linkpath: "package.json/x" })),
++    );
++    assert.include(fileAsDir.reason, "as a directory");
++
++    const hardToDir = await refused(
++      minimal(member({ path: `${PKG}/h`, type: "Link", linkpath: `${PKG}/dist` })),
++    );
++    assert.include(hardToDir.reason, "not an earlier regular file");
++    const hardToSymlink = await refused(
++      minimal(
++        member({ path: `${PKG}/s`, type: "SymbolicLink", linkpath: "package.json" }),
++        member({ path: `${PKG}/h`, type: "Link", linkpath: `${PKG}/s` }),
++      ),
++    );
++    assert.include(hardToSymlink.reason, "not an earlier regular file");
++    const hardToLater = await refused(
++      minimal(
++        member({ path: `${PKG}/h`, type: "Link", linkpath: `${PKG}/later` }),
++        member({ path: `${PKG}/later`, body: "x" }),
++      ),
++    );
++    assert.include(hardToLater.reason, "not an earlier regular file");
++    const hardOutside = await refused(
++      minimal(member({ path: `${PKG}/h`, type: "Link", linkpath: "../../server.tar.gz" })),
++    );
++    assert.include(hardOutside.reason, "hard link target");
++    const hardWithBody = await refused(
++      minimal(
++        member({ path: `${PKG}/h`, type: "Link", linkpath: `${PKG}/package.json`, body: "data" }),
++      ),
++    );
++    assert.include(hardWithBody.reason, "cannot carry data");
++    const symlinkWithBody = await refused(
++      minimal(
++        member({ path: `${PKG}/s`, type: "SymbolicLink", linkpath: "package.json", body: "data" }),
++      ),
++    );
++    assert.include(symlinkWithBody.reason, "cannot carry data");
++  });
++
++  it("refuses unsupported entry types and platform metadata", async () => {
++    const fifo = await refused(minimal(member({ path: `${PKG}/fifo`, type: "FIFO" })));
++    assert.include(fifo.reason, "unsupported entry type FIFO");
++    const device = await refused(minimal(member({ path: `${PKG}/dev`, type: "CharacterDevice" })));
++    assert.include(device.reason, "unsupported entry type CharacterDevice");
++    const sparse = await refused(
++      minimal(member({ path: `${PKG}/sparse`, type: "SparseFile", body: "x" })),
++    );
++    assert.include(sparse.reason, "unsupported or oversized entry");
++
++    const unknown = Buffer.from(member({ path: `${PKG}/weird`, body: "x" }));
++    unknown[156] = "Z".charCodeAt(0);
++    const unknownType = await refused(
++      minimal(Buffer.concat([withChecksum(unknown.subarray(0, BLOCK)), unknown.subarray(BLOCK)])),
++    );
++    assert.include(unknownType.reason, "unsupported");
++
++    const sparsePax = await refused(
++      minimal(paxMember({ "GNU.sparse.major": "1" }), member({ path: `${PKG}/x`, body: "x" })),
++    );
++    assert.strictEqual(sparsePax.reason, "unsupported PAX record GNU.sparse.major");
++    const xattr = await refused(
++      minimal(
++        paxMember({ "SCHILY.xattr.com.apple.quarantine": "0083" }),
++        member({ path: `${PKG}/x`, body: "x" }),
++      ),
++    );
++    assert.include(xattr.reason, "unsupported PAX record SCHILY.xattr");
++    const acl = await refused(
++      minimal(
++        paxMember({ "SCHILY.acl.access": "u::rwx" }),
++        member({ path: `${PKG}/x`, body: "x" }),
++      ),
++    );
++    assert.include(acl.reason, "unsupported PAX record SCHILY.acl");
++    const fflags = await refused(
++      minimal(paxMember({ "SCHILY.fflags": "hidden" }), member({ path: `${PKG}/x`, body: "x" })),
++    );
++    assert.include(fflags.reason, "unsupported PAX record SCHILY.fflags");
++    const malformedPax = await refused(
++      minimal(
++        paxMember({}, `${paxRecord("mtime", "0")}garbage line\n`),
++        member({ path: `${PKG}/x`, body: "x" }),
++      ),
++    );
++    assert.strictEqual(malformedPax.reason, "malformed PAX metadata");
++    const benignPax = await extract(
++      minimal(
++        paxMember({ mtime: "1700000000.5", uid: "501" }),
++        member({ path: `${PKG}/x`, body: "x" }),
++      ),
++    );
++    assert.strictEqual(benignPax.files, 3);
++  });
++
++  it("enforces size, count, and metadata limits", async () => {
++    const meta = await refused(
++      minimal(paxMember({ comment: "c".repeat(300) }), member({ path: `${PKG}/x`, body: "x" })),
++      {
++        limits: { maxMetaEntryBytes: 64 },
++      },
++    );
++    assert.include(meta.reason, "unsupported or oversized entry");
++    const file = await refused(minimal(member({ path: `${PKG}/big`, body: "x".repeat(600) })), {
++      limits: { maxFileBytes: 100 },
++    });
++    assert.include(file.reason, "larger than the limit");
++    const entries = await refused(minimal(member({ path: `${PKG}/x`, body: "x" })), {
++      limits: { maxEntries: 2 },
++    });
++    assert.strictEqual(entries.reason, "too many entries");
++    const expanded = await refused(minimal(), { limits: { maxExpandedBytes: 2048 } });
++    assert.include(expanded.reason, "expanded stream is larger");
++    const compressed = await refused(minimal(), { limits: { maxCompressedBytes: 16 } });
++    assert.include(compressed.reason, "larger than the compressed limit");
++  });
++
++  it("refuses to extract into an existing destination", async () => {
++    await NodeFSP.mkdir(destination);
++    await NodeFSP.writeFile(NodePath.join(destination, "pre.txt"), "pre");
++    await NodeFSP.writeFile(archivePath, minimal());
++    let error: unknown;
++    try {
++      await extractManagedRuntimeArchive({ archivePath, destination });
++    } catch (caught) {
++      error = caught;
++    }
++    assert.include((error as ManagedRuntimeArchiveError).reason, "creating the destination");
++    assert.strictEqual(
++      await NodeFSP.readFile(NodePath.join(destination, "pre.txt"), "utf8"),
++      "pre",
++    );
++  });
++
++  it("cancels cleanly before and during extraction", async () => {
++    const aborted = new AbortController();
++    aborted.abort();
++    const early = await refused(minimal(), { signal: aborted.signal });
++    assert.strictEqual(early.reason, "extraction cancelled");
++
++    const big = Buffer.alloc(4 * 1024 * 1024);
++    for (let index = 0; index < big.length; index += 1) big[index] = index % 251;
++    const archive = gz(tar([member({ path: `${PKG}/big.bin`, body: big }), PACKAGE_JSON, BIN]));
++    await NodeFSP.writeFile(archivePath, archive);
++    const controller = new AbortController();
++    const extraction = extractManagedRuntimeArchive({
++      archivePath,
++      destination,
++      signal: controller.signal,
++    });
++    const outcome = extraction.then(
++      () => "completed" as const,
++      (error: ManagedRuntimeArchiveError) => error.reason,
++    );
++    const bigPath = at(`${PKG}/big.bin`);
++    while (!(await exists(bigPath))) {
++      await new Promise<void>((resolve) => setImmediate(resolve));
++    }
++    controller.abort();
++    assert.strictEqual(await outcome, "extraction cancelled");
++    assert.isFalse(await exists(destination));
++    assert.strictEqual(await NodeFSP.readFile(sibling, "utf8"), "untouched");
++    assert.strictEqual((await NodeFSP.stat(archivePath)).size, archive.length);
++  });
++
++  const LINKED = minimal(member({ path: `${PKG}/lib`, type: "SymbolicLink", linkpath: "dist" }));
++
++  /**
++   * Cancels while `held` blocks a late extraction step. Cleanup must wait for
++   * that step to finish rather than race it, and the outcome must be the typed
++   * cancellation with nothing left behind.
++   */
++  async function cancelledWhileHeld(archive: Buffer, held: Held): Promise<void> {
++    await NodeFSP.writeFile(archivePath, archive);
++    const controller = new AbortController();
++    const outcome = extractManagedRuntimeArchive({
++      archivePath,
++      destination,
++      signal: controller.signal,
++    }).then(
++      () => "completed" as const,
++      (error: ManagedRuntimeArchiveError) => error.reason,
++    );
++    await held.entered;
++    controller.abort();
++    assert.isTrue(await isPending(outcome), "must wait for the in-flight call");
++    assert.isTrue(await exists(destination), "must not remove the tree under an active call");
++    held.release();
++    assert.strictEqual(await outcome, "extraction cancelled");
++    assert.isFalse(await exists(destination));
++    assert.strictEqual(await NodeFSP.readFile(sibling, "utf8"), "untouched");
++    assert.strictEqual((await NodeFSP.stat(archivePath)).size, archive.length);
++  }
++
++  it("cancels while a link is being created", async () => {
++    await cancelledWhileHeld(LINKED, holdNext(NodeFSP.symlink));
++    assert.strictEqual(vi.mocked(NodeFSP.symlink).mock.calls.length, 1);
++  });
++
++  it("cancels while the extracted tree is being verified", async () => {
++    await cancelledWhileHeld(minimal(), holdNext(NodeFSP.readdir));
++  });
++
++  it("cancels while the archive handle is closing", async () => {
++    await cancelledWhileHeld(minimal(), holdNextClose());
++  });
++
++  it.effect("interruption while a link is being created waits for it and removes the tree", () =>
++    Effect.gen(function* () {
++      yield* Effect.promise(() => NodeFSP.writeFile(archivePath, LINKED));
++      const held = holdNext(NodeFSP.symlink);
++      const fiber = yield* Effect.forkChild(
++        extractManagedRuntimeArchiveEffect({ archivePath, destination }),
++      );
++      yield* Effect.promise(() => held.entered);
++      // Starting the interrupt immediately delivers it before this fiber
++      // continues, while the link call is still held.
++      const interrupter = yield* Effect.forkChild(Fiber.interrupt(fiber), {
++        startImmediately: true,
++      });
++      assert.isUndefined(fiber.pollUnsafe(), "must wait for the in-flight call");
++      assert.isTrue(yield* Effect.promise(() => exists(destination)));
++      held.release();
++      yield* Fiber.join(interrupter);
++      const exit = yield* Effect.exit(Fiber.join(fiber));
++      assert.isTrue(Exit.hasInterrupts(exit));
++      assert.isFalse(yield* Effect.promise(() => exists(destination)));
++      assert.strictEqual(
++        yield* Effect.promise(() => NodeFSP.readFile(sibling, "utf8")),
++        "untouched",
++      );
++      assert.strictEqual(vi.mocked(NodeFSP.symlink).mock.calls.length, 1);
++    }),
++  );
++
++  it.effect("runs under Effect with typed failures and interruption cleanup", () =>
++    Effect.gen(function* () {
++      yield* Effect.promise(() => NodeFSP.writeFile(archivePath, minimal()));
++      const inventory = yield* extractManagedRuntimeArchiveEffect({ archivePath, destination });
++      assert.strictEqual(inventory.files, 2);
++      yield* Effect.promise(() => NodeFSP.rm(destination, { recursive: true }));
++
++      yield* Effect.promise(() =>
++        NodeFSP.writeFile(archivePath, minimal(member({ path: "escape", body: "x" }))),
++      );
++      const failure = yield* Effect.flip(
++        extractManagedRuntimeArchiveEffect({ archivePath, destination }),
++      );
++      assert.strictEqual(failure._tag, "ManagedRuntimeArchiveError");
++      assert.include(failure.reason, "only node_modules/t3 may be extracted");
++      assert.isFalse(yield* Effect.promise(() => exists(destination)));
++
++      const big = Buffer.alloc(4 * 1024 * 1024, 7);
++      yield* Effect.promise(() =>
++        NodeFSP.writeFile(
++          archivePath,
++          gz(tar([member({ path: `${PKG}/big.bin`, body: big }), PACKAGE_JSON, BIN])),
++        ),
++      );
++      const fiber = yield* Effect.forkChild(
++        extractManagedRuntimeArchiveEffect({ archivePath, destination }),
++      );
++      const bigPath = at(`${PKG}/big.bin`);
++      yield* Effect.promise(async () => {
++        while (!(await exists(bigPath))) {
++          await new Promise<void>((resolve) => setImmediate(resolve));
++        }
++      });
++      yield* Fiber.interrupt(fiber);
++      assert.isFalse(yield* Effect.promise(() => exists(destination)));
++      assert.strictEqual(
++        yield* Effect.promise(() => NodeFSP.readFile(sibling, "utf8")),
++        "untouched",
++      );
++    }),
++  );
++});
+diff --git a/apps/server/src/cloud/managedRuntimeArchive.ts b/apps/server/src/cloud/managedRuntimeArchive.ts
+new file mode 100644
+index 000000000..15f1fdee4
+--- /dev/null
++++ b/apps/server/src/cloud/managedRuntimeArchive.ts
+@@ -0,0 +1,1018 @@
++// @effect-diagnostics nodeBuiltinImport:off - streams a tar archive to disk with exclusive, no-follow opens that the Effect FileSystem does not expose.
++import * as NodeFS from "node:fs";
++import * as NodeFSP from "node:fs/promises";
++import * as NodePath from "node:path";
++import * as NodeStream from "node:stream";
++import * as NodeZlib from "node:zlib";
++
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++import { Parser, type ReadEntry } from "tar";
++
++/**
++ * Confined extraction of a managed server archive (`managed-server-*.tar.gz`)
++ * into a brand-new private directory.
++ *
++ * The tar module only parses; every filesystem decision is made here from an
++ * explicit inventory so the managed contract is enforced by refusal rather
++ * than by the library's own skip-or-strip behaviour. Members are limited to
++ * ordinary files, directories, relative symbolic links, and internal hard
++ * links beneath `node_modules/t3`, which is what a pnpm production deploy
++ * produces (many essential relative symlinks; hard links when bsdtar folds
++ * duplicate content). Links are recorded during parsing and created only
++ * after every file and directory exists and the whole graph resolves inside
++ * the package, so an archive can never create a link and then write through
++ * it.
++ */
++
++const ARCHIVE_ROOT_DIR = "node_modules";
++const ARCHIVE_PACKAGE_DIR = "node_modules/t3";
++const PACKAGE_SEGMENTS = [ARCHIVE_ROOT_DIR, "t3"] as const;
++const MAX_LINK_HOPS = 40;
++const TAR_BLOCK = 512;
++const GZIP_MAGIC = [0x1f, 0x8b] as const;
++const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd] as const;
++const DIRECTORY_MODE = 0o755;
++const FILE_MODE_BASE = 0o644;
++const EXECUTE_BITS = 0o111;
++/** PAX keys the parser applies to an entry; anything else is platform metadata this contract refuses. */
++const ALLOWED_PAX_KEYS = new Set([
++  "path",
++  "linkpath",
++  "size",
++  "mtime",
++  "atime",
++  "ctime",
++  "uid",
++  "gid",
++  "uname",
++  "gname",
++  "charset",
++  "comment",
++  "hdrcharset",
++  "SCHILY.dev",
++  "SCHILY.ino",
++  "SCHILY.nlink",
++]);
++
++export const DEFAULT_REQUIRED_ARCHIVE_FILES: ReadonlyArray<string> = [
++  `${ARCHIVE_PACKAGE_DIR}/package.json`,
++  `${ARCHIVE_PACKAGE_DIR}/dist/bin.mjs`,
++];
++
++export interface ManagedRuntimeArchiveLimits {
++  readonly maxCompressedBytes: number;
++  /** Cap on the whole decompressed tar stream: headers, metadata, padding, and bodies. */
++  readonly maxExpandedBytes: number;
++  readonly maxEntries: number;
++  readonly maxFileBytes: number;
++  /** Cap on one PAX / GNU long-name metadata record. */
++  readonly maxMetaEntryBytes: number;
++  readonly maxPathBytes: number;
++  readonly maxPathDepth: number;
++}
++
++/** Starting policy; validate against real builder output before enabling publication. */
++export const DEFAULT_MANAGED_RUNTIME_ARCHIVE_LIMITS: ManagedRuntimeArchiveLimits = {
++  maxCompressedBytes: 2 * 1024 * 1024 * 1024,
++  maxExpandedBytes: 8 * 1024 * 1024 * 1024,
++  maxEntries: 200_000,
++  maxFileBytes: 1024 * 1024 * 1024,
++  maxMetaEntryBytes: 1024 * 1024,
++  maxPathBytes: 4096,
++  maxPathDepth: 64,
++};
++
++export type ArchiveMemberKind = "file" | "directory" | "symlink" | "hardlink";
++
++export interface ArchiveMember {
++  readonly kind: ArchiveMemberKind;
++  /** Normalized archive-relative POSIX path, e.g. `node_modules/t3/package.json`. */
++  readonly path: string;
++  /** Symlink: the literal relative target. Hard link: the normalized member it aliases. */
++  readonly target?: string;
++  readonly size?: number;
++  /** Implicit directories were created for a child before any explicit entry named them. */
++  readonly explicit: boolean;
++}
++
++export interface ExtractionInventory {
++  readonly members: ReadonlyMap<string, ArchiveMember>;
++  readonly files: number;
++  readonly directories: number;
++  readonly symlinks: number;
++  readonly hardlinks: number;
++  readonly compressedBytes: number;
++  readonly expandedBytes: number;
++  readonly payloadBytes: number;
++}
++
++export class ManagedRuntimeArchiveError extends Schema.TaggedErrorClass<ManagedRuntimeArchiveError>()(
++  "ManagedRuntimeArchiveError",
++  {
++    reason: Schema.String,
++    entryPath: Schema.optional(Schema.String),
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    return this.entryPath === undefined
++      ? `Managed runtime archive rejected: ${this.reason}`
++      : `Managed runtime archive rejected at ${JSON.stringify(this.entryPath)}: ${this.reason}`;
++  }
++}
++
++export interface ExtractManagedRuntimeArchiveInput {
++  /** An already authenticated, exclusively owned regular file. */
++  readonly archivePath: string;
++  /** Must not exist; created mode 0700 and removed again on any failure. */
++  readonly destination: string;
++  readonly limits?: Partial<ManagedRuntimeArchiveLimits>;
++  /** Members that must exist as regular files (never links) once extraction completes. */
++  readonly requiredFiles?: ReadonlyArray<string>;
++  readonly signal?: AbortSignal;
++}
++
++// --- path policy -----------------------------------------------------------------
++
++type PathCheck =
++  | { readonly ok: true; readonly segments: ReadonlyArray<string> }
++  | { readonly ok: false; readonly reason: string };
++
++function checkRawPath(raw: string, limits: ManagedRuntimeArchiveLimits): string | undefined {
++  if (raw === "") return "empty path";
++  if (/[\p{Cc}]/u.test(raw)) return "path contains control characters";
++  if (raw.includes("\\")) return "path contains a backslash";
++  if (raw.startsWith("/")) return "absolute path";
++  if (/^[A-Za-z]:/.test(raw)) return "drive-letter path";
++  if (Buffer.byteLength(raw) > limits.maxPathBytes) return "path is too long";
++  return undefined;
++}
++
++/**
++ * Effective member names must be canonical relative POSIX paths: an optional
++ * leading `./`, no empty, `.`, or `..` segments, and a trailing `/` only on
++ * directories.
++ */
++function parseMemberPath(
++  raw: string,
++  isDirectory: boolean,
++  limits: ManagedRuntimeArchiveLimits,
++): PathCheck {
++  const rawProblem = checkRawPath(raw, limits);
++  if (rawProblem !== undefined) return { ok: false, reason: rawProblem };
++  let name = raw.startsWith("./") ? raw.slice(2) : raw;
++  if (isDirectory && name.endsWith("/")) name = name.slice(0, -1);
++  if (name === "") return { ok: false, reason: "path names the archive root" };
++  const segments = name.split("/");
++  for (const segment of segments) {
++    if (segment === "") return { ok: false, reason: "path contains an empty segment" };
++    if (segment === "." || segment === "..")
++      return { ok: false, reason: `path contains a ${segment} segment` };
++  }
++  if (segments.length > limits.maxPathDepth)
++    return { ok: false, reason: "path is nested too deeply" };
++  return { ok: true, segments };
++}
++
++/** Only `node_modules` itself (a directory) and members below `node_modules/t3`. */
++function checkLocation(
++  segments: ReadonlyArray<string>,
++  kind: ArchiveMemberKind,
++): string | undefined {
++  if (segments[0] !== ARCHIVE_ROOT_DIR) return `only ${ARCHIVE_PACKAGE_DIR} may be extracted`;
++  if (segments.length === 1)
++    return kind === "directory" ? undefined : `${ARCHIVE_ROOT_DIR} must be a directory`;
++  if (segments[1] !== PACKAGE_SEGMENTS[1]) return `only ${ARCHIVE_PACKAGE_DIR} may be extracted`;
++  if (segments.length === 2 && kind !== "directory")
++    return `${ARCHIVE_PACKAGE_DIR} must be a directory`;
++  return undefined;
++}
++
++function isInsidePackage(segments: ReadonlyArray<string>): boolean {
++  return (
++    segments.length > 2 &&
++    segments[0] === PACKAGE_SEGMENTS[0] &&
++    segments[1] === PACKAGE_SEGMENTS[1]
++  );
++}
++
++/** Resolves a relative link target lexically against its parent; undefined when it climbs above the archive root. */
++function resolveLexically(
++  parent: ReadonlyArray<string>,
++  target: string,
++): ReadonlyArray<string> | undefined {
++  const resolved = [...parent];
++  for (const segment of target.split("/")) {
++    if (segment === "" || segment === ".") continue;
++    if (segment === "..") {
++      if (resolved.length === 0) return undefined;
++      resolved.pop();
++      continue;
++    }
++    resolved.push(segment);
++  }
++  return resolved;
++}
++
++/** Key under which two names collide on a case-insensitive, normalization-insensitive volume. */
++function aliasKey(name: string): string {
++  return name.normalize("NFC").toLowerCase();
++}
++
++function fileModeFor(archiveMode: number | undefined): number {
++  return FILE_MODE_BASE | ((archiveMode ?? 0) & EXECUTE_BITS);
++}
++
++// --- PAX metadata ----------------------------------------------------------------
++
++/**
++ * A metadata record is either a raw GNU long name (not key/value) or a PAX
++ * body of `<len> key=value\n` lines. Only the latter can carry sparse maps,
++ * ACLs, xattrs, or fflags, so refuse a PAX body naming any other key.
++ */
++function checkMetadataRecord(meta: string): string | undefined {
++  // The parser decodes metadata as UTF-8; a replacement character means the
++  // bytes were not, which also breaks the byte accounting below.
++  if (meta.includes("�")) return "metadata is not valid UTF-8";
++  const lines = meta.endsWith("\n") ? meta.slice(0, -1).split("\n") : [meta];
++  let records = 0;
++  for (const line of lines) {
++    const match = /^(\d+) ([^=]+)=/.exec(line);
++    if (match === null || Number(match[1]) !== Buffer.byteLength(line) + 1) continue;
++    records += 1;
++    const key = match[2] as string;
++    if (!ALLOWED_PAX_KEYS.has(key)) return `unsupported PAX record ${key}`;
++  }
++  return records > 0 && records !== lines.length ? "malformed PAX metadata" : undefined;
++}
++
++// --- extraction -------------------------------------------------------------------
++
++interface MutableMember {
++  kind: ArchiveMemberKind;
++  path: string;
++  target?: string;
++  size?: number;
++  explicit: boolean;
++}
++
++class Extraction {
++  readonly members = new Map<string, MutableMember>();
++  private readonly aliases = new Map<string, string>();
++  private readonly limits: ManagedRuntimeArchiveLimits;
++  private readonly destination: string;
++  private readonly signal: AbortSignal | undefined;
++  private entries = 0;
++  payloadBytes = 0;
++
++  constructor(
++    destination: string,
++    limits: ManagedRuntimeArchiveLimits,
++    signal: AbortSignal | undefined,
++  ) {
++    this.destination = destination;
++    this.limits = limits;
++    this.signal = signal;
++  }
++
++  absolute(name: string): string {
++    return NodePath.join(this.destination, ...name.split("/"));
++  }
++
++  /**
++   * Link creation and tree verification run after the parser (and its abort
++   * hook) are gone, so they observe cancellation between filesystem calls
++   * instead. Each call is awaited before the next check, so an abort never
++   * races the caller's cleanup against an operation still in flight.
++   */
++  private checkpoint(): void {
++    this.signal?.throwIfAborted();
++  }
++
++  private claimAlias(name: string): void {
++    const key = aliasKey(name);
++    const existing = this.aliases.get(key);
++    if (existing !== undefined && existing !== name) {
++      throw new ManagedRuntimeArchiveError({
++        reason: `collides with ${JSON.stringify(existing)} on a case- or normalization-insensitive filesystem`,
++        entryPath: name,
++      });
++    }
++    this.aliases.set(key, name);
++  }
++
++  /** Every ancestor must be a directory member, created implicitly when the archive did not name it. */
++  private async ensureParents(segments: ReadonlyArray<string>): Promise<void> {
++    for (let depth = 1; depth < segments.length; depth += 1) {
++      const name = segments.slice(0, depth).join("/");
++      const existing = this.members.get(name);
++      if (existing !== undefined) {
++        if (existing.kind !== "directory") {
++          throw new ManagedRuntimeArchiveError({
++            reason: `parent ${JSON.stringify(name)} is a ${existing.kind}, not a directory`,
++            entryPath: segments.join("/"),
++          });
++        }
++        continue;
++      }
++      this.claimAlias(name);
++      await this.makeDirectory(name);
++      this.members.set(name, { kind: "directory", path: name, explicit: false });
++    }
++  }
++
++  private async makeDirectory(name: string): Promise<void> {
++    const target = this.absolute(name);
++    await NodeFSP.mkdir(target, { mode: DIRECTORY_MODE });
++    await NodeFSP.chmod(target, DIRECTORY_MODE);
++  }
++
++  async admit(
++    entry: ReadEntry,
++    kind: ArchiveMemberKind,
++  ): Promise<{ readonly name: string; readonly segments: ReadonlyArray<string> }> {
++    this.entries += 1;
++    if (this.entries > this.limits.maxEntries) {
++      throw new ManagedRuntimeArchiveError({ reason: "too many entries", entryPath: entry.path });
++    }
++    const parsed = parseMemberPath(entry.path, kind === "directory", this.limits);
++    if (!parsed.ok)
++      throw new ManagedRuntimeArchiveError({ reason: parsed.reason, entryPath: entry.path });
++    const name = parsed.segments.join("/");
++    const location = checkLocation(parsed.segments, kind);
++    if (location !== undefined)
++      throw new ManagedRuntimeArchiveError({ reason: location, entryPath: name });
++    if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
++      throw new ManagedRuntimeArchiveError({ reason: "invalid size", entryPath: name });
++    }
++    if (kind !== "file" && entry.size !== 0) {
++      throw new ManagedRuntimeArchiveError({
++        reason: `${kind} entries cannot carry data`,
++        entryPath: name,
++      });
++    }
++    await this.ensureParents(parsed.segments);
++    return { name, segments: parsed.segments };
++  }
++
++  async directory(entry: ReadEntry): Promise<void> {
++    const { name } = await this.admit(entry, "directory");
++    const existing = this.members.get(name);
++    if (existing !== undefined) {
++      if (existing.kind !== "directory" || existing.explicit) {
++        throw new ManagedRuntimeArchiveError({ reason: "duplicate member", entryPath: name });
++      }
++      existing.explicit = true;
++      return;
++    }
++    this.claimAlias(name);
++    await this.makeDirectory(name);
++    this.members.set(name, { kind: "directory", path: name, explicit: true });
++  }
++
++  async file(
++    entry: ReadEntry,
++    consume: (write: (chunk: Buffer) => Promise<void>) => Promise<void>,
++  ): Promise<void> {
++    const { name } = await this.admit(entry, "file");
++    if (this.members.has(name))
++      throw new ManagedRuntimeArchiveError({ reason: "duplicate member", entryPath: name });
++    if (entry.size > this.limits.maxFileBytes) {
++      throw new ManagedRuntimeArchiveError({
++        reason: "file is larger than the limit",
++        entryPath: name,
++      });
++    }
++    this.claimAlias(name);
++    const mode = fileModeFor(entry.mode);
++    const handle = await NodeFSP.open(
++      this.absolute(name),
++      NodeFS.constants.O_WRONLY |
++        NodeFS.constants.O_CREAT |
++        NodeFS.constants.O_EXCL |
++        NodeFS.constants.O_NOFOLLOW,
++      mode,
++    );
++    let written = 0;
++    try {
++      await handle.chmod(mode);
++      await consume(async (chunk) => {
++        written += chunk.length;
++        if (written > entry.size) {
++          throw new ManagedRuntimeArchiveError({
++            reason: "body exceeds the declared size",
++            entryPath: name,
++          });
++        }
++        let offset = 0;
++        while (offset < chunk.length) {
++          const result = await handle.write(chunk, offset, chunk.length - offset);
++          offset += result.bytesWritten;
++        }
++      });
++    } finally {
++      await handle.close();
++    }
++    if (written !== entry.size) {
++      throw new ManagedRuntimeArchiveError({
++        reason: "body is shorter than the declared size",
++        entryPath: name,
++      });
++    }
++    this.payloadBytes += written;
++    this.members.set(name, { kind: "file", path: name, size: written, explicit: true });
++  }
++
++  async symlink(entry: ReadEntry): Promise<void> {
++    const { name, segments } = await this.admit(entry, "symlink");
++    if (this.members.has(name))
++      throw new ManagedRuntimeArchiveError({ reason: "duplicate member", entryPath: name });
++    const target = entry.linkpath ?? "";
++    const rawProblem = checkRawPath(target, this.limits);
++    if (rawProblem !== undefined) {
++      throw new ManagedRuntimeArchiveError({
++        reason: `symlink target: ${rawProblem}`,
++        entryPath: name,
++      });
++    }
++    if (target.endsWith("/") || target.includes("//")) {
++      throw new ManagedRuntimeArchiveError({
++        reason: "symlink target is not canonical",
++        entryPath: name,
++      });
++    }
++    const resolved = resolveLexically(segments.slice(0, -1), target);
++    if (resolved === undefined || !isInsidePackage(resolved)) {
++      throw new ManagedRuntimeArchiveError({
++        reason: "symlink target escapes the package",
++        entryPath: name,
++      });
++    }
++    this.claimAlias(name);
++    this.members.set(name, { kind: "symlink", path: name, target, explicit: true });
++  }
++
++  async hardlink(entry: ReadEntry): Promise<void> {
++    const { name } = await this.admit(entry, "hardlink");
++    if (this.members.has(name))
++      throw new ManagedRuntimeArchiveError({ reason: "duplicate member", entryPath: name });
++    const parsed = parseMemberPath(entry.linkpath ?? "", false, this.limits);
++    if (!parsed.ok) {
++      throw new ManagedRuntimeArchiveError({
++        reason: `hard link target: ${parsed.reason}`,
++        entryPath: name,
++      });
++    }
++    const target = parsed.segments.join("/");
++    const resolved = this.resolveHardlink(target);
++    if (resolved === undefined) {
++      throw new ManagedRuntimeArchiveError({
++        reason: `hard link target ${JSON.stringify(target)} is not an earlier regular file`,
++        entryPath: name,
++      });
++    }
++    this.claimAlias(name);
++    this.members.set(name, { kind: "hardlink", path: name, target, explicit: true });
++  }
++
++  /** Follows an acyclic chain of hard links to the regular file that owns the bytes. */
++  resolveHardlink(target: string): string | undefined {
++    let current = target;
++    for (let hop = 0; hop <= MAX_LINK_HOPS; hop += 1) {
++      const member = this.members.get(current);
++      if (member === undefined) return undefined;
++      if (member.kind === "file") return current;
++      if (member.kind !== "hardlink" || member.target === undefined) return undefined;
++      current = member.target;
++    }
++    return undefined;
++  }
++
++  /**
++   * Resolves a member path through every symlink it crosses, component by
++   * component, entirely within the inventory. Fails on cycles, dangling
++   * targets, escapes, and files used as directories.
++   */
++  resolveThroughLinks(
++    segments: ReadonlyArray<string>,
++    visiting: Set<string>,
++    origin: string,
++  ): MutableMember {
++    let current: Array<string> = [];
++    const remaining = [...segments];
++    while (remaining.length > 0) {
++      current.push(remaining.shift() as string);
++      if (!isInsidePackage(current) && current.length > 2) {
++        throw new ManagedRuntimeArchiveError({
++          reason: "link resolves outside the package",
++          entryPath: origin,
++        });
++      }
++      const name = current.join("/");
++      const member = this.members.get(name);
++      if (member === undefined) {
++        throw new ManagedRuntimeArchiveError({
++          reason: `link target ${JSON.stringify(name)} does not exist`,
++          entryPath: origin,
++        });
++      }
++      if (member.kind === "symlink") {
++        if (visiting.has(name) || visiting.size >= MAX_LINK_HOPS) {
++          throw new ManagedRuntimeArchiveError({ reason: "link cycle", entryPath: origin });
++        }
++        const resolved = resolveLexically(current.slice(0, -1), member.target ?? "");
++        if (resolved === undefined || !isInsidePackage(resolved)) {
++          throw new ManagedRuntimeArchiveError({
++            reason: "link resolves outside the package",
++            entryPath: origin,
++          });
++        }
++        visiting.add(name);
++        const final = this.resolveThroughLinks(resolved, visiting, origin);
++        visiting.delete(name);
++        current = final.path.split("/");
++        if (remaining.length > 0 && final.kind !== "directory") {
++          throw new ManagedRuntimeArchiveError({
++            reason: `link crosses ${final.kind} ${JSON.stringify(final.path)} as a directory`,
++            entryPath: origin,
++          });
++        }
++      } else if (remaining.length > 0 && member.kind !== "directory") {
++        throw new ManagedRuntimeArchiveError({
++          reason: `link crosses ${member.kind} ${JSON.stringify(name)} as a directory`,
++          entryPath: origin,
++        });
++      }
++    }
++    return this.members.get(current.join("/")) as MutableMember;
++  }
++
++  async createLinks(): Promise<void> {
++    for (const member of this.members.values()) {
++      if (member.kind === "symlink") {
++        const segments = member.path.split("/");
++        const resolved = resolveLexically(segments.slice(0, -1), member.target ?? "");
++        if (resolved === undefined) {
++          throw new ManagedRuntimeArchiveError({
++            reason: "symlink target escapes the package",
++            entryPath: member.path,
++          });
++        }
++        this.resolveThroughLinks(resolved, new Set([member.path]), member.path);
++      }
++    }
++    for (const member of this.members.values()) {
++      if (member.kind === "symlink") {
++        this.checkpoint();
++        await NodeFSP.symlink(member.target ?? "", this.absolute(member.path));
++      } else if (member.kind === "hardlink") {
++        const source = this.resolveHardlink(member.target ?? "");
++        if (source === undefined) {
++          throw new ManagedRuntimeArchiveError({
++            reason: "hard link target vanished",
++            entryPath: member.path,
++          });
++        }
++        this.checkpoint();
++        await NodeFSP.link(this.absolute(source), this.absolute(member.path));
++      }
++    }
++  }
++
++  /** Proves the tree on disk is exactly the inventory and no link leaves the package. */
++  async verifyTree(requiredFiles: ReadonlyArray<string>): Promise<void> {
++    this.checkpoint();
++    const realRoot = await NodeFSP.realpath(this.destination);
++    const packagePrefix = `${NodePath.join(realRoot, ...PACKAGE_SEGMENTS)}${NodePath.sep}`;
++    let seen = 0;
++    const pending: Array<string> = [""];
++    while (pending.length > 0) {
++      const relative = pending.pop() as string;
++      this.checkpoint();
++      const entries = await NodeFSP.readdir(
++        relative === "" ? this.destination : this.absolute(relative),
++        {
++          withFileTypes: true,
++        },
++      );
++      for (const dirent of entries) {
++        const name = relative === "" ? dirent.name : `${relative}/${dirent.name}`;
++        const member = this.members.get(name);
++        if (member === undefined) {
++          throw new ManagedRuntimeArchiveError({
++            reason: "unexpected file in the extracted tree",
++            entryPath: name,
++          });
++        }
++        seen += 1;
++        const expectedDirectory = member.kind === "directory";
++        const expectedSymlink = member.kind === "symlink";
++        if (
++          dirent.isDirectory() !== expectedDirectory ||
++          dirent.isSymbolicLink() !== expectedSymlink ||
++          (!expectedDirectory && !expectedSymlink && !dirent.isFile())
++        ) {
++          throw new ManagedRuntimeArchiveError({
++            reason: `on-disk type differs from the inventory (${member.kind})`,
++            entryPath: name,
++          });
++        }
++        if (expectedDirectory) pending.push(name);
++        if (expectedSymlink) {
++          this.checkpoint();
++          if ((await NodeFSP.readlink(this.absolute(name))) !== member.target) {
++            throw new ManagedRuntimeArchiveError({
++              reason: "symlink target changed on disk",
++              entryPath: name,
++            });
++          }
++          this.checkpoint();
++          const real = await NodeFSP.realpath(this.absolute(name)).catch(() => undefined);
++          if (real === undefined || !real.startsWith(packagePrefix)) {
++            throw new ManagedRuntimeArchiveError({
++              reason: "symlink does not resolve inside the package",
++              entryPath: name,
++            });
++          }
++        }
++      }
++    }
++    if (seen !== this.members.size) {
++      throw new ManagedRuntimeArchiveError({
++        reason: "extracted tree does not match the inventory",
++      });
++    }
++    for (const required of requiredFiles) {
++      if (this.members.get(required)?.kind !== "file") {
++        throw new ManagedRuntimeArchiveError({
++          reason: "required file is missing or is not a regular file",
++          entryPath: required,
++        });
++      }
++    }
++  }
++
++  inventory(compressedBytes: number, expandedBytes: number): ExtractionInventory {
++    let files = 0;
++    let directories = 0;
++    let symlinks = 0;
++    let hardlinks = 0;
++    for (const member of this.members.values()) {
++      if (member.kind === "file") files += 1;
++      else if (member.kind === "directory") directories += 1;
++      else if (member.kind === "symlink") symlinks += 1;
++      else hardlinks += 1;
++    }
++    return {
++      members: new Map([...this.members].map(([name, member]) => [name, { ...member }])),
++      files,
++      directories,
++      symlinks,
++      hardlinks,
++      compressedBytes,
++      expandedBytes,
++      payloadBytes: this.payloadBytes,
++    };
++  }
++}
++
++/**
++ * Streams one entry's body through `write`, holding the entry paused while a
++ * chunk is on its way to disk so the parser (and the gzip stream behind it)
++ * stops until we drain.
++ */
++function consumeEntry(entry: ReadEntry, write: (chunk: Buffer) => Promise<void>): Promise<void> {
++  return new Promise<void>((resolve, reject) => {
++    let chain = Promise.resolve();
++    let failed = false;
++    entry.once("error", (error: unknown) => {
++      failed = true;
++      reject(error);
++    });
++    entry.once("end", () => {
++      chain.then(resolve, reject);
++    });
++    entry.on("data", (chunk: Buffer) => {
++      if (failed) return;
++      entry.pause();
++      chain = chain
++        .then(() => write(chunk))
++        .then(
++          () => {
++            if (!failed) entry.resume();
++          },
++          (error: unknown) => {
++            failed = true;
++            reject(error);
++          },
++        );
++    });
++  });
++}
++
++/** Entries with no body still need to be consumed for the parser to advance. */
++function drainEntry(entry: ReadEntry): Promise<void> {
++  return new Promise<void>((resolve, reject) => {
++    entry.once("error", reject);
++    entry.once("end", resolve);
++    entry.resume();
++  });
++}
++
++const isManagedRuntimeArchiveError = Schema.is(ManagedRuntimeArchiveError);
++
++function toArchiveError(error: unknown, reason: string): ManagedRuntimeArchiveError {
++  if (isManagedRuntimeArchiveError(error)) return error;
++  const message = error instanceof Error ? error.message : String(error);
++  return new ManagedRuntimeArchiveError({ reason: `${reason}: ${message}`, cause: error });
++}
++
++async function extractInto(
++  input: ExtractManagedRuntimeArchiveInput,
++  limits: ManagedRuntimeArchiveLimits,
++  signal: AbortSignal | undefined,
++): Promise<ExtractionInventory> {
++  const extraction = new Extraction(input.destination, limits, signal);
++  const archive = await NodeFSP.open(
++    input.archivePath,
++    NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
++  );
++  let inventory: ExtractionInventory;
++  try {
++    const stats = await archive.stat();
++    if (!stats.isFile())
++      throw new ManagedRuntimeArchiveError({ reason: "archive is not a regular file" });
++    if (stats.size === 0) throw new ManagedRuntimeArchiveError({ reason: "archive is empty" });
++    if (stats.size > limits.maxCompressedBytes) {
++      throw new ManagedRuntimeArchiveError({
++        reason: "archive is larger than the compressed limit",
++      });
++    }
++
++    let failure: ManagedRuntimeArchiveError | undefined;
++    const waiters = new Set<(error: ManagedRuntimeArchiveError) => void>();
++    let pending: Promise<void> = Promise.resolve();
++    let compressedBytes = 0;
++    let expandedBytes = 0;
++    // Offset of the last non-zero byte of the expanded stream, and the offset
++    // where the end-of-archive marker finished. The parser stops at that
++    // marker and drops whatever follows, so the two are compared afterwards
++    // to refuse trailing data instead of ignoring it. The parser reports each
++    // member it consumed (regular, ignored, and metadata; the latter in
++    // stream order, sized by its UTF-8 body), which is enough to recompute
++    // that offset block by block without reading headers here.
++    let lastNonZeroOffset = -1;
++    let consumedBytes = 0;
++    let eofOffset: number | undefined;
++    const blockAligned = (size: number) => TAR_BLOCK + Math.ceil(size / TAR_BLOCK) * TAR_BLOCK;
++
++    const parser = new Parser({
++      strict: true,
++      maxMetaEntrySize: limits.maxMetaEntryBytes,
++      brotli: false,
++      zstd: false,
++    });
++    const readStream = archive.createReadStream({ autoClose: false });
++    const gunzip = NodeZlib.createGunzip();
++
++    const fail = (error: unknown, reason: string): void => {
++      if (failure !== undefined) return;
++      failure = toArchiveError(error, reason);
++      for (const waiter of waiters) waiter(failure);
++      waiters.clear();
++      readStream.destroy();
++      gunzip.destroy();
++      parser.abort(new Error(reason));
++    };
++    const onAbort = () =>
++      fail(new ManagedRuntimeArchiveError({ reason: "extraction cancelled" }), "cancelled");
++    if (signal !== undefined) {
++      if (signal.aborted) onAbort();
++      signal.addEventListener("abort", onAbort, { once: true });
++    }
++
++    parser.on("error", (error: unknown) => fail(error, "tar parse error"));
++    parser.on("warn", (code: string, message: string) =>
++      fail(new Error(`${code}: ${message}`), "tar warning"),
++    );
++    parser.on("ignoredEntry", (entry: ReadEntry) => {
++      consumedBytes += blockAligned(entry.size);
++      fail(
++        new ManagedRuntimeArchiveError({
++          reason: `unsupported or oversized entry (${entry.type})`,
++          entryPath: entry.path,
++        }),
++        "unsupported entry",
++      );
++    });
++    parser.on("meta", (meta: string) => {
++      consumedBytes += blockAligned(Buffer.byteLength(meta));
++      const problem = checkMetadataRecord(meta);
++      if (problem !== undefined) {
++        fail(new ManagedRuntimeArchiveError({ reason: problem }), "unsupported metadata");
++      }
++    });
++    parser.on("nullBlock", () => {
++      consumedBytes += TAR_BLOCK;
++    });
++    parser.on("eof", () => {
++      consumedBytes += TAR_BLOCK;
++      eofOffset = consumedBytes;
++    });
++    // A consumer holding a paused entry would never settle once the stream
++    // fails elsewhere, so every wait on an entry also races the failure.
++    const untilFailure = <T>(work: Promise<T>): Promise<T> =>
++      new Promise<T>((resolve, reject) => {
++        if (failure !== undefined) {
++          reject(failure);
++          return;
++        }
++        waiters.add(reject);
++        work.then(
++          (value) => {
++            waiters.delete(reject);
++            resolve(value);
++          },
++          (error: unknown) => {
++            waiters.delete(reject);
++            reject(error);
++          },
++        );
++      });
++    parser.on("entry", (entry: ReadEntry) => {
++      consumedBytes += blockAligned(entry.size);
++      pending = pending
++        .then(async () => {
++          if (failure !== undefined) return;
++          switch (entry.type) {
++            case "File":
++            case "OldFile":
++              await extraction.file(entry, (write) => untilFailure(consumeEntry(entry, write)));
++              return;
++            case "Directory":
++              await extraction.directory(entry);
++              await untilFailure(drainEntry(entry));
++              return;
++            case "SymbolicLink":
++              await extraction.symlink(entry);
++              await untilFailure(drainEntry(entry));
++              return;
++            case "Link":
++              await extraction.hardlink(entry);
++              await untilFailure(drainEntry(entry));
++              return;
++            default:
++              throw new ManagedRuntimeArchiveError({
++                reason: `unsupported entry type ${entry.type}`,
++                entryPath: entry.path,
++              });
++          }
++        })
++        .catch((error: unknown) => fail(error, "entry failed"));
++    });
++
++    const feed = (chunk: Buffer): Promise<void> =>
++      new Promise<void>((resolve, reject) => {
++        if (failure !== undefined) {
++          reject(failure);
++          return;
++        }
++        const onDrain = () => {
++          waiters.delete(reject);
++          resolve();
++        };
++        waiters.add(reject);
++        parser.once("drain", onDrain);
++        const accepted = parser.write(chunk);
++        if (failure !== undefined) {
++          parser.removeListener("drain", onDrain);
++          waiters.delete(reject);
++          reject(failure);
++        } else if (accepted) {
++          parser.removeListener("drain", onDrain);
++          waiters.delete(reject);
++          resolve();
++        }
++      });
++
++    NodeStream.pipeline(readStream, gunzip, () => {});
++    readStream.on("data", (chunk: string | Buffer) => {
++      compressedBytes += chunk.length;
++      if (compressedBytes > limits.maxCompressedBytes) {
++        fail(
++          new ManagedRuntimeArchiveError({ reason: "archive is larger than the compressed limit" }),
++          "limit",
++        );
++      }
++    });
++
++    try {
++      let first = true;
++      for await (const chunk of gunzip as AsyncIterable<Buffer>) {
++        if (failure !== undefined) throw failure;
++        const chunkOffset = expandedBytes;
++        expandedBytes += chunk.length;
++        if (expandedBytes > limits.maxExpandedBytes) {
++          throw new ManagedRuntimeArchiveError({
++            reason: "expanded stream is larger than the limit",
++          });
++        }
++        if (first) {
++          first = false;
++          if (
++            GZIP_MAGIC.every((byte, index) => chunk[index] === byte) ||
++            ZSTD_MAGIC.every((byte, index) => chunk[index] === byte)
++          ) {
++            throw new ManagedRuntimeArchiveError({ reason: "nested compression is not allowed" });
++          }
++        }
++        let tail = chunk.length - 1;
++        while (tail >= 0 && chunk[tail] === 0) tail -= 1;
++        if (tail >= 0) lastNonZeroOffset = chunkOffset + tail;
++        await feed(chunk);
++      }
++      if (failure !== undefined) throw failure;
++      await new Promise<void>((resolve, reject) => {
++        waiters.add(reject);
++        parser.once("end", () => {
++          waiters.delete(reject);
++          resolve();
++        });
++        parser.end();
++      });
++      await pending;
++      if (failure !== undefined) throw failure;
++      if (eofOffset === undefined) {
++        throw new ManagedRuntimeArchiveError({
++          reason: "archive ends without an end-of-archive marker",
++        });
++      }
++      if (lastNonZeroOffset >= eofOffset) {
++        throw new ManagedRuntimeArchiveError({ reason: "data after the end-of-archive marker" });
++      }
++      if (compressedBytes !== stats.size) {
++        throw new ManagedRuntimeArchiveError({ reason: "archive size changed while reading" });
++      }
++    } catch (error) {
++      fail(error, "reading the archive");
++      await pending;
++      throw failure ?? error;
++    } finally {
++      signal?.removeEventListener("abort", onAbort);
++    }
++
++    signal?.throwIfAborted();
++    await extraction.createLinks();
++    await extraction.verifyTree(input.requiredFiles ?? DEFAULT_REQUIRED_ARCHIVE_FILES);
++    inventory = extraction.inventory(compressedBytes, expandedBytes);
++  } finally {
++    await archive.close();
++  }
++  // Closing the archive is the last asynchronous step; an abort that lands
++  // while it settles must still reject so the caller removes the destination.
++  signal?.throwIfAborted();
++  return inventory;
++}
++
++/**
++ * Extracts an authenticated archive into `destination`, which must not exist
++ * yet. Any failure or cancellation removes the destination again and leaves
++ * nothing else behind; the archive file itself is never touched.
++ */
++export async function extractManagedRuntimeArchive(
++  input: ExtractManagedRuntimeArchiveInput,
++): Promise<ExtractionInventory> {
++  const limits = { ...DEFAULT_MANAGED_RUNTIME_ARCHIVE_LIMITS, ...input.limits };
++  const signal = input.signal;
++  if (signal?.aborted) throw new ManagedRuntimeArchiveError({ reason: "extraction cancelled" });
++  try {
++    await NodeFSP.mkdir(input.destination, { mode: 0o700 });
++    await NodeFSP.chmod(input.destination, 0o700);
++  } catch (error) {
++    throw toArchiveError(error, "creating the destination");
++  }
++  try {
++    return await extractInto(input, limits, signal);
++  } catch (error) {
++    await NodeFSP.rm(input.destination, { recursive: true, force: true }).catch(() => {});
++    if (signal?.aborted) throw new ManagedRuntimeArchiveError({ reason: "extraction cancelled" });
++    throw toArchiveError(error, "extracting the archive");
++  }
++}
++
++/** Effect boundary: typed failure, and interruption aborts the extraction and waits for its cleanup. */
++export const extractManagedRuntimeArchiveEffect = Effect.fn(
++  "cloud.managed_runtime_archive.extract",
++)(function* (input: Omit<ExtractManagedRuntimeArchiveInput, "signal">) {
++  return yield* Effect.callback<ExtractionInventory, ManagedRuntimeArchiveError>(
++    (resume, signal) => {
++      const settled = extractManagedRuntimeArchive({ ...input, signal }).then(
++        (inventory) => resume(Effect.succeed(inventory)),
++        (error: unknown) =>
++          resume(isManagedRuntimeArchiveError(error) ? Effect.fail(error) : Effect.die(error)),
++      );
++      return Effect.promise(() => settled);
++    },
++  );
++});
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index d2bd2b64e..885d20c6d 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -505,6 +505,9 @@ importers:
+       node-pty:
+         specifier: ^1.1.0
+         version: 1.1.0
++      tar:
++        specifier: 7.5.16
++        version: 7.5.16
+       yaml:
+         specifier: ^2.9.0
+         version: 2.9.0

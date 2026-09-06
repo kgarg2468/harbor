@@ -1,0 +1,1682 @@
+diff --git a/apps/desktop/src/updates/desktopUpdateReservation.test.ts b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
+new file mode 100644
+index 000000000..f1e9799f5
+--- /dev/null
++++ b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
+@@ -0,0 +1,892 @@
++import { assert, describe, it } from "@effect/vitest";
++import type {
++  DesktopUpdateReservationCommand,
++  DesktopUpdateReservationStatus,
++} from "@t3tools/contracts";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++
++import {
++  make,
++  type DesktopUpdateDispositionReport,
++  type DesktopUpdateFreezeResult,
++  type DesktopUpdateReservationExchange,
++  type FrozenDesktopBackends,
++  type OwnedBackendRun,
++} from "./desktopUpdateReservation.ts";
++
++interface Sent {
++  readonly run: OwnedBackendRun;
++  readonly command: DesktopUpdateReservationCommand;
++}
++
++type Answer = (sent: Sent) => Effect.Effect<DesktopUpdateReservationExchange>;
++
++class InstallFailure {
++  readonly _tag = "InstallFailure";
++  readonly message: string;
++  constructor(message: string) {
++    this.message = message;
++  }
++}
++
++const primary: OwnedBackendRun = { instanceId: "primary", runId: 3 };
++const secondary: OwnedBackendRun = { instanceId: "wsl:ubuntu", runId: 1 };
++
++const label = (run: OwnedBackendRun) => `${run.instanceId}#${run.runId}`;
++
++const reply = (
++  run: OwnedBackendRun,
++  attemptId: string,
++  status: DesktopUpdateStatusReplyStatus,
++  reason?: string,
++): DesktopUpdateReservationExchange => ({
++  _tag: "reply",
++  run,
++  reply: {
++    version: 1,
++    type: "desktopUpdateReservationReply",
++    attemptId,
++    status,
++    ...(reason === undefined ? {} : { reason }),
++  },
++});
++type DesktopUpdateStatusReplyStatus = DesktopUpdateReservationStatus;
++
++const unanswered = (reason: string): DesktopUpdateReservationExchange => ({
++  _tag: "unanswered",
++  reason,
++});
++
++/** A cooperative server: ready on reserve, aborted on abort, committed on commit. */
++const cooperative: Answer = ({ run, command }) =>
++  Effect.succeed(
++    reply(
++      run,
++      command.attemptId,
++      command.action === "reserve" ? "ready" : command.action === "abort" ? "aborted" : "committed",
++    ),
++  );
++
++/** Overrides `cooperative` for one run/action pair, leaving every other exchange cooperative. */
++const except =
++  (
++    match: {
++      readonly run: OwnedBackendRun;
++      readonly action: DesktopUpdateReservationCommand["action"];
++    },
++    answer: Answer,
++  ): Answer =>
++  (sent) =>
++    sent.run.instanceId === match.run.instanceId &&
++    sent.run.runId === match.run.runId &&
++    sent.command.action === match.action
++      ? answer(sent)
++      : cooperative(sent);
++
++interface FakeOptions {
++  readonly runs?: ReadonlyArray<OwnedBackendRun>;
++  readonly freeze?: Exclude<DesktopUpdateFreezeResult, { _tag: "frozen" }>;
++  /** Replaces the static `freeze` answer when the lifecycle state changes between calls. */
++  readonly tryFreeze?: (
++    backends: FrozenDesktopBackends,
++  ) => Effect.Effect<DesktopUpdateFreezeResult>;
++  readonly answer?: Answer;
++  /** Runs after the fence is logged as retained; a throw models a failing lifecycle latch. */
++  readonly retain?: () => void;
++  /**
++   * Runs after the report is logged. Called eagerly, exactly like the real
++   * dependency: a returned defect models a failing disposition channel, a
++   * throw models the factory failing before it returns an effect.
++   */
++  readonly publish?: (report: DesktopUpdateDispositionReport) => Effect.Effect<void>;
++  /** Runs after the stop is logged; eager like `publish`. */
++  readonly install?: (runs: ReadonlyArray<OwnedBackendRun>) => Effect.Effect<void, InstallFailure>;
++}
++
++const makeFake = (options: FakeOptions = {}) =>
++  Effect.gen(function* () {
++    const log: Array<string> = [];
++    const sent: Array<Sent> = [];
++    const dispositions: Array<DesktopUpdateDispositionReport> = [];
++    const backends: FrozenDesktopBackends = {
++      runs: options.runs ?? [primary],
++      release: Effect.sync(() => {
++        log.push("release");
++      }),
++      retainUntilProcessExit: () => {
++        log.push("retain");
++        options.retain?.();
++      },
++    };
++    const controller = yield* make<InstallFailure>(
++      {
++        tryFreeze:
++          options.tryFreeze?.(backends) ??
++          Effect.sync(
++            (): DesktopUpdateFreezeResult => options.freeze ?? { _tag: "frozen", backends },
++          ),
++        exchange: (run, command) => {
++          const entry = { run, command };
++          sent.push(entry);
++          log.push(`${command.action} ${label(run)}`);
++          return (options.answer ?? cooperative)(entry);
++        },
++        publishDisposition: (report) => {
++          dispositions.push(report);
++          log.push(`publish ${report.disposition}`);
++          return options.publish === undefined ? Effect.void : options.publish(report);
++        },
++        stopAndInstall: (runs) => {
++          log.push(`install ${runs.map(label).join(",")}`);
++          return options.install === undefined ? Effect.void : options.install(runs);
++        },
++      },
++      { attemptIdPrefix: "test" },
++    );
++    return { controller, log, sent, dispositions };
++  });
++
++const input = { requestId: "req-1", targetVersion: "1.2.4" };
++
++describe("desktopUpdateReservation", () => {
++  it.effect("defers without touching any backend while lifecycle work is executing", () =>
++    Effect.gen(function* () {
++      const fake = yield* makeFake({
++        freeze: { _tag: "busy", reason: "wsl:ubuntu is restarting" },
++      });
++      const result = yield* fake.controller.tryInstall(input);
++
++      assert.equal(result._tag, "rejected");
++      if (result._tag !== "rejected") return;
++      assert.deepEqual(result.rejection, {
++        kind: "lifecycle-busy",
++        reason: "wsl:ubuntu is restarting",
++      });
++      assert.deepEqual(fake.sent, []);
++      assert.deepEqual(fake.log, ["publish rejected"]);
++      assert.deepEqual(fake.dispositions, [
++        {
++          requestId: "req-1",
++          attemptId: "test-1",
++          targetVersion: "1.2.4",
++          disposition: "rejected",
++          reason: "wsl:ubuntu is restarting",
++        },
++      ]);
++    }),
++  );
++
++  it.effect("rejects the whole install when any running owner is unreservable", () =>
++    Effect.gen(function* () {
++      const fake = yield* makeFake({
++        freeze: { _tag: "unsupported", reason: "wsl:ubuntu has no reservation transport" },
++      });
++      const result = yield* fake.controller.tryInstall(input);
++
++      assert.equal(result._tag, "rejected");
++      if (result._tag !== "rejected") return;
++      assert.equal(result.rejection.kind, "unsupported");
++      assert.deepEqual(fake.sent, []);
++      assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++    }),
++  );
++
++  it.effect(
++    "aborts every attempted reservation when a later backend is busy and stops nothing",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: except({ run: secondary, action: "reserve" }, ({ run, command }) =>
++            Effect.succeed(reply(run, command.attemptId, "busy", "turn in progress")),
++          ),
++        });
++        const result = yield* fake.controller.tryInstall(input);
++
++        assert.equal(result._tag, "rejected");
++        if (result._tag !== "rejected") return;
++        assert.deepEqual(result.rejection, {
++          kind: "backend-busy",
++          run: secondary,
++          reason: "busy: turn in progress",
++        });
++        assert.deepEqual(result.unconfirmedAborts, []);
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "abort primary#3",
++          "abort wsl:ubuntu#1",
++          "release",
++          "publish rejected",
++        ]);
++        // Only owned generations are ever addressed; a busy remote
++        // environment reached through T3 Connect is not in the frozen set
++        // and receives no reserve, abort or stop.
++        assert.deepEqual(
++          fake.sent.map((entry) => entry.run),
++          [primary, secondary, primary, secondary],
++        );
++      }),
++  );
++
++  it.effect(
++    "treats a lost reserve as unknown, tombstones it with abort, and reports unconfirmed release",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: (sent) => {
++            if (sent.run.instanceId === "wsl:ubuntu") {
++              // Reserve never answers; the abort that follows is also lost.
++              return Effect.succeed(unanswered("transport closed"));
++            }
++            return cooperative(sent);
++          },
++        });
++        const result = yield* fake.controller.tryInstall(input);
++
++        assert.equal(result._tag, "rejected");
++        if (result._tag !== "rejected") return;
++        assert.equal(result.rejection.kind, "reservation-failed");
++        assert.deepEqual(result.unconfirmedAborts, [secondary]);
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "abort primary#3",
++          "abort wsl:ubuntu#1",
++          "release",
++          "publish rejected",
++        ]);
++      }),
++  );
++
++  it.effect(
++    "does not let a reply from an old generation or another attempt satisfy a reserve",
++    () =>
++      Effect.gen(function* () {
++        const staleRun = yield* makeFake({
++          answer: ({ command }) =>
++            Effect.succeed(
++              command.action === "reserve"
++                ? reply({ instanceId: "primary", runId: 2 }, command.attemptId, "ready")
++                : reply(primary, command.attemptId, "aborted"),
++            ),
++        });
++        const staleRunResult = yield* staleRun.controller.tryInstall(input);
++        assert.equal(staleRunResult._tag, "rejected");
++        if (staleRunResult._tag !== "rejected") return;
++        assert.equal(staleRunResult.rejection.kind, "reservation-failed");
++        assert.deepEqual(staleRun.log, [
++          "reserve primary#3",
++          "abort primary#3",
++          "release",
++          "publish rejected",
++        ]);
++
++        const staleAttempt = yield* makeFake({
++          answer: ({ run, command }) =>
++            Effect.succeed(
++              command.action === "reserve"
++                ? reply(run, "some-earlier-attempt", "ready")
++                : reply(run, command.attemptId, "aborted"),
++            ),
++        });
++        const staleAttemptResult = yield* staleAttempt.controller.tryInstall(input);
++        assert.equal(staleAttemptResult._tag, "rejected");
++        assert.isFalse(staleAttempt.log.some((entry) => entry.startsWith("install")));
++      }),
++  );
++
++  it.effect(
++    "stays uncertain and retains everything when one commit acknowledgement is missing",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: except({ run: secondary, action: "commit" }, () =>
++            Effect.succeed(unanswered("pipe closed before reply")),
++          ),
++        });
++        const result = yield* fake.controller.tryInstall(input);
++
++        assert.equal(result._tag, "uncertain");
++        if (result._tag !== "uncertain") return;
++        assert.deepEqual(result.committed, [primary]);
++        assert.deepEqual(result.unconfirmed, [secondary]);
++        assert.deepEqual(fake.dispositions, []);
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++        ]);
++        // No abort after the commit decision, no release, no stop.
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++      }),
++  );
++
++  it.effect("publishes accepted before the first stop once every generation is committed", () =>
++    Effect.gen(function* () {
++      const fake = yield* makeFake({ runs: [primary, secondary] });
++      const result = yield* fake.controller.tryInstall(input);
++
++      assert.equal(result._tag, "accepted");
++      if (result._tag !== "accepted") return;
++      assert.deepEqual(result.runs, [primary, secondary]);
++      assert.deepEqual(fake.log, [
++        "reserve primary#3",
++        "reserve wsl:ubuntu#1",
++        "retain",
++        "commit primary#3",
++        "commit wsl:ubuntu#1",
++        "publish accepted",
++        "install primary#3,wsl:ubuntu#1",
++      ]);
++      assert.deepEqual(fake.dispositions, [
++        {
++          requestId: "req-1",
++          attemptId: "test-1",
++          targetVersion: "1.2.4",
++          disposition: "accepted",
++          reason: undefined,
++        },
++      ]);
++      assert.isTrue(
++        fake.sent.every(
++          (entry) =>
++            entry.command.attemptId === "test-1" && entry.command.targetVersion === "1.2.4",
++        ),
++      );
++    }),
++  );
++
++  it.effect("keeps the accepted disposition and the fence when the install itself fails", () =>
++    Effect.gen(function* () {
++      const fake = yield* makeFake({
++        install: () => Effect.fail(new InstallFailure("quitAndInstall threw")),
++      });
++      const result = yield* fake.controller.tryInstall(input);
++
++      assert.equal(result._tag, "install-failed");
++      if (result._tag !== "install-failed") return;
++      assert.equal(result.error.message, "quitAndInstall threw");
++      assert.deepEqual(
++        fake.dispositions.map((report) => report.disposition),
++        ["accepted"],
++      );
++      assert.isFalse(fake.log.includes("release"));
++      assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++    }),
++  );
++
++  it.effect(
++    "replays the recorded disposition for a duplicate request instead of reserving again",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake();
++        const first = yield* fake.controller.tryInstall(input);
++        const sentAfterFirst = fake.sent.length;
++        const second = yield* fake.controller.tryInstall(input);
++
++        assert.deepEqual(second, first);
++        assert.equal(fake.sent.length, sentAfterFirst);
++        assert.equal(fake.dispositions.length, 1);
++
++        // A different request is a new attempt with its own id.
++        const other = yield* fake.controller.tryInstall({
++          requestId: "req-2",
++          targetVersion: "1.2.4",
++        });
++        assert.equal(other.attemptId, "test-2");
++      }),
++  );
++
++  it.effect("retries a request rejected while the lifecycle was busy once it is idle", () =>
++    Effect.gen(function* () {
++      let busy = true;
++      const fake = yield* makeFake({
++        tryFreeze: (backends) =>
++          Effect.sync((): DesktopUpdateFreezeResult =>
++            busy
++              ? { _tag: "busy", reason: "wsl:ubuntu is restarting" }
++              : { _tag: "frozen", backends },
++          ),
++      });
++      const first = yield* fake.controller.tryInstall(input);
++      assert.equal(first._tag, "rejected");
++      assert.equal(first.attemptId, "test-1");
++      assert.deepEqual(fake.sent, []);
++
++      busy = false;
++      const second = yield* fake.controller.tryInstall(input);
++      assert.equal(second._tag, "accepted");
++      assert.equal(second.attemptId, "test-2");
++      assert.isTrue(fake.sent.every((entry) => entry.command.attemptId === "test-2"));
++      assert.deepEqual(
++        fake.dispositions.map((report) => [report.attemptId, report.disposition]),
++        [
++          ["test-1", "rejected"],
++          ["test-2", "accepted"],
++        ],
++      );
++
++      // The decided attempt is now the record for the request.
++      const sentAfterSecond = fake.sent.length;
++      const third = yield* fake.controller.tryInstall(input);
++      assert.deepEqual(third, second);
++      assert.equal(fake.sent.length, sentAfterSecond);
++    }),
++  );
++
++  it.effect("refuses a different target for the same prepared request, in flight or decided", () =>
++    Effect.gen(function* () {
++      const reserveReached = yield* Deferred.make<void>();
++      const reserveAnswer = yield* Deferred.make<DesktopUpdateReservationExchange>();
++      const fake = yield* makeFake({
++        answer: except({ run: primary, action: "reserve" }, () =>
++          Deferred.succeed(reserveReached, undefined).pipe(
++            Effect.andThen(Deferred.await(reserveAnswer)),
++          ),
++        ),
++      });
++      const retargeted = { requestId: "req-1", targetVersion: "1.2.5" };
++
++      const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++      yield* Deferred.await(reserveReached);
++      const duringAttempt = yield* fake.controller.tryInstall(retargeted);
++      assert.equal(duringAttempt._tag, "rejected");
++      if (duringAttempt._tag !== "rejected") return;
++      assert.equal(duringAttempt.rejection.kind, "request-conflict");
++      assert.equal(fake.sent.length, 1);
++      assert.deepEqual(fake.dispositions, []);
++
++      yield* Deferred.succeed(reserveAnswer, reply(primary, "test-1", "ready"));
++      const first = yield* Fiber.join(attempt);
++      assert.equal(first._tag, "accepted");
++
++      const afterDecision = yield* fake.controller.tryInstall(retargeted);
++      assert.equal(afterDecision._tag, "rejected");
++      if (afterDecision._tag !== "rejected") return;
++      assert.equal(afterDecision.rejection.kind, "request-conflict");
++      // The conflict changed nothing for the request's own target.
++      const replay = yield* fake.controller.tryInstall(input);
++      assert.deepEqual(replay, first);
++      assert.isTrue(fake.sent.every((entry) => entry.command.targetVersion === "1.2.4"));
++      assert.deepEqual(
++        fake.dispositions.map((report) => report.disposition),
++        ["accepted"],
++      );
++    }),
++  );
++
++  it.effect(
++    "interrupting the owner while it holds the request record never strands a duplicate caller",
++    () =>
++      Effect.gen(function* () {
++        const freezeReached = yield* Deferred.make<void>();
++        const freezeAnswer = yield* Deferred.make<DesktopUpdateFreezeResult>();
++        let freezes = 0;
++        const fake = yield* makeFake({
++          tryFreeze: (backends) =>
++            Effect.suspend(() =>
++              freezes++ === 0
++                ? Deferred.succeed(freezeReached, undefined).pipe(
++                    Effect.andThen(Deferred.await(freezeAnswer)),
++                  )
++                : Effect.succeed<DesktopUpdateFreezeResult>({ _tag: "frozen", backends }),
++            ),
++        });
++
++        const owner = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++        yield* Deferred.await(freezeReached);
++        const duplicate = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++        yield* Fiber.interrupt(owner).pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        yield* Deferred.succeed(freezeAnswer, { _tag: "busy", reason: "primary is starting" });
++
++        const ownerExit = yield* Fiber.await(owner);
++        assert.isTrue(Exit.isFailure(ownerExit));
++        const joined = yield* Fiber.join(duplicate);
++        assert.equal(joined._tag, "rejected");
++        if (joined._tag !== "rejected") return;
++        assert.equal(joined.rejection.kind, "lifecycle-busy");
++        assert.deepEqual(fake.log, ["publish rejected"]);
++
++        // The declined attempt released the request for a fresh one.
++        const retry = yield* fake.controller.tryInstall(input);
++        assert.equal(retry._tag, "accepted");
++        assert.equal(retry.attemptId, "test-2");
++      }),
++  );
++
++  it.effect(
++    "cancellation before the commit decision aborts what was attempted and reopens the fence",
++    () =>
++      Effect.gen(function* () {
++        const reserveReached = yield* Deferred.make<void>();
++        const reserveAnswer = yield* Deferred.make<DesktopUpdateReservationExchange>();
++        let reserves = 0;
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: except({ run: secondary, action: "reserve" }, (sent) =>
++            reserves++ === 0
++              ? Deferred.succeed(reserveReached, undefined).pipe(
++                  Effect.andThen(Deferred.await(reserveAnswer)),
++                )
++              : cooperative(sent),
++          ),
++        });
++
++        const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++        yield* Deferred.await(reserveReached);
++        yield* Fiber.interrupt(attempt);
++        const exit = yield* Fiber.await(attempt);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "abort primary#3",
++          "abort wsl:ubuntu#1",
++          "release",
++          "publish rejected",
++        ]);
++        // The delayed ready can no longer change anything for the aborted
++        // attempt; the same request starts a fresh attempt with its own id
++        // while the old attempt's abort tombstones stay addressed to test-1.
++        yield* Deferred.succeed(reserveAnswer, reply(secondary, "test-1", "ready"));
++        const retry = yield* fake.controller.tryInstall(input);
++        assert.equal(retry._tag, "accepted");
++        assert.equal(retry.attemptId, "test-2");
++        assert.deepEqual(
++          fake.sent.map((entry) => `${entry.command.action} ${entry.command.attemptId}`),
++          [
++            "reserve test-1",
++            "reserve test-1",
++            "abort test-1",
++            "abort test-1",
++            "reserve test-2",
++            "reserve test-2",
++            "commit test-2",
++            "commit test-2",
++          ],
++        );
++      }),
++  );
++
++  it.effect(
++    "interrupting the owner during a pending commit retains every gate and reports uncertain",
++    () =>
++      Effect.gen(function* () {
++        const commitReached = yield* Deferred.make<void>();
++        const commitAnswer = yield* Deferred.make<DesktopUpdateReservationExchange>();
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: except({ run: primary, action: "commit" }, () =>
++            Deferred.succeed(commitReached, undefined).pipe(
++              Effect.andThen(Deferred.await(commitAnswer)),
++            ),
++          ),
++        });
++
++        const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++        yield* Deferred.await(commitReached);
++        yield* Fiber.interrupt(attempt);
++        const exit = yield* Fiber.await(attempt);
++
++        // The observer exits finitely without waiting for the reply, and the
++        // missing acknowledgement never becomes permission to stop.
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++        ]);
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.deepEqual(replay.committed, []);
++        assert.deepEqual(replay.unconfirmed, [primary, secondary]);
++
++        // A late acknowledgement changes nothing: no abort, no release, no stop.
++        yield* Deferred.succeed(commitAnswer, reply(primary, "test-1", "committed"));
++        yield* Effect.yieldNow;
++        assert.equal(fake.sent.length, 3);
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++        assert.deepEqual(fake.dispositions, []);
++      }),
++  );
++
++  it.effect(
++    "interrupting the owner during a pending install keeps the accepted disposition and reopens nothing",
++    () =>
++      Effect.gen(function* () {
++        const installReached = yield* Deferred.make<void>();
++        const fake = yield* makeFake({
++          // The process never confirms exit; the observer must not wait on it.
++          install: () =>
++            Deferred.succeed(installReached, undefined).pipe(Effect.andThen(Effect.never)),
++        });
++
++        const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++        yield* Deferred.await(installReached);
++        yield* Fiber.interrupt(attempt);
++        const exit = yield* Fiber.await(attempt);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "retain",
++          "commit primary#3",
++          "publish accepted",
++          "install primary#3",
++        ]);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "accepted");
++        assert.equal(fake.sent.length, 2);
++        assert.deepEqual(
++          fake.dispositions.map((report) => report.disposition),
++          ["accepted"],
++        );
++      }),
++  );
++
++  it.effect(
++    "a defect during reserve still aborts, reopens the fence, and surfaces the defect",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          answer: except({ run: primary, action: "reserve" }, () =>
++            Effect.die(new Error("control pipe decoder crashed")),
++          ),
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "abort primary#3",
++          "release",
++          "publish rejected",
++        ]);
++        // Nothing was decided, so the same request gets a fresh attempt.
++        const retryExit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++        assert.isTrue(Exit.isFailure(retryExit));
++        assert.deepEqual(
++          fake.sent.map((entry) => `${entry.command.action} ${entry.command.attemptId}`),
++          ["reserve test-1", "abort test-1", "reserve test-2", "abort test-2"],
++        );
++      }),
++  );
++
++  it.effect(
++    "a defect while reporting acceptance installs nothing and binds the request to an uncertain result",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          publish: (report) =>
++            report.disposition === "accepted"
++              ? Effect.die(new Error("disposition channel crashed"))
++              : Effect.void,
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        // The owner sees the defect, but the decision already happened: the
++        // gates are committed, the fence is retained and no stop was issued.
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++          "publish accepted",
++        ]);
++
++        // A duplicate request replays the retained disposition instead of
++        // freezing, exchanging or stopping again under a latched fence.
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, [primary, secondary]);
++        assert.deepEqual(replay.unconfirmed, []);
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.deepEqual(
++          fake.dispositions.map((report) => report.disposition),
++          ["accepted"],
++        );
++      }),
++  );
++
++  it.effect(
++    "a retain that throws at the commit boundary reopens nothing and keeps the request bound",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          retain: () => {
++            throw new Error("lifecycle latch failed");
++          },
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, ["reserve primary#3", "retain"]);
++
++        // The fence state is unknown, so the reserved run is neither aborted
++        // nor committed and the same request does not start a fresh attempt.
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, []);
++        assert.deepEqual(replay.unconfirmed, [primary]);
++        assert.deepEqual(fake.log, ["reserve primary#3", "retain"]);
++        assert.deepEqual(fake.dispositions, []);
++      }),
++  );
++
++  // The three post-commit dependencies are factories that may throw before
++  // they return an effect. Such a throw escapes the step it was meant to
++  // build, so the record must be settled by the region, not by the step.
++  it.effect(
++    "a commit exchange factory that throws keeps earlier commits and binds the request as uncertain",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          answer: except({ run: secondary, action: "commit" }, () => {
++            throw new Error("control pipe encoder crashed");
++          }),
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++        ]);
++
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, [primary]);
++        assert.deepEqual(replay.unconfirmed, [secondary]);
++        // No second commit, no abort, no release, no stop, no report.
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++        assert.deepEqual(fake.dispositions, []);
++      }),
++  );
++
++  it.effect(
++    "an acceptance report factory that throws installs nothing and binds the request as uncertain",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          runs: [primary, secondary],
++          publish: (report) => {
++            if (report.disposition === "accepted") throw new Error("disposition encoder crashed");
++            return Effect.void;
++          },
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "reserve wsl:ubuntu#1",
++          "retain",
++          "commit primary#3",
++          "commit wsl:ubuntu#1",
++          "publish accepted",
++        ]);
++
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "uncertain");
++        if (replay._tag !== "uncertain") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.committed, [primary, secondary]);
++        assert.deepEqual(replay.unconfirmed, []);
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.equal(fake.log.filter((entry) => entry === "publish accepted").length, 1);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.isFalse(fake.log.includes("release"));
++        assert.isFalse(fake.log.some((entry) => entry.startsWith("install")));
++      }),
++  );
++
++  it.effect(
++    "a stop/install factory that throws after acceptance was reported keeps the accepted disposition",
++    () =>
++      Effect.gen(function* () {
++        const fake = yield* makeFake({
++          install: () => {
++            throw new Error("installer handle missing");
++          },
++        });
++        const exit = yield* fake.controller.tryInstall(input).pipe(Effect.exit);
++
++        assert.isTrue(Exit.isFailure(exit));
++        assert.deepEqual(fake.log, [
++          "reserve primary#3",
++          "retain",
++          "commit primary#3",
++          "publish accepted",
++          "install primary#3",
++        ]);
++
++        // Acceptance was already published; a later observer defect cannot
++        // revoke it, and the duplicate neither reserves nor installs again.
++        const sentBefore = fake.sent.length;
++        const replay = yield* fake.controller.tryInstall(input);
++        assert.equal(replay._tag, "accepted");
++        if (replay._tag !== "accepted") return;
++        assert.equal(replay.attemptId, "test-1");
++        assert.deepEqual(replay.runs, [primary]);
++        assert.equal(fake.sent.length, sentBefore);
++        assert.equal(fake.log.filter((entry) => entry.startsWith("install")).length, 1);
++        assert.equal(fake.log.filter((entry) => entry === "retain").length, 1);
++        assert.isFalse(fake.sent.some((entry) => entry.command.action === "abort"));
++        assert.isFalse(fake.log.includes("release"));
++        assert.deepEqual(
++          fake.dispositions.map((report) => report.disposition),
++          ["accepted"],
++        );
++      }),
++  );
++
++  it.effect("accepts an empty owned set without any exchange", () =>
++    Effect.gen(function* () {
++      const fake = yield* makeFake({ runs: [] });
++      const result = yield* fake.controller.tryInstall({ targetVersion: "1.2.4" });
++
++      assert.equal(result._tag, "accepted");
++      assert.deepEqual(fake.log, ["retain", "publish accepted", "install "]);
++      assert.equal(fake.dispositions[0]?.requestId, undefined);
++    }),
++  );
++});
+diff --git a/apps/desktop/src/updates/desktopUpdateReservation.ts b/apps/desktop/src/updates/desktopUpdateReservation.ts
+new file mode 100644
+index 000000000..ee627d01a
+--- /dev/null
++++ b/apps/desktop/src/updates/desktopUpdateReservation.ts
+@@ -0,0 +1,468 @@
++import type {
++  DesktopUpdateCommitDisposition,
++  DesktopUpdateReservationCommand,
++  DesktopUpdateReservationReply,
++} from "@t3tools/contracts";
++import * as Cause from "effect/Cause";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Ref from "effect/Ref";
++import * as Result from "effect/Result";
++
++/**
++ * Desktop-side transaction for one managed install attempt.
++ *
++ * The helper owns the attempt id, the irrevocable abort/commit decision, the
++ * per-run reply correlation and the abort/commit ordering. Everything that
++ * touches the outside world (the lifecycle fence, the per-run reservation
++ * exchange, reporting, stopping and installing) is injected, so the state
++ * machine is deterministic and the wiring can be supplied later without
++ * changing it. No timers, process calls or filesystem access belong here:
++ * an exchange that never answers is the transport's problem to bound, and a
++ * missing answer is never treated as permission.
++ */
++
++/** One backend process generation, as allocated by DesktopBackendManager. */
++export interface OwnedBackendRun {
++  readonly instanceId: string;
++  readonly runId: number;
++}
++
++/**
++ * The owned backends captured under the desktop lifecycle fence. While
++ * frozen, no backend may start, restart or change pool membership, so
++ * `runs` is exactly the set of generations an install would terminate.
++ */
++export interface FrozenDesktopBackends {
++  readonly runs: ReadonlyArray<OwnedBackendRun>;
++  /** Lift the fence. Only reachable after an irrevocable abort decision. */
++  readonly release: Effect.Effect<void>;
++  /**
++   * Keep the fence for the rest of the process lifetime. Used once the
++   * commit decision is recorded: replacement generations must never start
++   * under an old reservation, whether the install proceeds or ends uncertain.
++   */
++  readonly retainUntilProcessExit: () => void;
++}
++
++export type DesktopUpdateFreezeResult =
++  | { readonly _tag: "frozen"; readonly backends: FrozenDesktopBackends }
++  /** Backend start/register/restart/unregister work is executing right now. */
++  | { readonly _tag: "busy"; readonly reason: string }
++  /** An owner exists that cannot be reserved (SSH, WSL, unknown). */
++  | { readonly _tag: "unsupported"; readonly reason: string };
++
++/**
++ * Result of sending one reservation command to one run. `run` is the identity
++ * the desktop stamped at its trusted per-run control callback, never a value
++ * the server claimed. `unanswered` covers transport loss, a bounded wait that
++ * elapsed, or a run that exited before answering.
++ */
++export type DesktopUpdateReservationExchange =
++  | {
++      readonly _tag: "reply";
++      readonly run: OwnedBackendRun;
++      readonly reply: DesktopUpdateReservationReply;
++    }
++  | { readonly _tag: "unanswered"; readonly reason: string };
++
++export interface DesktopUpdateDispositionReport {
++  readonly requestId: string | undefined;
++  readonly attemptId: string;
++  readonly targetVersion: string;
++  readonly disposition: DesktopUpdateCommitDisposition;
++  readonly reason: string | undefined;
++}
++
++export interface DesktopUpdateReservationDependencies<InstallError> {
++  /** Take the desktop lifecycle fence and snapshot every owned generation. */
++  readonly tryFreeze: Effect.Effect<DesktopUpdateFreezeResult>;
++  /** Send one command on the matching run's input and await its correlated reply. */
++  readonly exchange: (
++    run: OwnedBackendRun,
++    command: DesktopUpdateReservationCommand,
++  ) => Effect.Effect<DesktopUpdateReservationExchange>;
++  /** Report the definitive pre-stop disposition for the originating request. */
++  readonly publishDisposition: (report: DesktopUpdateDispositionReport) => Effect.Effect<void>;
++  /** Stop exactly the reserved generations and hand over to the installer. */
++  readonly stopAndInstall: (
++    runs: ReadonlyArray<OwnedBackendRun>,
++  ) => Effect.Effect<void, InstallError>;
++}
++
++export interface DesktopUpdateInstallInput {
++  /** Prepared-download request that initiated this attempt, if any. */
++  readonly requestId?: string;
++  readonly targetVersion: string;
++}
++
++export type DesktopUpdateRejection =
++  | { readonly kind: "lifecycle-busy"; readonly reason: string }
++  | { readonly kind: "unsupported"; readonly reason: string }
++  | { readonly kind: "backend-busy"; readonly run: OwnedBackendRun; readonly reason: string }
++  /** The run did not answer `ready`: unknown status, uncorrelated reply, or no reply. */
++  | { readonly kind: "reservation-failed"; readonly run: OwnedBackendRun; readonly reason: string }
++  /** The attempt was interrupted or failed before the commit decision. */
++  | { readonly kind: "cancelled"; readonly reason: string }
++  /** The prepared request already names a different target version. */
++  | { readonly kind: "request-conflict"; readonly reason: string };
++
++export type DesktopUpdateInstallResult<InstallError> =
++  | {
++      readonly _tag: "rejected";
++      readonly attemptId: string;
++      readonly rejection: DesktopUpdateRejection;
++      /** Aborts that were sent but not acknowledged; those gates may still be held. */
++      readonly unconfirmedAborts: ReadonlyArray<OwnedBackendRun>;
++    }
++  /**
++   * Committed, but never accepted: a commit acknowledgement is missing, or
++   * every run acknowledged and the acceptance report failed. Nothing was
++   * stopped; the fence and every gate stay retained until process exit.
++   */
++  | {
++      readonly _tag: "uncertain";
++      readonly attemptId: string;
++      readonly committed: ReadonlyArray<OwnedBackendRun>;
++      readonly unconfirmed: ReadonlyArray<OwnedBackendRun>;
++    }
++  | {
++      readonly _tag: "accepted";
++      readonly attemptId: string;
++      readonly runs: ReadonlyArray<OwnedBackendRun>;
++    }
++  | {
++      readonly _tag: "install-failed";
++      readonly attemptId: string;
++      readonly runs: ReadonlyArray<OwnedBackendRun>;
++      readonly error: InstallError;
++    };
++
++export interface DesktopUpdateReservationController<InstallError> {
++  /**
++   * Run one install attempt to its disposition. A `requestId` names an
++   * immutable target: a repeated call with the same target joins the
++   * in-flight attempt or replays a decided (`uncertain`, `accepted`,
++   * `install-failed`) result instead of reserving again, while a call after
++   * a `rejected` result starts a fresh attempt under a new attempt id. A
++   * different target for the same `requestId` is rejected outright. A
++   * rejected result reopened nothing that was not confirmed; the decided
++   * results all retain the fence and the committed gates until process exit.
++   *
++   * Interrupting the caller before the commit decision aborts the attempt.
++   * Interrupting it afterwards only stops observing: the decision, the fence
++   * and every gate stay retained, the recorded disposition stays truthful,
++   * and whoever owns the process lifetime remains responsible for it.
++   */
++  readonly tryInstall: (
++    input: DesktopUpdateInstallInput,
++  ) => Effect.Effect<DesktopUpdateInstallResult<InstallError>>;
++}
++
++export interface DesktopUpdateReservationOptions {
++  /** Prefix for generated attempt ids; wiring should make it unique per desktop process. */
++  readonly attemptIdPrefix?: string;
++}
++
++const sameRun = (left: OwnedBackendRun, right: OwnedBackendRun) =>
++  left.instanceId === right.instanceId && left.runId === right.runId;
++
++const describeExchange = (exchange: DesktopUpdateReservationExchange) =>
++  exchange._tag === "unanswered"
++    ? `no reply: ${exchange.reason}`
++    : `${exchange.reply.status}${exchange.reply.reason === undefined ? "" : `: ${exchange.reply.reason}`}`;
++
++export const make = <InstallError>(
++  deps: DesktopUpdateReservationDependencies<InstallError>,
++  options: DesktopUpdateReservationOptions = {},
++): Effect.Effect<DesktopUpdateReservationController<InstallError>> =>
++  Effect.gen(function* () {
++    type Result = DesktopUpdateInstallResult<InstallError>;
++    const prefix = options.attemptIdPrefix ?? "desktop-update";
++    const attemptCounter = yield* Ref.make(0);
++    /**
++     * One entry per prepared request. The target is fixed by the first call;
++     * `record` is the current attempt while one is in flight or decided, and
++     * absent once an attempt was rejected before commit, which makes the
++     * request eligible for a fresh attempt.
++     */
++    interface RequestEntry {
++      readonly targetVersion: string;
++      readonly record?: Deferred.Deferred<Result>;
++    }
++    const attemptsByRequest = yield* Ref.make(new Map<string, RequestEntry>());
++    const nextAttemptId = Ref.modify(attemptCounter, (count) => [
++      `${prefix}-${count + 1}`,
++      count + 1,
++    ]);
++
++    const runAttempt = (
++      input: DesktopUpdateInstallInput,
++      attemptId: string,
++      record: Deferred.Deferred<Result>,
++    ): Effect.Effect<Result> =>
++      Effect.uninterruptibleMask((restore) =>
++        Effect.gen(function* () {
++          const command = (action: DesktopUpdateReservationCommand["action"]) =>
++            ({
++              version: 1,
++              type: "desktopUpdateReservation",
++              attemptId,
++              targetVersion: input.targetVersion,
++              action,
++            }) satisfies DesktopUpdateReservationCommand;
++
++          // A reply only counts when it came from the exact generation we
++          // addressed and names this attempt. Anything else (an old run's
++          // late answer, another attempt's reply, silence) is not evidence.
++          const answered = (
++            run: OwnedBackendRun,
++            exchange: DesktopUpdateReservationExchange,
++            status: DesktopUpdateReservationReply["status"],
++          ) =>
++            exchange._tag === "reply" &&
++            sameRun(exchange.run, run) &&
++            exchange.reply.attemptId === attemptId &&
++            exchange.reply.status === status;
++
++          const publish = (disposition: DesktopUpdateCommitDisposition, reason?: string) =>
++            deps.publishDisposition({
++              requestId: input.requestId,
++              attemptId,
++              targetVersion: input.targetVersion,
++              disposition,
++              reason,
++            });
++
++          const finish = (result: Result) =>
++            Deferred.succeed(record, result).pipe(Effect.as(result));
++
++          const freeze = yield* deps.tryFreeze;
++          if (freeze._tag !== "frozen") {
++            yield* publish("rejected", freeze.reason);
++            return yield* finish({
++              _tag: "rejected",
++              attemptId,
++              rejection: {
++                kind: freeze._tag === "busy" ? "lifecycle-busy" : "unsupported",
++                reason: freeze.reason,
++              },
++              unconfirmedAborts: [],
++            });
++          }
++          const { backends } = freeze;
++
++          // Reserve one generation at a time. Stopping at the first refusal
++          // leaves fewer gates to reopen, and `attempted` is exactly the set
++          // that must receive an abort, acknowledged or not.
++          const attempted: Array<OwnedBackendRun> = [];
++          const reserveExit = yield* restore(
++            Effect.gen(function* () {
++              for (const run of backends.runs) {
++                attempted.push(run);
++                const exchange = yield* deps.exchange(run, command("reserve"));
++                if (answered(run, exchange, "ready")) continue;
++                const reason = describeExchange(exchange);
++                return answered(run, exchange, "busy")
++                  ? ({ kind: "backend-busy", run, reason } satisfies DesktopUpdateRejection)
++                  : ({ kind: "reservation-failed", run, reason } satisfies DesktopUpdateRejection);
++              }
++              return undefined;
++            }),
++          ).pipe(Effect.exit);
++
++          const rejection: DesktopUpdateRejection | undefined = Exit.isFailure(reserveExit)
++            ? {
++                kind: "cancelled",
++                reason: Cause.hasInterruptsOnly(reserveExit.cause)
++                  ? "interrupted before commit"
++                  : Cause.pretty(reserveExit.cause),
++              }
++            : reserveExit.value;
++          if (rejection !== undefined) {
++            // Irrevocable abort decision: this attempt can never commit, so
++            // the fence may lift once every attempted run has been told.
++            const unconfirmedAborts: Array<OwnedBackendRun> = [];
++            for (const run of attempted) {
++              const exchange = yield* deps.exchange(run, command("abort"));
++              if (!answered(run, exchange, "aborted")) unconfirmedAborts.push(run);
++            }
++            yield* backends.release;
++            yield* publish("rejected", rejection.reason);
++            const result = yield* finish({
++              _tag: "rejected",
++              attemptId,
++              rejection,
++              unconfirmedAborts,
++            });
++            return Exit.isFailure(reserveExit)
++              ? yield* Effect.failCause(reserveExit.cause)
++              : result;
++          }
++
++          // Irrevocable commit decision. From here nothing reopens: the
++          // fence outlives the attempt and each committed gate is latched
++          // until its process exits. Only the decision and each recorded
++          // acknowledgement are masked; the waits themselves are
++          // interruptible, because an owner that stops observing must still
++          // exit finitely. A commit interrupted or never sent leaves its run
++          // reserved and unconfirmed, never aborted. A retain that throws
++          // leaves the fence in an unknown state, so nothing is released or
++          // aborted and every reserved run stays unconfirmed.
++          //
++          // `retained` is the disposition the decision has reached so far.
++          // Every exit of the region below other than a recorded result,
++          // whether a failing dependency effect, an interruption or a
++          // dependency factory throwing before it even returned its effect,
++          // settles the record to it under this attempt id. An unsettled
++          // record would let the request start a fresh attempt against
++          // gates and a fence that are already latched.
++          const committed: Array<OwnedBackendRun> = [];
++          let accepted = false;
++          const retained = (): Result =>
++            accepted
++              ? { _tag: "accepted", attemptId, runs: backends.runs }
++              : {
++                  _tag: "uncertain",
++                  attemptId,
++                  committed: [...committed],
++                  unconfirmed: backends.runs.filter(
++                    (run) => !committed.some((done) => sameRun(done, run)),
++                  ),
++                };
++          return yield* Effect.gen(function* () {
++            yield* Effect.sync(() => backends.retainUntilProcessExit());
++            for (const run of backends.runs) {
++              const exchange = yield* restore(deps.exchange(run, command("commit")));
++              if (answered(run, exchange, "committed")) committed.push(run);
++            }
++            if (committed.length !== backends.runs.length) return yield* finish(retained());
++
++            // Acceptance is recorded before the first stop and is never
++            // inferred from the stop or install having happened. An owner
++            // interrupted while the stop or install is pending keeps the
++            // accepted disposition and every retained gate; the process
++            // owner, not this observer, is responsible for the lifetime of
++            // the child. A report that fails leaves every gate committed but
++            // nothing accepted: the attempt stays uncertain and no stop is
++            // issued.
++            yield* publish("accepted");
++            accepted = true;
++            const installExit = yield* restore(deps.stopAndInstall(backends.runs)).pipe(
++              Effect.exit,
++            );
++            if (Exit.isSuccess(installExit)) return yield* finish(retained());
++            const failure = Cause.findError(installExit.cause);
++            if (Result.isSuccess(failure)) {
++              return yield* finish({
++                _tag: "install-failed",
++                attemptId,
++                runs: backends.runs,
++                error: failure.success,
++              });
++            }
++            return yield* Effect.failCause(failure.failure);
++          }).pipe(
++            Effect.onExit((exit) =>
++              Exit.isFailure(exit) ? Deferred.succeed(record, retained()) : Effect.void,
++            ),
++          );
++        }),
++      );
++
++    /**
++     * Runs once the owning attempt has exited, however it exited. Settles the
++     * record for joined callers if the attempt never recorded a disposition
++     * (interrupted before reserve, or a defect), then releases the request
++     * for a fresh attempt unless the recorded disposition retains the fence.
++     */
++    const settle = (
++      requestId: string | undefined,
++      attemptId: string,
++      record: Deferred.Deferred<Result>,
++      exit: Exit.Exit<Result>,
++    ) =>
++      Effect.gen(function* () {
++        yield* Deferred.done(
++          record,
++          Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)
++            ? Exit.succeed<Result>({
++                _tag: "rejected",
++                attemptId,
++                rejection: { kind: "cancelled", reason: "interrupted before reserve" },
++                unconfirmedAborts: [],
++              })
++            : exit,
++        );
++        if (requestId === undefined) return;
++        const recorded = yield* Deferred.await(record).pipe(Effect.exit);
++        if (Exit.isSuccess(recorded) && recorded.value._tag !== "rejected") return;
++        yield* Ref.update(attemptsByRequest, (attempts) => {
++          const entry = attempts.get(requestId);
++          if (entry === undefined || entry.record !== record) return attempts;
++          return new Map(attempts).set(requestId, { targetVersion: entry.targetVersion });
++        });
++      });
++
++    type Claim =
++      | { readonly _tag: "own" }
++      | { readonly _tag: "join"; readonly record: Deferred.Deferred<Result> }
++      | { readonly _tag: "conflict"; readonly targetVersion: string };
++
++    const tryInstall: DesktopUpdateReservationController<InstallError>["tryInstall"] = (input) =>
++      // The claim, the attempt id and the completion finalizer are installed
++      // as one step: a record that joined callers can see must always have
++      // an owner that will settle it, even if interruption is already pending.
++      Effect.uninterruptibleMask((restore) =>
++        Effect.gen(function* () {
++          const record = yield* Deferred.make<Result>();
++          const requestId = input.requestId;
++          const claim: Claim =
++            requestId === undefined
++              ? { _tag: "own" }
++              : yield* Ref.modify(
++                  attemptsByRequest,
++                  (attempts): readonly [Claim, Map<string, RequestEntry>] => {
++                    const existing = attempts.get(requestId);
++                    if (existing !== undefined && existing.targetVersion !== input.targetVersion) {
++                      return [
++                        { _tag: "conflict", targetVersion: existing.targetVersion },
++                        attempts,
++                      ];
++                    }
++                    if (existing?.record !== undefined) {
++                      return [{ _tag: "join", record: existing.record }, attempts];
++                    }
++                    return [
++                      { _tag: "own" },
++                      new Map(attempts).set(requestId, {
++                        targetVersion: input.targetVersion,
++                        record,
++                      }),
++                    ];
++                  },
++                );
++          if (claim._tag === "join") return yield* restore(Deferred.await(claim.record));
++          const attemptId = yield* nextAttemptId;
++          if (claim._tag === "conflict") {
++            // Not a disposition of the prepared request: its own attempt is
++            // unaffected, so nothing is frozen, exchanged or published.
++            return {
++              _tag: "rejected",
++              attemptId,
++              rejection: {
++                kind: "request-conflict",
++                reason: `request ${requestId} targets ${claim.targetVersion}, not ${input.targetVersion}`,
++              },
++              unconfirmedAborts: [],
++            } satisfies Result;
++          }
++          return yield* restore(runAttempt(input, attemptId, record)).pipe(
++            Effect.onExit((exit) => settle(requestId, attemptId, record, exit)),
++          );
++        }),
++      );
++
++    return { tryInstall };
++  });
+diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
+new file mode 100644
+index 000000000..26f2112fe
+--- /dev/null
++++ b/packages/contracts/src/resourceTelemetry.test.ts
+@@ -0,0 +1,216 @@
++import * as Schema from "effect/Schema";
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  DesktopHostTelemetryMessage,
++  DesktopUpdateReservationCommand,
++  DesktopUpdateReservationReply,
++  DesktopUpdateStatusReport,
++} from "./resourceTelemetry.ts";
++
++const updateState = {
++  enabled: true,
++  status: "downloaded",
++  channel: "latest",
++  currentVersion: "1.2.3",
++  hostArch: "arm64",
++  appArch: "arm64",
++  runningUnderArm64Translation: false,
++  availableVersion: "1.2.4",
++  downloadedVersion: "1.2.4",
++  releaseNotes: [],
++  omittedReleaseCount: 0,
++  downloadPercent: 100,
++  checkedAt: null,
++  message: null,
++  errorContext: null,
++  canRetry: false,
++};
++
++const decodeHostMessage = Schema.decodeUnknownSync(DesktopHostTelemetryMessage);
++
++describe("DesktopUpdateStatusReport", () => {
++  const decode = Schema.decodeUnknownSync(DesktopUpdateStatusReport);
++  const encode = Schema.encodeSync(DesktopUpdateStatusReport);
++
++  it("still accepts reports that predate the commit disposition", () => {
++    const report = decode({
++      version: 1,
++      type: "desktopUpdateStatus",
++      requestId: "req-1",
++      outcome: "ready-to-install",
++      state: updateState,
++    });
++
++    expect(report.attemptId).toBeUndefined();
++    expect(report.commitDisposition).toBeUndefined();
++    expect(encode(report)).not.toHaveProperty("commitDisposition");
++  });
++
++  it("carries the explicit disposition and attempt id through the host telemetry union", () => {
++    const decoded = decodeHostMessage({
++      version: 1,
++      type: "desktopUpdateStatus",
++      requestId: "req-1",
++      attemptId: "attempt-1",
++      commitDisposition: "accepted",
++      state: updateState,
++    });
++
++    expect(decoded.type).toBe("desktopUpdateStatus");
++    if (decoded.type !== "desktopUpdateStatus") return;
++    expect(decoded.attemptId).toBe("attempt-1");
++    expect(decoded.commitDisposition).toBe("accepted");
++    // A later install failure may report `failed`, but it cannot revoke
++    // an accepted disposition: both fields coexist on one report.
++    expect(
++      decode({
++        version: 1,
++        type: "desktopUpdateStatus",
++        requestId: "req-1",
++        attemptId: "attempt-1",
++        commitDisposition: "accepted",
++        outcome: "failed",
++        reason: "installer exited early",
++        state: updateState,
++      }).commitDisposition,
++    ).toBe("accepted");
++  });
++
++  it("rejects dispositions outside accepted/rejected", () => {
++    expect(() =>
++      decode({
++        version: 1,
++        type: "desktopUpdateStatus",
++        attemptId: "attempt-1",
++        commitDisposition: "uncertain",
++        state: updateState,
++      }),
++    ).toThrow();
++  });
++
++  it("accepts a rejected disposition alongside its attempt id", () => {
++    const report = decode({
++      version: 1,
++      type: "desktopUpdateStatus",
++      attemptId: "attempt-1",
++      commitDisposition: "rejected",
++      state: updateState,
++    });
++
++    expect(report.commitDisposition).toBe("rejected");
++    expect(encode(report)).toMatchObject({
++      attemptId: "attempt-1",
++      commitDisposition: "rejected",
++    });
++  });
++
++  it("rejects an attempt id without its disposition, and vice versa", () => {
++    const attemptOnly = {
++      version: 1,
++      type: "desktopUpdateStatus",
++      attemptId: "attempt-1",
++      state: updateState,
++    };
++    const dispositionOnly = {
++      version: 1,
++      type: "desktopUpdateStatus",
++      commitDisposition: "accepted",
++      state: updateState,
++    };
++
++    for (const partial of [attemptOnly, dispositionOnly]) {
++      expect(() => decode(partial)).toThrow(/supplied together/);
++      expect(() => decodeHostMessage(partial)).toThrow();
++      // The invariant is enforced on the way out too, so a locally built
++      // report cannot publish half of the pair.
++      expect(() => encode(partial as DesktopUpdateStatusReport)).toThrow(/supplied together/);
++    }
++  });
++});
++
++describe("DesktopUpdateReservationCommand", () => {
++  const decode = Schema.decodeUnknownSync(DesktopUpdateReservationCommand);
++
++  it("round-trips each reservation action", () => {
++    for (const action of ["reserve", "abort", "commit"] as const) {
++      expect(
++        decode({
++          version: 1,
++          type: "desktopUpdateReservation",
++          attemptId: "attempt-7",
++          targetVersion: "1.2.4",
++          action,
++        }),
++      ).toEqual({
++        version: 1,
++        type: "desktopUpdateReservation",
++        attemptId: "attempt-7",
++        targetVersion: "1.2.4",
++        action,
++      });
++    }
++  });
++
++  it("requires a non-empty attempt id, target version and known action", () => {
++    expect(() =>
++      decode({
++        version: 1,
++        type: "desktopUpdateReservation",
++        attemptId: " ",
++        targetVersion: "1.2.4",
++        action: "reserve",
++      }),
++    ).toThrow();
++    expect(() =>
++      decode({
++        version: 1,
++        type: "desktopUpdateReservation",
++        attemptId: "attempt-7",
++        targetVersion: "1.2.4",
++        action: "release",
++      }),
++    ).toThrow();
++  });
++});
++
++describe("DesktopUpdateReservationReply", () => {
++  const decode = Schema.decodeUnknownSync(DesktopUpdateReservationReply);
++
++  it("accepts every reservation status with an optional reason", () => {
++    for (const status of ["ready", "busy", "unknown", "aborted", "committed"] as const) {
++      expect(
++        decode({
++          version: 1,
++          type: "desktopUpdateReservationReply",
++          attemptId: "attempt-7",
++          status,
++        }).status,
++      ).toBe(status);
++    }
++    expect(
++      decode({
++        version: 1,
++        type: "desktopUpdateReservationReply",
++        attemptId: "attempt-7",
++        status: "busy",
++        reason: "turn in progress",
++      }).reason,
++    ).toBe("turn in progress");
++  });
++
++  it("does not let a reply carry its own run identity", () => {
++    // The desktop stamps `{ instanceId, runId }` at its trusted callback;
++    // an unexpected key from the wire is dropped rather than trusted.
++    const reply = decode({
++      version: 1,
++      type: "desktopUpdateReservationReply",
++      attemptId: "attempt-7",
++      status: "ready",
++      instanceId: "primary",
++      runId: 3,
++    });
++    expect(reply).not.toHaveProperty("instanceId");
++    expect(reply).not.toHaveProperty("runId");
++  });
++});
+diff --git a/packages/contracts/src/resourceTelemetry.ts b/packages/contracts/src/resourceTelemetry.ts
+index 3ec1e4de3..9012303dc 100644
+--- a/packages/contracts/src/resourceTelemetry.ts
++++ b/packages/contracts/src/resourceTelemetry.ts
+@@ -253,6 +253,17 @@ export const DesktopUpdateRemoteOutcome = Schema.Literals([
+ ]);
+ export type DesktopUpdateRemoteOutcome = typeof DesktopUpdateRemoteOutcome.Type;
+ 
++/**
++ * Whether a desktop install attempt owns the irreversible install decision.
++ * `accepted` is published before the first backend stop and can never be
++ * revoked, even if the install later fails. `rejected` is only possible
++ * before the commit decision and authorizes no stop. An attempt that is
++ * neither (commit sent, not every backend acknowledged) publishes no
++ * disposition: its gates stay held and the outcome is uncertain.
++ */
++export const DesktopUpdateCommitDisposition = Schema.Literals(["accepted", "rejected"]);
++export type DesktopUpdateCommitDisposition = typeof DesktopUpdateCommitDisposition.Type;
++
+ /**
+  * Desktop main -> server: the desktop app's update state. Sent once when the
+  * backend attaches and again on every state change, so the server always
+@@ -268,10 +279,64 @@ export const DesktopUpdateStatusReport = Schema.Struct({
+   // Terminal marker for a server-triggered run; absent while it is working.
+   outcome: Schema.optionalKey(DesktopUpdateRemoteOutcome),
+   reason: Schema.optionalKey(TrimmedNonEmptyString),
++  // Set together once an install attempt has reserved its backends: the
++  // reservation attempt (distinct from `requestId`) and whether the desktop
++  // accepted or rejected the install before stopping anything.
++  attemptId: Schema.optionalKey(TrimmedNonEmptyString),
++  commitDisposition: Schema.optionalKey(DesktopUpdateCommitDisposition),
+   state: DesktopUpdateStateSchema,
+-});
++}).check(
++  Schema.makeFilter(
++    (input) =>
++      (input.attemptId === undefined) === (input.commitDisposition === undefined) ||
++      "attemptId and commitDisposition must be supplied together",
++  ),
++);
+ export type DesktopUpdateStatusReport = typeof DesktopUpdateStatusReport.Type;
+ 
++export const DesktopUpdateReservationAction = Schema.Literals(["reserve", "abort", "commit"]);
++export type DesktopUpdateReservationAction = typeof DesktopUpdateReservationAction.Type;
++
++/**
++ * Desktop main -> one owned server, on that run's telemetry input: reserve
++ * the server's admission gates for a desktop install attempt, abort the
++ * attempt, or commit it. `attemptId` correlates replies and is distinct from
++ * a prepared-download `requestId`; one attempt spans every owned backend.
++ */
++export const DesktopUpdateReservationCommand = Schema.Struct({
++  version: Schema.Literal(1),
++  type: Schema.Literal("desktopUpdateReservation"),
++  attemptId: TrimmedNonEmptyString,
++  targetVersion: TrimmedNonEmptyString,
++  action: DesktopUpdateReservationAction,
++});
++export type DesktopUpdateReservationCommand = typeof DesktopUpdateReservationCommand.Type;
++
++export const DesktopUpdateReservationStatus = Schema.Literals([
++  "ready",
++  "busy",
++  "unknown",
++  "aborted",
++  "committed",
++]);
++export type DesktopUpdateReservationStatus = typeof DesktopUpdateReservationStatus.Type;
++
++/**
++ * Server -> desktop main, on the run's control output. The desktop stamps the
++ * actual `{ instanceId, runId }` at its trusted per-run callback; the reply
++ * itself never claims which run it came from. `ready` means both gates are
++ * held; `busy` means none was left closed; `committed` latches the gates
++ * through process exit; `aborted` is an idempotent tombstone.
++ */
++export const DesktopUpdateReservationReply = Schema.Struct({
++  version: Schema.Literal(1),
++  type: Schema.Literal("desktopUpdateReservationReply"),
++  attemptId: TrimmedNonEmptyString,
++  status: DesktopUpdateReservationStatus,
++  reason: Schema.optionalKey(TrimmedNonEmptyString),
++});
++export type DesktopUpdateReservationReply = typeof DesktopUpdateReservationReply.Type;
++
+ export const DesktopHostTelemetryMessage = Schema.Union([
+   DesktopHostTelemetryHello,
+   DesktopHostTelemetrySnapshot,
