@@ -79,6 +79,10 @@ What this component does not do:
   and shared command/reply contracts. It correlates backend generations and
   orders abort, commit and installation; transport and installer integration
   remain separate work.
+- `patches/0017-server-reservation.patch`: binds desktop update attempts to a
+  server-owned idle reservation, with prompt busy replies, durable-in-process
+  abort tombstones, and retained commit ownership. Transport and live update
+  integration remain separate work.
 - `patches/0018-candidate-process.patch`: runs candidate version and preflight
   probes with a private home and replacement environment. It retains owned
   files until actual child exit and pipe settlement; staging and activation

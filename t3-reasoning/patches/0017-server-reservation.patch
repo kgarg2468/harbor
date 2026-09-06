@@ -1,0 +1,1172 @@
+diff --git a/apps/server/src/cloud/idleUpdateCoordinator.test.ts b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
+index 6437fbebd..1531b22f6 100644
+--- a/apps/server/src/cloud/idleUpdateCoordinator.test.ts
++++ b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
+@@ -468,4 +468,150 @@ describe("idleUpdateCoordinator", () => {
+       assert.equal(env.notifications(), 0);
+     }),
+   );
++
++  describe("tryReserve", () => {
++    it.effect.each([
++      {
++        name: "accepted",
++        before: (control: IdleHandoffControl) =>
++          Effect.sync(() => control.dispatchStarted()).pipe(Effect.andThen(control.accepted)),
++      },
++      {
++        name: "uncertain",
++        before: (control: IdleHandoffControl) => Effect.sync(() => control.dispatchStarted()),
++      },
++    ])(
++      "answers unknown at once when an $name handoff owns the gates, while tryActivate parks",
++      ({ before }) =>
++        Effect.gen(function* () {
++          const env = yield* setup();
++          const scope = yield* Scope.make();
++
++          // A state snapshot says ready, but another handoff latches before
++          // the reservation is invoked. The answer must come from the check at
++          // method entry, not from that stale snapshot.
++          assert.deepStrictEqual(yield* env.coordinator.state, { phase: "ready" });
++          const owner = yield* forkAttempt(env, scope, before, () => Effect.succeed(declined));
++          yield* Deferred.succeed(owner.resume, undefined);
++          yield* Effect.yieldNow;
++          assert.isFalse(yield* isSettled(owner.fiber));
++
++          let invoked = false;
++          const refused = yield* env.coordinator.tryReserve(() => {
++            invoked = true;
++            return Effect.succeed(declined);
++          });
++          assert.deepStrictEqual(refused, {
++            status: "unknown",
++            reason: "another handoff owns the update gates",
++          });
++          assert.isFalse(invoked);
++          yield* assertLatched(env);
++
++          const parked = yield* env.coordinator
++            .tryActivate(() => Effect.succeed(declined), env.onHandoffAccepted)
++            .pipe(Effect.forkChild);
++          yield* Effect.yieldNow;
++          assert.isFalse(yield* isSettled(parked));
++          yield* Fiber.interrupt(parked);
++          yield* assertLatched(env);
++          yield* Scope.close(scope, Exit.void);
++          yield* assertLatched(env);
++        }),
++    );
++
++    it.effect("declines busy while an attempt, a lease or a client command is live", () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        const scope = yield* Scope.make();
++        let invoked = false;
++        const session = () => {
++          invoked = true;
++          return Effect.succeed(declined);
++        };
++
++        const attempt = yield* forkAttempt(
++          env,
++          scope,
++          () => Effect.void,
++          () => Effect.succeed(declined),
++        );
++        assert.equal((yield* env.coordinator.tryReserve(session)).status, "busy");
++        yield* Deferred.succeed(attempt.resume, undefined);
++        assert.deepStrictEqual(yield* Fiber.join(attempt.fiber), declined);
++        yield* assertOpen(env);
++
++        const lease = yield* env.activity.acquire("turn waiting for approval");
++        assert.deepStrictEqual(yield* env.coordinator.tryReserve(session), {
++          status: "busy",
++          reason: "1 agent operation(s) in flight",
++        });
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++        // The approval that finishes the turn is still admitted.
++        yield* env.admission.withAdmission(Effect.sync(() => lease.release()));
++        yield* assertOpen(env);
++
++        const release = yield* Deferred.make<void>();
++        const command = yield* env.admission
++          .withAdmission(Deferred.await(release))
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.equal((yield* env.coordinator.tryReserve(session)).status, "busy");
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 1 });
++        yield* Deferred.succeed(release, undefined);
++        yield* Fiber.join(command);
++
++        assert.isFalse(invoked);
++        yield* assertOpen(env);
++        yield* Scope.close(scope, Exit.void);
++      }),
++    );
++
++    it.effect("its own session holds, releases on rejection and parks once accepted", () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        const scope = yield* Scope.make();
++
++        // Held gates, then a definite rejection: everything reopens.
++        const rejected = yield* env.coordinator.tryReserve((control) =>
++          Effect.gen(function* () {
++            yield* assertLatched(env);
++            control.dispatchStarted();
++            control.definitivelyRejected();
++            return { status: "busy", reason: "peer aborted" } as const;
++          }),
++        );
++        assert.deepStrictEqual(rejected, { status: "busy", reason: "peer aborted" });
++        yield* assertOpen(env);
++
++        // Accepted: the reservation parks with both gates retained, and only
++        // the owning scope ends it. The queue is never notified.
++        const exposed = yield* Deferred.make<void>();
++        const reservation = yield* Effect.forkIn(
++          env.coordinator.tryReserve((control) =>
++            Effect.sync(() => control.dispatchStarted()).pipe(
++              Effect.andThen(Deferred.succeed(exposed, undefined)),
++              Effect.andThen(control.accepted),
++              Effect.as(declined),
++            ),
++          ),
++          scope,
++        );
++        yield* Deferred.await(exposed);
++        yield* Effect.yieldNow;
++        yield* Effect.yieldNow;
++        assert.isFalse(yield* isSettled(reservation));
++        assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++        yield* assertLatched(env);
++        yield* assertUnstealable(env);
++        assert.equal(env.notifications(), 0);
++
++        yield* Scope.close(scope, Exit.void);
++        const exit = yield* Fiber.await(reservation);
++        assert.isTrue(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause));
++        yield* assertLatched(env);
++        assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++      }),
++    );
++  });
+ });
+diff --git a/apps/server/src/cloud/idleUpdateCoordinator.ts b/apps/server/src/cloud/idleUpdateCoordinator.ts
+index d795ebafa..f3aa56117 100644
+--- a/apps/server/src/cloud/idleUpdateCoordinator.ts
++++ b/apps/server/src/cloud/idleUpdateCoordinator.ts
+@@ -33,9 +33,11 @@ import type { ActivationDeclined } from "./queuedUpdate.ts";
+ 
+ export interface IdleHandoffControl {
+   /**
+-   * Call immediately before the actual transport submission, inside its mask.
+-   * From here on an exit without `definitivelyRejected` or `accepted` is an
+-   * ambiguous outcome and latches the gates.
++   * Call at the point from which the peer may observe the held gates: for a
++   * launcher handoff that is immediately before its transport submission,
++   * inside its mask; for a reservation it is immediately before `ready` is
++   * exposed. From here on an exit without `definitivelyRejected` or
++   * `accepted` is an ambiguous outcome and latches the gates.
+    */
+   readonly dispatchStarted: () => void;
+   /**
+@@ -65,6 +67,16 @@ export interface IdleUpdateCoordinatorShape {
+     handoff: (control: IdleHandoffControl) => Effect.Effect<ActivationDeclined, E, R>,
+     onHandoffAccepted: Effect.Effect<void>,
+   ) => Effect.Effect<ActivationDeclined, E, R>;
++  /**
++   * `tryActivate` for a peer-driven reservation: same gates, same claim, same
++   * exits, but when another accepted or ambiguous handoff already owns the
++   * gates it answers `unknown` promptly instead of parking, so the peer can
++   * abort whatever else it prepared. Once this session's own handoff is
++   * accepted or ambiguous it parks exactly like `tryActivate`.
++   */
++  readonly tryReserve: <E, R>(
++    session: (control: IdleHandoffControl) => Effect.Effect<ActivationDeclined, E, R>,
++  ) => Effect.Effect<ActivationDeclined, E, R>;
+   readonly state: Effect.Effect<IdleUpdateCoordinatorState>;
+ }
+ 
+@@ -100,6 +112,11 @@ const attemptInProgress: ActivationDeclined = {
+   reason: "an update handoff attempt is already in progress",
+ };
+ 
++const ownedByAnotherHandoff: ActivationDeclined = {
++  status: "unknown",
++  reason: "another handoff owns the update gates",
++};
++
+ export const make = ({
+   admission,
+   activity,
+@@ -183,9 +200,17 @@ export const make = ({
+       }),
+     );
+ 
+-  const tryActivate: IdleUpdateCoordinatorShape["tryActivate"] = (handoff, onHandoffAccepted) =>
++  // Shared entry: the only policy difference between the two public methods is
++  // the answer while another handoff already owns latched gates. The check and
++  // the claim run in one synchronous step, so no other attempt can latch in
++  // between.
++  const enter = <E, R>(
++    whenOwned: Effect.Effect<ActivationDeclined, E, R>,
++    handoff: (control: IdleHandoffControl) => Effect.Effect<ActivationDeclined, E, R>,
++    onHandoffAccepted: Effect.Effect<void>,
++  ): Effect.Effect<ActivationDeclined, E, R> =>
+     Effect.suspend(() => {
+-      if (phase === "accepted" || phase === "uncertain") return parked;
++      if (phase === "accepted" || phase === "uncertain") return whenOwned;
+       if (phase === "attempting") return Effect.succeed(attemptInProgress);
+       // Only an optimization: a known-busy environment answers without
+       // touching admission. The authoritative check is the seal under the claim.
+@@ -200,9 +225,15 @@ export const make = ({
+       });
+     });
+ 
++  const tryActivate: IdleUpdateCoordinatorShape["tryActivate"] = (handoff, onHandoffAccepted) =>
++    enter(parked, handoff, onHandoffAccepted);
++
++  const tryReserve: IdleUpdateCoordinatorShape["tryReserve"] = (session) =>
++    enter(Effect.succeed(ownedByAnotherHandoff), session, Effect.void);
++
+   const state = Effect.sync((): IdleUpdateCoordinatorState => ({ phase }));
+ 
+-  return { tryActivate, state } satisfies IdleUpdateCoordinatorShape;
++  return { tryActivate, tryReserve, state } satisfies IdleUpdateCoordinatorShape;
+ };
+ 
+ export const layer = Layer.effect(
+diff --git a/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
+new file mode 100644
+index 000000000..5c8ff7c74
+--- /dev/null
++++ b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
+@@ -0,0 +1,610 @@
++import { assert, describe, it } from "@effect/vitest";
++import type {
++  DesktopUpdateReservationAction,
++  DesktopUpdateReservationCommand,
++  DesktopUpdateReservationReply,
++  DesktopUpdateReservationStatus,
++} from "@t3tools/contracts";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as References from "effect/References";
++import * as Scope from "effect/Scope";
++
++import {
++  type IdleUpdateCoordinatorShape,
++  make as makeCoordinator,
++} from "../cloud/idleUpdateCoordinator.ts";
++import { make as makeAdmission, UpdateAdmissionClosedError } from "../updateAdmission.ts";
++import { make as makeActivity, UpdateActivityUnavailableError } from "../updateActivity.ts";
++import { make } from "./DesktopUpdateReservation.ts";
++
++const TARGET = "1.2.3";
++
++const command = (
++  action: DesktopUpdateReservationAction,
++  attemptId: string,
++  targetVersion = TARGET,
++): DesktopUpdateReservationCommand => ({
++  version: 1,
++  type: "desktopUpdateReservation",
++  attemptId,
++  targetVersion,
++  action,
++});
++
++const answer = (
++  attemptId: string,
++  status: DesktopUpdateReservationStatus,
++  reason?: string,
++): DesktopUpdateReservationReply =>
++  reason === undefined
++    ? { version: 1, type: "desktopUpdateReservationReply", attemptId, status }
++    : { version: 1, type: "desktopUpdateReservationReply", attemptId, status, reason };
++
++/**
++ * One server generation: gates, coordinator and an adapter owned by a scope
++ * the test closes. `beforeAcquire` lets a test hold an owner in `acquiring`
++ * before the coordinator is entered.
++ */
++const setup = Effect.fn("setup")(function* () {
++  const admission = yield* makeAdmission();
++  const activity = yield* makeActivity();
++  const inner = makeCoordinator({ admission, activity });
++  let beforeAcquire: Effect.Effect<void> = Effect.void;
++  const coordinator: IdleUpdateCoordinatorShape = {
++    ...inner,
++    tryReserve: (session) => Effect.andThen(beforeAcquire, inner.tryReserve(session)),
++  };
++  const scope = yield* Scope.make();
++  const reservation = yield* Scope.provide(make({ coordinator }), scope);
++  return {
++    admission,
++    activity,
++    coordinator: inner,
++    scope,
++    handle: reservation.handle,
++    holdAcquisition: (gate: Deferred.Deferred<void>) => {
++      beforeAcquire = Deferred.await(gate);
++    },
++  };
++});
++
++type Setup = Effect.Success<ReturnType<typeof setup>>;
++
++/** Both gates open with nothing outstanding and no shutdown authorized. */
++const assertOpen = Effect.fn("assertOpen")(function* (env: Setup) {
++  assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++  assert.include(yield* env.activity.state, { phase: "open", idleShutdownAuthorized: false });
++  assert.deepStrictEqual(yield* env.coordinator.state, { phase: "ready" });
++});
++
++/** Both gates closed: client commands rejected, activity sealed and shutdown authorized. */
++const assertLatched = Effect.fn("assertLatched")(function* (env: Setup) {
++  assert.deepStrictEqual(yield* env.admission.state, { phase: "maintenance", inFlight: 0 });
++  assert.include(yield* env.activity.state, { phase: "sealed", idleShutdownAuthorized: true });
++  const rejected = yield* env.admission.withAdmission(Effect.void).pipe(Effect.flip);
++  assert.instanceOf(rejected, UpdateAdmissionClosedError);
++  const sealed = yield* env.activity.acquire("root").pipe(Effect.flip);
++  assert.instanceOf(sealed, UpdateActivityUnavailableError);
++});
++
++const isSettled = (fiber: Fiber.Fiber<unknown, unknown>) =>
++  Effect.sync(() => fiber.pollUnsafe() !== undefined);
++
++/**
++ * Visits every scheduler handoff inside one `reserve`. Iteration `k` forks the
++ * reserve on a fiber that yields between consecutive runtime operations,
++ * advances it by `k` of them, then runs `interleave` on the caller's fiber
++ * against a fresh generation. Ends once the reserve completed before the
++ * interleave could land: every earlier handoff has then been exercised.
++ * A budget of 3 is the smallest that still makes progress; each resume spends
++ * one operation on the yield continuation before doing real work.
++ */
++const atEveryHandoff = <E>(
++  reserve: DesktopUpdateReservationCommand,
++  interleave: (
++    env: Setup,
++    pending: Fiber.Fiber<DesktopUpdateReservationReply>,
++  ) => Effect.Effect<void, E>,
++) =>
++  Effect.gen(function* () {
++    for (let steps = 0; steps < 2_000; steps++) {
++      const env = yield* setup();
++      const pending = yield* env
++        .handle(reserve)
++        .pipe(Effect.provideService(References.MaxOpsBeforeYield, 3), Effect.forkChild);
++      for (let i = 0; i < steps; i++) yield* Effect.yieldNow;
++      if (yield* isSettled(pending)) {
++        yield* Scope.close(env.scope, Exit.void);
++        assert.isAbove(steps, 1, "the reserve must span at least one handoff");
++        return;
++      }
++      yield* interleave(env, pending);
++      yield* Scope.close(env.scope, Exit.void);
++    }
++    assert.fail("the reserve never completed");
++  });
++
++describe("DesktopUpdateReservation", () => {
++  it.effect("reserve holds both gates and commit latches them before committed is answered", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      yield* assertOpen(env);
++
++      assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.coordinator.state, { phase: "attempting" });
++
++      // A lost ready reply is retried against the same held reservation.
++      assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++      yield* assertLatched(env);
++
++      assert.deepStrictEqual(yield* env.handle(command("commit", "a1")), answer("a1", "committed"));
++      assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++      yield* assertLatched(env);
++
++      // Duplicates after commit replay committed; commit wins over a late abort.
++      for (const action of ["commit", "reserve", "abort"] as const) {
++        assert.deepStrictEqual(yield* env.handle(command(action, "a1")), answer("a1", "committed"));
++      }
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++
++      // A new attempt cannot steal a committed server.
++      assert.deepStrictEqual(
++        yield* env.handle(command("reserve", "a2")),
++        answer("a2", "unknown", "another reservation attempt owns this server"),
++      );
++
++      // Scope teardown keeps the latch and still replays the commit.
++      yield* Scope.close(env.scope, Exit.void);
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.handle(command("commit", "a1")), answer("a1", "committed"));
++      assert.deepStrictEqual(
++        yield* env.handle(command("reserve", "a3")),
++        answer("a3", "unknown", "server is shutting down"),
++      );
++      yield* assertLatched(env);
++    }),
++  );
++
++  it.effect("abort after ready reopens both gates before aborted is answered", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++      yield* assertLatched(env);
++
++      // The aborted acknowledgement is produced only once the coordinator has
++      // released its claim, so the gates are observed open by the reply.
++      const observed = yield* Effect.gen(function* () {
++        const reply = yield* env.handle(command("abort", "a1"));
++        const admission = yield* env.admission.state;
++        const activity = yield* env.activity.state;
++        return { reply, admission: admission.phase, activity: activity.phase };
++      });
++      assert.deepStrictEqual(observed, {
++        reply: answer("a1", "aborted"),
++        admission: "open",
++        activity: "open",
++      });
++      yield* assertOpen(env);
++
++      // The tombstone replays for every action; nothing reopens or closes.
++      for (const action of ["abort", "reserve", "commit"] as const) {
++        assert.deepStrictEqual(yield* env.handle(command(action, "a1")), answer("a1", "aborted"));
++      }
++      yield* assertOpen(env);
++
++      // A retry needs a fresh attempt id.
++      assert.deepStrictEqual(yield* env.handle(command("reserve", "a2")), answer("a2", "ready"));
++      yield* assertLatched(env);
++      // A stale abort cannot release a different active attempt.
++      assert.deepStrictEqual(yield* env.handle(command("abort", "a1")), answer("a1", "aborted"));
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.handle(command("commit", "a2")), answer("a2", "committed"));
++      yield* Scope.close(env.scope, Exit.void);
++    }),
++  );
++
++  it.effect(
++    "declines promptly while the server is busy and a fresh attempt succeeds once idle",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++
++        const lease = yield* env.activity.acquire("turn waiting for approval");
++        assert.deepStrictEqual(
++          yield* env.handle(command("reserve", "a1")),
++          answer("a1", "busy", "1 agent operation(s) in flight"),
++        );
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++        assert.include(yield* env.activity.state, { phase: "open", idleShutdownAuthorized: false });
++        // The approval that finishes the turn is still admitted.
++        yield* env.admission.withAdmission(Effect.sync(() => lease.release()));
++        yield* assertOpen(env);
++
++        // An in-flight client command declines the same way.
++        const release = yield* Deferred.make<void>();
++        const inFlight = yield* env.admission
++          .withAdmission(Deferred.await(release))
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.equal((yield* env.handle(command("reserve", "a2"))).status, "busy");
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 1 });
++        yield* Deferred.succeed(release, undefined);
++        yield* Fiber.join(inFlight);
++        yield* assertOpen(env);
++
++        // Replaying a busy attempt stays declined and never acquires.
++        assert.deepStrictEqual(
++          yield* env.handle(command("reserve", "a1")),
++          answer("a1", "busy", "1 agent operation(s) in flight"),
++        );
++        assert.deepStrictEqual(
++          yield* env.handle(command("commit", "a1")),
++          answer("a1", "busy", "1 agent operation(s) in flight"),
++        );
++        yield* assertOpen(env);
++
++        assert.deepStrictEqual(yield* env.handle(command("reserve", "a3")), answer("a3", "ready"));
++        yield* assertLatched(env);
++        // Once sealed, a late root loses and stays out until the abort reopens.
++        const late = yield* env.activity.acquire("late root").pipe(Effect.flip);
++        assert.equal(late.reason, "sealed");
++        assert.deepStrictEqual(yield* env.handle(command("abort", "a3")), answer("a3", "aborted"));
++        yield* assertOpen(env);
++        yield* Scope.close(env.scope, Exit.void);
++      }),
++  );
++
++  it.effect(
++    "a root that acquires between the activity read and the seal defeats the reservation",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        let lease: { release: () => void } | undefined;
++        const racing = {
++          ...env.activity,
++          state: Effect.tap(env.activity.state, () =>
++            lease === undefined
++              ? Effect.map(Effect.orDie(env.activity.acquire("racing root")), (acquired) => {
++                  lease = acquired;
++                })
++              : Effect.void,
++          ),
++        };
++        const coordinator = makeCoordinator({ admission: env.admission, activity: racing });
++        const scope = yield* Scope.make();
++        const reservation = yield* Scope.provide(make({ coordinator }), scope);
++
++        assert.deepStrictEqual(
++          yield* reservation.handle(command("reserve", "a1")),
++          answer("a1", "busy", "1 agent operation(s) in flight"),
++        );
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++        assert.include(yield* env.activity.state, { phase: "open", outstanding: 1 });
++        lease?.release();
++        yield* assertOpen(env);
++        yield* Scope.close(scope, Exit.void);
++      }),
++  );
++
++  it.effect("abort before reserve leaves a tombstone a delayed reserve cannot acquire", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      assert.deepStrictEqual(yield* env.handle(command("abort", "a1")), answer("a1", "aborted"));
++      assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "aborted"));
++      assert.deepStrictEqual(yield* env.handle(command("commit", "a1")), answer("a1", "aborted"));
++      yield* assertOpen(env);
++      yield* Scope.close(env.scope, Exit.void);
++    }),
++  );
++
++  it.effect("an abort landing on any handoff inside reserve keeps its tombstone", () =>
++    atEveryHandoff(command("reserve", "a1"), (env, pending) =>
++      Effect.gen(function* () {
++        assert.deepStrictEqual(yield* env.handle(command("abort", "a1")), answer("a1", "aborted"));
++        assert.deepStrictEqual(yield* Fiber.join(pending), answer("a1", "aborted"));
++        yield* assertOpen(env);
++        assert.deepStrictEqual(
++          yield* env.handle(command("reserve", "a1")),
++          answer("a1", "aborted"),
++        );
++        // Nothing was left acquired under the aborted id.
++        assert.deepStrictEqual(yield* env.handle(command("reserve", "a2")), answer("a2", "ready"));
++        assert.deepStrictEqual(yield* env.handle(command("abort", "a2")), answer("a2", "aborted"));
++        yield* assertOpen(env);
++      }),
++    ),
++  );
++
++  it.effect("a duplicate reserve landing on any handoff joins the one owner", () =>
++    atEveryHandoff(command("reserve", "a1"), (env, pending) =>
++      Effect.gen(function* () {
++        assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++        assert.deepStrictEqual(yield* Fiber.join(pending), answer("a1", "ready"));
++        yield* assertLatched(env);
++        // The held owner stays reachable by its own commands.
++        assert.deepStrictEqual(
++          yield* env.handle(command("commit", "a1")),
++          answer("a1", "committed"),
++        );
++        assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++      }),
++    ),
++  );
++
++  it.effect("a differing target landing on any handoff cannot rebind the attempt", () =>
++    atEveryHandoff(command("reserve", "a1", TARGET), (env, pending) =>
++      Effect.gen(function* () {
++        const other = yield* env.handle(command("reserve", "a1", "1.2.4"));
++        const first = yield* Fiber.join(pending);
++        // Whichever ran first bound the id; the other is inert against it.
++        const [bound, unbound] = first.status === "ready" ? [TARGET, "1.2.4"] : ["1.2.4", TARGET];
++        const inert = answer(
++          "a1",
++          "unknown",
++          `attempt is bound to target ${bound}, not ${unbound}`,
++        );
++        assert.deepStrictEqual(first.status === "ready" ? [first, other] : [other, first], [
++          answer("a1", "ready"),
++          inert,
++        ]);
++        yield* assertLatched(env);
++        assert.deepStrictEqual(yield* env.handle(command("commit", "a1", unbound)), inert);
++        assert.deepStrictEqual(
++          yield* env.handle(command("commit", "a1", bound)),
++          answer("a1", "committed"),
++        );
++      }),
++    ),
++  );
++
++  it.effect("abort during acquisition takes the abort exit without ever exposing ready", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      const gate = yield* Deferred.make<void>();
++      env.holdAcquisition(gate);
++
++      const reserve = yield* env.handle(command("reserve", "a1")).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isFalse(yield* isSettled(reserve));
++      yield* assertOpen(env);
++
++      // Commit is not possible before ready and changes nothing.
++      assert.deepStrictEqual(
++        yield* env.handle(command("commit", "a1")),
++        answer("a1", "unknown", "reservation is not ready to commit"),
++      );
++      const abort = yield* env.handle(command("abort", "a1")).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isFalse(yield* isSettled(abort));
++
++      yield* Deferred.succeed(gate, undefined);
++      assert.deepStrictEqual(yield* Fiber.join(reserve), answer("a1", "aborted"));
++      assert.deepStrictEqual(yield* Fiber.join(abort), answer("a1", "aborted"));
++      yield* assertOpen(env);
++      yield* Scope.close(env.scope, Exit.void);
++    }),
++  );
++
++  it.effect("a duplicate reserve joins the pending acquisition without a second claim", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      const gate = yield* Deferred.make<void>();
++      env.holdAcquisition(gate);
++
++      const first = yield* env.handle(command("reserve", "a1")).pipe(Effect.forkChild);
++      const second = yield* env.handle(command("reserve", "a1")).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isFalse(yield* isSettled(first));
++      assert.isFalse(yield* isSettled(second));
++      yield* Deferred.succeed(gate, undefined);
++      assert.deepStrictEqual(yield* Fiber.join(first), answer("a1", "ready"));
++      assert.deepStrictEqual(yield* Fiber.join(second), answer("a1", "ready"));
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.handle(command("abort", "a1")), answer("a1", "aborted"));
++      yield* assertOpen(env);
++      yield* Scope.close(env.scope, Exit.void);
++    }),
++  );
++
++  it.effect("an unseen commit is a declined tombstone that never authorizes later work", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      assert.deepStrictEqual(
++        yield* env.handle(command("commit", "a1")),
++        answer("a1", "unknown", "commit without a held reservation"),
++      );
++      yield* assertOpen(env);
++      assert.deepStrictEqual(
++        yield* env.handle(command("reserve", "a1")),
++        answer("a1", "unknown", "commit without a held reservation"),
++      );
++      assert.deepStrictEqual(
++        yield* env.handle(command("abort", "a1")),
++        answer("a1", "unknown", "commit without a held reservation"),
++      );
++      yield* assertOpen(env);
++      yield* Scope.close(env.scope, Exit.void);
++    }),
++  );
++
++  it.effect.each([
++    { first: "commit", second: "abort", result: "committed" },
++    { first: "abort", second: "commit", result: "aborted" },
++  ] as const)(
++    "$first selected before $second wins and both are answered $result",
++    ({ first, second, result }) =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++
++        const late = yield* env.handle(command(second, "a1")).pipe(Effect.forkChild);
++        assert.deepStrictEqual(yield* env.handle(command(first, "a1")), answer("a1", result));
++        assert.deepStrictEqual(yield* Fiber.join(late), answer("a1", result));
++        if (result === "committed") {
++          yield* assertLatched(env);
++          assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++        } else {
++          yield* assertOpen(env);
++        }
++        yield* Scope.close(env.scope, Exit.void);
++      }),
++  );
++
++  it.effect(
++    "a mismatched target is inert for every action and the first target must be exact",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        for (const action of ["reserve", "abort", "commit"] as const) {
++          assert.deepStrictEqual(
++            yield* env.handle(command(action, "a1", "latest")),
++            answer("a1", "unknown", "target latest is not an exact release version"),
++          );
++        }
++        yield* assertOpen(env);
++        // Nothing was bound, so the exact target still reserves under this id.
++        assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++
++        for (const action of ["reserve", "abort", "commit"] as const) {
++          assert.deepStrictEqual(
++            yield* env.handle(command(action, "a1", "1.2.4")),
++            answer("a1", "unknown", "attempt is bound to target 1.2.3, not 1.2.4"),
++          );
++        }
++        yield* assertLatched(env);
++        assert.deepStrictEqual(yield* env.coordinator.state, { phase: "attempting" });
++        assert.deepStrictEqual(yield* env.handle(command("abort", "a1")), answer("a1", "aborted"));
++        yield* assertOpen(env);
++        assert.deepStrictEqual(
++          yield* env.handle(command("reserve", "a1", "1.2.4")),
++          answer("a1", "unknown", "attempt is bound to target 1.2.3, not 1.2.4"),
++        );
++        yield* Scope.close(env.scope, Exit.void);
++      }),
++  );
++
++  it.effect("cancelling only the response waiter leaves the owner and its decision intact", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++
++      // The reserve caller goes away before the owner even starts; the owner
++      // still acquires and the retry sees the held reservation.
++      const reserve = yield* env
++        .handle(command("reserve", "a1"))
++        .pipe(Effect.forkChild({ startImmediately: true }));
++      yield* Fiber.interrupt(reserve);
++      yield* assertOpen(env);
++      yield* Effect.yieldNow;
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++
++      // The commit caller goes away: the latch already happened at selection.
++      const commit = yield* env
++        .handle(command("commit", "a1"))
++        .pipe(Effect.forkChild({ startImmediately: true }));
++      yield* Fiber.interrupt(commit);
++      assert.deepStrictEqual(yield* env.coordinator.state, { phase: "accepted" });
++      yield* assertLatched(env);
++      assert.deepStrictEqual(yield* env.handle(command("commit", "a1")), answer("a1", "committed"));
++      yield* Scope.close(env.scope, Exit.void);
++      yield* assertLatched(env);
++    }),
++  );
++
++  it.effect("an abort waiter that is cancelled still sees the gates released on retry", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      const gate = yield* Deferred.make<void>();
++      env.holdAcquisition(gate);
++      const reserve = yield* env.handle(command("reserve", "a1")).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++
++      const abort = yield* env
++        .handle(command("abort", "a1"))
++        .pipe(Effect.forkChild({ startImmediately: true }));
++      yield* Fiber.interrupt(abort);
++      yield* Deferred.succeed(gate, undefined);
++      assert.deepStrictEqual(yield* Fiber.join(reserve), answer("a1", "aborted"));
++      assert.deepStrictEqual(yield* env.handle(command("abort", "a1")), answer("a1", "aborted"));
++      yield* assertOpen(env);
++      yield* Scope.close(env.scope, Exit.void);
++    }),
++  );
++
++  it.effect("closing the scope before the owner starts answers unknown and takes nothing", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      const reserve = yield* env
++        .handle(command("reserve", "a1"))
++        .pipe(Effect.forkChild({ startImmediately: true }));
++      assert.isFalse(yield* isSettled(reserve));
++      yield* Scope.close(env.scope, Exit.void);
++      assert.deepStrictEqual(
++        yield* Fiber.join(reserve),
++        answer("a1", "unknown", "reservation owner ended before a decision"),
++      );
++      yield* assertOpen(env);
++      assert.deepStrictEqual(
++        yield* env.handle(command("abort", "a1")),
++        answer("a1", "unknown", "reservation owner ended before a decision"),
++      );
++      assert.deepStrictEqual(
++        yield* env.handle(command("abort", "a2")),
++        answer("a2", "unknown", "server is shutting down"),
++      );
++      yield* assertOpen(env);
++    }),
++  );
++
++  it.effect(
++    "closing the scope while ready retains both gates and a later abort cannot reopen",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        assert.deepStrictEqual(yield* env.handle(command("reserve", "a1")), answer("a1", "ready"));
++        yield* Scope.close(env.scope, Exit.void);
++        assert.deepStrictEqual(yield* env.coordinator.state, { phase: "uncertain" });
++        yield* assertLatched(env);
++
++        for (const action of ["abort", "commit", "reserve"] as const) {
++          assert.deepStrictEqual(
++            yield* env.handle(command(action, "a1")),
++            answer("a1", "unknown", "reservation owner ended before a decision"),
++          );
++        }
++        assert.deepStrictEqual(yield* env.coordinator.state, { phase: "uncertain" });
++        yield* assertLatched(env);
++      }),
++  );
++
++  it.effect("separate server generations never share records or gates", () =>
++    Effect.gen(function* () {
++      const previous = yield* setup();
++      const current = yield* setup();
++      assert.deepStrictEqual(
++        yield* previous.handle(command("reserve", "a1")),
++        answer("a1", "ready"),
++      );
++      yield* assertLatched(previous);
++      yield* assertOpen(current);
++
++      assert.deepStrictEqual(
++        yield* current.handle(command("commit", "a1")),
++        answer("a1", "unknown", "commit without a held reservation"),
++      );
++      yield* assertOpen(current);
++      yield* assertLatched(previous);
++      assert.deepStrictEqual(
++        yield* previous.handle(command("commit", "a1")),
++        answer("a1", "committed"),
++      );
++      yield* Scope.close(previous.scope, Exit.void);
++      yield* Scope.close(current.scope, Exit.void);
++    }),
++  );
++});
+diff --git a/apps/server/src/desktopUpdate/DesktopUpdateReservation.ts b/apps/server/src/desktopUpdate/DesktopUpdateReservation.ts
+new file mode 100644
+index 000000000..8412b9e27
+--- /dev/null
++++ b/apps/server/src/desktopUpdate/DesktopUpdateReservation.ts
+@@ -0,0 +1,310 @@
++/**
++ * DesktopUpdateReservation - answers the desktop's reserve/abort/commit
++ * commands for one install attempt against this server's update gates.
++ *
++ * Each attempt gets one owner fiber that lives in the server scope, not on the
++ * fiber reading the command, so a sequential transport reader keeps receiving
++ * the abort or commit that ends it. The owner holds both gates through
++ * `IdleUpdateCoordinator.tryReserve`; every command only records a decision
++ * and waits for the owner's acknowledgement, so no retained gate control is
++ * ever driven from another fiber. Records are tombstones for the rest of this
++ * process generation: a retry needs a fresh attempt id.
++ *
++ * @module DesktopUpdateReservation
++ */
++import type {
++  DesktopUpdateReservationCommand,
++  DesktopUpdateReservationReply,
++  DesktopUpdateReservationStatus,
++} from "@t3tools/contracts";
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import type * as Scope from "effect/Scope";
++
++import type {
++  IdleHandoffControl,
++  IdleUpdateCoordinatorShape,
++} from "../cloud/idleUpdateCoordinator.ts";
++import type { ActivationDeclined } from "../cloud/queuedUpdate.ts";
++import { isExactServiceVersion } from "../cloud/serviceProtocol.ts";
++
++export interface DesktopUpdateReservationShape {
++  readonly handle: (
++    command: DesktopUpdateReservationCommand,
++  ) => Effect.Effect<DesktopUpdateReservationReply>;
++}
++
++export class DesktopUpdateReservation extends Context.Service<
++  DesktopUpdateReservation,
++  DesktopUpdateReservationShape
++>()("t3/desktopUpdate/DesktopUpdateReservation") {}
++
++export interface DesktopUpdateReservationDependencies {
++  readonly coordinator: IdleUpdateCoordinatorShape;
++}
++
++type Decision = "abort" | "commit";
++
++/**
++ * `acquiring` and `ready` are the only phases without a decision; `aborting`
++ * and `committing` have one selected and wait for the owner; the rest are
++ * terminal tombstones.
++ */
++type Phase =
++  | "acquiring"
++  | "ready"
++  | "aborting"
++  | "committing"
++  | "aborted"
++  | "committed"
++  | "declined"
++  | "unknown";
++
++interface ReservationRecord {
++  readonly attemptId: string;
++  readonly targetVersion: string;
++  phase: Phase;
++  decision: Decision | undefined;
++  readonly decided: Deferred.Deferred<Decision>;
++  /** First answer to `reserve`: `ready`, or the terminal answer when ready was never exposed. */
++  readonly first: Deferred.Deferred<DesktopUpdateReservationReply>;
++  /** Terminal acknowledgement: aborted, committed, a decline, or unknown. */
++  readonly terminal: Deferred.Deferred<DesktopUpdateReservationReply>;
++}
++
++const isTerminal = (phase: Phase): boolean =>
++  phase === "aborted" || phase === "committed" || phase === "declined" || phase === "unknown";
++
++const reply = (
++  attemptId: string,
++  status: DesktopUpdateReservationStatus,
++  reason?: string,
++): DesktopUpdateReservationReply =>
++  reason === undefined
++    ? { version: 1, type: "desktopUpdateReservationReply", attemptId, status }
++    : { version: 1, type: "desktopUpdateReservationReply", attemptId, status, reason };
++
++/** The target an attempt id was first seen with is immutable for the generation. */
++const boundElsewhere = (
++  existing: ReservationRecord,
++  targetVersion: string,
++): DesktopUpdateReservationReply =>
++  reply(
++    existing.attemptId,
++    "unknown",
++    `attempt is bound to target ${existing.targetVersion}, not ${targetVersion}`,
++  );
++
++/** What the owner hands back to the coordinator after an explicit abort. */
++const abortExit: ActivationDeclined = {
++  status: "busy",
++  reason: "desktop aborted the reservation",
++};
++
++export const make = ({
++  coordinator,
++}: DesktopUpdateReservationDependencies): Effect.Effect<
++  DesktopUpdateReservationShape,
++  never,
++  Scope.Scope
++> =>
++  Effect.map(Effect.scope, (scope) => {
++    const records = new Map<string, ReservationRecord>();
++    // The one record whose owner fiber is alive: acquiring, ready, deciding,
++    // or parked after commit. Cleared only by that owner's own exit.
++    let active: ReservationRecord | undefined;
++
++    const makeRecord = (attemptId: string, targetVersion: string): ReservationRecord => {
++      const record: ReservationRecord = {
++        attemptId,
++        targetVersion,
++        phase: "acquiring",
++        decision: undefined,
++        decided: Deferred.makeUnsafe<Decision>(),
++        first: Deferred.makeUnsafe<DesktopUpdateReservationReply>(),
++        terminal: Deferred.makeUnsafe<DesktopUpdateReservationReply>(),
++      };
++      records.set(attemptId, record);
++      return record;
++    };
++
++    const settle = (
++      record: ReservationRecord,
++      phase: "aborted" | "committed" | "declined" | "unknown",
++      answer: DesktopUpdateReservationReply,
++    ): void => {
++      record.phase = phase;
++      Deferred.doneUnsafe(record.first, Effect.succeed(answer));
++      Deferred.doneUnsafe(record.terminal, Effect.succeed(answer));
++    };
++
++    const select = (record: ReservationRecord, decision: Decision): void => {
++      record.decision = decision;
++      record.phase = decision === "abort" ? "aborting" : "committing";
++      Deferred.doneUnsafe(record.decided, Effect.succeed(decision));
++    };
++
++    // Runs with both gates held and idle shutdown armed. Ready is exposed only
++    // after `dispatchStarted`, so any owner exit after that point without an
++    // explicit abort leaves the coordinator holding uncertain gates.
++    const session = (
++      record: ReservationRecord,
++      control: IdleHandoffControl,
++    ): Effect.Effect<ActivationDeclined> =>
++      Effect.suspend(() => {
++        if (record.decision === "abort") return Effect.succeed(abortExit);
++        control.dispatchStarted();
++        record.phase = "ready";
++        Deferred.doneUnsafe(record.first, Effect.succeed(reply(record.attemptId, "ready")));
++        return Effect.flatMap(Deferred.await(record.decided), (decision) => {
++          if (decision === "abort") {
++            control.definitivelyRejected();
++            return Effect.succeed(abortExit);
++          }
++          // Latch before the committed reply can be observed, then park until
++          // the server scope closes: the gates stay retained either way.
++          return Effect.uninterruptible(
++            Effect.andThen(
++              control.accepted,
++              Effect.sync(() => settle(record, "committed", reply(record.attemptId, "committed"))),
++            ),
++          ).pipe(Effect.andThen(Effect.interruptible(Effect.never)));
++        });
++      });
++
++    // The coordinator answers only once its claim is gone (or was never
++    // taken), so an aborted acknowledgement always follows the reopening.
++    // Completing a Deferred resumes its waiters synchronously, so every state
++    // change lands before `settle`.
++    const own = (record: ReservationRecord): Effect.Effect<void> =>
++      Effect.flatMap(
++        coordinator.tryReserve((control) => session(record, control)),
++        (declined) =>
++          Effect.sync(() => {
++            if (active === record) active = undefined;
++            if (record.decision === "abort") {
++              settle(record, "aborted", reply(record.attemptId, "aborted"));
++            } else if (record.phase === "acquiring") {
++              settle(record, "declined", reply(record.attemptId, declined.status, declined.reason));
++            } else {
++              settle(record, "unknown", reply(record.attemptId, "unknown", declined.reason));
++            }
++          }),
++      );
++
++    // Lookup, target check and record creation are one synchronous step here:
++    // `handle` observed the id absent on an earlier step, and a scheduler
++    // handoff since then may have installed an abort tombstone or another
++    // owner under it. Only this check authorizes creation.
++    const reserveNew = (
++      attemptId: string,
++      targetVersion: string,
++    ): Effect.Effect<DesktopUpdateReservationReply> =>
++      Effect.uninterruptibleMask((restore) =>
++        Effect.suspend(() => {
++          const existing = records.get(attemptId);
++          if (existing !== undefined) {
++            return existing.targetVersion === targetVersion
++              ? restore(onExisting(existing, "reserve"))
++              : Effect.succeed(boundElsewhere(existing, targetVersion));
++          }
++          const record = makeRecord(attemptId, targetVersion);
++          if (active !== undefined) {
++            const owned = active.phase === "committing" || active.phase === "committed";
++            settle(
++              record,
++              "declined",
++              reply(
++                attemptId,
++                owned ? "unknown" : "busy",
++                "another reservation attempt owns this server",
++              ),
++            );
++            return Deferred.await(record.terminal);
++          }
++          active = record;
++          return Effect.flatMap(Effect.forkIn(own(record), scope), (fiber) => {
++            // Last-resort completion: an owner that ends without settling
++            // (interrupted before it started, or after ready without a
++            // decision) can only be reported as unknown.
++            fiber.addObserver(() => {
++              if (active === record) active = undefined;
++              if (!isTerminal(record.phase)) {
++                settle(
++                  record,
++                  "unknown",
++                  reply(attemptId, "unknown", "reservation owner ended before a decision"),
++                );
++              }
++            });
++            return restore(Deferred.await(record.first));
++          });
++        }),
++      );
++
++    const onExisting = (
++      record: ReservationRecord,
++      action: DesktopUpdateReservationCommand["action"],
++    ): Effect.Effect<DesktopUpdateReservationReply> =>
++      Effect.suspend(() => {
++        const undecided = record.phase === "acquiring" || record.phase === "ready";
++        switch (action) {
++          case "reserve":
++            return Deferred.await(undecided ? record.first : record.terminal);
++          case "abort":
++            if (undecided) select(record, "abort");
++            return Deferred.await(record.terminal);
++          case "commit":
++            if (record.phase === "acquiring") {
++              return Effect.succeed(
++                reply(record.attemptId, "unknown", "reservation is not ready to commit"),
++              );
++            }
++            if (undecided) select(record, "commit");
++            return Deferred.await(record.terminal);
++        }
++      });
++
++    const handle: DesktopUpdateReservationShape["handle"] = (command) =>
++      Effect.suspend(() => {
++        const { attemptId, targetVersion, action } = command;
++        const existing = records.get(attemptId);
++        if (existing !== undefined) {
++          if (existing.targetVersion !== targetVersion) {
++            return Effect.succeed(boundElsewhere(existing, targetVersion));
++          }
++          return onExisting(existing, action);
++        }
++        if (!isExactServiceVersion(targetVersion)) {
++          return Effect.succeed(
++            reply(attemptId, "unknown", `target ${targetVersion} is not an exact release version`),
++          );
++        }
++        if (scope.state._tag === "Closed") {
++          return Effect.succeed(reply(attemptId, "unknown", "server is shutting down"));
++        }
++        switch (action) {
++          case "reserve":
++            return reserveNew(attemptId, targetVersion);
++          case "abort": {
++            // A tombstone first: a delayed reserve for this attempt can no
++            // longer acquire anything.
++            const record = makeRecord(attemptId, targetVersion);
++            settle(record, "aborted", reply(attemptId, "aborted"));
++            return Deferred.await(record.terminal);
++          }
++          case "commit": {
++            const record = makeRecord(attemptId, targetVersion);
++            settle(
++              record,
++              "declined",
++              reply(attemptId, "unknown", "commit without a held reservation"),
++            );
++            return Deferred.await(record.terminal);
++          }
++        }
++      });
++
++    return { handle } satisfies DesktopUpdateReservationShape;
++  });
