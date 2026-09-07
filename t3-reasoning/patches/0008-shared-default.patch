@@ -25,6 +25,35 @@ index c5871fa65d6638c5afff5d3d21eef0f98f664fa7..4c9cc99e6c173638a69a0ed27614ea6a
    const target = useMemo(
      () =>
        primary?.entry.target._tag === "PrimaryConnectionTarget"
+diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
+index 6769586f7fa86fe74d153d207f904b8266ad7243..fa1d7577ccef2700e230c80d937d9dd8e0807f3b 100644
+--- a/apps/web/src/components/AppSidebarLayout.tsx
++++ b/apps/web/src/components/AppSidebarLayout.tsx
+@@ -23,6 +23,7 @@ import {
+ import LegacyThreadSidebar from "./LegacySidebar";
+ import ThreadSidebar from "./Sidebar";
+ import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
++import { SharedEnvironmentStatus } from "./SharedEnvironmentStatus";
+ import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
+ import {
+   resolveSidebarStageFocusRingOffsetClass,
+@@ -254,7 +255,15 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+           )}
+           <SidebarRail onDoubleClick={resetSidebarWidth} />
+         </Sidebar>
+-        {children}
++        {/* The content column stacks the route's SidebarInset over the shared
++            environment banner. The banner sits below rather than above so it
++            never meets the fixed titlebar chrome (sidebar trigger, macOS
++            traffic lights, chat panel controls); the inset's flex-basis wins
++            over its viewport height, so both fit inside the shell. */}
++        <div className="flex min-w-0 flex-1 flex-col">
++          {children}
++          <SharedEnvironmentStatus />
++        </div>
+         <SidebarControl />
+       </SidebarProvider>
+     </PanelAnimationSuppressionProvider>
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
 index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea2d39ab25 100644
 --- a/apps/web/src/components/ChatView.tsx
@@ -447,7 +476,7 @@ index ec1e79dc2d7bae557129b223df611248d36a70ab..6a9645a603529fb986fc13171944b8a1
        (currentProjectId ? (projectTitleById.get(currentProjectId) ?? null) : null);
 diff --git a/apps/web/src/components/SharedEnvironmentStatus.tsx b/apps/web/src/components/SharedEnvironmentStatus.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..21d89a5bea33c79b7d417832ad3fa49b293b9479
+index 0000000000000000000000000000000000000000..d39bc058e13ad5043f8411b423f358a6f9636045
 --- /dev/null
 +++ b/apps/web/src/components/SharedEnvironmentStatus.tsx
 @@ -0,0 +1,78 @@
@@ -513,7 +542,7 @@ index 0000000000000000000000000000000000000000..21d89a5bea33c79b7d417832ad3fa49b
 +  return (
 +    <div
 +      role="status"
-+      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-warning/30 bg-warning/8 px-4 py-2 text-xs text-foreground"
++      className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-warning/30 bg-warning/8 px-4 pt-2 pb-[calc(max(env(safe-area-inset-bottom),0px)+0.5rem)] text-xs text-foreground"
 +    >
 +      <p className="min-w-0 flex-1">{message}</p>
 +      <div className="flex shrink-0 items-center gap-2">
@@ -1673,10 +1702,10 @@ index 9b428b08ea50952df2591aea326980f34860f40b..370fc6ae0248029f9c673d6e039a1f98
 +  publishPreferredEnvironment();
  }
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00798836b0 100644
+index 12cdd946f6c46a63ae6e2c9177f64630f1941519..2301364612c7390120c01cf9949496a812405b1c 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
-@@ -52,7 +52,12 @@ import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
+@@ -52,7 +52,11 @@ import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
  import { shellEnvironment } from "../state/shell";
  import { useAtomValue } from "@effect/atom-react";
  import { useAtomCommand } from "../state/use-atom-command";
@@ -1686,19 +1715,10 @@ index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00
 +  useEnvironments,
 +  usePrimaryEnvironment,
 +} from "../state/environments";
-+import { SharedEnvironmentStatus } from "../components/SharedEnvironmentStatus";
  import {
    primaryServerConfigAtom,
    primaryServerConfigEventAtom,
-@@ -183,6 +188,7 @@ function RootRouteView() {
-           ) : null}
-           {primaryEnvironmentAuthenticated ? <PlanAgentSelectionHeal /> : null}
-           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
-+          <SharedEnvironmentStatus />
-           {appShell}
-           {/* Above the router: a theme draft is judged by walking the app, so the
-               editor has to survive navigation away from settings. */}
-@@ -274,8 +280,16 @@ function DocumentTitleSync() {
+@@ -274,8 +278,16 @@ function DocumentTitleSync() {
  function HostedStaticEnvironmentBootstrap() {
    const { environments } = useEnvironments();
    const activeEnvironmentId = useActiveEnvironmentId();
@@ -1715,7 +1735,7 @@ index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00
      if (
        environments.some(
          (environment) => environment.entry.target._tag === "PrimaryConnectionTarget",
-@@ -294,7 +308,7 @@ function HostedStaticEnvironmentBootstrap() {
+@@ -294,7 +306,7 @@ function HostedStaticEnvironmentBootstrap() {
      }
  
      setActiveEnvironmentId(firstSavedEnvironment.environmentId);
@@ -1724,7 +1744,7 @@ index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00
  
    return null;
  }
-@@ -422,6 +436,11 @@ function EventRouter({
+@@ -422,6 +434,11 @@ function EventRouter({
    const pathname = useLocation({ select: (loc) => loc.pathname });
    const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
    const primaryEnvironment = usePrimaryEnvironment();
@@ -1736,7 +1756,7 @@ index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00
    const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
      reportFailure: false,
    });
-@@ -439,7 +458,9 @@ function EventRouter({
+@@ -439,7 +456,9 @@ function EventRouter({
    const handleWelcome = useEffectEvent((payload: ServerLifecycleWelcomePayload | null) => {
      if (!payload) return;
  
@@ -1747,7 +1767,7 @@ index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00
      void (async () => {
        if (!payload.bootstrapProjectId || !payload.bootstrapThreadId) {
          return;
-@@ -459,7 +480,7 @@ function EventRouter({
+@@ -459,7 +478,7 @@ function EventRouter({
          );
        useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
  
@@ -1756,7 +1776,7 @@ index 12cdd946f6c46a63ae6e2c9177f64630f1941519..a7e208bf706b1e761c2ab7193aee8e00
          return;
        }
        if (skipInitialBootstrapNavigationRef.current) {
-@@ -542,12 +563,12 @@ function EventRouter({
+@@ -542,12 +561,12 @@ function EventRouter({
    });
  
    useEffect(() => {

@@ -76,7 +76,7 @@
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "49a7dcb7a3c7f6a355e2d594626d56042a4568dc2f561b9c72ad76ff72abc2d7"
+      "sha256": "66ced494e5f39530e0791027a71f2422405511fc1c387cf0103a7f8474ef4cd9"
     },
     {
       "id": "reasoning-identity",
