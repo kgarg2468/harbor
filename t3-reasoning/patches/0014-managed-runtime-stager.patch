@@ -1,11 +1,10 @@
 diff --git a/apps/server/package.json b/apps/server/package.json
-index 3d03fcd45..8f87e507f 100644
 --- a/apps/server/package.json
 +++ b/apps/server/package.json
-@@ -31,6 +31,7 @@
-     "effect": "catalog:",
-     "msgpackr-extract": "3.0.4",
+@@ -33,6 +33,7 @@
      "node-pty": "^1.1.0",
+     "stream-chain": "^4.2.5",
+     "stream-json": "3.6.0",
 +    "tar": "7.5.16",
      "yaml": "catalog:",
      "yauzl": "^3.4.0"
@@ -3014,13 +3013,12 @@ index 000000000..15f1fdee4
 +  );
 +});
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
-index d2bd2b64e..885d20c6d 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -505,6 +505,9 @@ importers:
-       node-pty:
-         specifier: ^1.1.0
-         version: 1.1.0
+@@ -508,6 +508,9 @@
+       stream-json:
+         specifier: 3.6.0
+         version: 3.6.0
 +      tar:
 +        specifier: 7.5.16
 +        version: 7.5.16
