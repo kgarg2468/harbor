@@ -333,6 +333,8 @@ it_contains 'record names the operator' "\"operator\": \"${IT_OPERATOR}\"" "${re
 it_contains 'record names the Node.js version' "\"nodejs_version\": \"${nodejs_version}\"" "${record}"
 it_contains 'record says Harbor installed Tailscale' \
   '"tailscale_ownership": "harbor-installed"' "${record}"
+it_contains 'record names the Tailscale version' \
+  "\"tailscale_version\": \"${tailscale_version}\"" "${record}"
 
 # ---------------------------------------------------------------------------
 section 'the journal'

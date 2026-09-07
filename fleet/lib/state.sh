@@ -36,19 +36,23 @@ harbor_state_record_number() {
   esac
 }
 # harbor_state_record_render TAG ENTRYPOINT LOCK_SHA256 FLAGS NODEJS_VERSION
-# TAILSCALE_OWNERSHIP OPERATOR UID GID HOME TIMESTAMP: the record itself, built with printf
-# and harbor_json_escape rather than with jq, because every function under lib/ runs before
-# the Packages row could have installed one. One key per line in a fixed order, so a reader
-# as small as the sed of harbor_entrypoint_record_tag can find a value and so two records
-# built from equal values are equal byte for byte, which is what makes the rerun below
-# rewrite nothing. The uid and the gid are numbers; every other value is a string.
+# TAILSCALE_OWNERSHIP TAILSCALE_VERSION OPERATOR UID GID HOME TIMESTAMP: the record itself,
+# built with printf and harbor_json_escape rather than with jq, because every function under
+# lib/ runs before the Packages row could have installed one. One key per line in a fixed
+# order, so a reader as small as the sed of harbor_entrypoint_record_tag can find a value and
+# so two records built from equal values are equal byte for byte, which is what makes the
+# rerun below rewrite nothing. The uid and the gid are numbers; every other value is a string.
 #
-# Tailscale carries its ownership and, when Harbor installed or adopted the daemon, the
-# version it installed. This release installs no Tailscale and adopts none, so the only
-# ownership it can truthfully record is pre-existing and there is no version to name: slice
-# 3d, which owns lib/tailscale.sh, is what makes harbor-installed and adopted reachable and
-# what adds the version key beside this one.
+# Tailscale carries its ownership and, beside the two ownerships Harbor holds, the version of
+# the daemon that ownership covers. A harbor-installed or an adopted Tailscale is one Harbor
+# itself moved to the lock, so the record names the version it moved it to and section 6.4's
+# harbor upgrade has a pin to compare the installed daemon against. A pre-existing Tailscale
+# is one Harbor neither installed nor adopted, and so is not Harbor's to pin: the version is
+# rendered empty beside it whatever the caller passes, because naming one there would claim a
+# pin Harbor never made and leave a later command comparing against it as though it had.
 harbor_state_record_render() {
+  local version="${7}"
+  [ "${6}" != pre-existing ] || version=""
   printf '{\n'
   printf '  "release_tag": "%s",\n' "$(harbor_json_escape "${1}")"
   printf '  "entrypoint": "%s",\n' "$(harbor_json_escape "${2}")"
@@ -56,11 +60,12 @@ harbor_state_record_render() {
   printf '  "flags": "%s",\n' "$(harbor_json_escape "${4}")"
   printf '  "nodejs_version": "%s",\n' "$(harbor_json_escape "${5}")"
   printf '  "tailscale_ownership": "%s",\n' "$(harbor_json_escape "${6}")"
-  printf '  "operator": "%s",\n' "$(harbor_json_escape "${7}")"
-  printf '  "operator_uid": %s,\n' "${8}"
-  printf '  "operator_gid": %s,\n' "${9}"
-  printf '  "operator_home": "%s",\n' "$(harbor_json_escape "${10}")"
-  printf '  "timestamp": "%s"\n' "$(harbor_json_escape "${11}")"
+  printf '  "tailscale_version": "%s",\n' "$(harbor_json_escape "${version}")"
+  printf '  "operator": "%s",\n' "$(harbor_json_escape "${8}")"
+  printf '  "operator_uid": %s,\n' "${9}"
+  printf '  "operator_gid": %s,\n' "${10}"
+  printf '  "operator_home": "%s",\n' "$(harbor_json_escape "${11}")"
+  printf '  "timestamp": "%s"\n' "$(harbor_json_escape "${12}")"
   printf '}\n'
 }
 # harbor_state_record_timestamp RECORD: the timestamp RECORD carries, or nothing when there
@@ -75,18 +80,18 @@ harbor_state_record_timestamp() {
   sed -n 's/^  "timestamp": "\([^"]*\)"$/\1/p' "${record}" | sed -n 1p
 }
 # harbor_state_record STATE_ROOT TAG ENTRYPOINT LOCK_SHA256 FLAGS NODEJS_VERSION
-# TAILSCALE_OWNERSHIP OPERATOR UID GID HOME: the State record row of design section 5.2,
-# written last and journaled as one file transaction. A record that is already, byte for
-# byte, what would be written is journaled observed and left alone, which is what makes a
-# rerun on a healthy node rewrite nothing; a record whose content, mode, or owner differs is
-# rewritten with a fresh timestamp and journaled modified with the prior state; an absent one
-# is journaled created. Anything at the path that is not a regular file is foreign and exits 3
-# untouched, because Harbor overwrites nothing it cannot prove it wrote.
+# TAILSCALE_OWNERSHIP TAILSCALE_VERSION OPERATOR UID GID HOME: the State record row of design
+# section 5.2, written last and journaled as one file transaction. A record that is already,
+# byte for byte, what would be written is journaled observed and left alone, which is what
+# makes a rerun on a healthy node rewrite nothing; a record whose content, mode, or owner
+# differs is rewritten with a fresh timestamp and journaled modified with the prior state; an
+# absent one is journaled created. Anything at the path that is not a regular file is foreign
+# and exits 3 untouched, because Harbor overwrites nothing it cannot prove it wrote.
 harbor_state_record() {
-  local root tag entrypoint lock flags nodejs tailscale operator uid gid home
+  local root tag entrypoint lock flags nodejs tailscale version operator uid gid home
   local record pre post stamp tmp ownership entry known=0 word
-  [ "$#" -eq 11 ] \
-    || harbor_die 3 usage "usage: harbor_state_record <state-root> <release-tag> <entrypoint> <lock-sha256> <flag-set> <nodejs-version> <tailscale-ownership> <operator> <uid> <gid> <home>"
+  [ "$#" -eq 12 ] \
+    || harbor_die 3 usage "usage: harbor_state_record <state-root> <release-tag> <entrypoint> <lock-sha256> <flag-set> <nodejs-version> <tailscale-ownership> <tailscale-version> <operator> <uid> <gid> <home>"
   root="${1}"
   tag="${2}"
   entrypoint="${3}"
@@ -94,15 +99,18 @@ harbor_state_record() {
   flags="${5}"
   nodejs="${6}"
   tailscale="${7}"
-  operator="${8}"
-  uid="${9}"
-  gid="${10}"
-  home="${11}"
+  version="${8}"
+  operator="${9}"
+  uid="${10}"
+  gid="${11}"
+  home="${12}"
   for word in ${HARBOR_STATE_TAILSCALE_OWNERSHIPS}; do
     [ "${word}" != "${tailscale}" ] || known=1
   done
   [ "${known}" = 1 ] \
     || harbor_die 3 state.tailscale_ownership "'${tailscale}' is not one of the Tailscale ownerships design section 5.2 records (${HARBOR_STATE_TAILSCALE_OWNERSHIPS}); nothing was written"
+  [ -n "${version}" ] || [ "${tailscale}" = pre-existing ] \
+    || harbor_die 3 state.tailscale_version "the Tailscale ownership is '${tailscale}' and no version came with it, and design section 5.2 has the record name the version of an installation Harbor holds; nothing was written"
   harbor_state_record_number "${uid}" "the operator uid"
   harbor_state_record_number "${gid}" "the operator gid"
   record="$(harbor_state_record_path "${root}")"
@@ -127,7 +135,7 @@ harbor_state_record() {
   stamp="$(harbor_state_record_timestamp "${record}")"
   if [ -n "${stamp}" ]; then
     harbor_state_record_render "${tag}" "${entrypoint}" "${lock}" "${flags}" "${nodejs}" \
-      "${tailscale}" "${operator}" "${uid}" "${gid}" "${home}" "${stamp}" >"${tmp}"
+      "${tailscale}" "${version}" "${operator}" "${uid}" "${gid}" "${home}" "${stamp}" >"${tmp}"
     chmod 0644 "${tmp}"
     post="$(harbor_observe_file "${tmp}")"
     if [ "${post}" = "${pre}" ]; then
@@ -138,7 +146,7 @@ harbor_state_record() {
     fi
   fi
   harbor_state_record_render "${tag}" "${entrypoint}" "${lock}" "${flags}" "${nodejs}" \
-    "${tailscale}" "${operator}" "${uid}" "${gid}" "${home}" "$(harbor_utc_now)" >"${tmp}"
+    "${tailscale}" "${version}" "${operator}" "${uid}" "${gid}" "${home}" "$(harbor_utc_now)" >"${tmp}"
   chmod 0644 "${tmp}"
   post="$(harbor_observe_file "${tmp}")"
   ownership=modified

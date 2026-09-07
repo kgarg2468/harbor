@@ -1464,8 +1464,9 @@ expected_rows() {
   # Every value is the one the row that owns it proved: the tag of the executing release,
   # the absolute entrypoint, the hash of the lock the preflight loaded, the intent the
   # flag binding recorded, the locked Node.js version, the ownership the Tailscale
-  # install row read out of the journal, and the account the operator-user row created,
-  # uid, gid, and home as the name service now lists them.
+  # install row read out of the journal with the version that row installed beside it,
+  # and the account the operator-user row created, uid, gid, and home as the name
+  # service now lists them.
   run cat "${record}"
   assert_line --index 0 '{'
   assert_line --index 1 "  \"release_tag\": \"${TAG}\","
@@ -1474,13 +1475,14 @@ expected_rows() {
   assert_line --index 4 "  \"flags\": \"${flags}\","
   assert_line --index 5 "  \"nodejs_version\": \"${NODE_LOCKED}\","
   assert_line --index 6 '  "tailscale_ownership": "harbor-installed",'
-  assert_line --index 7 "  \"operator\": \"${OPUSER}\","
-  assert_line --index 8 '  "operator_uid": 4242,'
-  assert_line --index 9 '  "operator_gid": 4242,'
-  assert_line --index 10 "  \"operator_home\": \"${HOMES}/${OPUSER}\","
-  assert_line --index 11 --regexp '^  "timestamp": "[0-9]{8}T[0-9]{6}Z"$'
-  assert_line --index 12 '}'
-  assert_equal "${#lines[@]}" 13
+  assert_line --index 7 "  \"tailscale_version\": \"${TS_LOCKED}\","
+  assert_line --index 8 "  \"operator\": \"${OPUSER}\","
+  assert_line --index 9 '  "operator_uid": 4242,'
+  assert_line --index 10 '  "operator_gid": 4242,'
+  assert_line --index 11 "  \"operator_home\": \"${HOMES}/${OPUSER}\","
+  assert_line --index 12 --regexp '^  "timestamp": "[0-9]{8}T[0-9]{6}Z"$'
+  assert_line --index 13 '}'
+  assert_equal "${#lines[@]}" 14
   # Non-secret: no key material and no holder identity reach it.
   refute_output --partial 'AAAAC3NzaC1lZDI1NTE5'
 }
@@ -1543,7 +1545,7 @@ expected_rows() {
   assert_equal "$(phase_of file "${STATE}/bootstrap.json")" prepared
   assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${TAG}"
   run cat "${STATE}/bootstrap.json"
-  assert_equal "${#lines[@]}" 13
+  assert_equal "${#lines[@]}" 14
   assert_equal "$(harbor_stat_mode "${STATE}/bootstrap.json")" 0644
   # And the rerun decides that entry and converges without rewriting the record.
   local before
@@ -1700,9 +1702,13 @@ expected_rows() {
   assert_equal "$(entry_raw "${STATE}" "$(seq_of tailscale-operator "${OPUSER}")" pre_state)" \
     '"someone-else"'
   # An installation Harbor moved to the pin is adopted, not harbor-installed, and that
-  # is the word the record carries.
+  # is the word the record carries, with the version Harbor moved it to beside it:
+  # adopted is an ownership Harbor holds, so the record names the pin it holds it at
+  # rather than the version it replaced.
   run cat "${STATE}/bootstrap.json"
   assert_line '  "tailscale_ownership": "adopted",'
+  assert_line "  \"tailscale_version\": \"${TS_LOCKED}\","
+  refute_line "  \"tailscale_version\": \"${TS_OTHER}\","
 }
 
 @test "a pre-existing Tailscale without --adopt-tailscale is degraded, not fatal" {
@@ -1735,9 +1741,14 @@ expected_rows() {
   # here is a line that is a curl invocation, not the word.
   refute_line --regexp '^curl '
   # The record names the installation for what it is, which is what a later command
-  # reads to know what Harbor may do to it.
+  # reads to know what Harbor may do to it. No version is named beside it: the row
+  # passes the version it found, but a Tailscale Harbor neither installed nor adopted
+  # is not Harbor's to pin, so the record carries the empty string rather than a pin it
+  # never made.
   run cat "${STATE}/bootstrap.json"
   assert_line '  "tailscale_ownership": "pre-existing",'
+  assert_line '  "tailscale_version": "",'
+  refute_line "  \"tailscale_version\": \"${TS_OTHER}\","
 }
 
 # Step boundaries: HARBOR_FAIL_AFTER cuts each row between its mutation and its

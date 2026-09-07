@@ -77,6 +77,14 @@ jobs:
           set -euo pipefail
           fleet/tests/integration/assert_rerun.sh
 
+      # The installed-entrypoint row of the design section 5.2 map, driven through
+      # harbor auth tailscale as the operator. Last, because it is the one step that
+      # logs the node in to the stand-in tailnet and so cannot be put back.
+      - name: Assert the installed-entrypoint row through harbor auth tailscale
+        run: |
+          set -euo pipefail
+          sudo bash fleet/tests/integration/assert_auth.sh
+
       - name: Diagnostics
         if: failure()
         run: |
@@ -95,6 +103,21 @@ jobs:
           if sudo test -d /var/lib/harbor/journal; then
             sudo ls -la /var/lib/harbor/journal
             sudo grep -r . /var/lib/harbor/journal
+          else
+            printf '(absent)\n'
+          fi
+          # The operator state root of design section 3.7, which harbor auth tailscale
+          # creates and takes its lock in. Root-owned it is not: it is 0700 under the
+          # operator's home, so every read of it here goes through sudo.
+          printf '\n===== the operator state root\n'
+          if sudo test -d /home/harbor/.local/state/harbor; then
+            sudo ls -laR /home/harbor/.local/state/harbor
+            printf '\n----- harbor.log\n'
+            if sudo test -f /home/harbor/.local/state/harbor/harbor.log; then
+              sudo cat /home/harbor/.local/state/harbor/harbor.log
+            else
+              printf '(absent)\n'
+            fi
           else
             printf '(absent)\n'
           fi

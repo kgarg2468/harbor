@@ -624,11 +624,13 @@ harbor_bootstrap_steps() {
   # can return through, the preserved drift included, so the record names what this
   # node really has rather than a second reading of its own.
   #
-  # Design section 5.2 has the record carry the installed version beside a
-  # harbor-installed or adopted ownership as well. harbor_state_record takes no
-  # parameter for one, so this row passes the ten values the record holds and no
-  # eleventh: the version the install row proved stays in HARBOR_TAILSCALE_VERSION
-  # until lib/state.sh has a key for it.
+  # Design section 5.2 has the record carry the installed version beside that word,
+  # and the version is passed the same way and from the same row: the install row
+  # sets HARBOR_TAILSCALE_VERSION on every path on which it sets the ownership, to
+  # the pin it installed or to the version it found already there. It is passed
+  # whatever the ownership turned out to be, because deciding which ownerships name a
+  # version is lib/state.sh's, not this row's: the record blanks it beside a
+  # pre-existing Tailscale, which is the one Harbor has no pin to claim.
   harbor_bootstrap_row state-record "every row of the design section 5.2 table is applied and ${root}/bootstrap.json is being written; until it names this release, every command but bootstrap and journal resolve refuses to run against this node"
   # Both values are read into variables of their own rather than substituted into the
   # call, for the reason the preflight reads the locked release into one: a failure
@@ -638,7 +640,7 @@ harbor_bootstrap_steps() {
   nodejs="$(harbor_version_require nodejs_version)" || exit "$?"
   harbor_state_record "${root}" "${HARBOR_BOOTSTRAP_TAG}" "${HARBOR_BOOTSTRAP_LINK}" \
     "${lock_sha}" "${HARBOR_BOOTSTRAP_FLAG_SET}" "${nodejs}" "${HARBOR_TAILSCALE_OWNERSHIP}" \
-    "${operator}" "${uid}" "${gid}" "${home}"
+    "${HARBOR_TAILSCALE_VERSION}" "${operator}" "${uid}" "${gid}" "${home}"
   # Every row is applied, so a failure after this point is no longer one row's.
   # Read by the ERR trap of lib/log.sh, never in this file.
   # shellcheck disable=SC2034
