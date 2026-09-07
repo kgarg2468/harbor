@@ -69,6 +69,11 @@
       "sha256": "d0850e428f54a4e18e43af07b048d84e35769fd9fc5bf51551e8060633c7b606"
     },
     {
+      "id": "managed-runtime-transaction",
+      "path": "patches/0019-managed-runtime-transaction.patch",
+      "sha256": "19aeb429932431447c0766a1a780387e7775c0ac4b4acfe77c1e5631070042f2"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "3c242c29b863494e637a339b45788ea056c67b312bbdb98871eae8349ee66897"
@@ -87,7 +92,8 @@
       "managed-runtime-stager",
       "desktop-reservation",
       "server-reservation",
-      "candidate-process"
+      "candidate-process",
+      "managed-runtime-transaction"
     ],
     "reasoning": [
       "reasoning-full",
@@ -102,6 +108,7 @@
       "desktop-reservation",
       "server-reservation",
       "candidate-process",
+      "managed-runtime-transaction",
       "reasoning-identity"
     ]
   }
