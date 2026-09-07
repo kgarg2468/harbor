@@ -1,5 +1,5 @@
 diff --git a/apps/mobile/src/lib/threadActivity.test.ts b/apps/mobile/src/lib/threadActivity.test.ts
-index 8e31719b4..07073dc61 100644
+index 8e31719b43dc38548483a451a3aca76cd72ab875..07073dc61a71d67b7e40a1983c6f07ef4e2e113c 100644
 --- a/apps/mobile/src/lib/threadActivity.test.ts
 +++ b/apps/mobile/src/lib/threadActivity.test.ts
 @@ -3272,4 +3272,26 @@ describe("quiet timeline: nested agents", () => {
@@ -30,7 +30,7 @@ index 8e31719b4..07073dc61 100644
 +  });
  });
 diff --git a/apps/mobile/src/lib/threadActivity.ts b/apps/mobile/src/lib/threadActivity.ts
-index 42e0db669..4a2cc3d6f 100644
+index 42e0db669a73ae02f345c48de23c03a9e387fc18..4a2cc3d6ff9db3de0883c56018b105153f29f85f 100644
 --- a/apps/mobile/src/lib/threadActivity.ts
 +++ b/apps/mobile/src/lib/threadActivity.ts
 @@ -2,7 +2,7 @@ import {
@@ -59,7 +59,7 @@ index 42e0db669..4a2cc3d6f 100644
    const entries = Arr.sortWith(
      [
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
-index 9e1416007..93329d150 100644
+index 9e141600713f1f65708fbf386c56afd3479935ee..93329d1506b4d2250dac8de2bab1d0501e6f3bae 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 @@ -534,6 +534,26 @@ describe("CheckpointReactor", () => {
@@ -98,7 +98,7 @@ index 9e1416007..93329d150 100644
            { path: "large.txt", kind: "modified", additions: largeFileLineCount, deletions: 0 },
            { path: "README.md", kind: "modified", additions: 1, deletions: 1 },
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index eb7734818..df19830f6 100644
+index eb77348180ff0d9b4fc36f5bf1ab064f32917c44..df19830f6ef433b691c9f6fc255aaad6f9a040e1 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -3,10 +3,12 @@ import {
@@ -137,7 +137,7 @@ index eb7734818..df19830f6 100644
  
      yield* orchestrationEngine.dispatch({
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-index 1a989958f..e88e47ab3 100644
+index 1a989958f50c01c7bb5f2e8681fe9fd33ea245dd..e88e47ab39b0791d11887a62cb55e0f152ee3fc1 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 @@ -365,8 +365,9 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -1055,7 +1055,7 @@ index 1a989958f..e88e47ab3 100644
    "OrchestrationProjectionPipeline pending turn cleanup",
    (it) => {
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
-index 050ad1a90..aff406ef6 100644
+index 050ad1a902ae6bef23ae18c4210bab61f6ce3648..aff406ef603eba53ba0885d05fdbb9f40f398937 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
 @@ -4,6 +4,7 @@ import {
@@ -1112,7 +1112,7 @@ index 050ad1a90..aff406ef6 100644
            }
            // A completed assistant message only settles the turn once the
 diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
-index e262bce34..d15c2ec79 100644
+index e262bce34aaf53a9c10f30cdf3349b01b0d525a4..d15c2ec79310671da48aefa09625ed063468fad8 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
 @@ -146,21 +146,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
@@ -1179,7 +1179,7 @@ index e262bce34..d15c2ec79 100644
                id: asMessageId("message-1"),
                role: "assistant",
 diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
-index 5f82a26e2..f899c5d86 100644
+index 5f82a26e2a36e052be77622dd551c7906d9fbf96..abf6dfb01ac1b7e2816c70a3c32391a693c71a3c 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
 @@ -7,6 +7,7 @@ import {
@@ -1206,7 +1206,15 @@ index 5f82a26e2..f899c5d86 100644
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -1177,6 +1180,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+@@ -1145,6 +1148,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+         thread_id AS "threadId",
+         turn_id AS "turnId",
+         role,
++        channel,
+         text,
+         attachments_json AS "attachments",
+         is_streaming AS "isStreaming",
+@@ -1177,6 +1181,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -1214,7 +1222,7 @@ index 5f82a26e2..f899c5d86 100644
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -1534,6 +1538,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+@@ -1534,6 +1539,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
@@ -1222,7 +1230,7 @@ index 5f82a26e2..f899c5d86 100644
            text,
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
-@@ -1933,6 +1938,7 @@ pending_approval_requests AS (
+@@ -1933,6 +1939,7 @@ pending_approval_requests AS (
                  threadMessages.push({
                    id: row.messageId,
                    role: row.role,
@@ -1230,7 +1238,7 @@ index 5f82a26e2..f899c5d86 100644
                    text: row.text,
                    ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                    turnId: row.turnId,
-@@ -3206,6 +3212,7 @@ pending_approval_requests AS (
+@@ -3206,6 +3213,7 @@ pending_approval_requests AS (
            const message = {
              id: row.messageId,
              role: row.role,
@@ -1239,7 +1247,7 @@ index 5f82a26e2..f899c5d86 100644
              turnId: row.turnId,
              streaming: row.isStreaming === 1,
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-index d93fec5a3..51aef1fb8 100644
+index d93fec5a3cf68655a5e2fea4be3974243b79da5a..51aef1fb89b226c76e41fb4428179fcb9f8f2249 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 @@ -1477,6 +1477,17 @@ describe("ProviderCommandReactor", () => {
@@ -1261,7 +1269,7 @@ index d93fec5a3..51aef1fb8 100644
        harness.engine.dispatch({
          type: "thread.message.assistant.delta",
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index 5c1086b9e..b355205a7 100644
+index 5c1086b9e29c1595d1424d4f764bacef03e1be11..b355205a75901aa02ae7a8288ddf9e1f07f2bbed 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 @@ -1,5 +1,7 @@
@@ -1288,7 +1296,7 @@ index 5c1086b9e..b355205a7 100644
    }
    const text = assistantCitationsToPlainText(message.text).trim();
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index 1094ab48b..14588c2fd 100644
+index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb79d263d5 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -22,6 +22,7 @@ import {
@@ -2289,7 +2297,7 @@ index 1094ab48b..14588c2fd 100644
 +  });
  });
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index 8d34fee4f..d21ffcb00 100644
+index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6f459c8a7 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 @@ -8,6 +8,7 @@ import {
@@ -2830,7 +2838,7 @@ index 8d34fee4f..d21ffcb00 100644
  
    const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
-index 9dc55e119..3d235638a 100644
+index 9dc55e1194cc9ef728399b9cc3dc08e8513a0646..3d235638ae384402add951f74a2f1a88b68cde4f 100644
 --- a/apps/server/src/orchestration/decider.ts
 +++ b/apps/server/src/orchestration/decider.ts
 @@ -1399,6 +1399,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
@@ -2850,7 +2858,7 @@ index 9dc55e119..3d235638a 100644
            turnId: command.turnId ?? null,
            streaming: false,
 diff --git a/apps/server/src/orchestration/projector.test.ts b/apps/server/src/orchestration/projector.test.ts
-index e973b5232..15e3de089 100644
+index e973b523275f9767023fe0f1b10f721e1b37ba5b..15e3de089434dacf8b6e7c6d0982babcd851c61d 100644
 --- a/apps/server/src/orchestration/projector.test.ts
 +++ b/apps/server/src/orchestration/projector.test.ts
 @@ -1,3 +1,4 @@
@@ -3705,7 +3713,7 @@ index e973b5232..15e3de089 100644
      const createdAt = "2026-03-01T10:00:00.000Z";
      const model = createEmptyReadModel(createdAt);
 diff --git a/apps/server/src/orchestration/projector.ts b/apps/server/src/orchestration/projector.ts
-index c048247f4..eae78f1a0 100644
+index c048247f4128848eb10ea0dc5561949c811dfba0..eae78f1a0bfff357c5076e74385ab191f3649bb6 100644
 --- a/apps/server/src/orchestration/projector.ts
 +++ b/apps/server/src/orchestration/projector.ts
 @@ -158,6 +158,7 @@ function retainThreadMessagesAfterRevert(
@@ -3741,7 +3749,7 @@ index c048247f4..eae78f1a0 100644
                        ? { attachments: message.attachments }
                        : {}),
 diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
-index 12f4db91f..0f6c2c742 100644
+index 12f4db91fe0b7527256fcaf4a223bd6f857b18f2..0f6c2c7422671d51b05f67b56f1844d414fe952c 100644
 --- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
 +++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
 @@ -276,4 +276,59 @@ layer("ProjectionThreadMessageRepository", (it) => {
@@ -3805,7 +3813,7 @@ index 12f4db91f..0f6c2c742 100644
 +  );
  });
 diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
-index eae7189de..4637c0ce5 100644
+index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a09159f2a250 100644
 --- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
 +++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
 @@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
@@ -3915,7 +3923,7 @@ index eae7189de..4637c0ce5 100644
            attachments_json AS "attachments",
            is_streaming AS "isStreaming",
 diff --git a/apps/server/src/persistence/Migrations.ts b/apps/server/src/persistence/Migrations.ts
-index c95f746d3..eddabea5e 100644
+index c95f746d3648b7db5d8ccbe74e4132043230f325..eddabea5e029748e7bd14f9bb1073b734f96e8ea 100644
 --- a/apps/server/src/persistence/Migrations.ts
 +++ b/apps/server/src/persistence/Migrations.ts
 @@ -11,6 +11,12 @@
@@ -3975,7 +3983,7 @@ index c95f746d3..eddabea5e 100644
  });
 diff --git a/apps/server/src/persistence/ReasoningSchema.test.ts b/apps/server/src/persistence/ReasoningSchema.test.ts
 new file mode 100644
-index 000000000..45ddbaa4b
+index 0000000000000000000000000000000000000000..45ddbaa4b041f84c95f1ffe0d06a3b6e154d2bfd
 --- /dev/null
 +++ b/apps/server/src/persistence/ReasoningSchema.test.ts
 @@ -0,0 +1,264 @@
@@ -4245,7 +4253,7 @@ index 000000000..45ddbaa4b
 +});
 diff --git a/apps/server/src/persistence/ReasoningSchema.ts b/apps/server/src/persistence/ReasoningSchema.ts
 new file mode 100644
-index 000000000..d953ba2f3
+index 0000000000000000000000000000000000000000..d953ba2f3ea0287f8c004a769af5d5611c50b225
 --- /dev/null
 +++ b/apps/server/src/persistence/ReasoningSchema.ts
 @@ -0,0 +1,109 @@
@@ -4359,7 +4367,7 @@ index 000000000..d953ba2f3
 +  return true;
 +});
 diff --git a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
-index a7e258ad5..8c246e547 100644
+index a7e258ad5dc095929c5eacdf3ed854dd81d292ab..8c246e5477bcb878d60cdefab92f3267cb54e29f 100644
 --- a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
 +++ b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
 @@ -10,6 +10,7 @@ import {
@@ -4379,7 +4387,7 @@ index a7e258ad5..8c246e547 100644
    attachments: Schema.optional(Schema.Array(ChatAttachment)),
    isStreaming: Schema.Boolean,
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-index 13b44c166..94d4de9e9 100644
+index 13b44c1669fa5fe536b90b3505f4bff991867686..94d4de9e9535a8912b07b44996c6cafa79e057df 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 @@ -574,6 +574,50 @@ describe("ClaudeAdapterLive", () => {
@@ -4434,7 +4442,7 @@ index 13b44c166..94d4de9e9 100644
      const harness = makeHarness();
      return Effect.gen(function* () {
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index 1ecde618e..478aebff5 100644
+index 1ecde618e191881c3d28f9799d1c258f41c63079..478aebff57e4843701df055d27bbaa15bad6b5bd 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
 @@ -4641,6 +4641,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
@@ -4447,7 +4455,7 @@ index 1ecde618e..478aebff5 100644
          onUserDialog,
          supportedDialogKinds: ["resume_return"],
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-index 0136c3fbf..2cffc4fee 100644
+index 0136c3fbf170d97eeb741405c27560b55ffd0dd8..2cffc4feee82334def863560c1116c7b3a18ad17 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 @@ -116,6 +116,7 @@ describe("buildTurnStartParams", () => {
@@ -4483,7 +4491,7 @@ index 0136c3fbf..2cffc4fee 100644
    });
  });
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index 4b88b7ce0..95b619f20 100644
+index 4b88b7ce01c0f4c9d95d19f80402d0141406364a..95b619f20117304cd08e2cae70b105013ded041e 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 @@ -636,6 +636,8 @@ export function buildTurnStartParams(input: {
@@ -4496,7 +4504,7 @@ index 4b88b7ce0..95b619f20 100644
    }).pipe(
      Effect.mapError((cause) =>
 diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
-index e1cf7f0dc..b137f01f4 100644
+index e1cf7f0dc6e7b8282ce6bc4d71d9ea8b05b3f245..b137f01f48e5984aa5a182b83cbddae302b9f762 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
 +++ b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
 @@ -24,10 +24,12 @@ import {
@@ -5089,7 +5097,7 @@ index e1cf7f0dc..b137f01f4 100644
  
    it("withholds assistant metadata while the active turn is still in progress", () => {
 diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.ts b/apps/web/src/components/chat/MessagesTimeline.logic.ts
-index 08e4f8d26..7160e4516 100644
+index 08e4f8d26037aa980a2682148e4bf1bfea427581..7160e451652f8c9625bb0a56bc0da012b3f6866d 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.logic.ts
 +++ b/apps/web/src/components/chat/MessagesTimeline.logic.ts
 @@ -28,7 +28,13 @@ import {
@@ -5279,7 +5287,7 @@ index 08e4f8d26..7160e4516 100644
        kind: "thinking",
        id: LIVE_ACTIVITY_ROW_ID,
 diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
-index a113157ac..c2499a365 100644
+index a113157aca3304afc055169ece83f4afd622066f..c2499a365cf9f041da30b88160ba7e3966e517f7 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.tsx
 +++ b/apps/web/src/components/chat/MessagesTimeline.tsx
 @@ -1,4 +1,5 @@
@@ -5440,7 +5448,7 @@ index a113157ac..c2499a365 100644
    const ctx = use(TimelineRowCtx);
    const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
 diff --git a/docs/README.md b/docs/README.md
-index 4e6f82bfb..9cf8ea1a5 100644
+index 4e6f82bfb82655293965a492db6c86889cc6efd7..9cf8ea1a5c9f1e02899303e5f0efcc393029788a 100644
 --- a/docs/README.md
 +++ b/docs/README.md
 @@ -5,6 +5,7 @@
@@ -5452,7 +5460,7 @@ index 4e6f82bfb..9cf8ea1a5 100644
  - [Terminal history](./user/terminal.md)
  - [Source control](./user/source-control.md)
 diff --git a/docs/internals/glossary.md b/docs/internals/glossary.md
-index f7cb61259..589fb38bc 100644
+index f7cb61259c0e3423a0a1aae69f5a730d70b3fa5e..589fb38bc8e265cf0171d5ba38c34f287a8de31f 100644
 --- a/docs/internals/glossary.md
 +++ b/docs/internals/glossary.md
 @@ -5,17 +5,18 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
@@ -5486,7 +5494,7 @@ index f7cb61259..589fb38bc 100644
  ## Orchestration
  
 diff --git a/docs/user/providers-claude.md b/docs/user/providers-claude.md
-index b43b58e52..d8d4cb60e 100644
+index b43b58e5262761f7caa18d40bac3d27d608a3412..d8d4cb60e0b38f599e380a0dda47f1be53c8cd46 100644
 --- a/docs/user/providers-claude.md
 +++ b/docs/user/providers-claude.md
 @@ -49,6 +49,12 @@ You can also send `/compact` in an existing conversation. Web and desktop offer
@@ -5504,7 +5512,7 @@ index b43b58e52..d8d4cb60e 100644
  If your Claude subscription runs out of usage mid-turn, the thread shows which
 diff --git a/docs/user/reasoning.md b/docs/user/reasoning.md
 new file mode 100644
-index 000000000..64a8d2fa4
+index 0000000000000000000000000000000000000000..64a8d2fa4bc47dddf8b9df852f6a9f4b7839b07e
 --- /dev/null
 +++ b/docs/user/reasoning.md
 @@ -0,0 +1,23 @@
@@ -5532,7 +5540,7 @@ index 000000000..64a8d2fa4
 +For Claude, what you read is a summary of the thinking rather than the model's raw words. Recent
 +Claude Code versions do not hand out raw thinking, so T3 Code asks for the summarized form.
 diff --git a/packages/client-runtime/src/state/threadReducer.test.ts b/packages/client-runtime/src/state/threadReducer.test.ts
-index 38afce2d5..6cd1f5e6e 100644
+index 38afce2d5cb790d42a0751994d7757d3d5f4ddcf..6cd1f5e6ec7e3a21251dd259cd524e9e2dbe19bc 100644
 --- a/packages/client-runtime/src/state/threadReducer.test.ts
 +++ b/packages/client-runtime/src/state/threadReducer.test.ts
 @@ -718,6 +718,58 @@ describe("applyThreadDetailEvent", () => {
@@ -5891,7 +5899,7 @@ index 38afce2d5..6cd1f5e6e 100644
        const threadWithData: OrchestrationThread = {
          ...baseThread,
 diff --git a/packages/client-runtime/src/state/threadReducer.ts b/packages/client-runtime/src/state/threadReducer.ts
-index a3481fdc7..d5c34c863 100644
+index a3481fdc729c53e3824bf5bfd15a3aafbf3c79d8..d5c34c8635178e0d5a015b9297451558fc8674cb 100644
 --- a/packages/client-runtime/src/state/threadReducer.ts
 +++ b/packages/client-runtime/src/state/threadReducer.ts
 @@ -1,16 +1,17 @@
@@ -5974,7 +5982,7 @@ index a3481fdc7..d5c34c863 100644
            (message.turnId === null || retainedTurnIds.has(message.turnId)),
        )
 diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
-index 37f5476fe..dc752384e 100644
+index 37f5476fecc8d86a3c80a0c5a1b88a1b5f28313a..dc752384e2fb503ab25d92a2554c22d1002a0b70 100644
 --- a/packages/contracts/src/orchestration.ts
 +++ b/packages/contracts/src/orchestration.ts
 @@ -351,9 +351,13 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
