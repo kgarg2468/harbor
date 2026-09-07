@@ -79,6 +79,11 @@
       "sha256": "66ced494e5f39530e0791027a71f2422405511fc1c387cf0103a7f8474ef4cd9"
     },
     {
+      "id": "managed-release-feed",
+      "path": "patches/0020-managed-release-feed.patch",
+      "sha256": "a6be628e58c97494288906820fdedb40a3aec873fb7a9a0980022c29c1a5255e"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "3c242c29b863494e637a339b45788ea056c67b312bbdb98871eae8349ee66897"
@@ -99,7 +104,8 @@
       "server-reservation",
       "candidate-process",
       "managed-runtime-transaction",
-      "shared-default"
+      "shared-default",
+      "managed-release-feed"
     ],
     "reasoning": [
       "reasoning-full",
@@ -116,6 +122,7 @@
       "candidate-process",
       "managed-runtime-transaction",
       "shared-default",
+      "managed-release-feed",
       "reasoning-identity"
     ]
   }
