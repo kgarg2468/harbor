@@ -99,6 +99,11 @@
       "sha256": "9097865599e7caafb54260c0097f8459c2d59914b321f5b846fd94d8601a3f27"
     },
     {
+      "id": "idle-preparation",
+      "path": "patches/0022-idle-preparation.patch",
+      "sha256": "e06ccb31d29447c23c2577b1f577e6e162155cd465586dbddbe97f2e4405f43b"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "3c242c29b863494e637a339b45788ea056c67b312bbdb98871eae8349ee66897"
@@ -123,7 +128,8 @@
       "shared-default",
       "managed-release-feed",
       "native-activity",
-      "managed-queue-handoff"
+      "managed-queue-handoff",
+      "idle-preparation"
     ],
     "reasoning": [
       "reasoning-full",
@@ -144,6 +150,7 @@
       "managed-release-feed",
       "native-activity",
       "managed-queue-handoff",
+      "idle-preparation",
       "reasoning-identity"
     ]
   }
