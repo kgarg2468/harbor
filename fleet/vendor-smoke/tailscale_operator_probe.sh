@@ -93,7 +93,22 @@ codename="${channel##*/}"
 # every exit path, successful or not, so that no later step of the job can find a login
 # URL lying on the filesystem and no artifact upload can sweep one up by accident.
 work=""
+published=0
 cleanup() {
+  local rc=$?
+  # A set -e exit anywhere below -- a keyring that will not download, a pin the channel
+  # does not carry, an account that will not be created -- ends this script without ever
+  # reaching abort, and the record built so far would be removed with the working
+  # directory just underneath. The workflow uploads that record whatever happened, so a
+  # run that could not measure has to leave one behind too; otherwise the artifact is
+  # silently absent exactly on the runs worth reading. The verdict is the same one abort
+  # records, because a measurement that did not happen is not a measurement.
+  if [ "${rc}" != 0 ] && [ "${published}" = 0 ] && [ -n "${work}" ] && [ -f "${work}/record" ]; then
+    emit result inconclusive
+    emit ssh_probe_reason not-reached
+    emit note "the lane exited ${rc} before the measurement was made; the job log above this record says where it stopped"
+    publish || :
+  fi
   [ -z "${work}" ] || rm -rf "${work}"
 }
 trap cleanup EXIT
@@ -111,6 +126,9 @@ emit() {
 # the workflow uploads as the artifact -- from the one file every line was appended to,
 # so the three cannot disagree.
 publish() {
+  # Set first, so that a failure inside this function cannot make the EXIT trap publish a
+  # second, contradictory copy of the same record.
+  published=1
   banner 'record'
   cat "${work}/record"
   mkdir -p "$(dirname "${record}")"
