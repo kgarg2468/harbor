@@ -26,6 +26,20 @@ IT_BASELINE="${IT_ROOT}/baseline"
 IT_SHIM_LOG="${IT_STATE}/shim.log"
 IT_MUT_LOG="${IT_STATE}/mutations.log"
 IT_SCENARIO_FILE="${IT_STATE}/scenario"
+# The tailscale stand-in's own two state files, written by stub/tailscale and by
+# nothing else: the operator its "set --operator" recorded, and the BackendState its
+# "up" moves from NeedsLogin to Running. The stub ships inside the locally built
+# package and so cannot source this file; it spells both paths as literals, the same
+# way the bin/ wrappers do. Keep them in step.
+IT_TS_OPERATOR="${IT_STATE}/tailscale.operator"
+IT_TS_BACKEND="${IT_STATE}/tailscale.backend"
+# The login URL that stand-in prints for "tailscale up". Design section 3.6 says the
+# URL reaches the operator's terminal and no log, and an absence assertion proves
+# nothing unless the string it looks for is one that really was printed, so it is a
+# fixed literal on both sides rather than anything either side generates. Keep it byte
+# for byte in step with it_login_url in stub/tailscale. The host is under the reserved
+# .invalid domain: nothing resolves it and nothing secret is involved.
+IT_LOGIN_URL="https://login.tailscale-integration.invalid/a/f00dcafe0123456789"
 # Which entrypoint the last run_root.sh invoked. A run started from the checkout
 # stages the release and re-execs the installed copy; a run started from the
 # installed entrypoint is already that copy and correctly re-execs nothing. Only the
@@ -264,4 +278,11 @@ it_journal_phases() {
 # it_release_tag -- the tag the lane created on the checkout under test.
 it_release_tag() {
   cat "${IT_STATE}/release-tag"
+}
+
+# it_operator_home -- the operator's home directory, as getent reports it. The
+# operator state root of design section 3.7 lives under it, and the scripts that need
+# it run as root, so ${HOME} would answer for root instead.
+it_operator_home() {
+  getent passwd "${IT_OPERATOR}" | cut -d: -f6
 }
