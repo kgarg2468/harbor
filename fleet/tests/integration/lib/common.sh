@@ -141,6 +141,17 @@ it_file_absent() {
   fi
 }
 
+# it_mode_owner PATH -- "MODE OWNER GROUP", with the mode in the four octal digits
+# the design writes modes in. stat prints %a without a leading zero, so a 0755
+# directory reads as 755 and every mode assertion in this lane compared a padded
+# expectation against an unpadded reading and failed on all of them. Padded here,
+# once, in the same shape lib/checks.sh reads a mode in.
+it_mode_owner() {
+  local raw
+  raw="$(stat -c '%a %U %G' "${1}")"
+  printf '%04d %s' "${raw%% *}" "${raw#* }"
+}
+
 # it_file LABEL MODE OWNER GROUP PATH -- exists as a regular file with the given
 # mode and ownership.
 it_file() {
@@ -154,7 +165,7 @@ it_file() {
     it_fail "${label}: ${path} is not a regular file"
     return 0
   fi
-  stat="$(stat -c '%a %U %G' "${path}")"
+  stat="$(it_mode_owner "${path}")"
   it_eq "${label} mode/owner (${path})" "${mode} ${owner} ${group}" "${stat}"
 }
 
@@ -170,7 +181,7 @@ it_dir() {
     it_fail "${label}: ${path} is not a directory"
     return 0
   fi
-  stat="$(stat -c '%a %U %G' "${path}")"
+  stat="$(it_mode_owner "${path}")"
   it_eq "${label} mode/owner (${path})" "${mode} ${owner} ${group}" "${stat}"
 }
 

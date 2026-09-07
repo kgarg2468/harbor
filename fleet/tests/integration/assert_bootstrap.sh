@@ -47,7 +47,11 @@ it_symlink 'entrypoint symlink' "${release}/bin/harbor" "${IT_LINK}"
 
 # Nothing in the installed tree may be group- or other-writable, whatever modes
 # the archived tag carried.
-loose="$(find "${release}" -perm /0022 -print)"
+# Symbolic links are excluded, and are not an exception being made: a symlink is mode
+# 0777 on Linux always, the kernel never consults it, and what may be written is
+# decided by the target's own mode, which this walk reaches on its own. The shims
+# under tests/ are links, so including them would report every release as loose.
+loose="$(find "${release}" ! -type l -perm /0022 -print)"
 it_eq 'no group- or other-writable path in the release' '' "${loose}"
 
 # ---------------------------------------------------------------------------
@@ -57,9 +61,15 @@ log="$(cat "${IT_HARBOR_LOG}")"
 it_file 'the bootstrap log' 0600 root root "${IT_HARBOR_LOG}"
 it_contains 're-exec of the installed entrypoint' \
   "exec ${IT_LINK} bootstrap" "${log}"
-it_contains 'the checkout rules approved the tag' \
-  "the checkout rules approved " "${log}"
-it_contains 'the approved tree was the tag' " at ${tag} in " "${log}"
+# The checkout rules of design section 6.1 are what let this run install anything:
+# harbor_checkout_tag refuses a tree that is dirty, carries an untracked file, or sits
+# anywhere but exactly at a tag. There is no separate line announcing that, and the
+# wording asserted here before was never emitted by anything. The proof that is
+# actually written down is the one below: the entrypoint the re-exec lands on is the
+# release the journal records installing, and it is named for the tag.
+it_contains 'the installed entrypoint is proven by its harbor-install entry' \
+  "entrypoint ${release} is proven by an applied harbor-install entry" "${log}"
+it_contains 'the release the run installed is the tag' "${tag}" "${log}"
 
 # ---------------------------------------------------------------------------
 section 'operator user'
