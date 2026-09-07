@@ -87,4 +87,4 @@ it_done "converge (${step}), before the full assertions"
 section 'the converged node is the node a clean bootstrap produces'
 # ---------------------------------------------------------------------------
 sudo bash "${IT_INTEGRATION}/assert_bootstrap.sh" --after-recovery
-"${IT_INTEGRATION}/assert_rerun.sh"
+"${IT_INTEGRATION}/assert_rerun.sh" --after-recovery

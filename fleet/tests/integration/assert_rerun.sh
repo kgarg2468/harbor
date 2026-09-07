@@ -27,6 +27,18 @@ set -euo pipefail
   exit 1
 }
 
+# --after-recovery: as in assert_bootstrap.sh. This node reached its state through a
+# crash and a rerun, so the journal may carry an entry the recovery scan reverted.
+after_recovery=0
+case "${1:-}" in
+  --after-recovery) after_recovery=1 ;;
+  '') ;;
+  *)
+    printf 'assert_rerun.sh: unknown argument %s\n' "${1}" >&2
+    exit 1
+    ;;
+esac
+
 snapshot="$(mktemp -d)"
 trap 'rm -rf "${snapshot}"' EXIT
 
@@ -123,8 +135,21 @@ for entry in "${snapshot}/journal.after"/*.json; do
   phases="${phases}$(it_journal_field "${entry}" phase)
 "
 done
-it_eq 'every entry is still applied' applied \
-  "$(printf '%s' "${phases}" | LC_ALL=C sort -u | tr -d '\n')"
+phases="$(printf '%s' "${phases}" | LC_ALL=C sort -u | tr -d '\n')"
+if [ "${after_recovery}" = 1 ]; then
+  # A reverted entry is the recovery scan of the earlier rerun having decided the
+  # crashed mutation never happened, and this second rerun leaves it exactly as it
+  # found it. What matters here is that nothing moved back to prepared and nothing
+  # became undecidable, not that the crash left no trace.
+  case "${phases}" in
+    applied | appliedreverted | reverted)
+      it_pass "every entry is still applied or reverted (${phases})"
+      ;;
+    *) it_fail "a journal entry is neither applied nor reverted: ${phases}" ;;
+  esac
+else
+  it_eq 'every entry is still applied' applied "${phases}"
+fi
 
 # ---------------------------------------------------------------------------
 section 'the state record is untouched'
