@@ -56,19 +56,19 @@ done
 
 it_kind=inspect
 case "${it_prog}:${it_verb}" in
-  systemctl:mask | systemctl:unmask | systemctl:start | systemctl:stop \
-    | systemctl:restart | systemctl:reload | systemctl:enable | systemctl:disable \
-    | systemctl:daemon-reload | systemctl:daemon-reexec | systemctl:set-property \
-    | systemctl:preset | systemctl:link | systemctl:revert | systemctl:kill)
+  systemctl:mask | systemctl:unmask | systemctl:start | systemctl:stop | \
+    systemctl:restart | systemctl:reload | systemctl:enable | systemctl:disable | \
+    systemctl:daemon-reload | systemctl:daemon-reexec | systemctl:set-property | \
+    systemctl:preset | systemctl:link | systemctl:revert | systemctl:kill)
     it_kind=mutate
     ;;
-  loginctl:enable-linger | loginctl:disable-linger | loginctl:terminate-user \
-    | loginctl:kill-user | loginctl:lock-session | loginctl:terminate-session)
+  loginctl:enable-linger | loginctl:disable-linger | loginctl:terminate-user | \
+    loginctl:kill-user | loginctl:lock-session | loginctl:terminate-session)
     it_kind=mutate
     ;;
-  apt-get:install | apt-get:remove | apt-get:purge | apt-get:update \
-    | apt-get:upgrade | apt-get:dist-upgrade | apt-get:full-upgrade \
-    | apt-get:autoremove | apt-get:clean | apt-get:autoclean | apt-get:reinstall)
+  apt-get:install | apt-get:remove | apt-get:purge | apt-get:update | \
+    apt-get:upgrade | apt-get:dist-upgrade | apt-get:full-upgrade | \
+    apt-get:autoremove | apt-get:clean | apt-get:autoclean | apt-get:reinstall)
     if [ "${it_simulate}" = no ]; then
       it_kind=mutate
     fi

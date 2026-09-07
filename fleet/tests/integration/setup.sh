@@ -219,6 +219,11 @@ if [ ! -x /usr/sbin/sshd ]; then
   printf 'openssh-server is absent from this image; installing it before the baseline\n'
   sudo env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y openssh-server
 fi
+# sshd refuses every invocation, -T and -t alike, when its privilege separation
+# directory is missing, and /run is a tmpfs the runner image boots empty without ever
+# having started sshd. Created here rather than in the assertions, because the -t of
+# bootstrap's own ssh row needs it just as much as this baseline does.
+sudo install -d -m 0755 -o root -g root /run/sshd
 sudo /usr/sbin/sshd -T -C "user=${IT_ADMIN}" | LC_ALL=C sort \
   | sudo tee "${IT_BASELINE}/sshd-admin.txt" >/dev/null
 sudo chmod 0644 "${IT_BASELINE}/sshd-admin.txt"
