@@ -214,9 +214,15 @@ banner 'the two unprivileged accounts'
 # create_probe_user USER: an ordinary account with a home and no authority at all. Both
 # the grant and the refusal this lane records are only worth recording about an account
 # that could not have done the thing anyway by being root, so an account that can reach
-# sudo aborts the run rather than quietly producing a flattering result.
+# sudo is made powerless before it is measured, and one that is still not powerless
+# afterwards aborts the run rather than quietly producing a flattering result.
+#
+# The hosted runner image ships a sudoers rule that grants every account passwordless
+# sudo, so an account created here inherits root the moment it exists. That is the
+# runner's arrangement and not something to work around silently: the lane revokes it
+# for its own two accounts, explicitly, and says so in the record.
 create_probe_user() {
-  local user="${1}" groups
+  local user="${1}" groups rule
   if id "${user}" >/dev/null 2>&1; then
     abort "the account ${user} already exists on this runner, and this lane will only measure accounts it created itself"
   fi
@@ -227,15 +233,29 @@ create_probe_user() {
       abort "the probe account ${user} landed in a privileged group (${groups}), so nothing it is answered would be an unprivileged answer"
       ;;
   esac
-  # sudo's own answer, not a guess from group membership: a sudoers drop-in could grant
-  # an account that is in no privileged group at all, and the runner image ships one.
-  if sudo -n -l -U "${user}" >/dev/null 2>&1; then
-    abort "sudo lists rules for the probe account ${user}, so it is not the powerless account this measurement needs"
+  # Written through visudo -c before it is installed, because a sudoers file that does
+  # not parse takes sudo down for every account on the machine, this script's own
+  # workflow user included, and it would take it down after the point where this lane
+  # could still report why.
+  rule="${work}/sudoers-${user}"
+  printf '%s ALL=(ALL:ALL) !ALL\n' "${user}" >"${rule}"
+  sudo visudo -cqf "${rule}" \
+    || abort "the sudoers rule that revokes ${user}'s inherited sudo does not parse, and nothing was installed"
+  sudo install -m 0440 -o root -g root "${rule}" "/etc/sudoers.d/harbor-smoke-deny-${user}"
+  # The check is what the account can do, not what sudo lists for it: the rule above is
+  # itself a rule, so a listing check would go on matching it. This runs sudo as that
+  # account and requires it to be refused, which is the only form of the question whose
+  # answer cannot be satisfied by a rule that merely exists.
+  if sudo runuser -u "${user}" -- sudo -n true >/dev/null 2>&1; then
+    abort "the probe account ${user} can still reach root through sudo after its grant was revoked, so it is not the powerless account this measurement needs"
   fi
-  printf '%s: created, groups %s, no sudo\n' "${user}" "${groups}"
+  printf '%s: created, groups %s, sudo revoked and refused\n' "${user}" "${groups}"
 }
 create_probe_user "${PROBE_OPERATOR}"
 create_probe_user "${PROBE_OTHER}"
+# Recorded, because it is a fact about the accounts every reading below was taken from:
+# they were powerless by this lane's own action rather than by the machine's default.
+emit probe_account_sudo revoked-and-refused
 
 # ---------------------------------------------------------------------------
 banner 'reading: tailscale get operator on the pinned version'
