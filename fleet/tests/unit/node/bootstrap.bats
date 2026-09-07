@@ -1545,7 +1545,7 @@ expected_rows() {
   assert_equal "$(phase_of file "${STATE}/bootstrap.json")" prepared
   assert_equal "$(harbor_entrypoint_record_tag "${STATE}/bootstrap.json")" "${TAG}"
   run cat "${STATE}/bootstrap.json"
-  assert_equal "${#lines[@]}" 13
+  assert_equal "${#lines[@]}" 14
   assert_equal "$(harbor_stat_mode "${STATE}/bootstrap.json")" 0644
   # And the rerun decides that entry and converges without rewriting the record.
   local before
