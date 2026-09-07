@@ -114,9 +114,14 @@
       "sha256": "92fcfbe0952f55ca4f6420c4f27bf6d84c5442a548305e99f205403fce24a728"
     },
     {
+      "id": "managed-desktop-identity",
+      "path": "patches/0025-managed-desktop-identity.patch",
+      "sha256": "687eb31620542f320c4cca75d05827b8d6b8a3cca432cd472f195b0eb1dfe5e4"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "3c242c29b863494e637a339b45788ea056c67b312bbdb98871eae8349ee66897"
+      "sha256": "ec810bc93f35c387f64f02a384006d9865a6f86e9217feb40aab99d31c921ab3"
     }
   ],
   "variants": {
@@ -141,7 +146,8 @@
       "native-activity",
       "idle-preparation",
       "managed-server-composition",
-      "live-admission"
+      "live-admission",
+      "managed-desktop-identity"
     ],
     "reasoning": [
       "reasoning-full",
@@ -165,6 +171,7 @@
       "idle-preparation",
       "managed-server-composition",
       "live-admission",
+      "managed-desktop-identity",
       "reasoning-identity"
     ]
   }

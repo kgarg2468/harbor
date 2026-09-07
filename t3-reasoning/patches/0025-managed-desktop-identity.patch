@@ -1,0 +1,387 @@
+diff --git a/apps/desktop/src/settings/DesktopClientSettings.test.ts b/apps/desktop/src/settings/DesktopClientSettings.test.ts
+index 6bf0e87c9324bd89778c527df6e44929a64ac61c..d475c4ed36bfce8c27ba849b7a6ddab18d43ce19 100644
+--- a/apps/desktop/src/settings/DesktopClientSettings.test.ts
++++ b/apps/desktop/src/settings/DesktopClientSettings.test.ts
+@@ -32,6 +32,7 @@ const clientSettings: ClientSettings = {
+   diffIgnoreWhitespace: true,
+   diffLayout: "stacked",
+   environmentIdentificationMode: "artwork",
++  preferredEnvironmentId: null,
+   favorites: [],
+   fontFamilyCode: "",
+   fontFamilyComposer: "",
+diff --git a/apps/desktop/src/updates/updateChannels.test.ts b/apps/desktop/src/updates/updateChannels.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..777915df55dfb84ce0bf50997a5b63808fe0dc22
+--- /dev/null
++++ b/apps/desktop/src/updates/updateChannels.test.ts
+@@ -0,0 +1,83 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { isNightlyDesktopVersion, resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
++
++const ORDINARY_NIGHTLY = "0.0.40-nightly.20260907.1359";
++const MANAGED_NIGHTLY = "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab";
++
++describe("isNightlyDesktopVersion", () => {
++  it("recognizes ordinary and managed nightly versions", () => {
++    expect(isNightlyDesktopVersion(ORDINARY_NIGHTLY)).toBe(true);
++    expect(isNightlyDesktopVersion(MANAGED_NIGHTLY)).toBe(true);
++    expect(isNightlyDesktopVersion("0.0.40-nightly.20260907.1359.managed.12.pabcdef012345")).toBe(
++      true,
++    );
++    // Any positive safe integer is a valid managed counter.
++    expect(
++      isNightlyDesktopVersion(
++        "0.0.40-nightly.20260907.1359.managed.9007199254740991.p0123456789ab",
++      ),
++    ).toBe(true);
++    // Ordinary nightly classification stays suffix-only.
++    expect(isNightlyDesktopVersion("junk-nightly.20260907.1359")).toBe(true);
++  });
++
++  it("keeps stable and preview versions outside nightly", () => {
++    expect(isNightlyDesktopVersion("0.0.40")).toBe(false);
++    expect(isNightlyDesktopVersion("0.0.40-pr.8182.1")).toBe(false);
++  });
++
++  it("rejects near misses of the managed grammar", () => {
++    for (const version of [
++      // zero or malformed counter
++      "0.0.40-nightly.20260907.1359.managed.0.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.01.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.x.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed..p0123456789ab",
++      // counter above Number.MAX_SAFE_INTEGER
++      "0.0.40-nightly.20260907.1359.managed.9007199254740992.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.99999999999999999999.p0123456789ab",
++      // junk or non-SemVer prefix before the nightly base
++      "junk-nightly.20260907.1359.managed.1.p0123456789ab",
++      "v0.0.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.0.40.1-nightly.20260907.1359.managed.1.p0123456789ab",
++      // leading zeros in the SemVer core, run id, or date
++      "00.0.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.00.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.0.040-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.0.40-nightly.20260907.01359.managed.1.p0123456789ab",
++      "0.0.40-nightly.02260907.1359.managed.1.p0123456789ab",
++      // digest length, case, or prefix
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789a",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789abc",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789AB",
++      "0.0.40-nightly.20260907.1359.managed.1.0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.1.pghijklmnopqr",
++      // missing or extra segments
++      "0.0.40-nightly.20260907.1359.managed.1",
++      "0.0.40-nightly.20260907.1359.managed.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab.extra",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab-dirty",
++      "0.0.40-nightly.20260907.1359-managed.1.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.Managed.1.p0123456789ab",
++      // managed suffix on a non-nightly base
++      "0.0.40.managed.1.p0123456789ab",
++      "0.0.40-pr.8182.1.managed.1.p0123456789ab",
++      "0.0.40-nightly.2026090.1359.managed.1.p0123456789ab",
++    ]) {
++      expect(isNightlyDesktopVersion(version), version).toBe(false);
++    }
++  });
++});
++
++describe("resolveDefaultDesktopUpdateChannel", () => {
++  it("defaults managed nightly versions to the nightly channel", () => {
++    expect(resolveDefaultDesktopUpdateChannel(ORDINARY_NIGHTLY)).toBe("nightly");
++    expect(resolveDefaultDesktopUpdateChannel(MANAGED_NIGHTLY)).toBe("nightly");
++    expect(resolveDefaultDesktopUpdateChannel("0.0.40")).toBe("latest");
++    expect(
++      resolveDefaultDesktopUpdateChannel("0.0.40-nightly.20260907.1359.managed.1.p0123456789AB"),
++    ).toBe("latest");
++  });
++});
+diff --git a/apps/desktop/src/updates/updateChannels.ts b/apps/desktop/src/updates/updateChannels.ts
+index 731910e441feab521581fea3d98a27c85e566991..8e74051f1d499c1badc35fd3ad1259dc72a639f3 100644
+--- a/apps/desktop/src/updates/updateChannels.ts
++++ b/apps/desktop/src/updates/updateChannels.ts
+@@ -1,9 +1,29 @@
+ import type { DesktopUpdateChannel } from "@t3tools/contracts";
+ 
+-const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
++// Ordinary upstream nightlies keep their historical suffix-only classification.
++const ORDINARY_NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
++
++// Harbor derives a managed desktop version from an ordinary nightly version by
++// appending `.managed.<counter>.p<12 lowercase hex>`, and the whole string must
++// match Harbor's release descriptor grammar: SemVer numerics without leading
++// zeros, an eight-digit date that does not start with zero, and a counter that
++// is a positive safe integer. Near misses keep the stable classification. Keep
++// in sync with scripts/build-desktop-artifact.ts.
++const SEMVER_NUMERIC = "(?:0|[1-9]\\d*)";
++const MANAGED_NIGHTLY_VERSION_PATTERN = new RegExp(
++  `^${SEMVER_NUMERIC}\\.${SEMVER_NUMERIC}\\.${SEMVER_NUMERIC}-nightly\\.[1-9]\\d{7}\\.${SEMVER_NUMERIC}` +
++    `\\.managed\\.(${SEMVER_NUMERIC})\\.p[0-9a-f]{12}$`,
++);
++
++function isManagedNightlyDesktopVersion(version: string): boolean {
++  const match = MANAGED_NIGHTLY_VERSION_PATTERN.exec(version);
++  if (match === null) return false;
++  const releaseCounter = Number(match[1]);
++  return Number.isSafeInteger(releaseCounter) && releaseCounter >= 1;
++}
+ 
+ export function isNightlyDesktopVersion(version: string): boolean {
+-  return NIGHTLY_VERSION_PATTERN.test(version);
++  return ORDINARY_NIGHTLY_VERSION_PATTERN.test(version) || isManagedNightlyDesktopVersion(version);
+ }
+ 
+ export function resolveDefaultDesktopUpdateChannel(appVersion: string): DesktopUpdateChannel {
+diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
+index affb83eb750642c23aa6f6fc40781a537513fc10..9c7634074a4973ed8216443db75af10151805e4e 100644
+--- a/scripts/build-desktop-artifact.test.ts
++++ b/scripts/build-desktop-artifact.test.ts
+@@ -30,6 +30,7 @@ import {
+   InvalidMacPasskeyPublishableKeyError,
+   InvalidMockUpdateServerPortError,
+   UnsupportedDesktopBuildArchitectureError,
++  isManagedDesktopVersion,
+   isMacPasskeySigningConfigurationError,
+   LinuxIconResizeError,
+   LinuxDesktopBuildPrerequisitesMissingError,
+@@ -89,6 +90,10 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+ import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+ import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+ 
++// Harbor's exact managed desktop version form: an ordinary nightly version
++// followed by `.managed.<positive counter>.p<12 lowercase hex>`.
++const MANAGED_NIGHTLY_VERSION = "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab";
++
+ // A minimal stand-in for the staged sidecar roots packed into the WSL archive.
+ const stageWslRuntimeTreeFixture = Effect.fn("stageWslRuntimeTreeFixture")(function* (
+   root: string,
+@@ -257,11 +262,81 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+   it("resolves the dedicated nightly updater channel from nightly versions", () => {
+     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
+     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
++    assert.equal(resolveDesktopUpdateChannel("0.0.33-pr.8182.1"), "latest");
++  });
++
++  it("classifies only the exact Harbor managed grammar as a managed nightly version", () => {
++    assert.equal(resolveDesktopUpdateChannel(MANAGED_NIGHTLY_VERSION), "nightly");
++    assert.isTrue(isManagedDesktopVersion(MANAGED_NIGHTLY_VERSION));
++    assert.isTrue(isManagedDesktopVersion("0.0.40-nightly.20260907.1359.managed.27.pabcdef012345"));
++    // Any positive safe integer is a valid managed counter.
++    assert.isTrue(
++      isManagedDesktopVersion(
++        "0.0.40-nightly.20260907.1359.managed.9007199254740991.p0123456789ab",
++      ),
++    );
++    // Ordinary nightly and stable versions are never managed.
++    assert.isFalse(isManagedDesktopVersion("0.0.40-nightly.20260907.1359"));
++    assert.isFalse(isManagedDesktopVersion("0.0.40"));
++    // Ordinary nightly classification stays suffix-only.
++    assert.equal(resolveDesktopUpdateChannel("junk-nightly.20260907.1359"), "nightly");
++
++    for (const version of [
++      // zero or malformed counter
++      "0.0.40-nightly.20260907.1359.managed.0.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.01.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.x.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed..p0123456789ab",
++      // counter above Number.MAX_SAFE_INTEGER
++      "0.0.40-nightly.20260907.1359.managed.9007199254740992.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.99999999999999999999.p0123456789ab",
++      // junk or non-SemVer prefix before the nightly base
++      "junk-nightly.20260907.1359.managed.1.p0123456789ab",
++      "v0.0.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.0.40.1-nightly.20260907.1359.managed.1.p0123456789ab",
++      // leading zeros in the SemVer core, run id, or date
++      "00.0.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.00.40-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.0.040-nightly.20260907.1359.managed.1.p0123456789ab",
++      "0.0.40-nightly.20260907.01359.managed.1.p0123456789ab",
++      "0.0.40-nightly.02260907.1359.managed.1.p0123456789ab",
++      "0.0.40-nightly.2026090.1359.managed.1.p0123456789ab",
++      // digest length, case, or prefix
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789a",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789abc",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789AB",
++      "0.0.40-nightly.20260907.1359.managed.1.0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.1.pghijklmnopqr",
++      // missing or extra segments
++      "0.0.40-nightly.20260907.1359.managed.1",
++      "0.0.40-nightly.20260907.1359.managed.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab.extra",
++      "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab-dirty",
++      "0.0.40-nightly.20260907.1359-managed.1.p0123456789ab",
++      "0.0.40-nightly.20260907.1359.Managed.1.p0123456789ab",
++      // managed suffix on a non-nightly base
++      "0.0.40.managed.1.p0123456789ab",
++      "0.0.40-pr.8182.1.managed.1.p0123456789ab",
++    ]) {
++      assert.isFalse(isManagedDesktopVersion(version), version);
++      assert.equal(resolveDesktopUpdateChannel(version), "latest", version);
++    }
+   });
+ 
+   it("switches desktop packaging product names to nightly for nightly builds", () => {
+     assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
+     assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
++    assert.equal(resolveDesktopProductName(MANAGED_NIGHTLY_VERSION), "T3 Code (Nightly)");
++  });
++
++  it("keeps nightly icons and web branding for managed nightly versions", () => {
++    assert.deepStrictEqual(resolveDesktopBuildIconAssets(MANAGED_NIGHTLY_VERSION), {
++      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
++      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
++      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
++    });
++    assert.equal(resolveDesktopWebAssetBrand(MANAGED_NIGHTLY_VERSION), "nightly");
+   });
+ 
+   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
+@@ -363,6 +438,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+     ),
+   );
+ 
++  it.effect("packages managed nightly versions with nightly presentation and no update feed", () =>
++    Effect.gen(function* () {
++      const build = (version: string, mockUpdates = false) =>
++        createBuildConfig("mac", "dmg", version, false, mockUpdates, undefined, undefined);
++
++      for (const env of [
++        { GITHUB_REPOSITORY: "kgarg2468/harbor" },
++        { T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code" },
++        {
++          GITHUB_REPOSITORY: "kgarg2468/harbor",
++          T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
++        },
++      ]) {
++        const withEnv = Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));
++        const managed = yield* build(MANAGED_NIGHTLY_VERSION).pipe(withEnv);
++        const nightly = yield* build("0.0.40-nightly.20260907.1359").pipe(withEnv);
++        const stable = yield* build("0.0.40").pipe(withEnv);
++        const preview = yield* build("0.0.40-pr.8182.1").pipe(withEnv);
++
++        // Managed builds keep the Nightly product identity but never ship the
++        // stock GitHub feed, whichever repository variable the runner exposes.
++        assert.notProperty(managed, "publish", Object.keys(env).join(","));
++        assert.equal(managed.productName, "T3 Code (Nightly)");
++        const managedDmg = managed.dmg as { title: string; background: string };
++        assert.equal(managedDmg.title, `T3 Code (Nightly) ${MANAGED_NIGHTLY_VERSION} Installer`);
++        assert.equal(managedDmg.background, "dmg/dmg-background-nightly.png");
++
++        // Ordinary versions keep their upstream feeds.
++        assert.deepStrictEqual(nightly.publish, [
++          {
++            provider: "github",
++            owner: env.T3CODE_DESKTOP_UPDATE_REPOSITORY ? "pingdotgg" : "kgarg2468",
++            repo: env.T3CODE_DESKTOP_UPDATE_REPOSITORY ? "t3code" : "harbor",
++            releaseType: "prerelease",
++            channel: "nightly",
++          },
++        ]);
++        assert.deepStrictEqual(stable.publish, [
++          {
++            provider: "github",
++            owner: env.T3CODE_DESKTOP_UPDATE_REPOSITORY ? "pingdotgg" : "kgarg2468",
++            repo: env.T3CODE_DESKTOP_UPDATE_REPOSITORY ? "t3code" : "harbor",
++            releaseType: "release",
++          },
++        ]);
++        assert.notProperty(preview, "publish");
++      }
++
++      // Explicit mock-update builds keep their local generic feed, managed or not.
++      const mockEnv = Effect.provide(
++        ConfigProvider.layer(
++          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "kgarg2468/harbor" } }),
++        ),
++      );
++      const managedMock = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        MANAGED_NIGHTLY_VERSION,
++        false,
++        true,
++        4321,
++        undefined,
++      ).pipe(mockEnv);
++      assert.deepStrictEqual(managedMock.publish, [
++        { provider: "generic", url: "http://localhost:4321" },
++      ]);
++      const nightlyMock = yield* createBuildConfig(
++        "mac",
++        "dmg",
++        "0.0.40-nightly.20260907.1359",
++        false,
++        true,
++        4321,
++        undefined,
++      ).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))));
++      assert.deepStrictEqual(nightlyMock.publish, [
++        { provider: "generic", url: "http://localhost:4321" },
++      ]);
++      const managedWithoutMock = yield* build(MANAGED_NIGHTLY_VERSION).pipe(
++        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
++      );
++      assert.notProperty(managedWithoutMock, "publish");
++    }),
++  );
++
+   it("omits bundled workspace packages from staged desktop dependencies", () => {
+     assert.deepStrictEqual(
+       resolveDesktopRuntimeDependencies(
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..cfa6bfdfce1a899820e5c9189f97ef4b1522c056 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -2511,8 +2511,32 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
+   };
+ });
+ 
++// Ordinary upstream nightlies keep their historical suffix-only classification.
++const ORDINARY_NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
++
++// Harbor derives a managed desktop version from an ordinary nightly version by
++// appending `.managed.<counter>.p<12 lowercase hex>`, and the whole string must
++// match Harbor's release descriptor grammar: SemVer numerics without leading
++// zeros, an eight-digit date that does not start with zero, and a counter that
++// is a positive safe integer. Near misses keep their ordinary classification.
++// Keep in sync with apps/desktop/src/updates/updateChannels.ts.
++const SEMVER_NUMERIC = "(?:0|[1-9]\\d*)";
++const MANAGED_NIGHTLY_VERSION_PATTERN = new RegExp(
++  `^${SEMVER_NUMERIC}\\.${SEMVER_NUMERIC}\\.${SEMVER_NUMERIC}-nightly\\.[1-9]\\d{7}\\.${SEMVER_NUMERIC}` +
++    `\\.managed\\.(${SEMVER_NUMERIC})\\.p[0-9a-f]{12}$`,
++);
++
++export function isManagedDesktopVersion(version: string): boolean {
++  const match = MANAGED_NIGHTLY_VERSION_PATTERN.exec(version);
++  if (match === null) return false;
++  const releaseCounter = Number(match[1]);
++  return Number.isSafeInteger(releaseCounter) && releaseCounter >= 1;
++}
++
+ export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
+-  return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
++  return ORDINARY_NIGHTLY_VERSION_PATTERN.test(version) || isManagedDesktopVersion(version)
++    ? "nightly"
++    : "latest";
+ }
+ 
+ function isDesktopPreviewVersion(version: string): boolean {
+@@ -2606,7 +2630,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+   };
+   const updateChannel = resolveDesktopUpdateChannel(version);
+   if (!isDesktopPreviewVersion(version)) {
+-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
++    // Managed builds are discovered through Harbor's own release feed, so they
++    // must never package the stock GitHub feed (app-update.yml), even when the
++    // Actions runner or a developer shell exposes a repository variable. The
++    // explicit local mock feed remains available for update-flow testing.
++    const publishConfig = isManagedDesktopVersion(version)
++      ? undefined
++      : yield* resolveGitHubPublishConfig(updateChannel);
+     if (publishConfig) {
+       buildConfig.publish = [publishConfig];
+     } else if (mockUpdates) {
