@@ -13,6 +13,8 @@
 // the four release package versions are stamped, a task-owned `.env` carrying
 // exactly the four public values is written, the pinned pnpm installs from
 // the frozen lock, and the source tree's own scripts/build-desktop-artifact.ts
+// (run by the explicit Node executable through `pnpm exec`, so the tree's
+// own node_modules/.bin tools such as `vp` resolve as in a package script)
 // produces one ZIP into an owned output directory. The variant is chosen once
 // from the CLI; the child environment, the provenance check, the expected
 // artifact identity, and the inventory all derive from that one value.
@@ -60,7 +62,10 @@ import {
 
 export const DESKTOP_PLATFORM = "darwin";
 export const DESKTOP_ARCH = "arm64";
-// The source tree's own builder, run through the explicit Node executable.
+// The source tree's own builder, run through the explicit Node executable
+// under `pnpm exec`. The builder spawns the tree's `vp` by bare name, which
+// only the project bin directory that pnpm exec prepends to PATH provides;
+// no globally installed tool and no ambient PATH change stands in for it.
 export const DESKTOP_BUILDER_SCRIPT = "scripts/build-desktop-artifact.ts";
 // Platform tools, by absolute path, never through a shell.
 export const DITTO = "/usr/bin/ditto";
@@ -169,6 +174,12 @@ export function desktopBuildArguments(version, outputDir) {
   return [DESKTOP_BUILDER_SCRIPT, "--platform", "mac", "--target", "zip", "--arch", DESKTOP_ARCH, "--build-version", version, "--output-dir", outputDir];
 }
 
+// The pnpm argument list that runs those builder arguments under the
+// explicit Node executable with the project bin directory on PATH.
+export function desktopBuildExecArguments(node, version, outputDir) {
+  return ["exec", node, ...desktopBuildArguments(version, outputDir)];
+}
+
 // --- archive inspection -----------------------------------------------------------------
 
 // Exactly one regular ZIP in the owned output, and no update feed beside it.
@@ -257,7 +268,7 @@ async function readHeader(file, length = 32) {
 //   source, descriptor, publicConfig, variant, destination — the CLI inputs;
 //   run — process runner (createRunner); host — describeHost(); env — base
 //   environment for child processes; pnpm — pnpm executable; node — Node
-//   executable that runs the source builder; tmpRoot — where the private
+//   executable that runs the source builder under `pnpm exec`; tmpRoot — where the private
 //   work directory is created; log — progress sink.
 // Returns { destination, file, inventory, sha256, bytes }.
 export async function buildManagedDesktopRuntime({
@@ -350,7 +361,7 @@ export async function buildManagedDesktopRuntime({
     const buildOut = path.join(work, "build-output");
     await mkdir(buildOut);
     log(`building the unsigned ${DESKTOP_PLATFORM}-${DESKTOP_ARCH} desktop ZIP with ${DESKTOP_BUILDER_SCRIPT}`);
-    await exec("desktop artifact build", { command: node, args: desktopBuildArguments(version, buildOut) });
+    await exec("desktop artifact build", { command: pnpm, args: desktopBuildExecArguments(node, version, buildOut) });
     await requireSourceUnchanged("desktop artifact build");
 
     // 3. Examine the actual archive.
