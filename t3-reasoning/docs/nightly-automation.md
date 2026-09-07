@@ -4,9 +4,10 @@ This document describes `scripts/discover-upstream-nightly.mjs`, the first
 bounded piece of managed Nightly automation: a helper that finds the newest
 published upstream Nightly, proves locally that Harbor's patch catalog still
 materializes on it for both variants, and writes a candidate report. It
-mutates nothing on GitHub and nothing in the checkout. The later stages
-(a reviewable PR, explicit CI dispatch, and the four-artifact build) are
-described at the end as boundaries, not as implemented behavior.
+mutates nothing on GitHub and nothing in the checkout. The two trusted
+workflows that run it on a schedule, propose the candidate PR, and check the
+PR's exact head are described at the end, together with the stages that
+remain boundaries (merge policy and the four-artifact build).
 
 ## What the helper does
 
@@ -186,22 +187,139 @@ preparer and real `git`, with no network access. The CLI cases shim `gh` on
 node --test t3-reasoning/tests/discover-upstream-nightly.test.mjs
 ```
 
-## What comes next, and what is still not configured
+## Workflows
 
-The report contract above is what the later stages consume. They are not
-implemented here:
+Two workflows consume the report contract above. Both run only checked-in
+code from the default branch, take their inputs as environment variables or
+API arguments (never shell interpolation), use pinned action revisions, and
+check out with persisted credentials disabled. Neither builds, signs,
+publishes, merges, installs, or changes a repository setting.
 
-- A scheduled and `workflow_dispatch` discovery workflow on trusted
-  default-branch code that runs this helper, does nothing on `unchanged`,
-  uploads the report and fails on `conflict`, and on `ready` opens a PR that
-  changes only `t3-reasoning/source.lock.json` and
-  `t3-reasoning/upstream-release.json`. PR creation by Actions is gated on a
-  repository setting that is currently off; no automation identity exists.
-- An explicit dispatch checker on `main` that validates a candidate PR's exact
-  head SHA with read-only credentials, because token-created pushes and PRs do
-  not launch the normal push and pull_request workflows.
-- Review and merge policy for bot-authored PRs, including whether Greptile
-  reviews them; auto-merge is disabled and no branch rules are enforced today.
+### Discovery: `.github/workflows/t3-managed-nightly-discovery.yml`
+
+Triggers: a daily `schedule` (05:23 UTC) and `workflow_dispatch`. The job runs
+only when the ref is `main`. The concurrency group is fixed and never cancels
+a run in progress, so a run that is already publishing finishes.
+
+The job runs the helper with `--destination "$RUNNER_TEMP/t3-nightly-candidate"`
+and `--work "$RUNNER_TEMP/t3-nightly-work"`, and passes `--current-release`
+only when `t3-reasoning/upstream-release.json` is tracked (the first run is the
+bootstrap). Exit 0 and 2 are consumed by reading `result.json`; exit 1 fails
+the step with no report. `result.json` and `patch-check.json` are always
+retained as the run artifact `t3-nightly-discovery-report`; prepared trees
+stay under the work directory and never leave the runner.
+
+| Status | Behavior |
+| --- | --- |
+| `unchanged` | Summary only; nothing else happens. |
+| `conflict` | Report uploaded, then the run fails with an annotation naming the variant and the failing patch. |
+| `ready` | The candidate PR is proposed and the checker is dispatched, as below. |
+
+On `ready` the publish step, a trusted script that imports this helper's own
+`candidateLockText` and `validateProvenance`, first re-checks the emitted files
+against the checkout: the candidate lock must equal the base lock with only
+the commit line replaced and must pin a different commit; the provenance must
+name that commit and match the report; and, when a tracked record exists, the
+candidate version must be greater. It then copies exactly the two files into
+the checkout and requires `git status` to show nothing but them. The commit is
+created through the Git data API from the base commit's tree plus the two
+blobs (parent = the run's base commit), so nothing else can be pushed and no
+credential ever enters git configuration. The branch is deterministic,
+`t3/nightly-candidate/<upstream version>`, and is only ever created, never
+force-updated. A PR against `main` is opened and the checker is dispatched on
+`main` with the PR number and the exact pushed SHA, because a token-created
+push and PR do not launch the ordinary `push`/`pull_request` workflows.
+
+Rerun behavior for an existing candidate branch. Before the branch is reused
+in any way, its head must be proven to be exactly the deterministic candidate
+commit, read-only through the Git data API: a single-parent commit whose
+parent is the run's base commit or an ancestor of it on `main` (checked with
+the compare API), and whose tree differs from that parent's tree in nothing
+but the two candidate paths, each a plain `100644` blob with the expected id.
+Byte-identical candidate files alone are not enough, because a branch can
+carry them beside extra files or extra commits.
+
+- Proven head and an open PR owning it: idempotent. Nothing is written; the
+  checker is dispatched again for the existing head.
+- Proven head and no PR ever opened (an earlier run failed after the push):
+  the PR is created against the existing head.
+- Anything else, before any write or dispatch: different content at the head,
+  an extra or changed path (including under `.github/workflows/`), a mode
+  change, a merge commit or a parent that is not on `main`, a tree listing the
+  API cannot return completely, a closed PR, or PR history without the branch.
+  The run fails and names the reason. Close the PR and delete the branch by
+  hand, then rerun.
+
+Not proposed automatically: a provenance-only bootstrap where the newest
+Nightly is the commit already pinned (commit `upstream-release.json` by hand),
+and a candidate that has gone stale because the default branch's catalog
+moved (close the PR, delete the branch, rerun). An older open candidate PR is
+not closed when a newer Nightly is proposed.
+
+Job permissions are `contents: write`, `pull-requests: write`, and
+`actions: write`; the token is supplied to `gh` only through the environment.
+
+### Candidate checker: `.github/workflows/t3-managed-nightly-candidate.yml`
+
+`workflow_dispatch` with inputs `pull_request_number` and `head_sha` (a full
+40-character lowercase SHA). Jobs run only when the ref is `main`; the
+concurrency group is per head SHA and never cancels.
+
+The `validate` job (`contents: read`, `pull-requests: read`):
+
+1. Checks both inputs' grammar in the shell before any checkout.
+2. Checks out the trusted default-branch code, and fetches the candidate SHA
+   into `candidate/` as data only (full history, persisted credentials
+   disabled). Nothing under `candidate/` is executed; every script that runs
+   comes from the trusted checkout.
+3. Reads the PR through the API and requires it to be open, based on `main`,
+   with base and head in this repository, `head.sha` equal to the input, and
+   a `t3/nightly-candidate/<version>` head branch.
+4. Requires the diff between the merge-base with `origin/main` and the head
+   to be exactly `t3-reasoning/source.lock.json` (modified) and
+   `t3-reasoning/upstream-release.json` (added or modified), both plain
+   `100644` files, with no rename detection. A head already contained in
+   `main` is refused.
+5. Requires the candidate lock text to equal both the merge-base lock and the
+   trusted default-branch lock with only the commit line replaced, so every
+   catalog entry, hash, variant, and the repository URL are retained and a
+   stale candidate is refused.
+6. Validates the provenance record with this helper's rules, requires its
+   commit to equal the lock commit and its version to equal the branch
+   version, requires it to advance the tracked record when one exists, and
+   re-reads the upstream release by id and resolves its tag read-only through
+   `gh api`; both must match the record.
+7. Overlays the two validated files onto the trusted checkout, re-verifies
+   the catalog hashes, then runs the trusted component unit tests, Markdown
+   lint, and the real preparer for both variants (the materialization proof).
+
+The `status` job (`statuses: write`, `pull-requests: read`) runs after
+`validate` whatever its result and publishes the commit status
+`t3-managed-nightly-candidate` on the exact SHA. It reports `success` only
+when `validate` succeeded and the PR is still open and still owns that SHA;
+otherwise it reports `failure` (a moved head is reported as such) and the job
+itself fails. This context exists only on candidate heads: the checker runs by
+explicit dispatch from discovery, so ordinary Harbor and fleet PRs never
+receive it. It is the status the candidate merge path must require on the
+PR's exact head SHA, not a required status check on `main` (see below).
+
+## What is still not configured
+
+- The repository setting that lets Actions create PRs is currently off, and
+  no automation identity exists. Until it is enabled (or a narrowly scoped
+  GitHub App token is used), the discovery run creates the branch and then
+  fails at PR creation; the next run recovers by creating the PR.
+- Review and merge policy for bot-authored candidate PRs, including whether
+  Greptile reviews them. The merge path for these two-file PRs (a trusted
+  merge identity or a later merge automation) must require a `success`
+  `t3-managed-nightly-candidate` status on the PR's exact head SHA and merge
+  nothing else. That requirement belongs to the candidate merge path only: do
+  not add the context as a required status check in a `main` branch rule,
+  because ordinary PRs never receive it and such a rule would leave every
+  non-candidate PR waiting on a check that never reports. (A global required
+  check would first need a general workflow that reports a result for every
+  PR, which does not exist.) Auto-merge is disabled and no branch rules are
+  enforced today, so following a Nightly stops at an open, checked PR.
 - Porting the newer reviewed source changes into the patch catalog. The helper
   proves only the catalog that is checked in; a `conflict` result is the
   signal that a patch needs to be re-ported by hand.

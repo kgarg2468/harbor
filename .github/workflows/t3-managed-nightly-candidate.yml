@@ -1,0 +1,336 @@
+name: t3-managed-nightly-candidate
+
+# Exact-head checker for an automated managed Nightly candidate PR. It is
+# dispatched explicitly (by the discovery workflow, or by hand) because pushes
+# and PRs created with the workflow token do not launch the ordinary
+# push/pull_request workflows. The definition and every script that runs come
+# from the trusted default branch; the candidate head is fetched as data only,
+# with persisted credentials disabled, and nothing from it is executed. The
+# checker requires the named PR to own the exact SHA, the diff against the
+# merge-base with `main` to be exactly `t3-reasoning/source.lock.json` (commit
+# line only) and `t3-reasoning/upstream-release.json`, the provenance to match
+# the upstream release and tag, and then runs the existing component unit
+# tests, Markdown lint, and the real preparer for both variants against the
+# candidate data. The verdict is published as the commit status
+# `t3-managed-nightly-candidate` on that SHA by a separate job whose only
+# write permission is `statuses`, and only when the PR still owns the SHA.
+# Inputs are consumed as environment or API arguments, never interpolated into
+# a shell. Contract: t3-reasoning/docs/nightly-automation.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Candidate PR number in this repository
+        required: true
+        type: string
+      head_sha:
+        description: Exact 40-character lowercase candidate head SHA
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: t3-managed-nightly-candidate-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
+env:
+  BASE_BRANCH: main
+  CANDIDATE_BRANCH_PREFIX: t3/nightly-candidate/
+  STATUS_CONTEXT: t3-managed-nightly-candidate
+  HEAD_SHA: ${{ inputs.head_sha }}
+  PR_NUMBER: ${{ inputs.pull_request_number }}
+
+jobs:
+  validate:
+    # The checker is only meaningful as the default branch defines it.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate dispatch inputs before any checkout
+        run: |
+          set -euo pipefail
+          if ! [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::head_sha must be a full 40-character lowercase SHA-1"
+            exit 1
+          fi
+          if ! [[ "${PR_NUMBER}" =~ ^[1-9][0-9]{0,9}$ ]]; then
+            echo "::error::pull_request_number must be a positive integer"
+            exit 1
+          fi
+
+      - name: Check out trusted default-branch code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # Data only: full history so the merge-base with main can be computed.
+      # Nothing under candidate/ is ever executed.
+      - name: Fetch the candidate head as data
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.head_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.13.1"
+
+      - name: Show toolchain
+        run: node --version && git --version && gh --version
+
+      - name: Validate PR ownership, exact two-file scope, lock, and provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRUSTED_CHECKOUT: ${{ github.workspace }}
+          CANDIDATE_CLONE: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/validate-candidate.mjs" <<'VALIDATE_CANDIDATE_EOF'
+          // Trusted validator. Reads inputs from the environment, the PR from
+          // the GitHub API (argv, no shell), git objects from the data-only
+          // candidate clone, and the trusted helpers from the default-branch
+          // checkout. On success it overlays the two candidate files onto the
+          // trusted checkout so the following trusted checks run against the
+          // candidate data.
+          import { spawn } from "node:child_process";
+          import { readFile, writeFile } from "node:fs/promises";
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          class CandidateError extends Error {}
+          const fail = (message) => {
+            throw new CandidateError(message);
+          };
+          const env = (name) => {
+            const value = process.env[name];
+            if (typeof value !== "string" || value === "") fail(`${name} is required in the environment`);
+            return value;
+          };
+
+          const LOCK = "t3-reasoning/source.lock.json";
+          const PROVENANCE = "t3-reasoning/upstream-release.json";
+          const COMMIT_RE = /^[0-9a-f]{40}$/;
+          const ZERO = "0".repeat(40);
+
+          const headSha = env("HEAD_SHA");
+          const prNumber = env("PR_NUMBER");
+          const repository = env("GITHUB_REPOSITORY");
+          const baseBranch = env("BASE_BRANCH");
+          const branchPrefix = env("CANDIDATE_BRANCH_PREFIX");
+          const trusted = env("TRUSTED_CHECKOUT");
+          const clone = env("CANDIDATE_CLONE");
+          if (!COMMIT_RE.test(headSha)) fail("HEAD_SHA must be a full 40-character lowercase SHA-1");
+          if (!/^[1-9]\d{0,9}$/.test(prNumber)) fail("PR_NUMBER must be a positive integer");
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) fail(`GITHUB_REPOSITORY ${repository} is not owner/repo`);
+
+          const scripts = path.join(trusted, "t3-reasoning", "scripts");
+          const discover = await import(pathToFileURL(path.join(scripts, "discover-upstream-nightly.mjs")).href);
+          const release = await import(pathToFileURL(path.join(scripts, "resolve-managed-release.mjs")).href);
+
+          function run(command, args, { cwd = trusted } = {}) {
+            return new Promise((resolve, reject) => {
+              const child = spawn(command, args, {
+                cwd,
+                env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+              let stdout = "";
+              let stderr = "";
+              child.stdout.on("data", (chunk) => (stdout += chunk));
+              child.stderr.on("data", (chunk) => (stderr += chunk));
+              child.on("error", reject);
+              child.on("close", (code) => {
+                if (code === 0) return resolve(stdout);
+                const tail = stderr.trim().split("\n").slice(-6).join(" ");
+                reject(new CandidateError(`${command} ${args.slice(0, 3).join(" ")} exited ${code}: ${tail}`));
+              });
+            });
+          }
+          // Plain git against the data-only clone; no hooks, no scripts.
+          // `show` returns file bytes untrimmed; everything else is one token.
+          const gitRaw = (...args) => run("git", ["-C", clone, ...args]);
+          const git = async (...args) => (await gitRaw(...args)).trim();
+          async function repoApi(endpoint) {
+            const stdout = await run("gh", ["api", "--method", "GET", `/repos/${repository}/${endpoint}`]);
+            try {
+              return JSON.parse(stdout);
+            } catch {
+              fail(`GET ${endpoint} returned invalid JSON`);
+            }
+          }
+
+          // 1. The PR must be open in this repository, based on the default
+          //    branch, from a same-repository candidate branch, and own the SHA.
+          const pr = await repoApi(`pulls/${prNumber}`);
+          if (pr?.number !== Number(prNumber)) fail(`PR #${prNumber} was not returned`);
+          if (pr.state !== "open" || pr.merged === true) fail(`PR #${prNumber} is not open`);
+          if (pr.base?.ref !== baseBranch) fail(`PR #${prNumber} targets ${pr.base?.ref}, not ${baseBranch}`);
+          if (pr.base?.repo?.full_name !== repository) fail(`PR #${prNumber} base repository is not ${repository}`);
+          if (pr.head?.repo?.full_name !== repository) fail(`PR #${prNumber} head is not in ${repository}`);
+          if (pr.head?.sha !== headSha) fail(`PR #${prNumber} head is ${pr.head?.sha}, not ${headSha}; the head moved`);
+          const headRef = pr.head?.ref;
+          if (typeof headRef !== "string" || !headRef.startsWith(branchPrefix)) fail(`PR #${prNumber} branch ${headRef} is not a ${branchPrefix}* candidate branch`);
+          const branchVersion = headRef.slice(branchPrefix.length);
+          try {
+            release.parseUpstreamNightlyVersion(branchVersion);
+          } catch (error) {
+            fail(`candidate branch ${headRef}: ${error.message}`);
+          }
+
+          // 2. Exact two-file diff against the merge-base with the default branch.
+          if ((await git("cat-file", "-t", headSha)) !== "commit") fail(`${headSha} is not a commit`);
+          if ((await git("rev-parse", "HEAD")) !== headSha) fail("candidate clone is not at the candidate head");
+          const mergeBase = await git("merge-base", `refs/remotes/origin/${baseBranch}`, headSha);
+          if (!COMMIT_RE.test(mergeBase)) fail("no merge-base with the default branch");
+          if (mergeBase === headSha) fail("candidate head is already contained in the default branch");
+          const raw = (await git("diff-tree", "-r", "--no-renames", "--raw", mergeBase, headSha)).split("\n").filter((line) => line !== "");
+          const entries = raw.map((line) => {
+            const match = /^:(\d{6}) (\d{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])\t(.+)$/.exec(line);
+            if (match === null) fail(`unparseable diff entry ${JSON.stringify(line)}`);
+            return { srcMode: match[1], dstMode: match[2], srcSha: match[3], dstSha: match[4], status: match[5], path: match[6] };
+          });
+          const paths = entries.map((entry) => entry.path).sort();
+          if (JSON.stringify(paths) !== JSON.stringify([LOCK, PROVENANCE].sort())) {
+            fail(`candidate changes ${JSON.stringify(paths)}; exactly ${LOCK} and ${PROVENANCE} are allowed`);
+          }
+          for (const entry of entries) {
+            const added = entry.path === PROVENANCE && entry.status === "A" && entry.srcMode === "000000" && entry.srcSha === ZERO;
+            const modified = entry.status === "M" && entry.srcMode === "100644";
+            if (entry.dstMode !== "100644" || !(added || modified)) {
+              fail(`${entry.path}: ${entry.status} ${entry.srcMode}->${entry.dstMode} is not a plain file modification`);
+            }
+          }
+
+          // 3. Lock: the candidate text is the merge-base lock and the trusted
+          //    default-branch lock with only the commit line replaced, so every
+          //    catalog entry, variant, and repository byte is retained and a
+          //    candidate that is stale against the default branch is refused.
+          const baseLockText = await gitRaw("show", `${mergeBase}:${LOCK}`);
+          const candidateLockText = await gitRaw("show", `${headSha}:${LOCK}`);
+          const candidateProvenanceText = await gitRaw("show", `${headSha}:${PROVENANCE}`);
+          const candidateLock = release.validateLock(JSON.parse(candidateLockText), "candidate lock");
+          const trustedLockPath = path.join(trusted, LOCK);
+          const trustedLockText = await readFile(trustedLockPath, "utf8");
+          const trustedLock = await release.readVerifiedLock(trustedLockPath);
+          if (candidateLock.commit === trustedLock.commit) fail("candidate lock pins the commit the default branch already pins");
+          if (candidateLockText !== discover.candidateLockText(baseLockText, JSON.parse(baseLockText), candidateLock.commit)) {
+            fail("candidate lock differs from the merge-base lock in more than the commit line");
+          }
+          if (candidateLockText !== discover.candidateLockText(trustedLockText, trustedLock, candidateLock.commit)) {
+            fail("candidate lock differs from the default-branch lock in more than the commit line; the candidate is stale");
+          }
+
+          // 4. Provenance: well-formed, names the lock commit and the branch
+          //    version, advances the tracked record, and matches upstream.
+          const provenance = discover.validateProvenance(JSON.parse(candidateProvenanceText), "candidate provenance");
+          if (provenance.commit !== candidateLock.commit) fail("candidate provenance commit differs from the candidate lock commit");
+          if (provenance.version !== branchVersion) fail(`branch names ${branchVersion} but provenance records ${provenance.version}`);
+          let current = null;
+          try {
+            current = discover.validateProvenance(JSON.parse(await readFile(path.join(trusted, PROVENANCE), "utf8")), "tracked provenance");
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+          if (current !== null) {
+            if (current.commit !== trustedLock.commit) fail("tracked provenance does not name the default-branch lock commit");
+            if (release.compareExactVersions(provenance.version, current.version) <= 0) {
+              fail(`candidate ${provenance.version} does not advance the tracked ${current.version}`);
+            }
+          }
+          const upstream = discover.createGhApi();
+          const listed = discover.normalizeRelease(await upstream(`${discover.API_PREFIX}releases/${provenance.releaseId}`));
+          if (listed === null) fail(`upstream release ${provenance.releaseId} is not a published Nightly prerelease`);
+          for (const key of ["releaseId", "tag", "version", "publishedAt"]) {
+            if (listed[key] !== provenance[key]) fail(`upstream release ${key} is ${listed[key]}, provenance records ${provenance[key]}`);
+          }
+          const tagCommit = await discover.resolvePublishedCommit(provenance, upstream);
+          if (tagCommit !== provenance.commit) fail(`upstream tag ${provenance.tag} resolves to ${tagCommit}, provenance records ${provenance.commit}`);
+
+          // 5. Overlay the validated data onto the trusted checkout and
+          //    re-verify the catalog hashes against the trusted patches.
+          await writeFile(trustedLockPath, candidateLockText);
+          await writeFile(path.join(trusted, PROVENANCE), candidateProvenanceText);
+          await release.readVerifiedLock(trustedLockPath);
+
+          const summary =
+            `- PR #${prNumber} on \`${headRef}\` owns \`${headSha}\` (merge-base \`${mergeBase}\`)\n` +
+            `- diff: exactly \`${LOCK}\` (commit line) and \`${PROVENANCE}\`\n` +
+            `- candidate: \`${provenance.tag}\` at \`${provenance.commit}\` (release ${provenance.releaseId}, published ${provenance.publishedAt}); ` +
+            `previous \`${trustedLock.commit}\`\n`;
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            await writeFile(process.env.GITHUB_STEP_SUMMARY, `## t3 managed Nightly candidate\n\n${summary}`, { flag: "a" });
+          }
+          process.stdout.write(summary);
+          VALIDATE_CANDIDATE_EOF
+          node "${RUNNER_TEMP}/validate-candidate.mjs"
+
+      - name: Unit tests (trusted code, candidate data)
+        run: node --test t3-reasoning/tests/*.test.mjs
+
+      - name: markdownlint
+        run: >
+          npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml
+          't3-reasoning/**/*.md'
+
+      - name: Materialization proof (trusted preparer, both variants)
+        env:
+          PREPARED: ${{ runner.temp }}/t3-prepared
+        run: |
+          set -euo pipefail
+          for variant in managed-nightly reasoning; do
+            node t3-reasoning/scripts/prepare-source.mjs \
+              --lock t3-reasoning/source.lock.json \
+              --variant "${variant}" \
+              --destination "${PREPARED}/${variant}"
+          done
+
+  status:
+    # Publishes the verdict on the exact SHA. Runs after validate whatever
+    # its result, with the narrowest permission that can post a status, and
+    # never reports success unless validate succeeded and the PR still owns
+    # the SHA.
+    needs: validate
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      statuses: write
+      pull-requests: read
+    steps:
+      - name: Publish the exact-head commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || ! [[ "${PR_NUMBER}" =~ ^[1-9][0-9]{0,9}$ ]]; then
+            echo "::error::invalid dispatch inputs; no status published"
+            exit 1
+          fi
+          pr="$(gh api --method GET "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          owns_head="$(jq -r --arg sha "${HEAD_SHA}" --arg base "${BASE_BRANCH}" --arg repo "${GITHUB_REPOSITORY}" \
+            '(.state == "open") and (.merged != true) and (.head.sha == $sha) and (.base.ref == $base) and (.head.repo.full_name == $repo) and (.base.repo.full_name == $repo)' \
+            <<<"${pr}")"
+          state=failure
+          if [ "${VALIDATE_RESULT}" = "success" ] && [ "${owns_head}" = "true" ]; then
+            state=success
+            description="candidate head validated: exact two-file scope, provenance, tests, lint, preparer"
+          elif [ "${owns_head}" != "true" ]; then
+            description="PR #${PR_NUMBER} no longer owns this head or is not open; not marking success"
+          else
+            description="candidate validation ${VALIDATE_RESULT}; see the run"
+          fi
+          jq -n --arg state "${state}" --arg context "${STATUS_CONTEXT}" --arg url "${RUN_URL}" --arg desc "${description}" \
+            '{state: $state, context: $context, target_url: $url, description: $desc}' \
+            | gh api --method POST "/repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" --input - > /dev/null
+          echo "published ${STATUS_CONTEXT}=${state} on ${HEAD_SHA}: ${description}"
+          [ "${state}" = "success" ]
