@@ -536,6 +536,26 @@ user_state() {
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
 }
 
+@test "an account logind holds no record for is linger off, not an unreadable state" {
+  # What real loginctl does for an account that is neither logged in nor already
+  # lingering: it fails outright rather than printing no, because logind keeps a user
+  # record for no other kind of account. A freshly created operator is exactly that
+  # account, so reading this as unreadable would put the linger row out of reach on
+  # every real node. The integration lane found this on the first run against a real
+  # logind; the fixture here had answered no, which real loginctl never does.
+  printf 'Failed to get user: User ID 1002 is not logged in or lingering\n' \
+    >"${FX}/loginctl/healthy/${LINGER_KEY}.out"
+  printf '1\n' >"${FX}/loginctl/healthy/${LINGER_KEY}.exit"
+  run harbor_user_linger_state "${OPERATOR}"
+  assert_success
+  assert_output no
+  # And the row built on it applies, journaling the pre-state it actually observed.
+  enable_linger_succeeds
+  run harbor_user_linger "${FIX_ROOT}" "${OPERATOR}"
+  assert_success
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" '"no"'
+}
+
 @test "an unreadable or unparseable linger state is fail-closed, exit 2, and journals nothing" {
   printf 'Failed to get user: No such process\n' >"${FX}/loginctl/healthy/${LINGER_KEY}.out"
   printf '1\n' >"${FX}/loginctl/healthy/${LINGER_KEY}.exit"
