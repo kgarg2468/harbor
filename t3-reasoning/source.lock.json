@@ -84,6 +84,11 @@
       "sha256": "66ced494e5f39530e0791027a71f2422405511fc1c387cf0103a7f8474ef4cd9"
     },
     {
+      "id": "managed-release-feed",
+      "path": "patches/0020-managed-release-feed.patch",
+      "sha256": "a6be628e58c97494288906820fdedb40a3aec873fb7a9a0980022c29c1a5255e"
+    },
+    {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
       "sha256": "0ddc965500d08328f1c89050650a7d3b6b148c3363e6003b31814bb79c2c5f43"
@@ -111,6 +116,7 @@
       "candidate-process",
       "managed-runtime-transaction",
       "shared-default",
+      "managed-release-feed",
       "native-activity"
     ],
     "reasoning": [
@@ -129,6 +135,7 @@
       "candidate-process",
       "managed-runtime-transaction",
       "shared-default",
+      "managed-release-feed",
       "native-activity",
       "reasoning-identity"
     ]

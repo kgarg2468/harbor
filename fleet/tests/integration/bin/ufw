@@ -1,0 +1,127 @@
+#!/bin/bash
+# Integration-lane ufw wrapper (design section 7: "the ufw wrapper is a fake").
+#
+# It records every mutating argv (default, allow, delete, enable, disable) and
+# answers status queries from its own recorded state WITHOUT running the real
+# ufw, because enabling a real firewall on a hosted runner can cut the runner's
+# own connectivity. Everything else about the firewall row is real: Harbor builds
+# the rule text, decides the pre-state, journals, and re-reads through this
+# wrapper exactly as it would through the vendor binary.
+#
+# Installed to /opt/harbor-it/bin/ufw as root:root 0755 by setup.sh. Standalone
+# on purpose: it must not depend on the checkout. Lane paths are literals here
+# and in lib/common.sh; keep them in sync.
+set -euo pipefail
+
+it_state=/opt/harbor-it/state
+it_shim_log="${it_state}/shim.log"
+it_mut_log="${it_state}/mutations.log"
+it_active="${it_state}/ufw.active"
+it_in="${it_state}/ufw.default.incoming"
+it_out="${it_state}/ufw.default.outgoing"
+it_rules="${it_state}/ufw.rules"
+
+# it_log KIND ARGV... -- one tab separated line; mutating calls land in both logs.
+it_log() {
+  local kind line arg
+  kind="${1}"
+  shift
+  line="$(date -u +%s)"$'\t'"${kind}"$'\t'ufw
+  for arg in "$@"; do
+    line="${line}"$'\t'"${arg}"
+  done
+  printf '%s\n' "${line}" >>"${it_shim_log}"
+  if [ "${kind}" = mutate ]; then
+    printf '%s\n' "${line}" >>"${it_mut_log}"
+  fi
+}
+
+it_die() {
+  printf 'integration ufw wrapper: %s\n' "${*}" >&2
+  exit 1
+}
+
+for it_file in "${it_active}" "${it_in}" "${it_out}" "${it_rules}"; do
+  [ -f "${it_file}" ] || it_die "missing lane state ${it_file}; setup.sh did not run"
+done
+
+# The scenario the sudo call site named must be the scenario setup.sh seeded.
+if [ -n "${HARBOR_SHIM_SCENARIO:-}" ]; then
+  it_seeded="$(cat "${it_state}/scenario")"
+  [ "${HARBOR_SHIM_SCENARIO}" = "${it_seeded}" ] \
+    || it_die "scenario mismatch: call site says ${HARBOR_SHIM_SCENARIO}, seeded state says ${it_seeded}"
+fi
+
+case "${1:-}" in
+  status)
+    it_log inspect "$@"
+    if [ "$(cat "${it_active}")" = yes ]; then
+      printf 'Status: active\n'
+      printf 'Logging: on (low)\n'
+      printf 'Default: %s (incoming), %s (outgoing), disabled (routed)\n' \
+        "$(cat "${it_in}")" "$(cat "${it_out}")"
+      printf 'New profiles: skip\n'
+    else
+      printf 'Status: inactive\n'
+    fi
+    ;;
+  show)
+    [ "${2:-}" = added ] || it_die "unsupported show subcommand: ${2:-}"
+    it_log inspect "$@"
+    printf 'Added user rules (see "ufw status" for running firewall):\n'
+    # Real ufw quotes the comment value; harbor_ufw_added strips the quotes, so
+    # reproducing them keeps that code path honest.
+    sed -e "s/ comment \\(.*\\)$/ comment '\\1'/" -e 's/^/ufw /' "${it_rules}"
+    ;;
+  default)
+    [ "$#" -eq 3 ] || it_die "malformed default: $*"
+    it_log mutate "$@"
+    case "${3}" in
+      incoming) printf '%s\n' "${2}" >"${it_in}" ;;
+      outgoing) printf '%s\n' "${2}" >"${it_out}" ;;
+      *) it_die "unsupported default direction: ${3}" ;;
+    esac
+    printf 'Default %s policy changed to "%s"\n' "${3}" "${2}"
+    ;;
+  allow | deny | reject | limit)
+    it_log mutate "$@"
+    printf '%s\n' "$*" >>"${it_rules}"
+    printf 'Rule added\n'
+    ;;
+  delete)
+    it_log mutate "$@"
+    shift
+    grep -F -x -v "$*" "${it_rules}" >"${it_rules}.next"
+    mv -f "${it_rules}.next" "${it_rules}"
+    printf 'Rule deleted\n'
+    ;;
+  --force)
+    case "${2:-}" in
+      enable)
+        it_log mutate "$@"
+        printf 'yes\n' >"${it_active}"
+        printf 'Firewall is active and enabled on system startup\n'
+        ;;
+      disable)
+        it_log mutate "$@"
+        printf 'no\n' >"${it_active}"
+        printf 'Firewall stopped and disabled on system startup\n'
+        ;;
+      reset)
+        it_log mutate "$@"
+        printf 'no\n' >"${it_active}"
+        : >"${it_rules}"
+        printf 'Backing up ...\n'
+        ;;
+      *) it_die "unsupported --force subcommand: ${2:-}" ;;
+    esac
+    ;;
+  enable | disable | reset)
+    it_log mutate "$@"
+    it_die "the lane refuses interactive ufw ${1}; Harbor must pass --force"
+    ;;
+  *)
+    it_log inspect "$@"
+    it_die "unexpected ufw invocation: $*"
+    ;;
+esac

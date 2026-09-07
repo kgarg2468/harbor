@@ -1,0 +1,138 @@
+#!/bin/bash
+# Integration-lane stand-in for the tailscale CLI, shipped inside the locally
+# built tailscale package the lane's file:// apt repository serves (design
+# section 7: "locally built packages for every third-party component"). It is
+# installed at /usr/bin/tailscale by that package, which is where a real
+# tailscale lives and, more to the point, where runuser's reset PATH can find it
+# when Harbor runs the operator's unprivileged read-access probe.
+#
+# It reproduces exactly the CLI surface Harbor calls:
+#   tailscale status --json   the read every other read in the operator row
+#                             stands on. Root always gets an answer; a non-root
+#                             caller gets one only once it is the recorded
+#                             operator, which is what makes the probe mean
+#                             something.
+#   tailscale set --operator=NAME   records the grant. Root only.
+#   tailscale get operator    refused as an unknown subcommand, which is what the
+#                             current stable CLI does, so the lane exercises the
+#                             probe-based branch of the operator row rather than
+#                             the exact-value branch.
+#   tailscale version         prints the version the package carries.
+# Anything else is refused loudly. tailscale up, login, logout and serve are
+# refused on purpose: the lane never logs a node in and holds no auth key.
+#
+# The daemon this stands in for is never contacted, so this stub CANNOT settle
+# issue #63 (whether a real never-logged-in tailscaled exits 0 for
+# status --json). tests/integration/tailscale_status_probe.sh measures that
+# against a real daemon; see its header.
+set -euo pipefail
+
+it_state=/opt/harbor-it/state
+it_shim_log="${it_state}/shim.log"
+it_mut_log="${it_state}/mutations.log"
+it_operator_file="${it_state}/tailscale.operator"
+it_version_file=/usr/share/harbor-integration/tailscale-version
+
+it_log() {
+  local kind line arg
+  kind="${1}"
+  shift
+  line="$(date -u +%s)"$'\t'"${kind}"$'\t'tailscale
+  for arg in "$@"; do
+    line="${line}"$'\t'"${arg}"
+  done
+  # The lane's state directory only exists once setup.sh has run. The stub is
+  # also installed by the standalone status probe, which has no lane state and
+  # nothing to log to; that is a deliberate branch, not a swallowed error.
+  if [ -d "${it_state}" ]; then
+    printf '%s\n' "${line}" >>"${it_shim_log}"
+    if [ "${kind}" = mutate ]; then
+      printf '%s\n' "${line}" >>"${it_mut_log}"
+    fi
+  fi
+}
+
+it_version() {
+  if [ -r "${it_version_file}" ]; then
+    cat "${it_version_file}"
+  else
+    printf '0.0.0\n'
+  fi
+}
+
+it_operator() {
+  if [ -r "${it_operator_file}" ]; then
+    cat "${it_operator_file}"
+  fi
+}
+
+it_user="$(id -un)"
+
+case "${1:-}" in
+  status)
+    it_log inspect "$@"
+    if [ "${it_user}" != root ] && [ "${it_user}" != "$(it_operator)" ]; then
+      printf 'Access denied: this command is available only to the operator or root\n' >&2
+      exit 1
+    fi
+    case "${2:-}" in
+      --json) ;;
+      *)
+        printf 'Logged out.\n' >&2
+        exit 1
+        ;;
+    esac
+    printf '{\n'
+    printf '  "Version": "%s",\n' "$(it_version)"
+    printf '  "BackendState": "NeedsLogin",\n'
+    printf '  "AuthURL": "",\n'
+    printf '  "TailscaleIPs": null,\n'
+    printf '  "Self": null,\n'
+    printf '  "Health": ["state=NeedsLogin, wantRunning=false"],\n'
+    printf '  "MagicDNSSuffix": "",\n'
+    printf '  "CurrentTailnet": null,\n'
+    printf '  "Peer": null,\n'
+    printf '  "User": null\n'
+    printf '}\n'
+    ;;
+  set)
+    it_log mutate "$@"
+    if [ "${it_user}" != root ]; then
+      printf 'Access denied: changing settings requires root\n' >&2
+      exit 1
+    fi
+    case "${2:-}" in
+      --operator=*) ;;
+      *)
+        printf 'integration tailscale stub: only --operator=NAME is supported, got %s\n' "${2:-}" >&2
+        exit 64
+        ;;
+    esac
+    [ -d "${it_state}" ] || {
+      printf 'integration tailscale stub: %s is missing, so the operator grant cannot be recorded\n' "${it_state}" >&2
+      exit 1
+    }
+    printf '%s\n' "${2#--operator=}" >"${it_operator_file}"
+    chmod 0644 "${it_operator_file}"
+    ;;
+  get)
+    it_log inspect "$@"
+    printf 'tailscale: unknown subcommand "get"\n' >&2
+    printf 'For help, run: tailscale --help\n' >&2
+    exit 1
+    ;;
+  version | --version)
+    it_log inspect "$@"
+    it_version
+    ;;
+  up | login | logout | serve | funnel | down)
+    it_log mutate "$@"
+    printf 'integration tailscale stub: refusing "%s"; the lane never logs a node in and holds no auth key\n' "${1}" >&2
+    exit 64
+    ;;
+  *)
+    it_log inspect "$@"
+    printf 'integration tailscale stub: unsupported invocation: %s\n' "${*}" >&2
+    exit 64
+    ;;
+esac

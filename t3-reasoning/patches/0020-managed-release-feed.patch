@@ -1,0 +1,2558 @@
+diff --git a/apps/server/src/cloud/managedReleaseSource.test.ts b/apps/server/src/cloud/managedReleaseSource.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..de5cf056147167907114e2eae87bd6d36eea911f
+--- /dev/null
++++ b/apps/server/src/cloud/managedReleaseSource.test.ts
+@@ -0,0 +1,1511 @@
++// @effect-diagnostics preferSchemaOverJson:off - tests forge GitHub release JSON and re-sign the golden manifest as plain JSON.
++import { assert, describe, it } from "@effect/vitest";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as Latch from "effect/Latch";
++import * as Option from "effect/Option";
++import * as Scope from "effect/Scope";
++import * as Stream from "effect/Stream";
++import * as TestClock from "effect/testing/TestClock";
++import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
++
++import {
++  canonicalJson,
++  MANAGED_RELEASE_MANIFEST_FILE,
++  MANAGED_RELEASE_SUMS_FILE,
++  MAX_MANAGED_MANIFEST_BYTES,
++  MAX_MANAGED_SUMS_BYTES,
++  sha256Hex,
++  verifyManagedReleaseDocuments,
++  type ManagedServerTarget,
++  type VerifiedManagedServerAsset,
++} from "./managedRelease.ts";
++import {
++  makeGitHubManagedReleaseFeed,
++  MANAGED_RELEASE_REPOSITORY,
++  type ManagedReleaseFeed,
++} from "./managedReleaseSource.ts";
++import { ManagedArtifactSourceError } from "./managedRuntime.ts";
++
++// Golden cross-contract fixture, byte for byte as in managedRelease.test.ts:
++// the exact documents Harbor published for a four-artifact release.
++const GOLDEN_VERSION = "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a";
++const GOLDEN_MANIFEST = `{
++  "artifacts": [
++    {
++      "arch": "arm64",
++      "bundleId": "com.t3tools.t3code",
++      "bytes": 12,
++      "embeddedServerVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++      "file": "nightly.zip",
++      "format": "zip",
++      "id": "managed-nightly-darwin-arm64",
++      "kind": "desktop",
++      "platform": "darwin",
++      "presentationVariant": "managed-nightly",
++      "productName": "T3 Code (Nightly)",
++      "sha256": "bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e",
++      "urlSchemes": [
++        "t3code",
++        "t3code-dev"
++      ],
++      "variant": "managed-nightly",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "arm64",
++      "bundleId": "com.t3tools.t3code.reasoning",
++      "bytes": 14,
++      "embeddedServerVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++      "file": "reasoning.zip",
++      "format": "zip",
++      "id": "reasoning-darwin-arm64",
++      "kind": "desktop",
++      "platform": "darwin",
++      "presentationVariant": "reasoning",
++      "productName": "T3 Code (Reasoning)",
++      "sha256": "a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20",
++      "urlSchemes": [
++        "t3code-reasoning"
++      ],
++      "variant": "reasoning",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "arm64",
++      "bytes": 14,
++      "entry": "node_modules/t3/dist/bin.mjs",
++      "file": "server-darwin-arm64.tar.gz",
++      "format": "tar.gz",
++      "id": "managed-server-darwin-arm64",
++      "kind": "server",
++      "launcherProtocol": 2,
++      "platform": "darwin",
++      "sha256": "416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492",
++      "variant": "common",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "x64",
++      "bytes": 13,
++      "entry": "node_modules/t3/dist/bin.mjs",
++      "file": "server-linux-x64.tar.gz",
++      "format": "tar.gz",
++      "id": "managed-server-linux-x64",
++      "kind": "server",
++      "launcherProtocol": 2,
++      "platform": "linux",
++      "sha256": "9d05e7ed6624ed87a42f2ec049544d34fa31341804ad2ab11846b1df5500e6b0",
++      "variant": "common",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    }
++  ],
++  "builderRevision": "fedcba9876543210fedcba9876543210fedcba98",
++  "presentationVariants": {
++    "managed-nightly": "managed-nightly",
++    "reasoning": "reasoning"
++  },
++  "publicConfigKeys": [
++    "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
++    "T3CODE_CLERK_JWT_TEMPLATE",
++    "T3CODE_CLERK_PUBLISHABLE_KEY",
++    "T3CODE_RELAY_URL"
++  ],
++  "publicConfigSha256": "2cee922b77e095709737110ab244615e0fe4230ace80231198c01a2cfb9b377e",
++  "releaseCounter": 1,
++  "releaseInputSha256": "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++  "releaseVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++  "schemaVersion": 1,
++  "upstreamCommit": "0123456789abcdef0123456789abcdef01234567",
++  "upstreamRepository": "https://github.com/pingdotgg/t3code",
++  "upstreamVersion": "0.0.38-nightly.20260905.3",
++  "variants": {
++    "managed-nightly": {
++      "patches": [
++        {
++          "id": "common-one",
++          "sha256": "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a"
++        },
++        {
++          "id": "common-two",
++          "sha256": "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79"
++        }
++      ]
++    },
++    "reasoning": {
++      "patches": [
++        {
++          "id": "common-one",
++          "sha256": "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a"
++        },
++        {
++          "id": "common-two",
++          "sha256": "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79"
++        },
++        {
++          "id": "reasoning-identity",
++          "sha256": "3f72debee6fc10edb75cf331347684c769d350ace0d667d7ff1246ef5c1de450"
++        }
++      ]
++    }
++  }
++}
++`;
++const GOLDEN_SUMS = `bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51  managed-release.json
++bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e  nightly.zip
++a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20  reasoning.zip
++416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492  server-darwin-arm64.tar.gz
++9d05e7ed6624ed87a42f2ec049544d34fa31341804ad2ab11846b1df5500e6b0  server-linux-x64.tar.gz
++`;
++
++const DARWIN: ManagedServerTarget = { platform: "darwin", arch: "arm64" };
++const API_ORIGIN = "https://api.github.com";
++const RELEASES_PATH = `/repos/${MANAGED_RELEASE_REPOSITORY}/releases`;
++const API = `${API_ORIGIN}${RELEASES_PATH}`;
++const PAGE = (page: number) => `${API}?per_page=100&page=${page}`;
++const TAG = (version: string) => `${API}/tags/${encodeURIComponent(`t3-managed-v${version}`)}`;
++const ASSET = (id: number) => `${API}/assets/${id}`;
++/** Where every response-provided URL points; nothing may ever be requested from here. */
++const DECOY = "https://attacker.example";
++const TIME = "2026-09-06T00:00:00Z";
++const SERVER_FILE = "server-darwin-arm64.tar.gz";
++const encoder = new TextEncoder();
++const decoder = new TextDecoder();
++
++type Json = Record<string, any>;
++
++// --- documents ---------------------------------------------------------------------------
++
++interface Documents {
++  readonly version: string;
++  readonly manifest: Uint8Array;
++  readonly sums: Uint8Array;
++}
++
++function signSums(manifestText: string): string {
++  const manifest = JSON.parse(manifestText) as Json;
++  const entries: Array<{ file: string; sha256: string }> = [
++    ...(manifest.artifacts as Array<Json>).map((artifact) => ({
++      file: artifact.file as string,
++      sha256: artifact.sha256 as string,
++    })),
++    { file: MANAGED_RELEASE_MANIFEST_FILE, sha256: sha256Hex(manifestText) },
++  ];
++  return entries
++    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
++    .map(({ file, sha256 }) => `${sha256}  ${file}\n`)
++    .join("");
++}
++
++/** Counter 1 is the golden release byte for byte; other counters are the same provenance re-signed under their own version. */
++function documentsForCounter(counter: number): Documents {
++  if (counter === 1) {
++    return {
++      version: GOLDEN_VERSION,
++      manifest: encoder.encode(GOLDEN_MANIFEST),
++      sums: encoder.encode(GOLDEN_SUMS),
++    };
++  }
++  const manifest = JSON.parse(GOLDEN_MANIFEST) as Json;
++  const version = GOLDEN_VERSION.replace(".managed.1.", `.managed.${counter}.`);
++  manifest.releaseCounter = counter;
++  manifest.releaseVersion = version;
++  for (const artifact of manifest.artifacts as Array<Json>) {
++    artifact.version = version;
++    if (artifact.kind === "desktop") artifact.embeddedServerVersion = version;
++  }
++  const text = canonicalJson(manifest);
++  return { version, manifest: encoder.encode(text), sums: encoder.encode(signSums(text)) };
++}
++
++const GOLDEN = documentsForCounter(1);
++const COUNTER_2 = documentsForCounter(2);
++const V_LOWER = "0.0.38-nightly.20260905.2.managed.1.p6d1933416d7a";
++const V_OLDER = "0.0.37-nightly.20260901.1.managed.9.p000000000000";
++
++const verifiedGolden = verifyManagedReleaseDocuments({
++  manifestBytes: GOLDEN.manifest,
++  sumsBytes: GOLDEN.sums,
++  targetVersion: GOLDEN_VERSION,
++  hostTarget: DARWIN,
++});
++
++// --- fake GitHub -------------------------------------------------------------------------
++
++interface FakeAsset {
++  id: number;
++  name: string;
++  state: string;
++  size: number;
++  digest: string | null;
++  created_at: string;
++  updated_at: string;
++  bytes: Uint8Array;
++}
++
++interface FakeRelease {
++  id: number;
++  tag_name: string;
++  draft: boolean;
++  prerelease: boolean;
++  published_at: string | null;
++  immutable: boolean;
++  name: string;
++  body: string;
++  assets: Array<FakeAsset>;
++}
++
++/** Six uploaded assets: the two documents plus the four archives the manifest inventories, sized as it says. */
++function assetsFor(release: number, docs: Documents): Array<FakeAsset> {
++  const manifest = JSON.parse(decoder.decode(docs.manifest)) as Json;
++  const files: Array<[string, Uint8Array]> = [
++    [MANAGED_RELEASE_MANIFEST_FILE, docs.manifest],
++    [MANAGED_RELEASE_SUMS_FILE, docs.sums],
++    ...(manifest.artifacts as Array<Json>).map((artifact): [string, Uint8Array] => [
++      artifact.file as string,
++      new Uint8Array(artifact.bytes as number).fill(0x61),
++    ]),
++  ];
++  return files.map(([name, bytes], index) => ({
++    id: release * 100 + index + 1,
++    name,
++    state: "uploaded",
++    size: bytes.byteLength,
++    digest: null,
++    created_at: TIME,
++    updated_at: TIME,
++    bytes,
++  }));
++}
++
++function releaseFor(input: {
++  readonly id: number;
++  readonly docs?: Documents;
++  readonly version?: string;
++  readonly tag?: string;
++  readonly draft?: boolean;
++  readonly prerelease?: boolean;
++  readonly publishedAt?: string | null;
++  readonly immutable?: boolean;
++}): FakeRelease {
++  const version = input.version ?? input.docs?.version ?? GOLDEN_VERSION;
++  return {
++    id: input.id,
++    tag_name: input.tag ?? `t3-managed-v${version}`,
++    draft: input.draft ?? false,
++    prerelease: input.prerelease ?? true,
++    published_at: input.publishedAt === undefined ? TIME : input.publishedAt,
++    immutable: input.immutable ?? true,
++    name: `Managed ${version}`,
++    body: "release notes",
++    assets: input.docs === undefined ? [] : assetsFor(input.id, input.docs),
++  };
++}
++
++const goldenRelease = () => releaseFor({ id: 7, docs: GOLDEN });
++const assetOf = (release: FakeRelease, name: string): FakeAsset =>
++  release.assets.find((asset) => asset.name === name) as FakeAsset;
++
++function assetJson(asset: FakeAsset) {
++  return {
++    id: asset.id,
++    name: asset.name,
++    state: asset.state,
++    size: asset.size,
++    digest: asset.digest,
++    created_at: asset.created_at,
++    updated_at: asset.updated_at,
++    url: `${DECOY}/assets/${asset.id}`,
++    browser_download_url: `${DECOY}/download/${asset.name}`,
++    content_type: "application/octet-stream",
++    download_count: 0,
++    label: null,
++    node_id: `RA_${asset.id}`,
++  };
++}
++
++function releaseJson(release: FakeRelease) {
++  return {
++    id: release.id,
++    tag_name: release.tag_name,
++    draft: release.draft,
++    prerelease: release.prerelease,
++    published_at: release.published_at,
++    immutable: release.immutable,
++    name: release.name,
++    body: release.body,
++    url: `${DECOY}/releases/${release.id}`,
++    assets_url: `${DECOY}/releases/${release.id}/assets`,
++    upload_url: `${DECOY}/releases/${release.id}/assets{?name,label}`,
++    html_url: `${DECOY}/html/${release.tag_name}`,
++    tarball_url: `${DECOY}/tarball/${release.tag_name}`,
++    zipball_url: `${DECOY}/zipball/${release.tag_name}`,
++    target_commitish: "main",
++    node_id: `RE_${release.id}`,
++    author: { login: "kgarg2468" },
++    assets: release.assets.map(assetJson),
++  };
++}
++
++interface RecordedRequest {
++  readonly url: string;
++  readonly method: string;
++  readonly headers: Record<string, string>;
++  readonly signal: AbortSignal;
++  readonly redirect: string | undefined;
++}
++
++function streamResponse(
++  chunks: ReadonlyArray<Uint8Array>,
++  init?: { readonly status?: number; readonly headers?: Record<string, string> },
++): Response {
++  const body = new ReadableStream<Uint8Array>({
++    start(controller) {
++      for (const chunk of chunks) controller.enqueue(chunk);
++      controller.close();
++    },
++  });
++  return new Response(body, { status: init?.status ?? 200, headers: init?.headers ?? {} });
++}
++
++const bytesResponse = (bytes: Uint8Array, headers?: Record<string, string>) =>
++  streamResponse([bytes], { headers: { "content-length": String(bytes.byteLength), ...headers } });
++
++const notFound = () => Response.json({ message: "Not Found" }, { status: 404 });
++
++/**
++ * A body that never ends: `prefix` chunks are readable at once, the next read
++ * stays pending forever and opens `pulled` when it starts. Cancellation and
++ * abort are counted so a test can prove the request scope really closed.
++ */
++function hangingBody(options: {
++  readonly signal: AbortSignal;
++  readonly pulled: Latch.Latch;
++  readonly cancels: { count: number };
++  readonly prefix?: ReadonlyArray<Uint8Array>;
++}): ReadableStream<Uint8Array> {
++  return new ReadableStream<Uint8Array>(
++    {
++      start(controller) {
++        for (const chunk of options.prefix ?? []) controller.enqueue(chunk);
++        options.signal.addEventListener("abort", () => {
++          try {
++            controller.error(new Error("aborted"));
++          } catch {
++            // already closed by cancellation
++          }
++        });
++      },
++      pull() {
++        options.pulled.openUnsafe();
++        return new Promise<void>(() => {});
++      },
++      cancel() {
++        options.cancels.count += 1;
++      },
++    },
++    { highWaterMark: 0 },
++  );
++}
++
++interface FakeGitHub {
++  readonly releases: Array<FakeRelease>;
++  pageSize: number;
++  readonly requests: Array<RecordedRequest>;
++  /** Runs before routing; may mutate the model or return a response that replaces the routed one. */
++  intercept: (request: RecordedRequest, url: URL) => Response | undefined;
++  assetResponse: (asset: FakeAsset, request: RecordedRequest) => Response;
++  /** Requests this accepts are recorded and then never answered. */
++  pending: (url: URL) => boolean;
++}
++
++function makeFake(input: { readonly releases?: Array<FakeRelease>; readonly pageSize?: number }) {
++  const fake: FakeGitHub = {
++    releases: input.releases ?? [],
++    pageSize: input.pageSize ?? 100,
++    requests: [],
++    intercept: () => undefined,
++    assetResponse: (asset) => bytesResponse(asset.bytes),
++    pending: () => false,
++  };
++
++  const route = (url: URL, record: RecordedRequest): Response => {
++    const intercepted = fake.intercept(record, url);
++    if (intercepted !== undefined) return intercepted;
++    if (url.origin !== API_ORIGIN) return notFound();
++    const path = url.pathname;
++    if (path === RELEASES_PATH) {
++      if (url.searchParams.get("per_page") !== "100") return notFound();
++      const page = Number(url.searchParams.get("page") ?? "1");
++      const start = (page - 1) * fake.pageSize;
++      const slice = fake.releases.slice(start, start + fake.pageSize);
++      const lastPage = Math.max(1, Math.ceil(fake.releases.length / fake.pageSize));
++      const links: Array<string> = [];
++      if (page > 1) links.push(`<${PAGE(page - 1)}>; rel="prev"`, `<${PAGE(1)}>; rel="first"`);
++      if (page < lastPage) {
++        links.push(`<${PAGE(page + 1)}>; rel="next"`, `<${PAGE(lastPage)}>; rel="last"`);
++      }
++      return Response.json(
++        slice.map(releaseJson),
++        links.length === 0 ? undefined : { headers: { link: links.join(", ") } },
++      );
++    }
++    const tagsPrefix = `${RELEASES_PATH}/tags/`;
++    if (path.startsWith(tagsPrefix)) {
++      const tag = decodeURIComponent(path.slice(tagsPrefix.length));
++      const release = fake.releases.find((candidate) => candidate.tag_name === tag);
++      return release === undefined ? notFound() : Response.json(releaseJson(release));
++    }
++    const assetsPrefix = `${RELEASES_PATH}/assets/`;
++    if (path.startsWith(assetsPrefix)) {
++      const id = Number(path.slice(assetsPrefix.length));
++      const asset = fake.releases
++        .flatMap((release) => release.assets)
++        .find((candidate) => candidate.id === id);
++      if (asset === undefined) return notFound();
++      if (record.headers.accept !== "application/octet-stream") {
++        return Response.json(assetJson(asset));
++      }
++      return fake.assetResponse(asset, record);
++    }
++    return notFound();
++  };
++
++  const client = HttpClient.make((request, url, signal) =>
++    Effect.flatMap(Effect.serviceOption(FetchHttpClient.RequestInit), (init) => {
++      const record: RecordedRequest = {
++        url: url.toString(),
++        method: request.method,
++        headers: Object.fromEntries(Object.entries(request.headers)),
++        signal,
++        redirect: Option.getOrUndefined(init)?.redirect,
++      };
++      fake.requests.push(record);
++      if (fake.pending(url)) return Effect.never;
++      return Effect.succeed(HttpClientResponse.fromWeb(request, route(url, record)));
++    }),
++  );
++
++  const feed: Effect.Effect<ManagedReleaseFeed> = makeGitHubManagedReleaseFeed({
++    hostTarget: DARWIN,
++  }).pipe(Effect.provideService(HttpClient.HttpClient, client));
++
++  return { fake, feed };
++}
++
++const urlsOf = (fake: FakeGitHub) => fake.requests.map((request) => request.url);
++
++const reasonOf = <A>(effect: Effect.Effect<A, ManagedArtifactSourceError>) =>
++  effect.pipe(
++    Effect.flip,
++    Effect.map((error) => {
++      assert.strictEqual(error._tag, "ManagedArtifactSourceError");
++      return error.reason;
++    }),
++  );
++
++/** Applies `mutate` to the golden release the first time its tag endpoint is read. */
++function latestWithTagMutation(mutate: (release: FakeRelease) => void) {
++  const release = goldenRelease();
++  const { fake, feed } = makeFake({ releases: [release] });
++  let applied = false;
++  fake.intercept = (_request, url) => {
++    if (!applied && url.pathname.includes("/tags/")) {
++      applied = true;
++      mutate(release);
++    }
++    return undefined;
++  };
++  return { fake, latest: Effect.flatMap(feed, (feed) => feed.latest) };
++}
++
++/** Selects the golden release, then hands back a fake whose only later requests belong to the archive. */
++const selectGolden = Effect.fn(function* (input?: {
++  readonly assetResponse?: FakeGitHub["assetResponse"];
++  readonly intercept?: FakeGitHub["intercept"];
++}) {
++  const release = goldenRelease();
++  const { fake, feed: makeFeed } = makeFake({ releases: [release] });
++  const feed = yield* makeFeed;
++  const selection = yield* feed.resolve(GOLDEN_VERSION);
++  const verified = yield* verifiedGolden;
++  fake.requests.length = 0;
++  if (input?.assetResponse) fake.assetResponse = input.assetResponse;
++  if (input?.intercept) fake.intercept = input.intercept;
++  return { fake, feed, release, selection, verified };
++});
++
++// --- discovery ---------------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed discovery", () => {
++  it.effect("selects the highest published managed prerelease across every page", () =>
++    Effect.gen(function* () {
++      const { fake, feed } = makeFake({
++        pageSize: 2,
++        releases: [
++          releaseFor({ id: 3, version: V_OLDER, publishedAt: "2026-12-31T00:00:00Z" }),
++          releaseFor({ id: 4, docs: documentsForCounter(3), prerelease: false }),
++          releaseFor({ id: 5, docs: documentsForCounter(4), draft: true }),
++          goldenRelease(),
++          releaseFor({ id: 8, tag: "v1.2.3" }),
++          releaseFor({ id: 9, docs: documentsForCounter(5), publishedAt: null }),
++          releaseFor({
++            id: 10,
++            tag: "t3-managed-v0.0.38-nightly.20260905.3.managed.0.p6d1933416d7a",
++          }),
++          releaseFor({ id: 11, version: V_LOWER }),
++          releaseFor({ id: 12, version: GOLDEN_VERSION, tag: `t3-managed-v${GOLDEN_VERSION} ` }),
++        ],
++      });
++      const selection = yield* Effect.flatMap(feed, (feed) => feed.latest);
++      const verified = yield* verifiedGolden;
++
++      assert.isDefined(selection);
++      assert.deepStrictEqual(
++        { ...selection, source: undefined },
++        {
++          repository: "kgarg2468/harbor",
++          releaseId: 7,
++          tag: `t3-managed-v${GOLDEN_VERSION}`,
++          version: GOLDEN_VERSION,
++          publishedAt: TIME,
++          githubImmutable: true,
++          manifestSha256: verified.manifestSha256,
++          releaseInputSha256: verified.releaseInputSha256,
++          artifactId: `managed-server-darwin-arm64@sha256:${verified.sha256}`,
++          source: undefined,
++        },
++      );
++      const release = fake.releases[3] as FakeRelease;
++      assert.deepStrictEqual(urlsOf(fake), [
++        PAGE(1),
++        PAGE(2),
++        PAGE(3),
++        PAGE(4),
++        PAGE(5),
++        TAG(GOLDEN_VERSION),
++        ASSET(assetOf(release, MANAGED_RELEASE_MANIFEST_FILE).id),
++        ASSET(assetOf(release, MANAGED_RELEASE_SUMS_FILE).id),
++        TAG(GOLDEN_VERSION),
++      ]);
++      for (const request of fake.requests) {
++        assert.strictEqual(request.method, "GET");
++        assert.strictEqual(request.redirect, "manual");
++        assert.strictEqual(request.headers["user-agent"], "T3-Code-managed-release-source");
++        assert.strictEqual(request.headers["x-github-api-version"], "2026-03-10");
++        assert.notProperty(request.headers, "authorization");
++        assert.notProperty(request.headers, "cookie");
++        assert.notInclude(request.url, DECOY);
++        assert.notInclude(request.url, "/releases/latest");
++      }
++      assert.strictEqual(fake.requests[0]?.headers.accept, "application/vnd.github+json");
++      assert.strictEqual(fake.requests[6]?.headers.accept, "application/octet-stream");
++    }),
++  );
++
++  it.effect("returns undefined when no listed release is a candidate", () =>
++    Effect.gen(function* () {
++      const { fake, feed } = makeFake({
++        releases: [
++          releaseFor({ id: 1, tag: "v1.0.0" }),
++          releaseFor({ id: 2, docs: GOLDEN, draft: true }),
++          releaseFor({ id: 3, version: V_LOWER, prerelease: false }),
++        ],
++      });
++      assert.isUndefined(yield* Effect.flatMap(feed, (feed) => feed.latest));
++      assert.deepStrictEqual(urlsOf(fake), [PAGE(1)]);
++    }),
++  );
++
++  it.effect("rejects a managed version published by more than one release", () =>
++    Effect.gen(function* () {
++      const twice = makeFake({ releases: [goldenRelease(), releaseFor({ id: 8, docs: GOLDEN })] });
++      assert.include(
++        yield* reasonOf(Effect.flatMap(twice.feed, (feed) => feed.latest)),
++        "published by more than one release",
++      );
++      const repeated = goldenRelease();
++      const listedTwice = makeFake({ pageSize: 1, releases: [repeated, repeated] });
++      assert.include(
++        yield* reasonOf(Effect.flatMap(listedTwice.feed, (feed) => feed.latest)),
++        "release 7 was listed twice",
++      );
++    }),
++  );
++
++  it.effect("does not fall back to a lower version when the highest candidate is broken", () =>
++    Effect.gen(function* () {
++      const broken = releaseFor({ id: 8, docs: COUNTER_2 });
++      broken.assets = broken.assets.filter((asset) => asset.name !== MANAGED_RELEASE_SUMS_FILE);
++      const { fake, feed } = makeFake({ releases: [goldenRelease(), broken] });
++      const reason = yield* reasonOf(Effect.flatMap(feed, (feed) => feed.latest));
++      assert.include(reason, `expected exactly one ${MANAGED_RELEASE_SUMS_FILE} asset, found 0`);
++      assert.deepStrictEqual(urlsOf(fake), [PAGE(1), TAG(COUNTER_2.version)]);
++    }),
++  );
++
++  it.effect("resolves an exact version through its tag alone", () =>
++    Effect.gen(function* () {
++      const release = goldenRelease();
++      const { fake, feed: makeFeed } = makeFake({ releases: [release] });
++      const feed = yield* makeFeed;
++      const selection = yield* feed.resolve(GOLDEN_VERSION);
++      assert.strictEqual(selection.version, GOLDEN_VERSION);
++      assert.deepStrictEqual(urlsOf(fake), [
++        TAG(GOLDEN_VERSION),
++        ASSET(assetOf(release, MANAGED_RELEASE_MANIFEST_FILE).id),
++        ASSET(assetOf(release, MANAGED_RELEASE_SUMS_FILE).id),
++        TAG(GOLDEN_VERSION),
++      ]);
++
++      fake.requests.length = 0;
++      assert.include(yield* reasonOf(feed.resolve("1.2.3")), "not a managed release version");
++      assert.include(
++        yield* reasonOf(feed.resolve("../releases/latest")),
++        "not a managed release version",
++      );
++      assert.strictEqual(fake.requests.length, 0);
++
++      assert.include(yield* reasonOf(feed.resolve(V_LOWER)), "GitHub returned HTTP 404");
++      assert.deepStrictEqual(urlsOf(fake), [TAG(V_LOWER)]);
++
++      release.draft = true;
++      assert.include(yield* reasonOf(feed.resolve(GOLDEN_VERSION)), "is a draft");
++      release.draft = false;
++      release.prerelease = false;
++      assert.include(yield* reasonOf(feed.resolve(GOLDEN_VERSION)), "is not a prerelease");
++      release.prerelease = true;
++      release.published_at = null;
++      assert.include(yield* reasonOf(feed.resolve(GOLDEN_VERSION)), "is not published");
++      release.published_at = TIME;
++
++      // The tag endpoint answering with a release for another version is not the requested one.
++      fake.intercept = (_request, url) =>
++        url.pathname.includes("/tags/") ? Response.json(releaseJson(release)) : undefined;
++      assert.include(
++        yield* reasonOf(feed.resolve(COUNTER_2.version)),
++        `does not name version ${COUNTER_2.version}`,
++      );
++    }),
++  );
++
++  it.effect("reports rate limiting from the response headers, never the body", () =>
++    Effect.gen(function* () {
++      const fake = makeFake({ releases: [goldenRelease()] });
++      fake.fake.intercept = () =>
++        new Response('{"message":"secret-body"}', {
++          status: 403,
++          headers: {
++            "x-ratelimit-remaining": "0",
++            "x-ratelimit-reset": "1700000000",
++            "retry-after": "not a number",
++          },
++        });
++      const reason = yield* reasonOf(Effect.flatMap(fake.feed, (feed) => feed.latest));
++      assert.include(
++        reason,
++        "GitHub returned HTTP 403 (x-ratelimit-remaining=0, x-ratelimit-reset=1700000000)",
++      );
++      assert.notInclude(reason, "secret-body");
++      assert.notInclude(reason, "retry-after");
++
++      const plain = makeFake({ releases: [goldenRelease()] });
++      plain.fake.intercept = () => new Response("busy", { status: 429 });
++      assert.include(
++        yield* reasonOf(Effect.flatMap(plain.feed, (feed) => feed.latest)),
++        "HTTP 429 (rate limited or forbidden)",
++      );
++    }),
++  );
++});
++
++// --- pagination --------------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed pagination", () => {
++  const listWithLink = (link: string) => {
++    const { fake, feed } = makeFake({ pageSize: 1, releases: [goldenRelease(), goldenRelease()] });
++    fake.intercept = (_request, url) =>
++      url.pathname === RELEASES_PATH && url.searchParams.get("page") === "1"
++        ? Response.json([], { headers: { link } })
++        : undefined;
++    return { fake, latest: Effect.flatMap(feed, (feed) => feed.latest) };
++  };
++
++  it.effect("continues only through a next link that names the fixed endpoint's next page", () =>
++    Effect.gen(function* () {
++      const accepted = [
++        `<${PAGE(2)}>; rel="next"`,
++        `<${PAGE(2)}>; REL=Next`,
++        `<${PAGE(2)}>; rel="prev next"`,
++        `<${PAGE(2)}>; rel="NEXT"`,
++        `<${PAGE(2)}>; rel="first  next"`,
++        `<${PAGE(2)}>; rel="Prev NEXT Last"`,
++        `<${PAGE(1)}>; rel="prev", <${PAGE(2)}>; rel="next"; title="a, b; c", <${PAGE(2)}>; rel="last"`,
++        `<${API}?page=2&per_page=100>; rel="next"`,
++      ];
++      for (const link of accepted) {
++        const { fake, latest } = listWithLink(link);
++        assert.strictEqual((yield* latest)?.version, GOLDEN_VERSION, link);
++        assert.strictEqual(fake.requests[1]?.url, PAGE(2), link);
++      }
++
++      const final = [
++        `<${PAGE(1)}>; rel="prev"`,
++        `<${PAGE(1)}>; rel="first", <${PAGE(1)}>; rel="last"`,
++        `<${PAGE(1)}>; rel="prev first"; title="urn:example:next"`,
++        "",
++      ];
++      for (const link of final) {
++        const { fake, latest } = listWithLink(link);
++        assert.isUndefined(yield* latest, link);
++        assert.deepStrictEqual(urlsOf(fake), [PAGE(1)], link);
++      }
++    }),
++  );
++
++  it.effect("refuses malformed or out-of-policy continuations instead of stopping early", () =>
++    Effect.gen(function* () {
++      const refused: Array<[string, string]> = [
++        [`<${PAGE(3)}>; rel="next"`, "outside the fixed releases endpoint"],
++        [`<${API}?per_page=50&page=2>; rel="next"`, "outside the fixed releases endpoint"],
++        [`<${API}?per_page=100&page=2&extra=1>; rel="next"`, "outside the fixed releases endpoint"],
++        [
++          `<http://api.github.com${RELEASES_PATH}?per_page=100&page=2>; rel="next"`,
++          "outside the fixed",
++        ],
++        [
++          `<https://evil.example${RELEASES_PATH}?per_page=100&page=2>; rel="next"`,
++          "outside the fixed",
++        ],
++        [
++          `<https://user:pw${"@"}api.github.com${RELEASES_PATH}?per_page=100&page=2>; rel="next"`,
++          "outside",
++        ],
++        [`<${PAGE(2)}#fragment>; rel="next"`, "outside the fixed releases endpoint"],
++        [`<${API}/latest?per_page=100&page=2>; rel="next"`, "outside the fixed releases endpoint"],
++        [`<${PAGE(2)}>; rel="next", <${PAGE(2)}>; rel="next"`, "several next pages"],
++        [`<${PAGE(2)}>; rel="prev"; rel="next"`, "repeats a rel parameter"],
++        [`<${PAGE(1)}>; rel="prev", rel=next`, "Link header is malformed"],
++        [`<${PAGE(2)}> rel="next"`, "Link header is malformed"],
++        [`<${PAGE(2)}>; rel="next`, "Link header is malformed"],
++        [`<${PAGE(2)}>; rel=`, "Link header is malformed"],
++        [`<${PAGE(2)}>; ; rel="next"`, "Link header is malformed"],
++        [`<${PAGE(2)}; rel="next"`, "Link header is malformed"],
++        [`${PAGE(2)}; rel="next"`, "Link header is malformed"],
++        [`<not a url>; rel="next"`, "Link next URL is malformed"],
++        [`<${PAGE(2)}>; rel="next"; title="${"x".repeat(9000)}"`, "Link header is too long"],
++        [`<${PAGE(2)}>; rel=""`, "malformed rel value"],
++        [`<${PAGE(2)}>; rel="   "`, "malformed rel value"],
++        [`<${PAGE(2)}>; rel=" next"`, "malformed rel value"],
++        [`<${PAGE(2)}>; rel="next "`, "malformed rel value"],
++        // The supported subset is next, prev, first and last. Anything else,
++        // whether a registered name, an extension URI or a value this module
++        // cannot classify, is refused rather than treated as "no next page",
++        // even when it sits beside a valid next relation.
++        [`<${PAGE(2)}>; rel="alternate"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next alternate"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel=next.page`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="https://example.com/rel/next"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="https://example.com/rel?x=1#next next"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next urn:example:paging"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="prev urn:example:next"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next:#a#b"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next:["`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next,"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="prev,next"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="prev\tnext"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel=next!`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="-next"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next example.com/rel"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="next https://example.com/\\"x"`, "unsupported rel value"],
++        [`<${PAGE(2)}>; rel="prev", <${PAGE(1)}>; rel="first,"`, "unsupported rel value"],
++      ];
++      for (const [link, expected] of refused) {
++        const { fake, latest } = listWithLink(link);
++        assert.include(yield* reasonOf(latest), expected, link);
++        assert.deepStrictEqual(urlsOf(fake), [PAGE(1)], link);
++      }
++    }),
++  );
++
++  it.effect("fails past the page cap rather than returning a possibly stale maximum", () =>
++    Effect.gen(function* () {
++      const { fake, feed } = makeFake({});
++      fake.intercept = (_request, url) => {
++        if (url.pathname !== RELEASES_PATH) return undefined;
++        const page = Number(url.searchParams.get("page"));
++        return Response.json([], { headers: { link: `<${PAGE(page + 1)}>; rel="next"` } });
++      };
++      const reason = yield* reasonOf(Effect.flatMap(feed, (feed) => feed.latest));
++      assert.include(reason, "listing releases page 50: the repository has more than 50 pages");
++      assert.strictEqual(fake.requests.length, 50);
++      assert.strictEqual(fake.requests[49]?.url, PAGE(50));
++    }),
++  );
++});
++
++// --- descriptor identity ---------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed descriptor identity", () => {
++  it.effect("requires the exact-tag descriptor to equal the listed one", () =>
++    Effect.gen(function* () {
++      const moved: Array<[string, (release: FakeRelease) => void, string]> = [
++        ["release id", (release) => (release.id += 1), "changed while it was being read"],
++        ["published_at", (release) => (release.published_at = "2026-09-07T00:00:00Z"), "changed"],
++        ["immutable", (release) => (release.immutable = false), "changed while it was being read"],
++        ["asset size", (release) => (assetOf(release, "nightly.zip").size += 1), "changed"],
++        ["asset id", (release) => (assetOf(release, "nightly.zip").id += 1000), "changed"],
++        [
++          "asset digest",
++          (release) => (assetOf(release, "nightly.zip").digest = `sha256:${"0".repeat(64)}`),
++          "changed while it was being read",
++        ],
++        [
++          "asset updated_at",
++          (release) => (assetOf(release, SERVER_FILE).updated_at = "2026-09-07T00:00:00Z"),
++          "changed",
++        ],
++        [
++          "asset renamed",
++          (release) => (assetOf(release, "nightly.zip").name = "nightly-2.zip"),
++          "changed",
++        ],
++        ["asset removed", (release) => release.assets.splice(0, 1), "changed"],
++        [
++          "asset added",
++          (release) =>
++            release.assets.push({ ...assetOf(release, "nightly.zip"), id: 999, name: "notes.txt" }),
++          "changed",
++        ],
++        [
++          "asset state",
++          (release) => (assetOf(release, "nightly.zip").state = "starter"),
++          "is not uploaded",
++        ],
++        ["draft", (release) => (release.draft = true), "is a draft"],
++        ["prerelease", (release) => (release.prerelease = false), "is not a prerelease"],
++        [
++          "tag",
++          (release) => (release.tag_name = `t3-managed-v${COUNTER_2.version}`),
++          "GitHub returned HTTP 404",
++        ],
++      ];
++      for (const [label, mutate, expected] of moved) {
++        const { fake, latest } = latestWithTagMutation(mutate);
++        assert.include(yield* reasonOf(latest), expected, label);
++        assert.isFalse(
++          urlsOf(fake).some((url) => url.includes("/assets/")),
++          label,
++        );
++      }
++
++      const { fake, latest } = latestWithTagMutation((release) => {
++        release.name = "Renamed release";
++        release.body = "Edited notes";
++      });
++      assert.strictEqual((yield* latest)?.releaseId, 7);
++      assert.strictEqual(fake.requests.length, 5);
++    }),
++  );
++
++  it.effect("refuses a release that moved while its documents were being read", () =>
++    Effect.gen(function* () {
++      const release = goldenRelease();
++      const { fake, feed } = makeFake({ releases: [release] });
++      let tagReads = 0;
++      fake.intercept = (_request, url) => {
++        if (url.pathname.includes("/tags/") && ++tagReads === 2) {
++          assetOf(release, SERVER_FILE).size += 1;
++        }
++        return undefined;
++      };
++      const reason = yield* reasonOf(Effect.flatMap(feed, (feed) => feed.resolve(GOLDEN_VERSION)));
++      assert.include(
++        reason,
++        `re-reading release 7 ("t3-managed-v${GOLDEN_VERSION}") after its documents`,
++      );
++      assert.include(reason, "changed while it was being read");
++      assert.strictEqual(tagReads, 2);
++    }),
++  );
++
++  it.effect("refuses to open the archive of a release that moved since selection", () =>
++    Effect.gen(function* () {
++      const { fake, release, selection, verified } = yield* selectGolden();
++      assetOf(release, SERVER_FILE).id = 4242;
++      const reason = yield* reasonOf(Effect.scoped(selection.source.openArchive(verified)));
++      assert.include(reason, "before its archive");
++      assert.include(reason, "changed while it was being read");
++      assert.deepStrictEqual(urlsOf(fake), [TAG(GOLDEN_VERSION)]);
++    }),
++  );
++});
++
++// --- closure -----------------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed release closure", () => {
++  const resolveWith = (mutate: (release: FakeRelease) => void) => {
++    const release = goldenRelease();
++    mutate(release);
++    const { fake, feed } = makeFake({ releases: [release] });
++    return { fake, resolved: Effect.flatMap(feed, (feed) => feed.resolve(GOLDEN_VERSION)) };
++  };
++
++  it.effect("requires exactly the verified closure plus the checksum file", () =>
++    Effect.gen(function* () {
++      const sums = new Map(
++        GOLDEN_SUMS.split("\n")
++          .filter((line) => line !== "")
++          .map((line) => [line.slice(66), line.slice(0, 64)] as const),
++      );
++      const refused: Array<[string, (release: FakeRelease) => void, string]> = [
++        [
++          "missing archive",
++          (r) =>
++            r.assets.splice(
++              r.assets.findIndex((a) => a.name === "nightly.zip"),
++              1,
++            ),
++          "asset nightly.zip is missing",
++        ],
++        [
++          "missing manifest",
++          (r) => r.assets.splice(0, 1),
++          `expected exactly one ${MANAGED_RELEASE_MANIFEST_FILE} asset, found 0`,
++        ],
++        [
++          "extra asset",
++          (r) => r.assets.push({ ...assetOf(r, "nightly.zip"), id: 999, name: "notes.txt" }),
++          "asset notes.txt is outside the release closure",
++        ],
++        ["not uploaded", (r) => (assetOf(r, SERVER_FILE).state = "starter"), "is not uploaded"],
++        [
++          "duplicate name",
++          (r) => r.assets.push({ ...assetOf(r, "nightly.zip"), id: 999 }),
++          "asset name nightly.zip appears twice",
++        ],
++        [
++          "duplicate id",
++          (r) => r.assets.push({ ...assetOf(r, "nightly.zip"), name: "other.zip" }),
++          "appears twice",
++        ],
++        [
++          "traversal name",
++          (r) => (assetOf(r, "nightly.zip").name = "../nightly.zip"),
++          "is not a bare file name",
++        ],
++        [
++          "dash name",
++          (r) => (assetOf(r, "nightly.zip").name = "-nightly.zip"),
++          "is not a bare file name",
++        ],
++        [
++          "padded name",
++          (r) => (assetOf(r, "nightly.zip").name = " nightly.zip"),
++          "is not a bare file name",
++        ],
++        [
++          "server size",
++          (r) => (assetOf(r, SERVER_FILE).size = 15),
++          `asset ${SERVER_FILE} is 15 bytes on GitHub but 14 in the manifest`,
++        ],
++        [
++          "wrong archive digest",
++          (r) => (assetOf(r, "nightly.zip").digest = `sha256:${"0".repeat(64)}`),
++          "GitHub digest for nightly.zip disagrees",
++        ],
++        [
++          "wrong sums digest",
++          (r) => (assetOf(r, MANAGED_RELEASE_SUMS_FILE).digest = `sha256:${"0".repeat(64)}`),
++          `GitHub digest for ${MANAGED_RELEASE_SUMS_FILE} disagrees`,
++        ],
++        [
++          "wrong manifest digest",
++          (r) => (assetOf(r, MANAGED_RELEASE_MANIFEST_FILE).digest = `sha256:${"0".repeat(64)}`),
++          `GitHub digest for ${MANAGED_RELEASE_MANIFEST_FILE} disagrees`,
++        ],
++        [
++          "malformed digest",
++          (r) => (assetOf(r, "nightly.zip").digest = `SHA256:${"0".repeat(64)}`),
++          "asset digest is not sha256:<64 lowercase hex>",
++        ],
++        [
++          "zero asset id",
++          (r) => (assetOf(r, "nightly.zip").id = 0),
++          "asset id must be a positive safe integer",
++        ],
++        [
++          "zero size",
++          (r) => (assetOf(r, "nightly.zip").size = 0),
++          "size must be a positive safe integer",
++        ],
++        [
++          "bad timestamp",
++          (r) => (assetOf(r, "nightly.zip").created_at = "yesterday"),
++          "created_at is not a valid timestamp",
++        ],
++        [
++          "bad publication",
++          (r) => (r.published_at = "yesterday"),
++          "published_at is not a valid timestamp",
++        ],
++        ["zero release id", (r) => (r.id = 0), "release id must be a positive safe integer"],
++      ];
++      for (const [label, mutate, expected] of refused) {
++        const { fake, resolved } = resolveWith(mutate);
++        assert.include(yield* reasonOf(resolved), expected, label);
++        assert.isFalse(
++          urlsOf(fake).some((url) => url.includes(ASSET(assetOf(goldenRelease(), SERVER_FILE).id))),
++          label,
++        );
++      }
++
++      const { resolved } = resolveWith((release) => {
++        for (const asset of release.assets) {
++          asset.digest = `sha256:${asset.name === MANAGED_RELEASE_SUMS_FILE ? sha256Hex(GOLDEN.sums) : sums.get(asset.name)}`;
++        }
++      });
++      assert.strictEqual((yield* resolved).version, GOLDEN_VERSION);
++    }),
++  );
++
++  it.effect("verifies the documents with the real verifier against the exact version", () =>
++    Effect.gen(function* () {
++      const reserialized = resolveWith((release) => {
++        const manifest = assetOf(release, MANAGED_RELEASE_MANIFEST_FILE);
++        manifest.bytes = encoder.encode(JSON.stringify(JSON.parse(GOLDEN_MANIFEST)));
++        manifest.size = manifest.bytes.byteLength;
++      });
++      const reason = yield* reasonOf(reserialized.resolved);
++      assert.include(
++        reason,
++        `verifying the documents of release 7 ("t3-managed-v${GOLDEN_VERSION}")`,
++      );
++      assert.include(reason, "manifest hash");
++
++      // Golden documents published under another version's tag name the wrong version.
++      const mislabeled = releaseFor({ id: 8, docs: GOLDEN, version: COUNTER_2.version });
++      const { feed } = makeFake({ releases: [mislabeled] });
++      assert.include(
++        yield* reasonOf(Effect.flatMap(feed, (feed) => feed.resolve(COUNTER_2.version))),
++        "not the requested",
++      );
++    }),
++  );
++});
++
++// --- bodies ------------------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed bodies", () => {
++  it.effect("bounds document bodies as they stream and checks Content-Length early", () =>
++    Effect.gen(function* () {
++      const chunked = (asset: FakeAsset) =>
++        streamResponse(
++          asset.name === MANAGED_RELEASE_MANIFEST_FILE
++            ? Array.from({ length: 257 }, (_, index) => new Uint8Array(index === 256 ? 1 : 1024))
++            : [asset.bytes],
++        );
++      const oversized = makeFake({ releases: [goldenRelease()] });
++      oversized.fake.assetResponse = chunked;
++      assert.include(
++        yield* reasonOf(Effect.flatMap(oversized.feed, (feed) => feed.resolve(GOLDEN_VERSION))),
++        `response exceeds the ${MAX_MANAGED_MANIFEST_BYTES} byte limit`,
++      );
++
++      const declared = makeFake({ releases: [goldenRelease()] });
++      declared.fake.assetResponse = (asset) =>
++        bytesResponse(asset.bytes, {
++          "content-length": String(
++            asset.name === MANAGED_RELEASE_SUMS_FILE ? MAX_MANAGED_SUMS_BYTES + 1 : asset.size,
++          ),
++        });
++      assert.include(
++        yield* reasonOf(Effect.flatMap(declared.feed, (feed) => feed.resolve(GOLDEN_VERSION))),
++        `Content-Length ${MAX_MANAGED_SUMS_BYTES + 1} exceeds the ${MAX_MANAGED_SUMS_BYTES} byte limit`,
++      );
++
++      // An encoded body's Content-Length is not the decoded length, so it is not an early check.
++      const encoded = makeFake({ releases: [goldenRelease()] });
++      encoded.fake.assetResponse = (asset) =>
++        bytesResponse(asset.bytes, { "content-length": "999999999", "content-encoding": "gzip" });
++      const selection = yield* Effect.flatMap(encoded.feed, (feed) => feed.resolve(GOLDEN_VERSION));
++      assert.strictEqual(selection.version, GOLDEN_VERSION);
++    }),
++  );
++
++  it.effect("rejects metadata that is not bounded UTF-8 JSON matching the schema", () =>
++    Effect.gen(function* () {
++      const cases: Array<[Response, string]> = [
++        [streamResponse([new Uint8Array([0xff, 0xfe])]), "response is not valid UTF-8"],
++        [new Response("{", { status: 200 }), "response is not valid JSON"],
++        [Response.json([{ id: "seven" }]), "does not match the GitHub release schema"],
++        [Response.json({ message: "an object" }), "does not match the GitHub release schema"],
++        [
++          new Response("[]", { status: 200, headers: { "content-length": "5000000" } }),
++          "Content-Length 5000000 exceeds",
++        ],
++        [new Response("", { status: 500 }), "GitHub returned HTTP 500"],
++        [new Response(null, { status: 204 }), "GitHub returned HTTP 204"],
++      ];
++      for (const [response, expected] of cases) {
++        const { fake, feed } = makeFake({ releases: [goldenRelease()] });
++        fake.intercept = () => response;
++        assert.include(
++          yield* reasonOf(Effect.flatMap(feed, (feed) => feed.latest)),
++          expected,
++          expected,
++        );
++      }
++    }),
++  );
++});
++
++// --- source binding ----------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed source", () => {
++  it.effect("binds readDocuments to the selected version and hands out copies", () =>
++    Effect.gen(function* () {
++      const { fake, feed, selection } = yield* selectGolden();
++      const first = yield* selection.source.readDocuments(GOLDEN_VERSION);
++      assert.deepStrictEqual(first.manifestBytes, GOLDEN.manifest);
++      assert.deepStrictEqual(first.sumsBytes, GOLDEN.sums);
++      first.manifestBytes.fill(0);
++      first.sumsBytes.fill(0);
++      const second = yield* selection.source.readDocuments(GOLDEN_VERSION);
++      assert.deepStrictEqual(second.manifestBytes, GOLDEN.manifest);
++      assert.deepStrictEqual(second.sumsBytes, GOLDEN.sums);
++      assert.notStrictEqual(second.manifestBytes, first.manifestBytes);
++      assert.include(
++        yield* reasonOf(selection.source.readDocuments(COUNTER_2.version)),
++        `bound to ${GOLDEN_VERSION}, not`,
++      );
++      assert.strictEqual(fake.requests.length, 0);
++
++      // A later poll finds a newer release but cannot retarget the earlier selection.
++      fake.releases.push(releaseFor({ id: 8, docs: COUNTER_2 }));
++      const newer = yield* feed.latest;
++      if (newer === undefined) return assert.fail("expected the newer release to be selected");
++      assert.strictEqual(newer.version, COUNTER_2.version);
++      assert.strictEqual(newer.releaseId, 8);
++      const stillGolden = yield* selection.source.readDocuments(GOLDEN_VERSION);
++      assert.deepStrictEqual(stillGolden.manifestBytes, GOLDEN.manifest);
++      assert.include(
++        yield* reasonOf(selection.source.readDocuments(COUNTER_2.version)),
++        `bound to ${GOLDEN_VERSION}`,
++      );
++      const newerDocuments = yield* newer.source.readDocuments(COUNTER_2.version);
++      assert.deepStrictEqual(newerDocuments.manifestBytes, COUNTER_2.manifest);
++    }),
++  );
++
++  it.effect("opens the archive only for the exact verified asset", () =>
++    Effect.gen(function* () {
++      const { fake, selection, verified } = yield* selectGolden();
++      const keys = Object.keys(verified) as Array<keyof VerifiedManagedServerAsset>;
++      assert.strictEqual(keys.length, 11);
++      for (const key of keys) {
++        const value = verified[key];
++        const altered = { ...verified, [key]: typeof value === "number" ? value + 1 : `${value}x` };
++        const reason = yield* reasonOf(Effect.scoped(selection.source.openArchive(altered)));
++        assert.include(reason, "the requested asset is not the selected asset", key);
++      }
++      assert.strictEqual(fake.requests.length, 0);
++    }),
++  );
++
++  it.effect("streams the archive from the fixed asset-id endpoint after re-reading the tag", () =>
++    Effect.gen(function* () {
++      const { fake, release, selection, verified } = yield* selectGolden({
++        assetResponse: (asset) =>
++          streamResponse([asset.bytes.slice(0, 7), asset.bytes.slice(7)], {
++            headers: { "content-length": String(asset.size) },
++          }),
++      });
++      const serverAsset = assetOf(release, SERVER_FILE);
++      const scope = yield* Scope.make();
++      const stream = yield* selection.source.openArchive(verified).pipe(Scope.provide(scope));
++      const chunks: Array<number> = [];
++      yield* Stream.runForEach(stream, (chunk) => Effect.sync(() => chunks.push(chunk.byteLength)));
++      assert.deepStrictEqual(chunks, [7, 7]);
++      assert.deepStrictEqual(urlsOf(fake), [TAG(GOLDEN_VERSION), ASSET(serverAsset.id)]);
++      const archiveRequest = fake.requests[1] as RecordedRequest;
++      assert.strictEqual(archiveRequest.headers.accept, "application/octet-stream");
++      assert.strictEqual(archiveRequest.headers["x-github-api-version"], "2026-03-10");
++      assert.strictEqual(archiveRequest.redirect, "manual");
++      assert.notProperty(archiveRequest.headers, "authorization");
++      assert.isFalse(archiveRequest.signal.aborted);
++      yield* Scope.close(scope, Exit.void);
++      assert.isTrue(archiveRequest.signal.aborted);
++
++      fake.requests.length = 0;
++      fake.assetResponse = (asset) => bytesResponse(asset.bytes, { "content-length": "13" });
++      assert.include(
++        yield* reasonOf(Effect.scoped(selection.source.openArchive(verified))),
++        `Content-Length 13 is not the 14 bytes of ${SERVER_FILE}`,
++      );
++    }),
++  );
++
++  it.effect("follows GitHub's asset redirect by hand with a fresh unversioned GET", () =>
++    Effect.gen(function* () {
++      const objectUrl = "https://objects.example/blob/abc?X-Amz-Signature=SECRET-SIGNATURE";
++      const serverBytes = assetOf(goldenRelease(), SERVER_FILE).bytes;
++      const { fake, release, selection, verified } = yield* selectGolden({
++        assetResponse: () => new Response(null, { status: 302, headers: { location: objectUrl } }),
++        intercept: (_request, url) =>
++          url.origin === "https://objects.example" ? bytesResponse(serverBytes) : undefined,
++      });
++      const collectArchive = Effect.scoped(
++        Effect.flatMap(selection.source.openArchive(verified), Stream.runCollect),
++      );
++      const bytes = yield* collectArchive;
++      assert.strictEqual(
++        bytes.reduce((total, chunk) => total + chunk.byteLength, 0),
++        14,
++      );
++      assert.deepStrictEqual(urlsOf(fake), [
++        TAG(GOLDEN_VERSION),
++        ASSET(assetOf(release, SERVER_FILE).id),
++        objectUrl,
++      ]);
++      const hop = fake.requests[2] as RecordedRequest;
++      assert.strictEqual(hop.method, "GET");
++      assert.strictEqual(hop.headers.accept, "application/octet-stream");
++      assert.strictEqual(hop.headers["user-agent"], "T3-Code-managed-release-source");
++      assert.notProperty(hop.headers, "x-github-api-version");
++      assert.notProperty(hop.headers, "authorization");
++      assert.strictEqual(hop.redirect, "manual");
++
++      // A relative Location resolves against the hop it came from and keeps the version header on the API origin.
++      fake.requests.length = 0;
++      fake.assetResponse = () =>
++        new Response(null, {
++          status: 302,
++          headers: { location: "/relocated/blob?sig=SECRET-SIGNATURE" },
++        });
++      fake.intercept = (_request, url) =>
++        url.pathname === "/relocated/blob"
++          ? bytesResponse(assetOf(release, SERVER_FILE).bytes)
++          : undefined;
++      const relocated = yield* collectArchive;
++      assert.strictEqual(relocated.length, 1);
++      assert.strictEqual(
++        fake.requests[2]?.url,
++        `${API_ORIGIN}/relocated/blob?sig=SECRET-SIGNATURE`,
++      );
++      assert.strictEqual(fake.requests[2]?.headers["x-github-api-version"], "2026-03-10");
++    }),
++  );
++
++  it.effect("bounds and vets redirects without echoing their targets", () =>
++    Effect.gen(function* () {
++      const redirect = (location: string | undefined, status = 302) =>
++        new Response(null, { status, headers: location === undefined ? {} : { location } });
++      const cases: Array<[string, (hop: number) => Response, string]> = [
++        [
++          "too many hops",
++          (hop) => redirect(`https://objects.example/hop-${hop}?sig=SECRET-SIGNATURE`),
++          "redirected more than 3 times",
++        ],
++        [
++          "http target",
++          () => redirect("http://objects.example/blob?sig=SECRET-SIGNATURE"),
++          "redirect target is not HTTPS",
++        ],
++        [
++          "credentials",
++          () => redirect(`https://user:pw${"@"}objects.example/blob?sig=SECRET-SIGNATURE`),
++          "carries credentials or a fragment",
++        ],
++        [
++          "fragment",
++          () => redirect("https://objects.example/blob?sig=SECRET-SIGNATURE#frag"),
++          "carries credentials or a fragment",
++        ],
++        ["missing location", () => redirect(undefined), "redirected without a Location"],
++        [
++          "unparseable location",
++          () => redirect("https://[bad"),
++          "redirect target is not a valid URL",
++        ],
++        [
++          "permanent redirect",
++          () => redirect("https://objects.example/blob?sig=SECRET-SIGNATURE", 301),
++          "GitHub returned HTTP 301 for asset",
++        ],
++        [
++          "not found after hop",
++          (hop) =>
++            hop === 0
++              ? redirect("https://objects.example/gone?sig=SECRET-SIGNATURE")
++              : new Response("gone", { status: 404 }),
++          "HTTP 404 for asset",
++        ],
++      ];
++      for (const [label, respond, expected] of cases) {
++        let hop = 0;
++        const { fake, selection, verified } = yield* selectGolden({
++          assetResponse: () => respond(hop++),
++          intercept: (_request, url) =>
++            url.origin === "https://objects.example" ? respond(hop++) : undefined,
++        });
++        const reason = yield* reasonOf(Effect.scoped(selection.source.openArchive(verified)));
++        assert.include(reason, expected, label);
++        assert.notInclude(reason, "SECRET-SIGNATURE", label);
++        assert.notInclude(reason, "objects.example", label);
++        assert.isTrue(fake.requests.length <= 5, label);
++      }
++    }),
++  );
++});
++
++// --- cancellation ------------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed cancellation", () => {
++  const stalledManifest = (input: {
++    readonly pulled: Latch.Latch;
++    readonly cancels: { count: number };
++    readonly prefix?: ReadonlyArray<Uint8Array>;
++  }) => {
++    const { fake, feed } = makeFake({ releases: [goldenRelease()] });
++    fake.assetResponse = (asset, request) =>
++      asset.name === MANAGED_RELEASE_MANIFEST_FILE
++        ? new Response(hangingBody({ ...input, signal: request.signal }))
++        : bytesResponse(asset.bytes);
++    return { fake, resolve: Effect.flatMap(feed, (feed) => feed.resolve(GOLDEN_VERSION)) };
++  };
++  const manifestRequest = (fake: FakeGitHub) =>
++    fake.requests.find((request) =>
++      request.url.endsWith(`/assets/${assetOf(goldenRelease(), MANAGED_RELEASE_MANIFEST_FILE).id}`),
++    ) as RecordedRequest;
++
++  it.effect("interrupting a document read aborts its request and cancels the body", () =>
++    Effect.gen(function* () {
++      const pulled = Latch.makeUnsafe(false);
++      const cancels = { count: 0 };
++      const { fake, resolve } = stalledManifest({ pulled, cancels });
++      const fiber = yield* Effect.forkScoped(resolve);
++      yield* pulled.await;
++      assert.isFalse(manifestRequest(fake).signal.aborted);
++      yield* Fiber.interrupt(fiber);
++      assert.isTrue(manifestRequest(fake).signal.aborted);
++      assert.strictEqual(cancels.count, 1);
++      assert.strictEqual(fake.requests.length, 2);
++    }),
++  );
++
++  it.effect("times out a stalled document read as a typed failure and closes its scope", () =>
++    Effect.gen(function* () {
++      const pulled = Latch.makeUnsafe(false);
++      const cancels = { count: 0 };
++      const { fake, resolve } = stalledManifest({ pulled, cancels, prefix: [new Uint8Array(3)] });
++      const fiber = yield* Effect.forkScoped(reasonOf(resolve));
++      yield* pulled.await;
++      yield* Effect.yieldNow;
++      yield* TestClock.adjust(Duration.seconds(30));
++      const reason = yield* Fiber.join(fiber);
++      assert.include(reason, `downloading ${MANAGED_RELEASE_MANIFEST_FILE}`);
++      assert.include(reason, "no complete response within");
++      assert.isTrue(manifestRequest(fake).signal.aborted);
++      assert.strictEqual(cancels.count, 1);
++    }),
++  );
++
++  it.effect("cuts an oversized document off and aborts its request", () =>
++    Effect.gen(function* () {
++      const pulled = Latch.makeUnsafe(false);
++      const cancels = { count: 0 };
++      const { fake, resolve } = stalledManifest({
++        pulled,
++        cancels,
++        prefix: [new Uint8Array(MAX_MANAGED_MANIFEST_BYTES), new Uint8Array(1)],
++      });
++      const reason = yield* reasonOf(resolve);
++      assert.include(reason, `response exceeds the ${MAX_MANAGED_MANIFEST_BYTES} byte limit`);
++      assert.isTrue(manifestRequest(fake).signal.aborted);
++      assert.strictEqual(cancels.count, 1);
++      assert.strictEqual(fake.requests.length, 2);
++    }),
++  );
++
++  const stalledArchive = Effect.fn(function* (prefix: ReadonlyArray<Uint8Array>) {
++    const pulled = Latch.makeUnsafe(false);
++    const cancels = { count: 0 };
++    const { fake, selection, verified } = yield* selectGolden({
++      assetResponse: (asset, request) =>
++        new Response(hangingBody({ signal: request.signal, pulled, cancels, prefix }), {
++          headers: { "content-length": String(asset.size) },
++        }),
++    });
++    const scope = yield* Scope.make();
++    const stream = yield* selection.source.openArchive(verified).pipe(Scope.provide(scope));
++    const archiveRequest = fake.requests[1] as RecordedRequest;
++    assert.strictEqual(archiveRequest.headers.accept, "application/octet-stream");
++    return { pulled, cancels, scope, stream, archiveRequest };
++  });
++
++  it.effect(
++    "interrupting the archive consumer cancels the body; closing the scope aborts the request",
++    () =>
++      Effect.gen(function* () {
++        const { pulled, cancels, scope, stream, archiveRequest } = yield* stalledArchive([]);
++        const consumer = yield* Effect.forkScoped(Stream.runCollect(stream));
++        yield* pulled.await;
++        yield* Fiber.interrupt(consumer);
++        assert.strictEqual(cancels.count, 1);
++        assert.isFalse(archiveRequest.signal.aborted);
++        yield* Scope.close(scope, Exit.void);
++        assert.isTrue(archiveRequest.signal.aborted);
++      }),
++  );
++
++  it.effect("an idle archive stream fails after the idle window instead of ending cleanly", () =>
++    Effect.gen(function* () {
++      const { pulled, cancels, scope, stream, archiveRequest } = yield* stalledArchive([
++        new Uint8Array(7),
++      ]);
++      const received: Array<number> = [];
++      const consumer = yield* Effect.forkScoped(
++        reasonOf(
++          Stream.runForEach(stream, (chunk) => Effect.sync(() => received.push(chunk.byteLength))),
++        ),
++      );
++      yield* pulled.await;
++      // The first chunk was delivered while the body is still open: nothing here collects the archive.
++      assert.deepStrictEqual(received, [7]);
++      yield* Effect.yieldNow;
++      yield* TestClock.adjust(Duration.seconds(60));
++      const reason = yield* Fiber.join(consumer);
++      assert.include(reason, "no archive bytes for");
++      assert.deepStrictEqual(received, [7]);
++      assert.strictEqual(cancels.count, 1);
++      yield* Scope.close(scope, Exit.void);
++      assert.isTrue(archiveRequest.signal.aborted);
++    }),
++  );
++
++  it.effect("times out an archive response that never arrives and aborts the request", () =>
++    Effect.gen(function* () {
++      const requested = Latch.makeUnsafe(false);
++      const { fake, selection, verified } = yield* selectGolden();
++      fake.pending = (url) => {
++        if (!url.pathname.includes("/assets/")) return false;
++        requested.openUnsafe();
++        return true;
++      };
++      const fiber = yield* Effect.forkScoped(
++        reasonOf(Effect.scoped(selection.source.openArchive(verified))),
++      );
++      yield* requested.await;
++      yield* Effect.yieldNow;
++      yield* TestClock.adjust(Duration.seconds(30));
++      const reason = yield* Fiber.join(fiber);
++      assert.include(reason, "opening the archive of release 7");
++      assert.include(reason, "no complete response within");
++      assert.strictEqual(fake.requests.length, 2);
++      assert.isTrue(fake.requests[1]?.signal.aborted);
++    }),
++  );
++});
+diff --git a/apps/server/src/cloud/managedReleaseSource.ts b/apps/server/src/cloud/managedReleaseSource.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa43a35e3e84f255c92826b8c2805e6b24db9b7d
+--- /dev/null
++++ b/apps/server/src/cloud/managedReleaseSource.ts
+@@ -0,0 +1,1035 @@
++import * as DateTime from "effect/DateTime";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++import * as Stream from "effect/Stream";
++import {
++  FetchHttpClient,
++  HttpClient,
++  HttpClientRequest,
++  type HttpClientResponse,
++} from "effect/unstable/http";
++
++import {
++  MANAGED_RELEASE_MANIFEST_FILE,
++  MANAGED_RELEASE_SUMS_FILE,
++  MAX_MANAGED_MANIFEST_BYTES,
++  MAX_MANAGED_SUMS_BYTES,
++  managedArtifactContentId,
++  parseManagedReleaseVersion,
++  sha256Hex,
++  verifyManagedReleaseDocuments,
++  type ManagedServerTarget,
++  type VerifiedManagedServerAsset,
++} from "./managedRelease.ts";
++import {
++  ManagedArtifactSourceError,
++  type ManagedArtifactSource,
++  type ManagedReleaseDocuments,
++} from "./managedRuntime.ts";
++import { compareExactServiceVersions } from "./serviceProtocol.ts";
++
++/**
++ * The public GitHub release feed for managed T3 releases, and the
++ * release-bound `ManagedArtifactSource` the runtime stager consumes.
++ *
++ * Discovery lists the fixed public repository, keeps the published, non-draft
++ * prereleases whose tag is exactly `t3-managed-v<managed version>`, and picks
++ * the highest managed version by SemVer precedence. Resolution reads that one
++ * release through its exact tag, downloads and verifies its two release
++ * documents with the real document verifier, proves the release's asset
++ * inventory is exactly the verified closure, and re-reads the tag so a release
++ * that moved while it was being read is refused rather than mixed.
++ *
++ * Every selection closes over one normalized release descriptor and the exact
++ * document bytes it verified. Its source never resolves "latest" again and
++ * never turns a caller- or manifest-supplied value into a network location:
++ * archive bytes come from the fixed asset-id endpoint for the pinned asset,
++ * after the descriptor has been proven unchanged once more.
++ *
++ * Pagination reads GitHub's `Link` header under a fixed-feed policy, not as a
++ * general RFC 8288 client: only the navigation relations `next`, `prev`,
++ * `first` and `last` are understood, and the one `next` target must be the
++ * fixed releases endpoint on the following page. Every other relation value
++ * and every other target is a refusal, so an unreadable continuation is an
++ * error rather than a silent end of the listing.
++ *
++ * Trust boundary, stated so nothing here is overclaimed:
++ *
++ * - The fixed HTTPS repository plus document and archive hashes give exact
++ *   byte identity under the trust placed in `kgarg2468/harbor` and GitHub.
++ *   There is no independent signature. A publisher or repository compromise
++ *   that replaces a release before this client first observes it is not
++ *   detectable here. Descriptor re-reads detect movement during one attempt;
++ *   the managed runtime's content record detects conflict with content this
++ *   host already published. GitHub's `immutable` release flag is exposed as
++ *   `githubImmutable` as an observation only; neither it, the 12-hex
++ *   release-input suffix in the version, nor `SHA256SUMS` is a trust root.
++ * - The queue persists only the exact `targetVersion` before staging
++ *   finishes, and a restarted process re-resolves it through `resolve`. The
++ *   selection-bound source prevents retargeting within one discovery/staging
++ *   attempt; durable pre-stage pinning of release id, asset id and document
++ *   hashes needs a later persistence change that this module does not make.
++ * - Wiring must keep one `ManagedReleaseSelection` paired with its `source`,
++ *   queue exactly `selection.version`, and require the stager's `artifactId`
++ *   to equal `selection.artifactId`. A later poll may yield a newer selection
++ *   but must not swap the source underneath an already queued target.
++ */
++
++export const MANAGED_RELEASE_REPOSITORY = "kgarg2468/harbor" as const;
++export const MANAGED_RELEASE_TAG_PREFIX = "t3-managed-v";
++
++const API_ORIGIN = "https://api.github.com";
++const RELEASES_PATH = `/repos/${MANAGED_RELEASE_REPOSITORY}/releases`;
++const RELEASES_URL = `${API_ORIGIN}${RELEASES_PATH}`;
++const API_VERSION_HEADER = "x-github-api-version";
++const API_VERSION = "2026-03-10";
++const USER_AGENT = "T3-Code-managed-release-source";
++
++/** Fixed request headers; nothing here is derived from configuration, the environment, or a response. */
++const API_HEADERS = {
++  accept: "application/vnd.github+json",
++  [API_VERSION_HEADER]: API_VERSION,
++  "user-agent": USER_AGENT,
++} as const;
++const ASSET_HEADERS = {
++  accept: "application/octet-stream",
++  "user-agent": USER_AGENT,
++} as const;
++
++const RELEASES_PER_PAGE = 100;
++/** 5,000 records with headroom inside GitHub's 60 requests/hour unauthenticated limit. */
++const MAX_RELEASE_PAGES = 50;
++const MAX_RELEASE_PAGE_BYTES = 4 * 1024 * 1024;
++const MAX_RELEASE_DESCRIPTOR_BYTES = 512 * 1024;
++const MAX_LINK_HEADER_LENGTH = 8 * 1024;
++const METADATA_TIMEOUT = Duration.seconds(30);
++const DOCUMENT_TIMEOUT = Duration.seconds(30);
++const ARCHIVE_RESPONSE_TIMEOUT = Duration.seconds(30);
++const ARCHIVE_IDLE_TIMEOUT = Duration.seconds(60);
++const MAX_ASSET_REDIRECTS = 3;
++
++/** Redirects are followed here under an owned policy, never by the fetch implementation. */
++const MANUAL_REDIRECTS: globalThis.RequestInit = { redirect: "manual" };
++
++const ASSET_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
++const SUMS_LINE_RE = /^([0-9a-f]{64})  (.+)$/;
++const DIGITS_RE = /^\d{1,20}$/;
++/** RFC 8288 `link-param`: a token, `=`, then a token or quoted-string. */
++const HTTP_TOKEN = "[!#$%&'*+\\-.^_`|~0-9A-Za-z]+";
++const LINK_PARAM_RE = new RegExp(
++  `^(${HTTP_TOKEN})[ \\t]*=[ \\t]*("(?:[^"\\\\]|\\\\.)*"|${HTTP_TOKEN})$`,
++);
++/**
++ * The only relation names this module understands: the four navigation
++ * relations GitHub's releases endpoint emits, compared case-insensitively as
++ * registered names are. This is deliberately not a general RFC 8288 client.
++ * Any other relation, including a well-formed registered name or extension
++ * URI, is refused rather than parsed, so a `Link` field the module does not
++ * fully understand can never pass for the end of the listing.
++ */
++const SUPPORTED_RELATIONS: ReadonlySet<string> = new Set(["next", "prev", "first", "last"]);
++
++export interface ManagedReleaseSelection {
++  readonly repository: typeof MANAGED_RELEASE_REPOSITORY;
++  readonly releaseId: number;
++  readonly tag: string;
++  readonly version: string;
++  readonly publishedAt: string;
++  /** GitHub's observed release field; an observation under repository trust, not a trust root. */
++  readonly githubImmutable: boolean;
++  readonly manifestSha256: string;
++  readonly releaseInputSha256: string;
++  /** `<fixed host artifact id>@sha256:<archive hash>`; the stager's result must equal it. */
++  readonly artifactId: string;
++  /** Bound to this descriptor and these verified document bytes. */
++  readonly source: ManagedArtifactSource;
++}
++
++export interface ManagedReleaseFeed {
++  /**
++   * Enumerates every bounded page and selects the highest published managed
++   * prerelease, then resolves it. `undefined` when there is no candidate. A
++   * malformed, incomplete or moved highest release is an error, never a
++   * downgrade to the previous version.
++   */
++  readonly latest: Effect.Effect<ManagedReleaseSelection | undefined, ManagedArtifactSourceError>;
++  /**
++   * Resolves exactly the supplied managed version through its exact tag and
++   * never consults "latest". Exists so a durable queue target restored after a
++   * process restart is re-resolved as the same version.
++   */
++  readonly resolve: (
++    exactVersion: string,
++  ) => Effect.Effect<ManagedReleaseSelection, ManagedArtifactSourceError>;
++}
++
++// --- GitHub schema -----------------------------------------------------------------
++
++/** Only the identity fields; every other GitHub field, including any URL, is ignored. */
++const GitHubAsset = Schema.Struct({
++  id: Schema.Number,
++  name: Schema.String,
++  state: Schema.String,
++  size: Schema.Number,
++  digest: Schema.optional(Schema.NullOr(Schema.String)),
++  created_at: Schema.String,
++  updated_at: Schema.String,
++});
++
++const GitHubRelease = Schema.Struct({
++  id: Schema.Number,
++  tag_name: Schema.String,
++  draft: Schema.Boolean,
++  prerelease: Schema.Boolean,
++  published_at: Schema.NullOr(Schema.String),
++  immutable: Schema.optional(Schema.Boolean),
++  assets: Schema.Array(GitHubAsset),
++});
++type GitHubRelease = typeof GitHubRelease.Type;
++
++const GitHubReleasePage = Schema.Array(GitHubRelease);
++
++const decodeRelease = Schema.decodeUnknownEffect(GitHubRelease);
++const decodeReleasePage = Schema.decodeUnknownEffect(GitHubReleasePage);
++
++/**
++ * Normalized identity of one release: everything that changes when its
++ * distribution changes, nothing that changes when its description is edited.
++ * Assets are in name order so two reads of the same release compare equal.
++ */
++interface ReleaseAssetDescriptor {
++  readonly id: number;
++  readonly name: string;
++  readonly state: "uploaded";
++  readonly size: number;
++  readonly digest: string | null;
++  readonly createdAt: string;
++  readonly updatedAt: string;
++}
++
++interface ReleaseDescriptor {
++  readonly releaseId: number;
++  readonly tag: string;
++  readonly version: string;
++  readonly draft: false;
++  readonly prerelease: true;
++  readonly publishedAt: string;
++  readonly githubImmutable: boolean;
++  readonly assets: ReadonlyArray<ReleaseAssetDescriptor>;
++}
++
++// --- errors ---------------------------------------------------------------------------
++
++const isSourceError = Schema.is(ManagedArtifactSourceError);
++
++function sourceError(reason: string, cause?: unknown): ManagedArtifactSourceError {
++  return new ManagedArtifactSourceError({
++    reason,
++    ...(cause === undefined ? {} : { cause }),
++  });
++}
++
++function fail(reason: string): never {
++  throw sourceError(reason);
++}
++
++/** Runs a synchronous validator, moving its typed refusals into the error channel. */
++function attempt<A>(evaluate: () => A): Effect.Effect<A, ManagedArtifactSourceError> {
++  return Effect.suspend(() => {
++    try {
++      return Effect.succeed(evaluate());
++    } catch (error) {
++      return isSourceError(error) ? Effect.fail(error) : Effect.die(error);
++    }
++  });
++}
++
++/** The tags of a foreign failure, never its message: HTTP client messages carry the request URL, which for an archive hop is a signed object-store link. */
++function failureTag(error: unknown): string {
++  if (
++    typeof error !== "object" ||
++    error === null ||
++    !("_tag" in error) ||
++    typeof error._tag !== "string"
++  ) {
++    return "unexpected failure";
++  }
++  const reason = "reason" in error ? error.reason : undefined;
++  const reasonTag =
++    typeof reason === "object" &&
++    reason !== null &&
++    "_tag" in reason &&
++    typeof reason._tag === "string"
++      ? ` (${reason._tag})`
++      : "";
++  return `${error._tag}${reasonTag}`;
++}
++
++function toSourceError(phase: string, error: unknown): ManagedArtifactSourceError {
++  return isSourceError(error) ? error : sourceError(`${phase}: ${failureTag(error)}`, error);
++}
++
++const quote = (value: string): string => JSON.stringify(value);
++
++// --- validation -----------------------------------------------------------------------
++
++function positiveSafeInteger(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value < 1) {
++    fail(`${label} must be a positive safe integer`);
++  }
++  return value;
++}
++
++function timestamp(value: string, label: string): string {
++  if (Option.isNone(DateTime.make(value))) fail(`${label} is not a valid timestamp`);
++  return value;
++}
++
++/** The same bare-name rule the release documents apply to their own file names. */
++function bareAssetName(name: string, label: string): string {
++  if (
++    name === "" ||
++    name === "." ||
++    name === ".." ||
++    name.includes("/") ||
++    name.includes("\\") ||
++    /[\p{Cc}]/u.test(name) ||
++    name.startsWith("-") ||
++    name.trim() !== name
++  ) {
++    fail(`${label}: asset name ${quote(name)} is not a bare file name`);
++  }
++  return name;
++}
++
++function assetDigest(value: string | null | undefined, label: string): string | null {
++  if (value === null || value === undefined) return null;
++  if (!ASSET_DIGEST_RE.test(value)) fail(`${label}: asset digest is not sha256:<64 lowercase hex>`);
++  return value;
++}
++
++/** The managed version a tag names, or undefined when the tag is not exactly `t3-managed-v<managed version>`. */
++function managedVersionOfTag(tag: string): string | undefined {
++  if (!tag.startsWith(MANAGED_RELEASE_TAG_PREFIX)) return undefined;
++  const version = tag.slice(MANAGED_RELEASE_TAG_PREFIX.length);
++  if (parseManagedReleaseVersion(version) === undefined) return undefined;
++  return `${MANAGED_RELEASE_TAG_PREFIX}${version}` === tag ? version : undefined;
++}
++
++function managedTag(version: string): string {
++  return `${MANAGED_RELEASE_TAG_PREFIX}${version}`;
++}
++
++/** The managed version a listed release publishes, or undefined when the publication or tag rules make it a non-candidate the listing ignores. */
++function candidateVersion(raw: GitHubRelease): string | undefined {
++  if (raw.draft !== false || raw.prerelease !== true || raw.published_at === null) return undefined;
++  if (Option.isNone(DateTime.make(raw.published_at))) return undefined;
++  return managedVersionOfTag(raw.tag_name);
++}
++
++/** Full descriptor normalization; every refusal names the release. */
++function normalizeRelease(raw: GitHubRelease): ReleaseDescriptor {
++  const releaseId = positiveSafeInteger(raw.id, "release id");
++  const label = `release ${releaseId} (${quote(raw.tag_name)})`;
++  if (raw.draft !== false) fail(`${label} is a draft`);
++  if (raw.prerelease !== true) fail(`${label} is not a prerelease`);
++  if (raw.published_at === null) fail(`${label} is not published`);
++  const publishedAt = timestamp(raw.published_at, `${label}: published_at`);
++  const version = managedVersionOfTag(raw.tag_name);
++  if (version === undefined) fail(`${label}: tag is not a managed release tag`);
++
++  const ids = new Set<number>();
++  const names = new Set<string>();
++  const assets = raw.assets.map((asset): ReleaseAssetDescriptor => {
++    const id = positiveSafeInteger(asset.id, `${label}: asset id`);
++    const assetLabel = `${label}: asset ${id}`;
++    const name = bareAssetName(asset.name, assetLabel);
++    if (asset.state !== "uploaded") fail(`${assetLabel} (${name}) is not uploaded`);
++    if (ids.has(id)) fail(`${assetLabel} appears twice`);
++    if (names.has(name)) fail(`${assetLabel}: asset name ${name} appears twice`);
++    ids.add(id);
++    names.add(name);
++    return {
++      id,
++      name,
++      state: "uploaded",
++      size: positiveSafeInteger(asset.size, `${assetLabel} (${name}): size`),
++      digest: assetDigest(asset.digest, `${assetLabel} (${name})`),
++      createdAt: timestamp(asset.created_at, `${assetLabel} (${name}): created_at`),
++      updatedAt: timestamp(asset.updated_at, `${assetLabel} (${name}): updated_at`),
++    };
++  });
++  assets.sort((a, b) => (a.name < b.name ? -1 : 1));
++  return {
++    releaseId,
++    tag: raw.tag_name,
++    version,
++    draft: false,
++    prerelease: true,
++    publishedAt,
++    githubImmutable: raw.immutable ?? false,
++    assets,
++  };
++}
++
++/** Equal keys mean equal normalized descriptors; field order is fixed by the constructors above. */
++function descriptorKey(descriptor: ReleaseDescriptor): string {
++  return JSON.stringify(descriptor);
++}
++
++function decodeUtf8Strict(bytes: Uint8Array, phase: string): string {
++  try {
++    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
++  } catch {
++    return fail(`${phase}: response is not valid UTF-8`);
++  }
++}
++
++/** Strict UTF-8 then JSON; the shape is decoded by the caller's schema. Neither error carries body text. */
++function parseJson(bytes: Uint8Array, phase: string): unknown {
++  const text = decodeUtf8Strict(bytes, phase);
++  try {
++    return JSON.parse(text) as unknown;
++  } catch {
++    return fail(`${phase}: response is not valid JSON`);
++  }
++}
++
++/** Only an identity-encoded, well-formed `Content-Length` is an early check; anything else defers to the streamed count. */
++function declaredContentLength(headers: HttpClientResponse.HttpClientResponse["headers"]) {
++  const encoding = headers["content-encoding"];
++  if (encoding !== undefined && encoding.trim().toLowerCase() !== "identity") return undefined;
++  const value = headers["content-length"];
++  if (value === undefined || !DIGITS_RE.test(value.trim())) return undefined;
++  const length = Number(value.trim());
++  return Number.isSafeInteger(length) ? length : undefined;
++}
++
++/** 403/429 carry GitHub's rate-limit metadata; only digit-string values are echoed. */
++function statusReason(status: number, headers: HttpClientResponse.HttpClientResponse["headers"]) {
++  if (status !== 403 && status !== 429) return `GitHub returned HTTP ${status}`;
++  const details = (["x-ratelimit-remaining", "x-ratelimit-reset", "retry-after"] as const).flatMap(
++    (name) => {
++      const value = headers[name]?.trim();
++      return value !== undefined && DIGITS_RE.test(value) ? [`${name}=${value}`] : [];
++    },
++  );
++  return details.length === 0
++    ? `GitHub returned HTTP ${status} (rate limited or forbidden)`
++    : `GitHub returned HTTP ${status} (${details.join(", ")})`;
++}
++
++// --- Link header ------------------------------------------------------------------------
++
++/** Splits on `separator` outside `<...>` and quoted strings; unbalanced nesting is undefined. */
++function splitOutsideQuotes(value: string, separator: "," | ";"): Array<string> | undefined {
++  const parts: Array<string> = [];
++  let current = "";
++  let inAngle = false;
++  let inQuote = false;
++  for (let index = 0; index < value.length; index += 1) {
++    const char = value[index] as string;
++    if (inQuote) {
++      current += char;
++      if (char === "\\") {
++        index += 1;
++        if (index >= value.length) return undefined;
++        current += value[index];
++      } else if (char === '"') {
++        inQuote = false;
++      }
++      continue;
++    }
++    if (inAngle) {
++      if (char === "<") return undefined;
++      if (char === ">") inAngle = false;
++      current += char;
++      continue;
++    }
++    if (char === '"') inQuote = true;
++    else if (char === "<") inAngle = true;
++    else if (char === ">") return undefined;
++    else if (char === separator) {
++      parts.push(current);
++      current = "";
++      continue;
++    }
++    current += char;
++  }
++  if (inQuote || inAngle) return undefined;
++  parts.push(current);
++  return parts;
++}
++
++/**
++ * Relation names of one `rel` value, lowercased. The framing follows RFC 8288
++ * section 3.3: one relation name as a token, or a quoted-string of names
++ * separated by one or more spaces. Every name must be in
++ * `SUPPORTED_RELATIONS`; an empty or space-padded list is malformed and any
++ * other name, registered or extension URI, is unsupported. Both are refusals.
++ */
++function relationTypes(value: string, phase: string): ReadonlyArray<string> {
++  const parts = value.startsWith('"')
++    ? value.slice(1, -1).replace(/\\(.)/g, "$1").split(/ +/)
++    : [value];
++  return parts.map((part) => {
++    if (part === "") fail(`${phase}: Link header has a malformed rel value`);
++    const name = part.toLowerCase();
++    if (!SUPPORTED_RELATIONS.has(name)) {
++      fail(`${phase}: Link header has an unsupported rel value`);
++    }
++    return name;
++  });
++}
++
++/**
++ * Parses the whole `Link` field strictly and returns the URI-reference of its
++ * one `rel="next"` link-value, or undefined when no link-value has a next
++ * relation. Malformed syntax, a repeated `rel` parameter, a relation outside
++ * the supported navigation subset, and several next link-values are refusals:
++ * a continuation this parser cannot fully read is an error, never the end of
++ * the listing.
++ */
++function nextLinkTarget(link: string, phase: string): string | undefined {
++  const malformed = `${phase}: Link header is malformed`;
++  if (link.length > MAX_LINK_HEADER_LENGTH) fail(`${phase}: Link header is too long`);
++  const linkValues = splitOutsideQuotes(link, ",");
++  if (linkValues === undefined) fail(malformed);
++  let next: string | undefined;
++  for (const rawLinkValue of linkValues) {
++    const linkValue = rawLinkValue.trim();
++    if (linkValue === "") continue;
++    const close = linkValue.indexOf(">");
++    if (!linkValue.startsWith("<") || close === -1) fail(malformed);
++    const target = linkValue.slice(1, close);
++    const params = splitOutsideQuotes(linkValue.slice(close + 1), ";");
++    if (params === undefined || params[0]?.trim() !== "") fail(malformed);
++    let rel: string | undefined;
++    for (const param of params.slice(1)) {
++      const match = LINK_PARAM_RE.exec(param.trim());
++      if (match === null) fail(malformed);
++      if ((match[1] as string).toLowerCase() !== "rel") continue;
++      if (rel !== undefined) fail(`${phase}: Link header repeats a rel parameter`);
++      rel = match[2] as string;
++    }
++    if (rel === undefined) continue;
++    if (!relationTypes(rel, phase).includes("next")) continue;
++    if (next !== undefined) fail(`${phase}: Link header names several next pages`);
++    next = target;
++  }
++  return next;
++}
++
++/**
++ * The only continuation accepted from a `Link` header: one `rel="next"` whose
++ * URL is exactly the fixed releases endpoint on the next page. The returned
++ * page number is then used to build the URL locally; the header's URL itself
++ * is never fetched.
++ */
++function nextPageFromLink(link: string | undefined, current: number): number | undefined {
++  if (link === undefined) return undefined;
++  const phase = `listing releases page ${current}`;
++  const target = nextLinkTarget(link, phase);
++  if (target === undefined) return undefined;
++  let url: URL;
++  try {
++    url = new URL(target);
++  } catch {
++    return fail(`${phase}: Link next URL is malformed`);
++  }
++  const expectedPage = current + 1;
++  const params = [...url.searchParams.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
++  if (
++    url.protocol !== "https:" ||
++    url.origin !== API_ORIGIN ||
++    url.username !== "" ||
++    url.password !== "" ||
++    url.hash !== "" ||
++    url.pathname !== RELEASES_PATH ||
++    params.length !== 2 ||
++    params[0]?.[0] !== "page" ||
++    params[0]?.[1] !== String(expectedPage) ||
++    params[1]?.[0] !== "per_page" ||
++    params[1]?.[1] !== String(RELEASES_PER_PAGE)
++  ) {
++    fail(`${phase}: Link next URL is outside the fixed releases endpoint`);
++  }
++  return expectedPage;
++}
++
++function releasesPageUrl(page: number): string {
++  return `${RELEASES_URL}?per_page=${RELEASES_PER_PAGE}&page=${page}`;
++}
++
++function releaseByTagUrl(version: string): string {
++  return `${RELEASES_URL}/tags/${encodeURIComponent(managedTag(version))}`;
++}
++
++function assetUrl(assetId: number): string {
++  return `${RELEASES_URL}/assets/${assetId}`;
++}
++
++/** Reads the already-verified checksum file's names; the verifier has proven its shape. */
++function sumsEntries(sumsBytes: Uint8Array): ReadonlyMap<string, string> {
++  const text = new TextDecoder("utf-8", { fatal: true }).decode(sumsBytes);
++  const entries = new Map<string, string>();
++  for (const line of text.slice(0, -1).split("\n")) {
++    const match = SUMS_LINE_RE.exec(line);
++    if (match === null) fail("reading the verified checksum file: unexpected line");
++    entries.set(match[2] as string, match[1] as string);
++  }
++  return entries;
++}
++
++const VERIFIED_ASSET_KEYS = [
++  "version",
++  "releaseArtifactId",
++  "file",
++  "bytes",
++  "sha256",
++  "manifestSha256",
++  "releaseInputSha256",
++  "platform",
++  "arch",
++  "entry",
++  "launcherProtocol",
++] as const satisfies ReadonlyArray<keyof VerifiedManagedServerAsset>;
++
++function sameVerifiedAsset(a: VerifiedManagedServerAsset, b: VerifiedManagedServerAsset): boolean {
++  return VERIFIED_ASSET_KEYS.every((key) => a[key] === b[key]);
++}
++
++// --- feed -----------------------------------------------------------------------------
++
++export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_source.make")(
++  function* (options: {
++    readonly hostTarget: ManagedServerTarget;
++  }): Effect.fn.Return<ManagedReleaseFeed, never, HttpClient.HttpClient> {
++    // Every request's lifetime is a scope: metadata and documents close a
++    // local one around request plus bounded body; the archive lives in the
++    // caller's. Closing the scope aborts the request.
++    const client = HttpClient.withScope(yield* HttpClient.HttpClient);
++
++    const send = (request: HttpClientRequest.HttpClientRequest, phase: string) =>
++      client.execute(request).pipe(
++        Effect.provideService(FetchHttpClient.RequestInit, MANUAL_REDIRECTS),
++        Effect.mapError((cause) => sourceError(`${phase}: request failed`, cause)),
++      );
++
++    const withTimeout =
++      (duration: Duration.Duration, phase: string) =>
++      <A, E, R>(effect: Effect.Effect<A, E, R>) =>
++        effect.pipe(
++          Effect.timeoutOrElse({
++            duration,
++            orElse: () =>
++              Effect.fail(
++                sourceError(`${phase}: no complete response within ${Duration.format(duration)}`),
++              ),
++          }),
++        );
++
++    const schemaMismatch = (phase: string) => (cause: Schema.SchemaError) =>
++      sourceError(`${phase}: response does not match the GitHub release schema`, cause);
++
++    /** Collects at most `maxBytes` of the body, failing as soon as the cap would be exceeded. */
++    const readBounded = Effect.fn("cloud.managed_release_source.read_bounded")(function* (
++      response: HttpClientResponse.HttpClientResponse,
++      maxBytes: number,
++      phase: string,
++    ) {
++      const declared = declaredContentLength(response.headers);
++      if (declared !== undefined && declared > maxBytes) {
++        return yield* sourceError(
++          `${phase}: Content-Length ${declared} exceeds the ${maxBytes} byte limit`,
++        );
++      }
++      const collected = yield* Stream.runFoldEffect(
++        response.stream,
++        () => ({ chunks: [] as Array<Uint8Array>, bytes: 0 }),
++        (state, chunk) => {
++          const bytes = state.bytes + chunk.byteLength;
++          if (bytes > maxBytes) {
++            return Effect.fail(
++              sourceError(`${phase}: response exceeds the ${maxBytes} byte limit`),
++            );
++          }
++          state.chunks.push(chunk);
++          return Effect.succeed({ chunks: state.chunks, bytes });
++        },
++      ).pipe(Effect.mapError((error) => toSourceError(`${phase}: reading the response`, error)));
++      const body = new Uint8Array(collected.bytes);
++      let offset = 0;
++      for (const chunk of collected.chunks) {
++        body.set(chunk, offset);
++        offset += chunk.byteLength;
++      }
++      return body;
++    });
++
++    /** One metadata request: exactly 200, bounded body, strict UTF-8 and JSON; the caller applies its schema. */
++    const fetchJson = Effect.fn("cloud.managed_release_source.fetch_json")(
++      function* (url: string, maxBytes: number, phase: string) {
++        const response = yield* send(HttpClientRequest.get(url, { headers: API_HEADERS }), phase);
++        if (response.status !== 200) {
++          return yield* sourceError(`${phase}: ${statusReason(response.status, response.headers)}`);
++        }
++        const bytes = yield* readBounded(response, maxBytes, phase);
++        const parsed = yield* attempt(() => parseJson(bytes, phase));
++        return { parsed, headers: response.headers };
++      },
++      (effect, _url, _maxBytes, phase) =>
++        effect.pipe(Effect.scoped, withTimeout(METADATA_TIMEOUT, phase)),
++    );
++
++    /**
++     * Opens the fixed asset-id endpoint and follows GitHub's documented 302 to
++     * the object store by hand: at most three hops, each a fresh GET over
++     * HTTPS with no credentials, the API version header only while still on
++     * `api.github.com`, and only a final 200 accepted. The returned response
++     * belongs to the caller's scope.
++     */
++    const openAsset = Effect.fn("cloud.managed_release_source.open_asset")(function* (
++      assetId: number,
++      phase: string,
++    ) {
++      let url = assetUrl(assetId);
++      for (let hop = 0; ; hop += 1) {
++        const onApi = new URL(url).origin === API_ORIGIN;
++        const headers = onApi
++          ? { ...ASSET_HEADERS, [API_VERSION_HEADER]: API_VERSION }
++          : ASSET_HEADERS;
++        const response = yield* send(HttpClientRequest.get(url, { headers }), phase);
++        if (response.status === 200) return response;
++        if (response.status !== 302) {
++          return yield* sourceError(
++            `${phase}: ${statusReason(response.status, response.headers)} for asset ${assetId}${hop === 0 ? "" : ` after ${hop} redirect(s)`}`,
++          );
++        }
++        if (hop >= MAX_ASSET_REDIRECTS) {
++          return yield* sourceError(
++            `${phase}: asset ${assetId} redirected more than ${MAX_ASSET_REDIRECTS} times`,
++          );
++        }
++        const location = response.headers.location;
++        if (location === undefined) {
++          return yield* sourceError(`${phase}: asset ${assetId} redirected without a Location`);
++        }
++        // Redirect targets are commonly signed URLs: the target is checked and
++        // followed, but never echoed into an error.
++        const target = yield* attempt(() => {
++          let next: URL;
++          try {
++            next = new URL(location, url);
++          } catch {
++            return fail(`${phase}: asset ${assetId} redirect target is not a valid URL`);
++          }
++          if (next.protocol !== "https:") {
++            fail(`${phase}: asset ${assetId} redirect target is not HTTPS`);
++          }
++          if (next.username !== "" || next.password !== "" || next.hash !== "") {
++            fail(`${phase}: asset ${assetId} redirect target carries credentials or a fragment`);
++          }
++          return next.toString();
++        });
++        url = target;
++      }
++    });
++
++    /** Downloads one release document by its pinned asset id, bounded by the caller's cap. */
++    const readDocument = Effect.fn("cloud.managed_release_source.read_document")(
++      function* (assetId: number, maxBytes: number, phase: string) {
++        const response = yield* openAsset(assetId, phase);
++        return yield* readBounded(response, maxBytes, phase);
++      },
++      (effect, _assetId, _maxBytes, phase) =>
++        effect.pipe(Effect.scoped, withTimeout(DOCUMENT_TIMEOUT, phase)),
++    );
++
++    /** The exact tag endpoint for one managed version, required to be a candidate that names it. */
++    const readExactRelease = Effect.fn("cloud.managed_release_source.read_exact_release")(
++      function* (version: string, phase: string) {
++        const { parsed } = yield* fetchJson(
++          releaseByTagUrl(version),
++          MAX_RELEASE_DESCRIPTOR_BYTES,
++          phase,
++        );
++        const value = yield* decodeRelease(parsed).pipe(Effect.mapError(schemaMismatch(phase)));
++        return yield* attempt(() => {
++          const descriptor = normalizeRelease(value);
++          if (descriptor.version !== version) {
++            fail(`${phase}: tag ${quote(descriptor.tag)} does not name version ${version}`);
++          }
++          return descriptor;
++        });
++      },
++    );
++
++    const requireUnchanged = (
++      expected: ReleaseDescriptor,
++      actual: ReleaseDescriptor,
++      phase: string,
++    ) =>
++      descriptorKey(expected) === descriptorKey(actual)
++        ? Effect.void
++        : Effect.fail(
++            sourceError(
++              `${phase}: release ${expected.releaseId} (${quote(expected.tag)}) changed while it was being read`,
++            ),
++          );
++
++    /**
++     * Downloads and verifies the descriptor's two documents, proves the
++     * release inventory is exactly the verified closure, re-reads the tag,
++     * and binds the selection to the bytes it verified.
++     */
++    const resolveDescriptor = Effect.fn("cloud.managed_release_source.resolve_descriptor")(
++      function* (descriptor: ReleaseDescriptor) {
++        const { version, releaseId } = descriptor;
++        const label = `release ${releaseId} (${quote(descriptor.tag)})`;
++        const documentAsset = (file: string) =>
++          attempt(() => {
++            const matches = descriptor.assets.filter((asset) => asset.name === file);
++            const match = matches[0];
++            if (match === undefined || matches.length !== 1) {
++              return fail(
++                `resolving ${label}: expected exactly one ${file} asset, found ${matches.length}`,
++              );
++            }
++            return match;
++          });
++        const manifestAsset = yield* documentAsset(MANAGED_RELEASE_MANIFEST_FILE);
++        const sumsAsset = yield* documentAsset(MANAGED_RELEASE_SUMS_FILE);
++
++        const manifestBytes = yield* readDocument(
++          manifestAsset.id,
++          MAX_MANAGED_MANIFEST_BYTES,
++          `downloading ${MANAGED_RELEASE_MANIFEST_FILE} (asset ${manifestAsset.id}) of ${label}`,
++        );
++        const sumsBytes = yield* readDocument(
++          sumsAsset.id,
++          MAX_MANAGED_SUMS_BYTES,
++          `downloading ${MANAGED_RELEASE_SUMS_FILE} (asset ${sumsAsset.id}) of ${label}`,
++        );
++
++        const verified = yield* verifyManagedReleaseDocuments({
++          manifestBytes,
++          sumsBytes,
++          targetVersion: version,
++          hostTarget: options.hostTarget,
++        }).pipe(
++          Effect.mapError((error) =>
++            sourceError(`verifying the documents of ${label}: ${error.message}`, error),
++          ),
++        );
++
++        const serverAsset = yield* attempt(() => {
++          // The verifier has proven the checksum closure; the GitHub inventory
++          // must be exactly that closure plus the checksum file itself.
++          const sums = sumsEntries(sumsBytes);
++          const expectedNames = new Set([...sums.keys(), MANAGED_RELEASE_SUMS_FILE]);
++          const actualNames = new Set(descriptor.assets.map((asset) => asset.name));
++          for (const name of expectedNames) {
++            if (!actualNames.has(name)) fail(`resolving ${label}: asset ${name} is missing`);
++          }
++          for (const name of actualNames) {
++            if (!expectedNames.has(name)) {
++              fail(`resolving ${label}: asset ${name} is outside the release closure`);
++            }
++          }
++          if (descriptor.assets.length !== expectedNames.size) {
++            fail(
++              `resolving ${label}: expected exactly ${expectedNames.size} assets, found ${descriptor.assets.length}`,
++            );
++          }
++          const server = descriptor.assets.find((asset) => asset.name === verified.file);
++          if (server === undefined) fail(`resolving ${label}: asset ${verified.file} is missing`);
++          if (server.size !== verified.bytes) {
++            fail(
++              `resolving ${label}: asset ${verified.file} is ${server.size} bytes on GitHub but ${verified.bytes} in the manifest`,
++            );
++          }
++          // GitHub digests are consistency fields under the same trust as the
++          // documents, not a second signature; when present they must agree.
++          for (const asset of descriptor.assets) {
++            if (asset.digest === null) continue;
++            const expected =
++              asset.name === MANAGED_RELEASE_SUMS_FILE
++                ? sha256Hex(sumsBytes)
++                : sums.get(asset.name);
++            if (asset.digest !== `sha256:${expected}`) {
++              fail(
++                `resolving ${label}: GitHub digest for ${asset.name} disagrees with the verified checksum`,
++              );
++            }
++          }
++          return server;
++        });
++
++        const again = yield* readExactRelease(version, `re-reading ${label} after its documents`);
++        yield* requireUnchanged(descriptor, again, `re-reading ${label} after its documents`);
++
++        return makeSelection({
++          descriptor,
++          verified,
++          serverAsset,
++          manifestBytes: manifestBytes.slice(),
++          sumsBytes: sumsBytes.slice(),
++        });
++      },
++    );
++
++    /** A selection and the source that is bound to exactly it. */
++    const makeSelection = (input: {
++      readonly descriptor: ReleaseDescriptor;
++      readonly verified: VerifiedManagedServerAsset;
++      readonly serverAsset: ReleaseAssetDescriptor;
++      readonly manifestBytes: Uint8Array;
++      readonly sumsBytes: Uint8Array;
++    }): ManagedReleaseSelection => {
++      const { descriptor, verified, serverAsset } = input;
++      const label = `release ${descriptor.releaseId} (${quote(descriptor.tag)})`;
++
++      const readDocuments: ManagedArtifactSource["readDocuments"] = (version) =>
++        version === descriptor.version
++          ? Effect.succeed<ManagedReleaseDocuments>({
++              manifestBytes: input.manifestBytes.slice(),
++              sumsBytes: input.sumsBytes.slice(),
++            })
++          : Effect.fail(
++              sourceError(`this source is bound to ${descriptor.version}, not ${quote(version)}`),
++            );
++
++      const openArchive: ManagedArtifactSource["openArchive"] = Effect.fn(
++        "cloud.managed_release_source.open_archive",
++      )(function* (asset: VerifiedManagedServerAsset) {
++        const phase = `opening the archive of ${label}`;
++        if (!sameVerifiedAsset(asset, verified)) {
++          return yield* sourceError(`${phase}: the requested asset is not the selected asset`);
++        }
++        const rereadPhase = `re-reading ${label} before its archive`;
++        const current = yield* readExactRelease(descriptor.version, rereadPhase);
++        yield* requireUnchanged(descriptor, current, rereadPhase);
++        const located = current.assets.find(
++          (candidate) => candidate.id === serverAsset.id && candidate.name === verified.file,
++        );
++        if (located === undefined) {
++          return yield* sourceError(
++            `${phase}: asset ${serverAsset.id} (${verified.file}) is no longer in the release`,
++          );
++        }
++        const response = yield* openAsset(serverAsset.id, phase).pipe(
++          withTimeout(ARCHIVE_RESPONSE_TIMEOUT, phase),
++        );
++        const declared = declaredContentLength(response.headers);
++        if (declared !== undefined && declared !== verified.bytes) {
++          return yield* sourceError(
++            `${phase}: Content-Length ${declared} is not the ${verified.bytes} bytes of ${verified.file}`,
++          );
++        }
++        // The consumer owns the byte count, size limit and hash. A pull that
++        // yields nothing for the idle window is a failure, never a clean end,
++        // so an exact-length prefix can never look complete.
++        const idleTimeout = `${phase}: no archive bytes for ${Duration.format(ARCHIVE_IDLE_TIMEOUT)}`;
++        return response.stream.pipe(
++          Stream.mapError((error) => toSourceError(`${phase}: reading the archive`, error)),
++          Stream.timeoutOrElse({
++            duration: ARCHIVE_IDLE_TIMEOUT,
++            orElse: () => Stream.fail(sourceError(idleTimeout)),
++          }),
++        );
++      });
++
++      return {
++        repository: MANAGED_RELEASE_REPOSITORY,
++        releaseId: descriptor.releaseId,
++        tag: descriptor.tag,
++        version: descriptor.version,
++        publishedAt: descriptor.publishedAt,
++        githubImmutable: descriptor.githubImmutable,
++        manifestSha256: verified.manifestSha256,
++        releaseInputSha256: verified.releaseInputSha256,
++        artifactId: managedArtifactContentId(verified),
++        source: { readDocuments, openArchive },
++      };
++    };
++
++    /** Every bounded page of the fixed repository, reduced to its candidate releases. */
++    const listCandidates = Effect.fn("cloud.managed_release_source.list_candidates")(function* () {
++      const byVersion = new Map<string, GitHubRelease>();
++      const releaseIds = new Set<number>();
++      for (let page = 1; ; page += 1) {
++        const phase = `listing releases page ${page}`;
++        const { parsed, headers } = yield* fetchJson(
++          releasesPageUrl(page),
++          MAX_RELEASE_PAGE_BYTES,
++          phase,
++        );
++        const releases = yield* decodeReleasePage(parsed).pipe(
++          Effect.mapError(schemaMismatch(phase)),
++        );
++        yield* attempt(() => {
++          for (const raw of releases) {
++            const version = candidateVersion(raw);
++            if (version === undefined) continue;
++            if (releaseIds.has(raw.id)) fail(`${phase}: release ${raw.id} was listed twice`);
++            if (byVersion.has(version)) {
++              fail(`${phase}: managed version ${version} is published by more than one release`);
++            }
++            releaseIds.add(raw.id);
++            byVersion.set(version, raw);
++          }
++        });
++        const next = yield* attempt(() => nextPageFromLink(headers.link, page));
++        if (next === undefined) break;
++        if (page >= MAX_RELEASE_PAGES) {
++          return yield* sourceError(
++            `${phase}: the repository has more than ${MAX_RELEASE_PAGES} pages of releases`,
++          );
++        }
++      }
++      return byVersion;
++    });
++
++    const latest: ManagedReleaseFeed["latest"] = Effect.gen(function* () {
++      const candidates = yield* listCandidates();
++      let best: { readonly version: string; readonly raw: GitHubRelease } | undefined;
++      for (const [version, raw] of candidates) {
++        if (best === undefined) {
++          best = { version, raw };
++          continue;
++        }
++        const order = compareExactServiceVersions(version, best.version);
++        if (order === 0) {
++          return yield* sourceError(
++            `selecting the highest release: ${version} and ${best.version} have equal precedence`,
++          );
++        }
++        if (order > 0) best = { version, raw };
++      }
++      const chosen = best;
++      if (chosen === undefined) return undefined;
++      const phase = `resolving the highest release ${chosen.version}`;
++      const listed = yield* attempt(() => normalizeRelease(chosen.raw));
++      const exact = yield* readExactRelease(listed.version, phase);
++      yield* requireUnchanged(listed, exact, phase);
++      return yield* resolveDescriptor(exact);
++    }).pipe(Effect.withSpan("cloud.managed_release_source.latest"));
++
++    const resolve: ManagedReleaseFeed["resolve"] = Effect.fn(
++      "cloud.managed_release_source.resolve",
++    )(function* (exactVersion: string) {
++      if (parseManagedReleaseVersion(exactVersion) === undefined) {
++        return yield* sourceError(
++          `resolving ${quote(exactVersion)}: not a managed release version`,
++        );
++      }
++      const exact = yield* readExactRelease(exactVersion, `resolving ${exactVersion}`);
++      return yield* resolveDescriptor(exact);
++    });
++
++    return { latest, resolve } satisfies ManagedReleaseFeed;
++  },
++);

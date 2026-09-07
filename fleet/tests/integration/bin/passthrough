@@ -1,0 +1,87 @@
+#!/bin/bash
+# Integration-lane logging pass-through (design section 7: "the systemctl and
+# loginctl wrappers are logging pass-throughs to the real binaries wherever the
+# lane asserts real behaviour"). setup.sh installs this once and links it as
+# systemctl, loginctl and apt-get, so every call Harbor makes is recorded and
+# then handed to the genuine binary by absolute path. Nothing is faked: the units
+# really get masked, linger really gets enabled, packages really get installed.
+#
+# Mutating calls are recorded in mutations.log as well as shim.log, which is what
+# the idempotency assertion reads: a rerun on a converged node must leave
+# mutations.log byte-identical.
+#
+# Installed to /opt/harbor-it/bin/passthrough as root:root 0755 by setup.sh.
+# Standalone on purpose; lane paths are literals here and in lib/common.sh.
+set -euo pipefail
+
+it_state=/opt/harbor-it/state
+it_shim_log="${it_state}/shim.log"
+it_mut_log="${it_state}/mutations.log"
+
+it_prog="$(basename "${0}")"
+case "${it_prog}" in
+  systemctl) it_real=/usr/bin/systemctl ;;
+  loginctl) it_real=/usr/bin/loginctl ;;
+  apt-get) it_real=/usr/bin/apt-get ;;
+  *)
+    printf 'integration pass-through: no real binary is mapped for %s\n' "${it_prog}" >&2
+    exit 1
+    ;;
+esac
+
+[ -x "${it_real}" ] || {
+  printf 'integration pass-through: %s is not executable\n' "${it_real}" >&2
+  exit 1
+}
+
+# The first non-option word is the subcommand.
+it_verb=""
+for it_arg in "$@"; do
+  case "${it_arg}" in
+    -*) ;;
+    *)
+      it_verb="${it_arg}"
+      break
+      ;;
+  esac
+done
+
+# A simulated apt-get changes nothing, whatever its verb says.
+it_simulate=no
+for it_arg in "$@"; do
+  case "${it_arg}" in
+    -s | --simulate | --dry-run | --just-print | --no-act | --recon) it_simulate=yes ;;
+  esac
+done
+
+it_kind=inspect
+case "${it_prog}:${it_verb}" in
+  systemctl:mask | systemctl:unmask | systemctl:start | systemctl:stop | \
+    systemctl:restart | systemctl:reload | systemctl:enable | systemctl:disable | \
+    systemctl:daemon-reload | systemctl:daemon-reexec | systemctl:set-property | \
+    systemctl:preset | systemctl:link | systemctl:revert | systemctl:kill)
+    it_kind=mutate
+    ;;
+  loginctl:enable-linger | loginctl:disable-linger | loginctl:terminate-user | \
+    loginctl:kill-user | loginctl:lock-session | loginctl:terminate-session)
+    it_kind=mutate
+    ;;
+  apt-get:install | apt-get:remove | apt-get:purge | apt-get:update | \
+    apt-get:upgrade | apt-get:dist-upgrade | apt-get:full-upgrade | \
+    apt-get:autoremove | apt-get:clean | apt-get:autoclean | apt-get:reinstall)
+    if [ "${it_simulate}" = no ]; then
+      it_kind=mutate
+    fi
+    ;;
+esac
+
+it_line="$(date -u +%s)"$'\t'"${it_kind}"$'\t'"${it_prog}"
+for it_arg in "$@"; do
+  it_line="${it_line}"$'\t'"${it_arg}"
+done
+printf '%s\n' "${it_line}" >>"${it_shim_log}"
+if [ "${it_kind}" = mutate ]; then
+  printf '%s\n' "${it_line}" >>"${it_mut_log}"
+fi
+
+exec "${it_real}" "$@"

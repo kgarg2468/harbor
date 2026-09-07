@@ -218,6 +218,21 @@ harbor_user_linger_state() {
   # never observed.
   local out rc=0
   out="$(loginctl show-user "${1}" --property=Linger --value 2>&1)" || rc="$?"
+  # logind keeps a user record only for an account that is logged in or already
+  # lingering, and show-user fails outright for an account with neither rather than
+  # printing no. A freshly created operator is exactly that account, so treating the
+  # failure as unreadable would make the linger row unreachable on every real node,
+  # which is what the integration lane found on the first run that used a real logind.
+  # The absence of the record is the answer and linger is off; every other failure is
+  # still a read Harbor could not make, and still fail-closed.
+  if [ "${rc}" != 0 ]; then
+    case "${out}" in
+      *'is not logged in or lingering'*)
+        printf 'no'
+        return 0
+        ;;
+    esac
+  fi
   [ "${rc}" = 0 ] \
     || harbor_die 2 user.linger_inspect "loginctl show-user ${1} --property=Linger --value failed (exit ${rc}): ${out}"
   case "${out}" in

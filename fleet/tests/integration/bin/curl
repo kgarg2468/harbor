@@ -1,0 +1,56 @@
+#!/bin/bash
+# Integration-lane curl wrapper. Harbor's only fetch in this lane is the Tailscale
+# vendor keyring, and design section 7 forbids the lane from depending on a vendor
+# download host, so this serves that one URL from a locally generated fixture and
+# refuses every other URL loudly rather than reaching the network. It never runs
+# the real curl, so a URL this lane did not anticipate fails the run instead of
+# silently succeeding against the internet.
+#
+# Installed to /opt/harbor-it/bin/curl as root:root 0755 by setup.sh. Standalone
+# on purpose; lane paths are literals here and in lib/common.sh.
+set -euo pipefail
+
+it_state=/opt/harbor-it/state
+it_shim_log="${it_state}/shim.log"
+it_mut_log="${it_state}/mutations.log"
+it_keyring=/opt/harbor-it/fixtures/tailscale-keyring.gpg
+
+it_log() {
+  local kind line arg
+  kind="${1}"
+  shift
+  line="$(date -u +%s)"$'\t'"${kind}"$'\t'curl
+  for arg in "$@"; do
+    line="${line}"$'\t'"${arg}"
+  done
+  printf '%s\n' "${line}" >>"${it_shim_log}"
+  if [ "${kind}" = mutate ]; then
+    printf '%s\n' "${line}" >>"${it_mut_log}"
+  fi
+}
+
+it_log fetch "$@"
+
+# The URL is the last non-option argument. Harbor's form is
+# curl -fsSL --proto =https --tlsv1.2 <url>.
+it_url=""
+for it_arg in "$@"; do
+  case "${it_arg}" in
+    -*) ;;
+    *://*) it_url="${it_arg}" ;;
+  esac
+done
+
+case "${it_url}" in
+  https://pkgs.tailscale.com/*.noarmor.gpg)
+    [ -s "${it_keyring}" ] || {
+      printf 'integration curl wrapper: fixture keyring %s is missing\n' "${it_keyring}" >&2
+      exit 1
+    }
+    cat "${it_keyring}"
+    ;;
+  *)
+    printf 'integration curl wrapper: refusing to fetch %s; the lane serves only the Tailscale keyring locally and never reaches a vendor download host\n' "${it_url}" >&2
+    exit 22
+    ;;
+esac
