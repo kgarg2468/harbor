@@ -40,6 +40,7 @@ import {
   parseArgs,
   resolveTarget,
   stampReleasePackageVersions,
+  verifyPreparedSource,
   verifyStageLinks,
 } from "../scripts/build-managed-server-runtime.mjs";
 
@@ -175,9 +176,10 @@ function serverManifest(extra = {}) {
   };
 }
 
-// A prepared managed-nightly tree: upstream commit, patches applied to the
-// working tree, provenance next to the git metadata, and a lock beside it.
-async function makeFixture({ target = "darwin-arm64", worktree = false, serverExtra = {}, lockMutate = (l) => l } = {}) {
+// A prepared tree of one exact variant (managed-nightly by default): upstream
+// commit, that variant's ordered patches applied to the working tree,
+// provenance next to the git metadata, and a lock beside it.
+async function makeFixture({ target = "darwin-arm64", variant = "managed-nightly", worktree = false, serverExtra = {}, lockMutate = (l) => l } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "t3-server-builder-")));
   const lockDir = path.join(root, "lock");
   const patches = [];
@@ -226,10 +228,10 @@ async function makeFixture({ target = "darwin-arm64", worktree = false, serverEx
     source = path.join(root, "prepared");
     await git(upstream, ["worktree", "add", "-q", "--detach", source, "HEAD"]);
   }
-  const applied = lock.variants["managed-nightly"].map((id) => patches.find((p) => p.id === id));
+  const applied = lock.variants[variant].map((id) => patches.find((p) => p.id === id));
   for (const patch of applied) await git(source, ["apply"], PATCHES[patch.id]);
   const gitDir = (await git(source, ["rev-parse", "--absolute-git-dir"])).stdout.trim();
-  const provenance = { preparedAt: "2026-09-05T00:00:00.000Z", lock: lockPath, lockRepository: lock.repository, repository: upstream, commit, variant: "managed-nightly", patches: applied };
+  const provenance = { preparedAt: "2026-09-05T00:00:00.000Z", lock: lockPath, lockRepository: lock.repository, repository: upstream, commit, variant, patches: applied };
   await writeFile(path.join(gitDir, "harbor-source.json"), json(provenance));
 
   const descriptor = resolveManagedRelease({
@@ -492,11 +494,23 @@ describe("configuration handling", () => {
         CARGO_BUILD_TARGET: "x86_64-unknown-linux-musl",
         RUSTFLAGS: "-C target-cpu=native",
         CARGO_ENCODED_RUSTFLAGS: "x",
+        GITHUB_REPOSITORY: "t3dotgg/t3code",
         EMPTY: undefined,
       },
       PUBLIC_CONFIG,
     );
     assert.deepEqual(env, { PATH: "/usr/bin", HOME: "/home/x", CARGO_HOME: "/home/x/.cargo", ...PUBLIC_CONFIG, T3CODE_PRODUCT_VARIANT: "managed-nightly" });
+  });
+
+  it("stamps the default, an explicit managed-nightly, or an explicit reasoning variant and refuses any other", () => {
+    const base = { PATH: "/usr/bin", HOME: "/home/x", T3CODE_PRODUCT_VARIANT: "reasoning", GITHUB_REPOSITORY: "t3dotgg/t3code" };
+    const expected = { PATH: "/usr/bin", HOME: "/home/x", ...PUBLIC_CONFIG };
+    assert.deepEqual(buildChildEnvironment(base, PUBLIC_CONFIG), { ...expected, T3CODE_PRODUCT_VARIANT: "managed-nightly" });
+    assert.deepEqual(buildChildEnvironment(base, PUBLIC_CONFIG, "managed-nightly"), { ...expected, T3CODE_PRODUCT_VARIANT: "managed-nightly" });
+    assert.deepEqual(buildChildEnvironment(base, PUBLIC_CONFIG, "reasoning"), { ...expected, T3CODE_PRODUCT_VARIANT: "reasoning" });
+    throws(() => buildChildEnvironment(base, PUBLIC_CONFIG, "stock"), /expected variant "stock" is not one of managed-nightly, reasoning/);
+    throws(() => buildChildEnvironment(base, PUBLIC_CONFIG, null), /expected variant null is not one of/);
+    throws(() => buildChildEnvironment(base, PUBLIC_CONFIG, ""), /expected variant "" is not one of/);
   });
 
   it("stamps exactly the four release manifests and preserves every other field", async () => {
@@ -775,7 +789,7 @@ describe("refusals before any mutation", () => {
     };
     const fx = await makeFixture();
     await withProvenance(fx, (r) => { r.variant = "reasoning"; });
-    await refusal(fx, {}, /variant is "reasoning"; the shared server is built from managed-nightly only/, { beforeMutation: true });
+    await refusal(fx, {}, /variant is "reasoning"; this build requires a managed-nightly tree/, { beforeMutation: true });
     await withProvenance(fx, (r) => { r.commit = "1".repeat(40); });
     await rejects(() => build(fx), /records commit 1{40}/);
     await withProvenance(fx, (r) => { r.lockRepository = "https://elsewhere.invalid/x.git"; });
@@ -821,6 +835,62 @@ describe("refusals before any mutation", () => {
     await git(reasoning.source, ["apply"], PATCHES["reasoning-identity"]);
     await rejects(() => build(reasoning), /content differs .* M\tidentity/);
     await rm(reasoning.root, { recursive: true, force: true });
+  });
+
+  it("an exact Reasoning prepared tree is verifiable only as reasoning, and the shared server refuses it before mutation", async () => {
+    const indexDir = async (fx) => {
+      const dir = await mkdtemp(path.join(fx.tmpRoot, "index-"));
+      return dir;
+    };
+    const verify = (fx, expectedVariant) =>
+      verifyPreparedSource({
+        source: fx.source,
+        descriptor: fx.descriptor,
+        run: realRunner,
+        env: { PATH: process.env.PATH, HOME: process.env.HOME },
+        indexDir: fx.indexDir,
+        ...(expectedVariant === undefined ? {} : { expectedVariant }),
+      });
+
+    // The provenance record, applied patches, and tracked content all say reasoning.
+    const reasoning = await makeFixture({ variant: "reasoning" });
+    reasoning.indexDir = await indexDir(reasoning);
+    assert.equal(reasoning.provenance.variant, "reasoning");
+    assert.equal(await readFile(path.join(reasoning.source, "identity"), "utf8"), "reasoning\n");
+    const verified = await verify(reasoning, "reasoning");
+    assert.deepEqual(verified.patches.map((p) => p.id), ["reasoning-full", "desktop-runtime-common", "reasoning-identity"]);
+    assert.equal(verified.lockDir, reasoning.lockDir);
+    await rejects(() => verify(reasoning), /variant is "reasoning"; this build requires a managed-nightly tree/);
+    await rejects(() => verify(reasoning, "managed-nightly"), /variant is "reasoning"; this build requires a managed-nightly tree/);
+    await rejects(() => verify(reasoning, "stock"), /expected variant "stock" is not one of managed-nightly, reasoning/);
+    // The shared server builder never accepts it, and refuses before any stamp or non-version pnpm command.
+    await rm(reasoning.indexDir, { recursive: true, force: true });
+    await refusal(reasoning, {}, /variant is "reasoning"; this build requires a managed-nightly tree/, { beforeMutation: true });
+    assert.equal(await readFile(path.join(reasoning.source, "identity"), "utf8"), "reasoning\n", "the tree is untouched");
+    await rm(reasoning.root, { recursive: true, force: true });
+
+    // A managed-nightly tree still verifies by default and explicitly, and is not a reasoning tree.
+    const nightly = await makeFixture();
+    nightly.indexDir = await indexDir(nightly);
+    assert.deepEqual((await verify(nightly)).patches.map((p) => p.id), ["reasoning-full", "desktop-runtime-common"]);
+    await rm(nightly.indexDir, { recursive: true, force: true });
+    nightly.indexDir = await indexDir(nightly);
+    assert.deepEqual((await verify(nightly, "managed-nightly")).patches.map((p) => p.id), ["reasoning-full", "desktop-runtime-common"]);
+    await rejects(() => verify(nightly, "reasoning"), /variant is "managed-nightly"; this build requires a reasoning tree/);
+    // Provenance claiming reasoning over a managed-nightly tree fails on patch agreement, then on content.
+    const provenanceFile = path.join(nightly.gitDir, "harbor-source.json");
+    await writeFile(provenanceFile, json({ ...nightly.provenance, variant: "reasoning" }));
+    await rejects(() => verify(nightly, "reasoning"), /patches do not match the lock's ordered reasoning sequence/);
+    const reasoningPatches = ["reasoning-full", "desktop-runtime-common", "reasoning-identity"].map((id) => ({
+      id,
+      path: path.join("patches", `${id}.patch`),
+      sha256: sha256Hex(PATCHES[id]),
+    }));
+    await writeFile(provenanceFile, json({ ...nightly.provenance, variant: "reasoning", patches: reasoningPatches }));
+    await rm(nightly.indexDir, { recursive: true, force: true });
+    nightly.indexDir = await indexDir(nightly);
+    await rejects(() => verify(nightly, "reasoning"), /content differs from .* plus the ordered reasoning patches .* M\tidentity/);
+    await rm(nightly.root, { recursive: true, force: true });
   });
 
   it("a prepared tree that already carries installed dependencies or the monitor's Cargo target", async () => {

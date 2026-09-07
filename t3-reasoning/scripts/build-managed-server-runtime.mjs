@@ -56,6 +56,7 @@ import { parseEnv } from "node:util";
 import {
   MANAGED_NIGHTLY_VARIANT,
   PUBLIC_CONFIG_KEYS,
+  REQUIRED_VARIANTS,
   ReleaseError,
   canonicalJson,
   computePublicConfigFingerprint,
@@ -150,6 +151,16 @@ const FORBIDDEN_DEPENDENCY_PROTOCOLS = /^(workspace|link|file):/;
 
 function fail(message) {
   throw new ReleaseError(message);
+}
+
+// The closed set of variants a prepared tree can be verified as. The shared
+// server is always built from managed-nightly; the desktop builder chooses
+// one of the two. Anything else is refused before it can select patches.
+function expectVariant(value) {
+  if (!REQUIRED_VARIANTS.includes(value)) {
+    fail(`expected variant ${JSON.stringify(value)} is not one of ${REQUIRED_VARIANTS.join(", ")}`);
+  }
+  return value;
 }
 
 function isPlainObject(value) {
@@ -338,14 +349,17 @@ const DROPPED_ENV_KEYS = new Set([
   "RUSTFLAGS",
   "CARGO_ENCODED_RUSTFLAGS",
   "COPYFILE_DISABLE",
+  "GITHUB_REPOSITORY",
 ]);
 
 // The environment every build tool runs with: the caller's ordinary tool
 // environment (PATH, HOME, temp, toolchain homes) minus every build alias,
 // identity override, tracing value, Node loader hook, package-manager target
-// override, and cargo target/flag override, plus exactly the four canonical
-// public values and the compile-time product variant.
-export function buildChildEnvironment(baseEnv, publicConfig) {
+// override, cargo target/flag override, and release-feed selector, plus exactly the four canonical
+// public values and the compile-time product variant (managed-nightly unless
+// the caller names the other closed variant).
+export function buildChildEnvironment(baseEnv, publicConfig, expectedVariant = MANAGED_NIGHTLY_VARIANT) {
+  const variant = expectVariant(expectedVariant);
   const env = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
@@ -354,7 +368,7 @@ export function buildChildEnvironment(baseEnv, publicConfig) {
     env[key] = value;
   }
   for (const key of PUBLIC_CONFIG_KEYS) env[key] = publicConfig[key];
-  env[PRODUCT_VARIANT_ENV] = MANAGED_NIGHTLY_VARIANT;
+  env[PRODUCT_VARIANT_ENV] = variant;
   return env;
 }
 
@@ -393,8 +407,12 @@ async function gitDirectory(git, source) {
 // preparer's uncommitted patch application is therefore expected, while any
 // edit, extra input, or missing file is a mismatch. Ignored paths
 // (node_modules, dist, .env) are outside this comparison and handled
-// separately. Returns the lock directory and ordered patches.
-export async function verifyPreparedSource({ source, descriptor, run, env, indexDir }) {
+// separately. The tree must be prepared as `expectedVariant` (managed-nightly
+// unless the caller names the other closed variant), and that one value
+// selects the provenance check, the lock's patch sequence, and the descriptor
+// entry. Returns the lock directory and ordered patches.
+export async function verifyPreparedSource({ source, descriptor, run, env, indexDir, expectedVariant = MANAGED_NIGHTLY_VARIANT }) {
+  const variant = expectVariant(expectedVariant);
   const git = (args, options = {}) =>
     run({ command: "git", args, cwd: source, env: { ...gitEnvironment(env), ...options.env }, input: options.input });
   const commit = descriptor.upstreamCommit;
@@ -406,11 +424,8 @@ export async function verifyPreparedSource({ source, descriptor, run, env, index
   const provenanceFile = path.join(gitDir, "harbor-source.json");
   const provenance = await readJson(provenanceFile, "prepared-source provenance");
   if (!isPlainObject(provenance)) fail(`${provenanceFile}: must be a JSON object`);
-  if (provenance.variant !== MANAGED_NIGHTLY_VARIANT) {
-    fail(
-      `prepared source variant is ${JSON.stringify(provenance.variant)}; the shared server is built from ` +
-        `${MANAGED_NIGHTLY_VARIANT} only`,
-    );
+  if (provenance.variant !== variant) {
+    fail(`prepared source variant is ${JSON.stringify(provenance.variant)}; this build requires a ${variant} tree`);
   }
   if (provenance.commit !== commit) fail(`prepared source records commit ${provenance.commit}, descriptor pins ${commit}`);
   if (provenance.lockRepository !== descriptor.upstreamRepository) {
@@ -424,13 +439,13 @@ export async function verifyPreparedSource({ source, descriptor, run, env, index
   if (lock.repository !== descriptor.upstreamRepository) {
     fail(`lock ${provenance.lock} names repository ${lock.repository}, descriptor names ${descriptor.upstreamRepository}`);
   }
-  const expected = resolveReleaseVariants(lock).variants[MANAGED_NIGHTLY_VARIANT];
+  const expected = resolveReleaseVariants(lock).variants[variant];
   if (!sameJson(provenance.patches, expected)) {
-    fail(`prepared source patches do not match the lock's ordered ${MANAGED_NIGHTLY_VARIANT} sequence`);
+    fail(`prepared source patches do not match the lock's ordered ${variant} sequence`);
   }
   const identity = (patches) => patches.map(({ id, sha256 }) => ({ id, sha256 }));
-  if (!sameJson(identity(descriptor.variants[MANAGED_NIGHTLY_VARIANT].patches), identity(expected))) {
-    fail(`descriptor ${MANAGED_NIGHTLY_VARIANT} patches do not match the lock's ordered sequence`);
+  if (!sameJson(identity(descriptor.variants[variant].patches), identity(expected))) {
+    fail(`descriptor ${variant} patches do not match the lock's ordered sequence`);
   }
   const lockDir = await realpath(path.dirname(provenance.lock));
   const patches = [];
@@ -456,7 +471,7 @@ export async function verifyPreparedSource({ source, descriptor, run, env, index
     const { stdout } = await git(["diff-tree", "-r", "--name-status", expectedTree, actualTree]);
     const changes = stdout.trim().split("\n").filter(Boolean);
     fail(
-      `prepared source content differs from ${commit} plus the ordered ${MANAGED_NIGHTLY_VARIANT} patches ` +
+      `prepared source content differs from ${commit} plus the ordered ${variant} patches ` +
         `(${changes.length} path(s)): ${changes.slice(0, 20).join("; ")}`,
     );
   }
@@ -465,7 +480,7 @@ export async function verifyPreparedSource({ source, descriptor, run, env, index
 
 // Refuses any dotenv file the tree already carries where the build would read
 // one, rather than overwriting or inheriting user configuration.
-async function refuseExistingEnvFiles(source) {
+export async function refuseExistingEnvFiles(source) {
   for (const dir of ENV_FILE_DIRECTORIES) {
     const names = await readdir(path.join(source, dir)).catch(() => []);
     for (const name of names) {
@@ -772,7 +787,7 @@ export function checkArchiveMembers(listing) {
 // non-empty directory always survives. A run killed mid-way leaves the lock
 // behind; remove it by hand once no run is in progress. Failure removes only
 // the staging directory this run created.
-async function publishNewDirectory(destination, produce) {
+export async function publishNewDirectory(destination, produce) {
   if (await exists(destination)) fail(`destination ${destination} already exists; an artifact directory is never rewritten`);
   const parent = path.dirname(destination);
   await mkdir(parent, { recursive: true });
@@ -800,7 +815,7 @@ async function publishNewDirectory(destination, produce) {
 
 // --- the build ---------------------------------------------------------------------------------
 
-async function assertDisjoint(pairs) {
+export async function assertDisjoint(pairs) {
   for (const [labelA, a, labelB, b] of pairs) {
     const ca = await canonicalPath(a);
     const cb = await canonicalPath(b);
@@ -861,7 +876,7 @@ export async function buildManagedServerRuntime({
   await refuseExistingEnvFiles(sourceDir);
   await refusePriorBuildState(sourceDir);
   if (await exists(destination)) fail(`destination ${destination} already exists; an artifact directory is never rewritten`);
-  const childEnv = buildChildEnvironment(env, publicConfig);
+  const childEnv = buildChildEnvironment(env, publicConfig, MANAGED_NIGHTLY_VARIANT);
   const pnpmVersion = (
     await run({ command: pnpm, args: ["--version"], cwd: sourceDir, env: childEnv }).catch((error) =>
       fail(`cannot run ${pnpm}: ${tail(error)}`),
@@ -883,7 +898,14 @@ export async function buildManagedServerRuntime({
     const indexDir = path.join(work, "index");
     await mkdir(indexDir);
     log(`verifying prepared source ${sourceDir} against ${descriptor.upstreamCommit}`);
-    const { lockDir } = await verifyPreparedSource({ source: sourceDir, descriptor, run, env: childEnv, indexDir });
+    const { lockDir } = await verifyPreparedSource({
+      source: sourceDir,
+      descriptor,
+      run,
+      env: childEnv,
+      indexDir,
+      expectedVariant: MANAGED_NIGHTLY_VARIANT,
+    });
     await assertDisjoint([
       ["lock directory", lockDir, "destination", destination],
       ["lock directory", lockDir, "work directory", work],
