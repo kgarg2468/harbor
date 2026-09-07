@@ -84,6 +84,11 @@
       "sha256": "66ced494e5f39530e0791027a71f2422405511fc1c387cf0103a7f8474ef4cd9"
     },
     {
+      "id": "native-activity",
+      "path": "patches/0015-native-activity.patch",
+      "sha256": "0ddc965500d08328f1c89050650a7d3b6b148c3363e6003b31814bb79c2c5f43"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "3c242c29b863494e637a339b45788ea056c67b312bbdb98871eae8349ee66897"
@@ -105,7 +110,8 @@
       "server-reservation",
       "candidate-process",
       "managed-runtime-transaction",
-      "shared-default"
+      "shared-default",
+      "native-activity"
     ],
     "reasoning": [
       "reasoning-full",
@@ -123,6 +129,7 @@
       "candidate-process",
       "managed-runtime-transaction",
       "shared-default",
+      "native-activity",
       "reasoning-identity"
     ]
   }
