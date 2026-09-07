@@ -6,7 +6,7 @@
     {
       "id": "reasoning-full",
       "path": "patches/0001-reasoning.patch",
-      "sha256": "d5606cee4881aac5b710d8ccc075e2c7903c360dee1df7d680e51bda81b894a8"
+      "sha256": "6c5fd1434ee89369ab7e5cea1b957a0b40e096b802b07555c1dc2cad26cc80ff"
     },
     {
       "id": "desktop-runtime-common",
