@@ -1,0 +1,2759 @@
+diff --git a/apps/server/src/cloud/idleUpdateCoordinator.test.ts b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
+index 1531b22f6..4321aefdb 100644
+--- a/apps/server/src/cloud/idleUpdateCoordinator.test.ts
++++ b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
+@@ -6,9 +6,19 @@ import * as Exit from "effect/Exit";
+ import * as Fiber from "effect/Fiber";
+ import * as Scope from "effect/Scope";
+ 
+-import { make as makeAdmission, UpdateAdmissionClosedError } from "../updateAdmission.ts";
++import {
++  type ProviderIdlePreparationToken,
++  ProviderIdlePreparationTokenTypeId,
++} from "../provider/Services/ProviderService.ts";
++import type { ProviderIdleRetirementResult } from "../provider/Services/ProviderAdapter.ts";
++import {
++  make as makeAdmission,
++  UpdateAdmissionClosedError,
++  type UpdateAdmissionState,
++} from "../updateAdmission.ts";
+ import { make as makeActivity, UpdateActivityUnavailableError } from "../updateActivity.ts";
+ import { type IdleHandoffControl, make } from "./idleUpdateCoordinator.ts";
++import { type IdleSealReadiness, make as makePreparation } from "./idleUpdatePreparation.ts";
+ import type { ActivationDeclined } from "./queuedUpdate.ts";
+ 
+ const declined: ActivationDeclined = { status: "unknown", reason: "driver declined" };
+@@ -16,12 +26,32 @@ const declined: ActivationDeclined = { status: "unknown", reason: "driver declin
+ const setup = Effect.fn("setup")(function* () {
+   const admission = yield* makeAdmission();
+   const activity = yield* makeActivity();
+-  const coordinator = make({ admission, activity });
++  // Ready by default; each check records the admission gate it ran under.
++  let readiness: IdleSealReadiness = { status: "ready" };
++  const checkedUnder: Array<UpdateAdmissionState> = [];
++  const preparation = {
++    checkReadyForSeal: Effect.map(admission.state, (gate) => {
++      checkedUnder.push(gate);
++      return readiness;
++    }),
++  };
++  const coordinator = make({ admission, activity, preparation });
+   let notified = 0;
+   const onHandoffAccepted = Effect.sync(() => {
+     notified += 1;
+   });
+-  return { admission, activity, coordinator, onHandoffAccepted, notifications: () => notified };
++  return {
++    admission,
++    activity,
++    coordinator,
++    preparation,
++    checkedUnder,
++    setReadiness: (next: IdleSealReadiness) => {
++      readiness = next;
++    },
++    onHandoffAccepted,
++    notifications: () => notified,
++  };
+ });
+ 
+ type Setup = Effect.Success<ReturnType<typeof setup>>;
+@@ -164,7 +194,11 @@ describe("idleUpdateCoordinator", () => {
+           }),
+         ),
+       };
+-      const coordinator = make({ admission: env.admission, activity: racing });
++      const coordinator = make({
++        admission: env.admission,
++        activity: racing,
++        preparation: env.preparation,
++      });
+ 
+       let invoked = false;
+       const outcome = yield* coordinator.tryActivate(() => {
+@@ -469,6 +503,219 @@ describe("idleUpdateCoordinator", () => {
+     }),
+   );
+ 
++  describe("idle provider preparation", () => {
++    type Run = <E>(
++      env: Setup,
++      handoff: (control: IdleHandoffControl) => Effect.Effect<ActivationDeclined, E>,
++    ) => Effect.Effect<ActivationDeclined, E>;
++    const entries: ReadonlyArray<{ readonly name: string; readonly run: Run }> = [
++      {
++        name: "tryActivate",
++        run: (env, handoff) => env.coordinator.tryActivate(handoff, env.onHandoffAccepted),
++      },
++      {
++        name: "tryReserve",
++        run: (env, handoff) => env.coordinator.tryReserve(handoff),
++      },
++    ];
++
++    it.effect.each(entries)(
++      "$name checks the proof inside its admission claim before sealing",
++      ({ run }) =>
++        Effect.gen(function* () {
++          const env = yield* setup();
++          const outcome = yield* run(env, () =>
++            Effect.gen(function* () {
++              yield* assertLatched(env);
++              return declined;
++            }),
++          );
++          assert.deepStrictEqual(outcome, declined);
++          assert.deepStrictEqual(env.checkedUnder, [{ phase: "maintenance", inFlight: 0 }]);
++          yield* assertOpen(env);
++        }),
++    );
++
++    it.effect.each(entries)(
++      "$name declines without sealing or dispatching when no proof is stored, and both gates reopen",
++      ({ run }) =>
++        Effect.gen(function* () {
++          const env = yield* setup();
++          const noProof: ActivationDeclined = {
++            status: "busy",
++            reason: "idle providers are not prepared",
++          };
++          env.setReadiness(noProof);
++
++          let invoked = false;
++          const outcome = yield* run(env, () => {
++            invoked = true;
++            return Effect.succeed(declined);
++          });
++          assert.deepStrictEqual(outcome, noProof);
++          assert.isFalse(invoked);
++          // The check ran under the claim, and the claim's cleanup reopened it.
++          assert.deepStrictEqual(env.checkedUnder, [{ phase: "maintenance", inFlight: 0 }]);
++          yield* assertOpen(env);
++          assert.equal(env.notifications(), 0);
++
++          // A blocked proof is an unknown, not a retryable busy.
++          env.setReadiness({
++            status: "unknown",
++            reason: "provider instance 'cursor' cannot prove",
++          });
++          assert.deepStrictEqual(
++            yield* run(env, () => {
++              invoked = true;
++              return Effect.succeed(declined);
++            }),
++            { status: "unknown", reason: "provider instance 'cursor' cannot prove" },
++          );
++          assert.isFalse(invoked);
++          yield* assertOpen(env);
++
++          // Nothing latched: once a proof exists the same call seals and runs.
++          env.setReadiness({ status: "ready" });
++          assert.deepStrictEqual(
++            yield* run(env, () =>
++              Effect.gen(function* () {
++                invoked = true;
++                yield* assertLatched(env);
++                return declined;
++              }),
++            ),
++            declined,
++          );
++          assert.isTrue(invoked);
++          yield* assertOpen(env);
++        }),
++    );
++
++    // A real controller over a fake ProviderService: the proof is issued
++    // before the claim and found stale under it.
++    const makeFakeProvider = () => {
++      const token: ProviderIdlePreparationToken = {
++        [ProviderIdlePreparationTokenTypeId]: ProviderIdlePreparationTokenTypeId,
++      };
++      let readiness: ProviderIdleRetirementResult = { status: "retired" };
++      let prepared = 0;
++      let checked = 0;
++      return {
++        provider: {
++          prepareIdleRetirement: () =>
++            Effect.sync(() => {
++              prepared += 1;
++              return { status: "prepared", token } as const;
++            }),
++          checkIdleRetirementReadiness: (candidate: ProviderIdlePreparationToken) =>
++            Effect.sync((): ProviderIdleRetirementResult => {
++              checked += 1;
++              return candidate === token
++                ? readiness
++                : { status: "blocked", reason: "token was not issued by this service" };
++            }),
++        },
++        setReadiness: (next: ProviderIdleRetirementResult) => {
++          readiness = next;
++        },
++        prepared: () => prepared,
++        checked: () => checked,
++      };
++    };
++
++    it.effect(
++      "a proof gone stale between preparation and the claim declines before the seal and is discarded",
++      () =>
++        Effect.gen(function* () {
++          const env = yield* setup();
++          const scope = yield* Scope.make();
++          const fake = makeFakeProvider();
++          const preparation = makePreparation({
++            provider: fake.provider,
++            admission: env.admission,
++            activity: env.activity,
++            serverScope: scope,
++          });
++          const coordinator = make({
++            admission: env.admission,
++            activity: env.activity,
++            preparation,
++          });
++          const assertReopened = Effect.gen(function* () {
++            assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++            assert.include(yield* env.activity.state, {
++              phase: "open",
++              outstanding: 0,
++              idleShutdownAuthorized: false,
++            });
++            assert.deepStrictEqual(yield* coordinator.state, { phase: "ready" });
++          });
++
++          assert.deepStrictEqual(yield* preparation.request, { phase: "preparing" });
++          assert.deepStrictEqual(yield* preparation.settled, { phase: "prepared" });
++          assert.equal(fake.prepared(), 1);
++
++          // A session started after the proof, as ProviderService would report.
++          const newSession = "provider instance 'codex' (codex) has 1 live session(s)";
++          fake.setReadiness({ status: "busy", reason: newSession });
++          let invoked = false;
++          const handoff = () => {
++            invoked = true;
++            return Effect.succeed(declined);
++          };
++          assert.deepStrictEqual(yield* coordinator.tryActivate(handoff, env.onHandoffAccepted), {
++            status: "busy",
++            reason: newSession,
++          });
++          assert.isFalse(invoked);
++          assert.equal(fake.checked(), 1);
++          // The check never prepared again from inside the claim.
++          assert.equal(fake.prepared(), 1);
++          assert.deepStrictEqual(yield* preparation.state, { phase: "busy", reason: newSession });
++          yield* assertReopened;
++
++          // The stale proof is gone: the next attempt declines without
++          // consulting the provider at all.
++          assert.deepStrictEqual(yield* coordinator.tryReserve(handoff), {
++            status: "busy",
++            reason: "idle providers are not prepared",
++          });
++          assert.isFalse(invoked);
++          assert.equal(fake.checked(), 1);
++          yield* assertReopened;
++
++          // With the claim released, a new request starts a new owner.
++          fake.setReadiness({ status: "retired" });
++          assert.deepStrictEqual(yield* preparation.request, { phase: "preparing" });
++          assert.deepStrictEqual(yield* preparation.settled, { phase: "prepared" });
++          assert.equal(fake.prepared(), 2);
++          assert.deepStrictEqual(yield* coordinator.tryReserve(handoff), declined);
++          assert.isTrue(invoked);
++          assert.equal(fake.checked(), 2);
++          yield* assertReopened;
++
++          // A proof that passed its check survives the declined handoff, so a
++          // further request has nothing to start. A generation that can no
++          // longer prove retirement is then unknown, not busy.
++          assert.deepStrictEqual(yield* preparation.request, { phase: "prepared" });
++          assert.equal(fake.prepared(), 2);
++          fake.setReadiness({ status: "blocked", reason: "adapter generation replaced" });
++          invoked = false;
++          assert.deepStrictEqual(yield* coordinator.tryActivate(handoff, env.onHandoffAccepted), {
++            status: "unknown",
++            reason: "adapter generation replaced",
++          });
++          assert.isFalse(invoked);
++          assert.deepStrictEqual(yield* preparation.state, {
++            phase: "blocked",
++            reason: "adapter generation replaced",
++          });
++          yield* assertReopened;
++          yield* Scope.close(scope, Exit.void);
++        }),
++    );
++  });
++
+   describe("tryReserve", () => {
+     it.effect.each([
+       {
+diff --git a/apps/server/src/cloud/idleUpdateCoordinator.ts b/apps/server/src/cloud/idleUpdateCoordinator.ts
+index f3aa56117..0d6bfcf04 100644
+--- a/apps/server/src/cloud/idleUpdateCoordinator.ts
++++ b/apps/server/src/cloud/idleUpdateCoordinator.ts
+@@ -29,6 +29,7 @@ import {
+   type UpdateActivityShape,
+   type UpdateActivityState,
+ } from "../updateActivity.ts";
++import { IdleUpdatePreparation, type IdleUpdatePreparationShape } from "./idleUpdatePreparation.ts";
+ import type { ActivationDeclined } from "./queuedUpdate.ts";
+ 
+ export interface IdleHandoffControl {
+@@ -88,6 +89,8 @@ export class IdleUpdateCoordinator extends Context.Service<
+ export interface IdleUpdateCoordinatorDependencies {
+   readonly admission: UpdateAdmissionShape;
+   readonly activity: UpdateActivityShape;
++  /** Proof that idle provider resources were retired and that proof still stands. */
++  readonly preparation: Pick<IdleUpdatePreparationShape, "checkReadyForSeal">;
+ }
+ 
+ const isIdle = (state: UpdateActivityState): boolean =>
+@@ -120,6 +123,7 @@ const ownedByAnotherHandoff: ActivationDeclined = {
+ export const make = ({
+   admission,
+   activity,
++  preparation,
+ }: IdleUpdateCoordinatorDependencies): IdleUpdateCoordinatorShape => {
+   let phase: IdleUpdateCoordinatorState["phase"] = "ready";
+ 
+@@ -127,79 +131,92 @@ export const make = ({
+   // queue a decline it could retry or cancel against a possible restart.
+   const parked = Effect.interruptible(Effect.never);
+ 
+-  // Runs inside the admission claim: seal activity, own the seal under cleanup,
+-  // then interpret the handoff's exit. The seal is retained by never releasing
+-  // it; admission by the control handed in from the claim. Both happen in one
+-  // synchronous step, so no observer sees one gate latched without the other.
++  // Runs inside the admission claim: confirm the idle provider proof, seal
++  // activity, own the seal under cleanup, then interpret the handoff's exit.
++  // The seal is retained by never releasing it; admission by the control
++  // handed in from the claim. Both happen in one synchronous step, so no
++  // observer sees one gate latched without the other. A declined proof exits
++  // before the seal, so the claim's own cleanup reopens admission.
+   const attempt = <E, R>(
+     admissionControl: HandoffMaintenanceControl,
+     handoff: (control: IdleHandoffControl) => Effect.Effect<ActivationDeclined, E, R>,
+     onHandoffAccepted: Effect.Effect<void>,
+   ): Effect.Effect<ActivationDeclined, E, R> =>
+     Effect.uninterruptibleMask((restore) =>
+-      Effect.flatMap(activity.trySealIdle, (claim) => {
+-        if (claim.status === "busy") return Effect.succeed(declineFor(claim.state));
+-        const seal = claim.seal;
+-        seal.armIdleShutdown();
+-        phase = "attempting";
+-        let alive = true;
+-        let running = true;
+-        let dispatched = false;
+-        let accepted = false;
+-
+-        const latch = (outcome: "accepted" | "uncertain"): void => {
+-          admissionControl.retainUntilProcessExit();
+-          phase = outcome;
+-        };
+-
+-        const control: IdleHandoffControl = {
+-          dispatchStarted: () => {
+-            if (running) dispatched = true;
+-          },
+-          definitivelyRejected: () => {
+-            if (running) dispatched = false;
+-          },
+-          // Still honored while parked after an ambiguous exit: a late definite
+-          // acknowledgement upgrades the outcome and notifies the queue once.
+-          accepted: Effect.suspend(() => {
+-            if (!alive || accepted) return Effect.void;
+-            accepted = true;
+-            latch("accepted");
+-            return onHandoffAccepted;
+-          }),
+-        };
+-
+-        return restore(Effect.suspend(() => handoff(control))).pipe(
+-          Effect.exit,
+-          Effect.flatMap((exit) =>
+-            Effect.suspend((): Effect.Effect<ActivationDeclined, E, R> => {
+-              running = false;
+-              const uncertain = !accepted && dispatched;
+-              if (uncertain) latch("uncertain");
+-              if (accepted || uncertain) {
+-                const interrupted = Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause);
+-                const report = uncertain
+-                  ? Effect.logWarning(
+-                      "update handoff outcome is unknown after dispatch; holding update gates until restart",
+-                      { exit },
+-                    )
+-                  : Effect.void;
+-                return Effect.flatMap(report, () => (interrupted ? exit : restore(Effect.never)));
+-              }
+-              seal.release();
+-              phase = "ready";
+-              return exit;
+-            }),
+-          ),
+-          Effect.ensuring(
+-            Effect.sync(() => {
+-              alive = false;
+-            }),
+-          ),
+-        );
++      Effect.flatMap(restore(preparation.checkReadyForSeal), (readiness) => {
++        if (readiness.status !== "ready") return Effect.succeed(readiness);
++        return sealAndRun(restore, admissionControl, handoff, onHandoffAccepted);
+       }),
+     );
+ 
++  const sealAndRun = <E, R>(
++    restore: <X, XE, XR>(effect: Effect.Effect<X, XE, XR>) => Effect.Effect<X, XE, XR>,
++    admissionControl: HandoffMaintenanceControl,
++    handoff: (control: IdleHandoffControl) => Effect.Effect<ActivationDeclined, E, R>,
++    onHandoffAccepted: Effect.Effect<void>,
++  ): Effect.Effect<ActivationDeclined, E, R> =>
++    Effect.flatMap(activity.trySealIdle, (claim) => {
++      if (claim.status === "busy") return Effect.succeed(declineFor(claim.state));
++      const seal = claim.seal;
++      seal.armIdleShutdown();
++      phase = "attempting";
++      let alive = true;
++      let running = true;
++      let dispatched = false;
++      let accepted = false;
++
++      const latch = (outcome: "accepted" | "uncertain"): void => {
++        admissionControl.retainUntilProcessExit();
++        phase = outcome;
++      };
++
++      const control: IdleHandoffControl = {
++        dispatchStarted: () => {
++          if (running) dispatched = true;
++        },
++        definitivelyRejected: () => {
++          if (running) dispatched = false;
++        },
++        // Still honored while parked after an ambiguous exit: a late definite
++        // acknowledgement upgrades the outcome and notifies the queue once.
++        accepted: Effect.suspend(() => {
++          if (!alive || accepted) return Effect.void;
++          accepted = true;
++          latch("accepted");
++          return onHandoffAccepted;
++        }),
++      };
++
++      return restore(Effect.suspend(() => handoff(control))).pipe(
++        Effect.exit,
++        Effect.flatMap((exit) =>
++          Effect.suspend((): Effect.Effect<ActivationDeclined, E, R> => {
++            running = false;
++            const uncertain = !accepted && dispatched;
++            if (uncertain) latch("uncertain");
++            if (accepted || uncertain) {
++              const interrupted = Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause);
++              const report = uncertain
++                ? Effect.logWarning(
++                    "update handoff outcome is unknown after dispatch; holding update gates until restart",
++                    { exit },
++                  )
++                : Effect.void;
++              return Effect.flatMap(report, () => (interrupted ? exit : restore(Effect.never)));
++            }
++            seal.release();
++            phase = "ready";
++            return exit;
++          }),
++        ),
++        Effect.ensuring(
++          Effect.sync(() => {
++            alive = false;
++          }),
++        ),
++      );
++    });
++
+   // Shared entry: the only policy difference between the two public methods is
+   // the answer while another handoff already owns latched gates. The check and
+   // the claim run in one synchronous step, so no other attempt can latch in
+@@ -241,6 +258,7 @@ export const layer = Layer.effect(
+   Effect.gen(function* () {
+     const admission = yield* UpdateAdmission;
+     const activity = yield* UpdateActivity;
+-    return make({ admission, activity });
++    const preparation = yield* IdleUpdatePreparation;
++    return make({ admission, activity, preparation });
+   }),
+ );
+diff --git a/apps/server/src/cloud/idleUpdatePreparation.test.ts b/apps/server/src/cloud/idleUpdatePreparation.test.ts
+new file mode 100644
+index 000000000..1d64bf3d8
+--- /dev/null
++++ b/apps/server/src/cloud/idleUpdatePreparation.test.ts
+@@ -0,0 +1,405 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as Scope from "effect/Scope";
++
++import type { ProviderServiceError } from "../provider/Errors.ts";
++import type { ProviderIdleRetirementResult } from "../provider/Services/ProviderAdapter.ts";
++import {
++  type ProviderIdlePreparationResult,
++  type ProviderIdlePreparationToken,
++  ProviderIdlePreparationTokenTypeId,
++} from "../provider/Services/ProviderService.ts";
++import { make as makeAdmission } from "../updateAdmission.ts";
++import { make as makeActivity, UpdateActivityUnavailableError } from "../updateActivity.ts";
++import { type IdleUpdatePreparationDependencies, make } from "./idleUpdatePreparation.ts";
++
++/**
++ * A ProviderService reduced to the two members the controller uses. `hold`
++ * parks the next retirement so a test can observe the gates while it runs.
++ */
++const makeFakeProvider = () => {
++  const token: ProviderIdlePreparationToken = {
++    [ProviderIdlePreparationTokenTypeId]: ProviderIdlePreparationTokenTypeId,
++  };
++  const prepared: ProviderIdlePreparationResult = { status: "prepared", token };
++  let onPrepare: Effect.Effect<ProviderIdlePreparationResult, ProviderServiceError> =
++    Effect.succeed(prepared);
++  let readiness: ProviderIdleRetirementResult = { status: "retired" };
++  const calls = { prepare: 0, check: 0 };
++  const provider: IdleUpdatePreparationDependencies["provider"] = {
++    prepareIdleRetirement: () =>
++      Effect.suspend(() => {
++        calls.prepare += 1;
++        return onPrepare;
++      }),
++    checkIdleRetirementReadiness: (candidate) =>
++      Effect.sync((): ProviderIdleRetirementResult => {
++        calls.check += 1;
++        return candidate === token
++          ? readiness
++          : { status: "blocked", reason: "token was not issued by this service" };
++      }),
++  };
++  const hold = (during: Effect.Effect<void> = Effect.void) =>
++    Effect.gen(function* () {
++      const entered = yield* Deferred.make<void>();
++      const release = yield* Deferred.make<void>();
++      onPrepare = during.pipe(
++        Effect.andThen(Deferred.succeed(entered, undefined)),
++        Effect.andThen(Deferred.await(release)),
++        Effect.as(prepared),
++      );
++      return { entered, release };
++    });
++  return {
++    provider,
++    token,
++    calls,
++    hold,
++    answer: (next: ProviderIdlePreparationResult) => {
++      onPrepare = Effect.succeed(next);
++    },
++    fail: (error: ProviderServiceError) => {
++      onPrepare = Effect.fail(error);
++    },
++    setReadiness: (next: ProviderIdleRetirementResult) => {
++      readiness = next;
++    },
++  };
++};
++
++const setup = Effect.fn("setup")(function* (
++  provider?: IdleUpdatePreparationDependencies["provider"],
++) {
++  const admission = yield* makeAdmission();
++  const activity = yield* makeActivity();
++  const serverScope = yield* Scope.make();
++  const fake = makeFakeProvider();
++  const preparation = make({
++    provider: provider ?? fake.provider,
++    admission,
++    activity,
++    serverScope,
++  });
++  return { admission, activity, serverScope, fake, preparation };
++});
++
++type Setup = Effect.Success<ReturnType<typeof setup>>;
++
++const assertReleased = Effect.fn("assertReleased")(function* (env: Setup) {
++  assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++  assert.include(yield* env.activity.state, { phase: "open", outstanding: 0 });
++});
++
++const noProof = { status: "busy", reason: "idle providers are not prepared" } as const;
++
++describe("idleUpdatePreparation", () => {
++  it.effect("answers a known-busy environment without admission or retirement", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      const lease = yield* env.activity.acquire("turn waiting for approval");
++
++      assert.deepStrictEqual(yield* env.preparation.request, {
++        phase: "busy",
++        reason: "1 agent operation(s) in flight",
++      });
++      assert.equal(env.fake.calls.prepare, 0);
++      assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++      // The reply that finishes the turn is still admitted.
++      yield* env.admission.withAdmission(Effect.sync(() => lease.release()));
++      yield* assertReleased(env);
++
++      const blocker = env.activity.block("worker unavailable: fanout");
++      assert.deepStrictEqual(yield* env.preparation.request, {
++        phase: "busy",
++        reason: "activity is blocked: worker unavailable: fanout",
++      });
++      blocker.clear();
++      assert.equal(env.fake.calls.prepare, 0);
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++      assert.equal(env.fake.calls.check, 0);
++    }),
++  );
++
++  it.effect(
++    "one server-owned retirement serves duplicate requests and survives requester cancellation",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        const gate = yield* env.fake.hold();
++
++        const requester = yield* Effect.forkChild(env.preparation.request);
++        yield* Deferred.await(gate.entered);
++        yield* Fiber.interrupt(requester);
++        assert.deepStrictEqual(yield* env.preparation.state, { phase: "preparing" });
++
++        // Later requests join the running owner instead of retiring again.
++        assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++        assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++        assert.equal(env.fake.calls.prepare, 1);
++        assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, {
++          status: "busy",
++          reason: "idle provider preparation is in progress",
++        });
++
++        // Admission and exactly one ordinary lease are held for the retirement.
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "maintenance", inFlight: 0 });
++        assert.include(yield* env.activity.state, { phase: "open", outstanding: 1 });
++        assert.equal((yield* env.activity.trySealIdle).status, "busy");
++        assert.deepStrictEqual(yield* env.admission.tryWithMaintenance(Effect.void), {
++          status: "busy",
++        });
++
++        yield* Deferred.succeed(gate.release, undefined);
++        assert.deepStrictEqual(yield* env.preparation.settled, { phase: "prepared" });
++        assert.equal(env.fake.calls.prepare, 1);
++        yield* assertReleased(env);
++        assert.deepStrictEqual(yield* env.preparation.request, { phase: "prepared" });
++        assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, { status: "ready" });
++        assert.equal(env.fake.calls.check, 1);
++      }),
++  );
++
++  it.effect("releases admission and its lease before work produced by retirement drains", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      // Retirement publishes a tracked event whose consumer finishes later.
++      let produced: { release: () => void } | undefined;
++      const gate = yield* env.fake.hold(
++        Effect.map(Effect.orDie(env.activity.acquire("adapter exit event")), (lease) => {
++          produced = lease;
++        }),
++      );
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      yield* Deferred.await(gate.entered);
++      assert.deepStrictEqual(yield* env.admission.state, { phase: "maintenance", inFlight: 0 });
++      assert.include(yield* env.activity.state, { outstanding: 2 });
++
++      yield* Deferred.succeed(gate.release, undefined);
++      assert.deepStrictEqual(yield* env.preparation.settled, { phase: "prepared" });
++      // Preparation did not wait for the consumer; both its holds are gone.
++      assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++      assert.include(yield* env.activity.state, { phase: "open", outstanding: 1 });
++      produced?.release();
++      yield* assertReleased(env);
++    }),
++  );
++
++  it.effect("a client command in flight or a root under the claim prevents any retirement", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      const release = yield* Deferred.make<void>();
++      const command = yield* env.admission
++        .withAdmission(Deferred.await(release))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      assert.deepStrictEqual(yield* env.preparation.settled, {
++        phase: "busy",
++        reason: "client commands or another maintenance own update admission",
++      });
++      assert.equal(env.fake.calls.prepare, 0);
++      assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 1 });
++      yield* Deferred.succeed(release, undefined);
++      yield* Fiber.join(command);
++      yield* assertReleased(env);
++
++      // The request's own read says idle, then a root acquires before the
++      // claim's re-read: nothing is retired and admission reopens.
++      let lease: { release: () => void } | undefined;
++      let reads = 0;
++      const racing = {
++        ...env.activity,
++        state: Effect.tap(env.activity.state, () =>
++          reads++ === 0
++            ? Effect.map(Effect.orDie(env.activity.acquire("racing root")), (acquired) => {
++                lease = acquired;
++              })
++            : Effect.void,
++        ),
++      };
++      const preparation = make({
++        provider: env.fake.provider,
++        admission: env.admission,
++        activity: racing,
++        serverScope: env.serverScope,
++      });
++      assert.deepStrictEqual(yield* preparation.request, { phase: "preparing" });
++      assert.deepStrictEqual(yield* preparation.settled, {
++        phase: "busy",
++        reason: "1 agent operation(s) in flight",
++      });
++      assert.equal(env.fake.calls.prepare, 0);
++      assert.deepStrictEqual(yield* env.admission.state, { phase: "open", inFlight: 0 });
++      assert.include(yield* env.activity.state, { outstanding: 1 });
++      lease?.release();
++      yield* assertReleased(env);
++    }),
++  );
++
++  it.effect.each([
++    {
++      name: "a ProviderService without the capability",
++      provider: {} as IdleUpdatePreparationDependencies["provider"],
++      expected: {
++        phase: "blocked",
++        reason: "provider service cannot prove idle retirement",
++      } as const,
++    },
++    {
++      name: "a ProviderService with only the readiness half",
++      provider: {
++        checkIdleRetirementReadiness: () => Effect.succeed({ status: "retired" } as const),
++      } as IdleUpdatePreparationDependencies["provider"],
++      expected: {
++        phase: "blocked",
++        reason: "provider service cannot prove idle retirement",
++      } as const,
++    },
++  ])("$name is blocked without taking a proof", ({ provider, expected }) =>
++    Effect.gen(function* () {
++      const env = yield* setup(provider);
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      assert.deepStrictEqual(yield* env.preparation.settled, expected);
++      yield* assertReleased(env);
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++    }),
++  );
++
++  it.effect.each([
++    {
++      name: "an unsupported adapter",
++      answer: { status: "blocked", reason: "provider instance 'cursor' cannot prove" } as const,
++      expected: { phase: "blocked", reason: "provider instance 'cursor' cannot prove" } as const,
++    },
++    {
++      name: "native work found",
++      answer: { status: "busy", reason: "provider instance 'codex': turn running" } as const,
++      expected: { phase: "busy", reason: "provider instance 'codex': turn running" } as const,
++    },
++  ])("$name never produces a proof", ({ answer, expected }) =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      env.fake.answer(answer);
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      assert.deepStrictEqual(yield* env.preparation.settled, expected);
++      assert.equal(env.fake.calls.prepare, 1);
++      yield* assertReleased(env);
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++      assert.equal(env.fake.calls.check, 0);
++      // The next request tries again rather than trusting the old answer.
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      yield* env.preparation.settled;
++      assert.equal(env.fake.calls.prepare, 2);
++    }),
++  );
++
++  it.effect(
++    "a typed retirement failure or an interrupted owner is busy with everything released",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        env.fake.fail(new UpdateActivityUnavailableError({ reason: "sealed" }));
++        assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++        assert.deepStrictEqual(yield* env.preparation.settled, {
++          phase: "busy",
++          reason: "idle retirement failed: UpdateActivityUnavailableError",
++        });
++        yield* assertReleased(env);
++
++        const gate = yield* env.fake.hold();
++        assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++        yield* Deferred.await(gate.entered);
++        assert.deepStrictEqual(yield* env.admission.state, { phase: "maintenance", inFlight: 0 });
++        // Only the owning server scope can end a running owner.
++        yield* Scope.close(env.serverScope, Exit.void);
++        assert.deepStrictEqual(yield* env.preparation.settled, {
++          phase: "busy",
++          reason: "idle preparation was interrupted",
++        });
++        yield* assertReleased(env);
++        assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++      }),
++  );
++
++  it.effect(
++    "a server scope closed before the owner first resumes still settles as interrupted",
++    () =>
++      Effect.gen(function* () {
++        const env = yield* setup();
++        const gate = yield* env.fake.hold();
++        assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++        // Closed before the scheduled owner ran anything: no retirement, no
++        // admission, and the owner must still publish and free its slot.
++        yield* Scope.close(env.serverScope, Exit.void);
++        assert.equal(env.fake.calls.prepare, 0);
++        assert.isFalse(yield* Deferred.isDone(gate.entered));
++        assert.deepStrictEqual(yield* env.preparation.settled, {
++          phase: "busy",
++          reason: "idle preparation was interrupted",
++        });
++        assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++        assert.equal(env.fake.calls.check, 0);
++        yield* assertReleased(env);
++      }),
++  );
++
++  it.effect("a request on an already-closed server scope answers interrupted at once", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      yield* Scope.close(env.serverScope, Exit.void);
++      const interrupted = { phase: "busy", reason: "idle preparation was interrupted" } as const;
++      assert.deepStrictEqual(yield* env.preparation.request, interrupted);
++      assert.deepStrictEqual(yield* env.preparation.state, interrupted);
++      assert.deepStrictEqual(yield* env.preparation.settled, interrupted);
++      assert.equal(env.fake.calls.prepare, 0);
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++      yield* assertReleased(env);
++      // Nothing is left owning the slot, so a later request tries again and
++      // is refused the same way rather than reporting a phantom owner.
++      assert.deepStrictEqual(yield* env.preparation.request, interrupted);
++      assert.equal(env.fake.calls.prepare, 0);
++    }),
++  );
++
++  it.effect("a stale proof is discarded by the check without any retirement side effect", () =>
++    Effect.gen(function* () {
++      const env = yield* setup();
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      assert.deepStrictEqual(yield* env.preparation.settled, { phase: "prepared" });
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, { status: "ready" });
++      assert.deepStrictEqual(yield* env.preparation.state, { phase: "prepared" });
++
++      const newSession = "provider instance 'codex' (codex) has 1 live session(s)";
++      env.fake.setReadiness({ status: "busy", reason: newSession });
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, {
++        status: "busy",
++        reason: newSession,
++      });
++      assert.equal(env.fake.calls.prepare, 1);
++      assert.equal(env.fake.calls.check, 2);
++      assert.deepStrictEqual(yield* env.preparation.state, { phase: "busy", reason: newSession });
++      yield* assertReleased(env);
++      // Discarded: no further provider check until a new proof exists.
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, noProof);
++      assert.equal(env.fake.calls.check, 2);
++
++      env.fake.setReadiness({ status: "blocked", reason: "adapter generation replaced" });
++      assert.deepStrictEqual(yield* env.preparation.request, { phase: "preparing" });
++      assert.deepStrictEqual(yield* env.preparation.settled, { phase: "prepared" });
++      assert.deepStrictEqual(yield* env.preparation.checkReadyForSeal, {
++        status: "unknown",
++        reason: "adapter generation replaced",
++      });
++      assert.deepStrictEqual(yield* env.preparation.state, {
++        phase: "blocked",
++        reason: "adapter generation replaced",
++      });
++      assert.equal(env.fake.calls.prepare, 2);
++    }),
++  );
++});
+diff --git a/apps/server/src/cloud/idleUpdatePreparation.ts b/apps/server/src/cloud/idleUpdatePreparation.ts
+new file mode 100644
+index 000000000..26d8593a1
+--- /dev/null
++++ b/apps/server/src/cloud/idleUpdatePreparation.ts
+@@ -0,0 +1,280 @@
++/**
++ * IdleUpdatePreparation - retires idle provider resources ahead of a managed
++ * update, once per server, and tells the coordinator whether that proof still
++ * stands immediately before it seals.
++ *
++ * Preparation is a server-scope single-flight owner: a request either starts
++ * it or observes the one already running, and cancelling a requester never
++ * cancels the owner. The owner claims client admission without waiting,
++ * proves the activity registry idle under that claim, holds one ordinary
++ * activity lease around `ProviderService.prepareIdleRetirement`, and releases
++ * both before any work the retirement produced has to drain. It never waits
++ * for other roots and never drains the engine. Only a token issued by
++ * ProviderService counts as prepared; every other outcome is busy or blocked.
++ *
++ * @module IdleUpdatePreparation
++ */
++import * as Cause from "effect/Cause";
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Layer from "effect/Layer";
++import * as Scope from "effect/Scope";
++
++import {
++  type ProviderIdlePreparationToken,
++  ProviderService,
++  type ProviderServiceShape,
++} from "../provider/Services/ProviderService.ts";
++import { UpdateAdmission, type UpdateAdmissionShape } from "../updateAdmission.ts";
++import {
++  UpdateActivity,
++  type UpdateActivityShape,
++  type UpdateActivityState,
++} from "../updateActivity.ts";
++import type { ActivationDeclined } from "./queuedUpdate.ts";
++
++export type IdleUpdatePreparationState =
++  | { readonly phase: "idle" }
++  | { readonly phase: "preparing" }
++  | { readonly phase: "prepared" }
++  | { readonly phase: "busy"; readonly reason: string }
++  | { readonly phase: "blocked"; readonly reason: string };
++
++/** Answer for the coordinator: seal now, or decline with the reason the queue should see. */
++export type IdleSealReadiness = { readonly status: "ready" } | ActivationDeclined;
++
++export interface IdleUpdatePreparationShape {
++  /**
++   * Starts preparation if the server is known idle and nothing is prepared
++   * or preparing, otherwise answers with the current state. Returns promptly;
++   * a started owner runs in the server scope, not in the requester.
++   */
++  readonly request: Effect.Effect<IdleUpdatePreparationState>;
++  readonly state: Effect.Effect<IdleUpdatePreparationState>;
++  /** Resolves with the state once no owner is running. Local convenience, never a proof. */
++  readonly settled: Effect.Effect<IdleUpdatePreparationState>;
++  /**
++   * Side-effect-free readiness of the stored proof, for the coordinator to
++   * run inside its own admission claim immediately before sealing. Never
++   * starts preparation or takes admission. A proof found stale is discarded,
++   * so the next request after the claim releases starts a new owner.
++   */
++  readonly checkReadyForSeal: Effect.Effect<IdleSealReadiness>;
++}
++
++export class IdleUpdatePreparation extends Context.Service<
++  IdleUpdatePreparation,
++  IdleUpdatePreparationShape
++>()("t3/cloud/idleUpdatePreparation") {}
++
++export interface IdleUpdatePreparationDependencies {
++  readonly provider: Pick<
++    ProviderServiceShape,
++    "prepareIdleRetirement" | "checkIdleRetirementReadiness"
++  >;
++  readonly admission: UpdateAdmissionShape;
++  readonly activity: UpdateActivityShape;
++  /** Owns the preparation fiber; closing it is the only way to cancel one. */
++  readonly serverScope: Scope.Scope;
++}
++
++const isIdle = (state: UpdateActivityState): boolean =>
++  state.phase === "open" && state.outstanding === 0 && state.blockers.length === 0;
++
++const describeActivity = (state: UpdateActivityState): string => {
++  if (state.phase === "closed") return "activity registry is closed";
++  if (state.phase === "sealed") return "activity is already sealed";
++  if (state.blockers.length > 0) return `activity is blocked: ${state.blockers.join(", ")}`;
++  return `${state.outstanding} agent operation(s) in flight`;
++};
++
++const busy = (reason: string): IdleUpdatePreparationState => ({ phase: "busy", reason });
++const blocked = (reason: string): IdleUpdatePreparationState => ({ phase: "blocked", reason });
++const preparing: IdleUpdatePreparationState = { phase: "preparing" };
++const prepared: IdleUpdatePreparationState = { phase: "prepared" };
++
++const ready: IdleSealReadiness = { status: "ready" };
++const noProof: IdleSealReadiness = { status: "busy", reason: "idle providers are not prepared" };
++const stillPreparing: IdleSealReadiness = {
++  status: "busy",
++  reason: "idle provider preparation is in progress",
++};
++
++export const make = ({
++  provider,
++  admission,
++  activity,
++  serverScope,
++}: IdleUpdatePreparationDependencies): IdleUpdatePreparationShape => {
++  let current: IdleUpdatePreparationState = { phase: "idle" };
++  let owner: Deferred.Deferred<void> | undefined;
++  let token: ProviderIdlePreparationToken | undefined;
++
++  const missingCapabilityReason = "provider service cannot prove idle retirement";
++  const missingCapability = blocked(missingCapabilityReason);
++
++  // Runs with admission claimed, the registry re-proven idle and one
++  // preparation lease held. Every ProviderService answer maps to a state; a
++  // typed failure is a transient refusal, never a proof.
++  const retire: Effect.Effect<IdleUpdatePreparationState> = Effect.suspend(() => {
++    const prepare = provider.prepareIdleRetirement;
++    if (prepare === undefined || provider.checkIdleRetirementReadiness === undefined) {
++      return Effect.succeed(missingCapability);
++    }
++    return prepare().pipe(
++      Effect.map((result): IdleUpdatePreparationState => {
++        if (result.status === "prepared") {
++          token = result.token;
++          return prepared;
++        }
++        return { phase: result.status, reason: result.reason };
++      }),
++      Effect.catch((error) => Effect.succeed(busy(`idle retirement failed: ${error._tag}`))),
++    );
++  });
++
++  // Inside the admission claim. The lease is taken under the mask, so an
++  // interruption arriving at any point still releases it; the retirement
++  // itself stays interruptible so the owning scope can end it.
++  const underClaim: Effect.Effect<IdleUpdatePreparationState> = Effect.flatMap(
++    activity.state,
++    (before) => {
++      if (!isIdle(before)) return Effect.succeed(busy(describeActivity(before)));
++      return Effect.uninterruptibleMask((restore) =>
++        activity.acquire("update preparation").pipe(
++          Effect.flatMap((lease) =>
++            Effect.flatMap(activity.state, (held) => {
++              if (held.phase !== "open" || held.blockers.length > 0 || held.outstanding !== 1) {
++                lease.release();
++                return Effect.succeed(
++                  busy(describeActivity({ ...held, outstanding: held.outstanding - 1 })),
++                );
++              }
++              return restore(retire).pipe(Effect.ensuring(Effect.sync(() => lease.release())));
++            }),
++          ),
++          Effect.catchTag("UpdateActivityUnavailableError", (error) =>
++            Effect.succeed(busy(`activity registry is ${error.reason}`)),
++          ),
++        ),
++      );
++    },
++  );
++
++  const prepare: Effect.Effect<IdleUpdatePreparationState> = Effect.map(
++    admission.tryWithMaintenance(underClaim),
++    (claim) =>
++      claim.status === "busy"
++        ? busy("client commands or another maintenance own update admission")
++        : claim.value,
++  );
++
++  // The owner's exit, however it happens, publishes a state and frees the
++  // slot in one synchronous step. Interruption and defects discard any token
++  // the retirement may have stored on the way out.
++  //
++  // The owner is forked with an immediate start so this exit step is on its
++  // stack before the requester continues, and it yields once before the real
++  // preparation so no retirement work runs inside the requester. A server
++  // scope that is already closed, or closes before that yield resumes,
++  // interrupts a parked owner whose bookkeeping is already in place.
++  const runOwner = (done: Deferred.Deferred<void>) =>
++    Effect.andThen(Effect.yieldNow, prepare).pipe(
++      Effect.catchCause((cause) =>
++        Cause.hasInterruptsOnly(cause)
++          ? Effect.failCause(cause)
++          : Effect.logWarning("idle provider preparation failed", { cause }).pipe(
++              Effect.as(busy("idle preparation failed")),
++            ),
++      ),
++      Effect.onExit((exit) =>
++        Effect.sync(() => {
++          if (Exit.isSuccess(exit)) {
++            current = exit.value;
++          } else {
++            token = undefined;
++            current = busy("idle preparation was interrupted");
++          }
++          owner = undefined;
++          Deferred.doneUnsafe(done, Effect.void);
++        }),
++      ),
++    );
++
++  const request: IdleUpdatePreparationShape["request"] = Effect.suspend(() => {
++    if (owner !== undefined) return Effect.succeed(preparing);
++    if (token !== undefined) return Effect.succeed(prepared);
++    // Only an optimization: a known-busy environment answers without
++    // touching admission. The authoritative checks run under the claim.
++    return Effect.flatMap(activity.state, (activityState) => {
++      if (!isIdle(activityState)) {
++        current = busy(describeActivity(activityState));
++        return Effect.succeed(current);
++      }
++      // Ownership is installed and the owner forked in one uninterruptible
++      // step, into the server scope rather than the requester. The answer is
++      // read after the fork: an owner interrupted on arrival by a closed
++      // server scope has already published its state.
++      return Effect.uninterruptible(
++        Effect.suspend(() => {
++          if (owner !== undefined) return Effect.succeed(preparing);
++          const done = Deferred.makeUnsafe<void>();
++          owner = done;
++          current = preparing;
++          return Effect.map(
++            Effect.forkIn(runOwner(done), serverScope, { startImmediately: true }),
++            () => current,
++          );
++        }),
++      );
++    });
++  });
++
++  const state: IdleUpdatePreparationShape["state"] = Effect.sync(() => current);
++
++  const settled: IdleUpdatePreparationShape["settled"] = Effect.suspend(() =>
++    owner === undefined ? state : Effect.andThen(Deferred.await(owner), state),
++  );
++
++  const checkReadyForSeal: IdleUpdatePreparationShape["checkReadyForSeal"] = Effect.suspend(() => {
++    if (owner !== undefined) return Effect.succeed(stillPreparing);
++    const proof = token;
++    if (proof === undefined) return Effect.succeed(noProof);
++    const check = provider.checkIdleRetirementReadiness;
++    if (check === undefined) {
++      token = undefined;
++      current = missingCapability;
++      return Effect.succeed<IdleSealReadiness>({
++        status: "unknown",
++        reason: missingCapabilityReason,
++      });
++    }
++    return Effect.map(check(proof), (result): IdleSealReadiness => {
++      if (result.status === "retired") return ready;
++      // Discard only the proof that was checked; a newer one issued
++      // meanwhile (impossible under the claim, cheap to respect) stays.
++      if (token === proof) {
++        token = undefined;
++        current = { phase: result.status, reason: result.reason };
++      }
++      return result.status === "blocked"
++        ? { status: "unknown", reason: result.reason }
++        : { status: "busy", reason: result.reason };
++    });
++  });
++
++  return { request, state, settled, checkReadyForSeal } satisfies IdleUpdatePreparationShape;
++};
++
++export const layer = Layer.effect(
++  IdleUpdatePreparation,
++  Effect.gen(function* () {
++    const provider = yield* ProviderService;
++    const admission = yield* UpdateAdmission;
++    const activity = yield* UpdateActivity;
++    const serverScope = yield* Scope.Scope;
++    return make({ provider, admission, activity, serverScope });
++  }),
++);
+diff --git a/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
+index 5c8ff7c74..3a5bef328 100644
+--- a/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
++++ b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
+@@ -51,7 +51,8 @@ const answer = (
+ const setup = Effect.fn("setup")(function* () {
+   const admission = yield* makeAdmission();
+   const activity = yield* makeActivity();
+-  const inner = makeCoordinator({ admission, activity });
++  const preparation = { checkReadyForSeal: Effect.succeed({ status: "ready" as const }) };
++  const inner = makeCoordinator({ admission, activity, preparation });
+   let beforeAcquire: Effect.Effect<void> = Effect.void;
+   const coordinator: IdleUpdateCoordinatorShape = {
+     ...inner,
+@@ -275,7 +276,11 @@ describe("DesktopUpdateReservation", () => {
+               : Effect.void,
+           ),
+         };
+-        const coordinator = makeCoordinator({ admission: env.admission, activity: racing });
++        const coordinator = makeCoordinator({
++          admission: env.admission,
++          activity: racing,
++          preparation: { checkReadyForSeal: Effect.succeed({ status: "ready" as const }) },
++        });
+         const scope = yield* Scope.make();
+         const reservation = yield* Scope.provide(make({ coordinator }), scope);
+ 
+diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.test.ts b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
+index 4bd0bb3e1..778d02552 100644
+--- a/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
++++ b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
+@@ -18,6 +18,7 @@ import * as Path from "effect/Path";
+ import * as Queue from "effect/Queue";
+ import * as Schema from "effect/Schema";
+ import * as Stream from "effect/Stream";
++import * as TestClock from "effect/testing/TestClock";
+ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+ import * as AcpErrors from "effect-acp/errors";
+ import type * as AcpSchema from "effect-acp/schema";
+@@ -74,6 +75,7 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
+   readonly holdCancel?: boolean;
+   readonly holdClose?: boolean;
+   readonly holdDispatch?: boolean;
++  readonly holdLaunch?: boolean;
+ }) {
+   const runtimeEvents = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
+   const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+@@ -84,6 +86,8 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
+   const closeRelease = yield* Deferred.make<void>();
+   const dispatchStarted = yield* Deferred.make<void>();
+   const dispatchRelease = yield* Deferred.make<void>();
++  const launchStarted = yield* Deferred.make<void>();
++  const launchRelease = yield* Deferred.make<void>();
+   const seen: ProviderRuntimeEvent[] = [];
+   const calls: string[] = [];
+   const launches: Array<Parameters<AntigravityAdapterOptions["makeRuntime"]>[0]> = [];
+@@ -221,6 +225,8 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
+       makeRuntime: (input) =>
+         Effect.gen(function* () {
+           launches.push(input);
++          yield* Deferred.succeed(launchStarted, undefined);
++          if (options?.holdLaunch) yield* Deferred.await(launchRelease);
+           yield* Effect.addFinalizer(() =>
+             Effect.gen(function* () {
+               yield* Deferred.succeed(closeStarted, undefined);
+@@ -257,6 +263,7 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
+       Deferred.succeed(cancelRelease, undefined),
+       Deferred.succeed(closeRelease, undefined),
+       Deferred.succeed(dispatchRelease, undefined),
++      Deferred.succeed(launchRelease, undefined),
+     ]).pipe(Effect.asVoid),
+   );
+   const waitForEvent = Effect.fn("AntigravityAdapterTest.waitForEvent")(function* <
+@@ -290,6 +297,8 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
+     cancelRelease,
+     dispatchStarted,
+     dispatchRelease,
++    launchStarted,
++    launchRelease,
+     nextPrompt: Queue.take(prompts),
+     nextCancellation: Queue.take(cancellations),
+     drainEvents,
+@@ -1292,4 +1301,101 @@ it.layer(layer)("AntigravityAdapter", (it) => {
+       expect(active.launches).toHaveLength(0);
+     }),
+   );
++
++  it.effect("retires a never-started adapter generation without touching its event source", () =>
++    Effect.gen(function* () {
++      const h = yield* makeHarness();
++
++      expect(yield* h.adapter.retireIdleSessions()).toEqual({ status: "retired" });
++      expect(h.launches).toHaveLength(0);
++      expect(h.stops).toHaveLength(0);
++      expect(h.calls).toEqual([]);
++      expect(h.controls.closed).toBe(0);
++      expect(h.seen).toEqual([]);
++
++      // The PubSub was not shut down: a later start still publishes through it.
++      yield* h.adapter.startSession({
++        threadId,
++        cwd: process.cwd(),
++        runtimeMode: "approval-required",
++      });
++      // Live clock so the timeout is real under the suite's test clock.
++      yield* h
++        .waitForEvent((event) => event.type === "session.started")
++        .pipe(Effect.timeout("10 seconds"), TestClock.withLive);
++      expect(h.launches).toHaveLength(1);
++    }),
++  );
++
++  it.effect("blocks retirement as soon as a session start is in flight", () =>
++    Effect.gen(function* () {
++      const h = yield* makeHarness({ holdLaunch: true });
++      const starting = yield* h.adapter
++        .startSession({ threadId, cwd: process.cwd(), runtimeMode: "approval-required" })
++        .pipe(Effect.forkChild);
++      yield* Deferred.await(h.launchStarted).pipe(Effect.timeout("10 seconds"), TestClock.withLive);
++
++      // Nothing is registered yet; the start-attempt flag alone must block,
++      // and retirement neither cancels nor closes the parked launch.
++      expect(yield* h.adapter.listSessions()).toEqual([]);
++      expect((yield* h.adapter.retireIdleSessions()).status).toBe("blocked");
++      expect(h.controls.closed).toBe(0);
++      expect(h.calls).toEqual([]);
++
++      yield* Deferred.succeed(h.launchRelease, undefined);
++      const session = yield* Fiber.join(starting).pipe(
++        Effect.timeout("10 seconds"),
++        TestClock.withLive,
++      );
++      expect(session.threadId).toBe(threadId);
++      expect((yield* h.adapter.retireIdleSessions()).status).toBe("blocked");
++    }),
++  );
++
++  it.effect("keeps retirement blocked after a failed start", () =>
++    Effect.gen(function* () {
++      const disabled = yield* makeHarness({ enabled: false });
++      const rejected = yield* disabled.adapter
++        .startSession({ threadId, cwd: process.cwd(), runtimeMode: "approval-required" })
++        .pipe(Effect.exit);
++      expect(Exit.isFailure(rejected)).toBe(true);
++      expect(disabled.launches).toHaveLength(0);
++      expect(yield* disabled.adapter.listSessions()).toEqual([]);
++      expect((yield* disabled.adapter.retireIdleSessions()).status).toBe("blocked");
++
++      const unauthenticated = yield* makeHarness();
++      unauthenticated.controls.failAuth = true;
++      const failed = yield* unauthenticated.adapter
++        .startSession({ threadId, cwd: process.cwd(), runtimeMode: "approval-required" })
++        .pipe(Effect.exit);
++      expect(Exit.isFailure(failed)).toBe(true);
++      expect(unauthenticated.controls.closed).toBe(1);
++      expect((yield* unauthenticated.adapter.retireIdleSessions()).status).toBe("blocked");
++      expect(unauthenticated.controls.closed).toBe(1);
++    }),
++  );
++
++  it.effect("keeps retirement blocked after a started session stops", () =>
++    Effect.gen(function* () {
++      const h = yield* makeHarness();
++      yield* h.adapter.startSession({
++        threadId,
++        cwd: process.cwd(),
++        runtimeMode: "approval-required",
++      });
++      yield* h.adapter.stopSession(threadId);
++      yield* h
++        .waitForEvent((event) => event.type === "session.exited")
++        .pipe(Effect.timeout("10 seconds"), TestClock.withLive);
++      expect(yield* h.adapter.listSessions()).toEqual([]);
++      const callsBefore = [...h.calls];
++
++      // An empty session list is not proof; the used generation stays blocked
++      // and retirement closes nothing and synthesizes no second exit.
++      expect((yield* h.adapter.retireIdleSessions()).status).toBe("blocked");
++      expect(h.controls.closed).toBe(1);
++      expect(h.calls).toEqual(callsBefore);
++      expect(h.seen.filter((event) => event.type === "session.exited")).toHaveLength(1);
++    }),
++  );
+ });
+diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.ts b/apps/server/src/provider/Layers/AntigravityAdapter.ts
+index 97925cd49..9ddf1006f 100644
+--- a/apps/server/src/provider/Layers/AntigravityAdapter.ts
++++ b/apps/server/src/provider/Layers/AntigravityAdapter.ts
+@@ -83,7 +83,10 @@ import {
+   sanitizeAntigravityToolPayload,
+   selectAntigravityPermissionOptionId,
+ } from "../acp/AntigravityProtocol.ts";
+-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
++import type {
++  ProviderAdapterShape,
++  ProviderIdleRetirementResult,
++} from "../Services/ProviderAdapter.ts";
+ import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
+ 
+ const PROVIDER = ProviderDriverKind.make("antigravity");
+@@ -315,6 +318,16 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+   const sessions = new Map<ThreadId, SessionContext>();
+   const locks = yield* SynchronizedRef.make(new Map<ThreadId, Semaphore.Semaphore>());
+   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
++  // Flips at `startSession` entry and never clears, so `retireIdleSessions`
++  // can only vouch for an adapter generation that never tried to launch an
++  // ACP process or publish a native event. Antigravity has no exit proof after
++  // use, so a used generation stays blocked until the registry rebuilds it.
++  let startAttempted = false;
++  const recordStartAttempt = <A, E, R>(start: Effect.Effect<A, E, R>) =>
++    Effect.suspend(() => {
++      startAttempted = true;
++      return start;
++    });
+   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+   const randomId = crypto.randomUUIDv4.pipe(
+     Effect.mapError(
+@@ -942,7 +955,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+             ),
+           );
+       }).pipe(Effect.scoped),
+-    );
++    ).pipe(recordStartAttempt);
+ 
+   const promoteBackgroundCommands = (context: SessionContext) =>
+     context.commandLock.withPermit(
+@@ -1231,6 +1244,22 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+     withThreadLock(threadId, Effect.flatMap(requireSession(threadId), stopContext));
+   const stopAll: Adapter["stopAll"] = () =>
+     Effect.forEach([...sessions.values()], stopContext, { discard: true });
++  // Never-started proof only: nothing is stopped, closed, or synthesized.
++  const retireIdleSessions: NonNullable<Adapter["retireIdleSessions"]> = () =>
++    Effect.sync((): ProviderIdleRetirementResult =>
++      startAttempted
++        ? {
++            status: "blocked",
++            reason:
++              "An Antigravity session start was attempted in this adapter generation; native retirement is unsupported.",
++          }
++        : sessions.size > 0
++          ? {
++              status: "blocked",
++              reason: "Antigravity adapter holds sessions without a recorded start attempt.",
++            }
++          : { status: "retired" },
++    );
+   yield* Effect.addFinalizer(() =>
+     stopAll().pipe(
+       Effect.catchCause((cause) =>
+@@ -1253,6 +1282,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+     respondToUserInput,
+     stopSession,
+     stopAll,
++    retireIdleSessions,
+     listSessions: () =>
+       Effect.sync(() =>
+         [...sessions.values()]
+diff --git a/apps/server/src/provider/Layers/CursorAdapter.test.ts b/apps/server/src/provider/Layers/CursorAdapter.test.ts
+index 988171013..f7d935b96 100644
+--- a/apps/server/src/provider/Layers/CursorAdapter.test.ts
++++ b/apps/server/src/provider/Layers/CursorAdapter.test.ts
+@@ -1557,4 +1557,142 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
+       // hang until the suite timeout instead of failing here.
+     }).pipe(TestClock.withLive),
+   );
++
++  // Retirement is a never-started proof scoped to one adapter object, so these
++  // build their own adapter instead of sharing the layer's generation.
++  const makeFreshAdapter = Effect.gen(function* () {
++    const resolveSettings = yield* makeResolveCursorSettings;
++    return yield* makeCursorAdapter(decodeCursorSettings({}), { resolveSettings });
++  });
++  const startInput = (threadId: ThreadId) => ({
++    threadId,
++    provider: ProviderDriverKind.make("cursor"),
++    cwd: process.cwd(),
++    runtimeMode: "full-access" as const,
++    modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
++  });
++
++  it.effect("retires a never-started adapter generation without touching its event source", () =>
++    Effect.gen(function* () {
++      const settings = yield* ServerSettingsService;
++      const adapter = yield* makeFreshAdapter;
++      const threadId = ThreadId.make("cursor-retire-fresh");
++      const published: ProviderRuntimeEvent[] = [];
++      const sawSessionStarted = yield* Deferred.make<void>();
++      const consumer = yield* Stream.runForEach(adapter.streamEvents, (event) =>
++        Effect.sync(() => {
++          published.push(event);
++        }).pipe(
++          Effect.andThen(
++            event.type === "session.started"
++              ? Deferred.succeed(sawSessionStarted, undefined)
++              : Effect.void,
++          ),
++        ),
++      ).pipe(Effect.forkChild({ startImmediately: true }));
++
++      assert.deepStrictEqual(yield* adapter.retireIdleSessions(), { status: "retired" });
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.deepStrictEqual(published, []);
++
++      // The PubSub was not shut down: a later start still publishes through it.
++      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
++      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
++      yield* adapter.startSession(startInput(threadId));
++      yield* Deferred.await(sawSessionStarted).pipe(Effect.timeout("10 seconds"));
++
++      yield* adapter.stopSession(threadId);
++      yield* Fiber.interrupt(consumer);
++      // Live clock so the timeout above is real (see the test above).
++    }).pipe(TestClock.withLive),
++  );
++
++  it.effect("blocks retirement as soon as a session start is in flight", () =>
++    Effect.gen(function* () {
++      const settings = yield* ServerSettingsService;
++      const threadId = ThreadId.make("cursor-retire-in-flight");
++      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
++      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
++
++      // Park the start at the settings resolver: it runs after the attempt
++      // flag flips and before the ACP child spawns or the session registers.
++      const startReached = yield* Deferred.make<void>();
++      const startRelease = yield* Deferred.make<void>();
++      const resolveSettings = yield* makeResolveCursorSettings;
++      const adapter = yield* makeCursorAdapter(decodeCursorSettings({}), {
++        resolveSettings: Deferred.succeed(startReached, undefined).pipe(
++          Effect.andThen(Deferred.await(startRelease)),
++          Effect.andThen(resolveSettings),
++        ),
++      });
++
++      const startFiber = yield* adapter.startSession(startInput(threadId)).pipe(Effect.forkChild);
++      yield* Deferred.await(startReached).pipe(Effect.timeout("10 seconds"));
++
++      // Nothing is registered yet; the start-attempt flag alone must block,
++      // and retirement neither releases nor cancels the parked start.
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.equal(yield* Deferred.isDone(startRelease), false);
++
++      yield* Deferred.succeed(startRelease, undefined);
++      const session = yield* Fiber.join(startFiber).pipe(Effect.timeout("10 seconds"));
++      assert.equal(session.threadId, threadId);
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      yield* adapter.stopSession(threadId);
++      // Live clock so the timeouts above are real (see the test above).
++    }).pipe(TestClock.withLive),
++  );
++
++  it.effect("keeps retirement blocked after a failed start", () =>
++    Effect.gen(function* () {
++      const adapter = yield* makeFreshAdapter;
++      const failure = yield* adapter
++        .startSession({
++          ...startInput(ThreadId.make("cursor-retire-failed-start")),
++          provider: ProviderDriverKind.make("codex"),
++        })
++        .pipe(Effect.flip);
++
++      assert.equal(failure._tag, "ProviderAdapterValidationError");
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++    }),
++  );
++
++  it.effect("keeps retirement blocked after a started session stops", () =>
++    Effect.gen(function* () {
++      const settings = yield* ServerSettingsService;
++      const adapter = yield* makeFreshAdapter;
++      const threadId = ThreadId.make("cursor-retire-after-stop");
++      const published: ProviderRuntimeEvent[] = [];
++      const sawSessionExited = yield* Deferred.make<void>();
++      const consumer = yield* Stream.runForEach(adapter.streamEvents, (event) =>
++        Effect.sync(() => {
++          published.push(event);
++        }).pipe(
++          Effect.andThen(
++            event.type === "session.exited"
++              ? Deferred.succeed(sawSessionExited, undefined)
++              : Effect.void,
++          ),
++        ),
++      ).pipe(Effect.forkChild({ startImmediately: true }));
++      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
++      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
++
++      yield* adapter.startSession(startInput(threadId));
++      yield* adapter.stopSession(threadId);
++      yield* Deferred.await(sawSessionExited).pipe(Effect.timeout("10 seconds"));
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++
++      // An empty session list is not proof; the used generation stays blocked
++      // and retirement synthesizes no second exit.
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      assert.equal(published.filter((event) => event.type === "session.exited").length, 1);
++      yield* Fiber.interrupt(consumer);
++      // Live clock so the timeout above is real (see the test above).
++    }).pipe(TestClock.withLive),
++  );
+ });
+diff --git a/apps/server/src/provider/Layers/CursorAdapter.ts b/apps/server/src/provider/Layers/CursorAdapter.ts
+index 1ed9648a5..f1a01a14e 100644
+--- a/apps/server/src/provider/Layers/CursorAdapter.ts
++++ b/apps/server/src/provider/Layers/CursorAdapter.ts
+@@ -76,6 +76,7 @@ import {
+   extractTodosAsPlan,
+ } from "../acp/CursorAcpExtension.ts";
+ import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
++import type { ProviderIdleRetirementResult } from "../Services/ProviderAdapter.ts";
+ import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
+ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+ import {
+@@ -342,6 +343,16 @@ export function makeCursorAdapter(
+     const sessions = new Map<ThreadId, CursorSessionContext>();
+     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
++    // Flips at `startSession` entry and never clears, so `retireIdleSessions`
++    // can only vouch for an adapter generation that never tried to spawn an
++    // ACP child or publish a native event. Cursor has no exit proof after use,
++    // so a used generation stays blocked until the registry rebuilds it.
++    let startAttempted = false;
++    const recordStartAttempt = <A, E, R>(start: Effect.Effect<A, E, R>) =>
++      Effect.suspend(() => {
++        startAttempted = true;
++        return start;
++      });
+ 
+     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
+@@ -920,7 +931,7 @@ export function makeCursorAdapter(
+ 
+           return session;
+         }).pipe(Effect.scoped),
+-      );
++      ).pipe(recordStartAttempt);
+ 
+     const sendTurn: CursorAdapterShape["sendTurn"] = (input) =>
+       Effect.gen(function* () {
+@@ -1197,6 +1208,23 @@ export function makeCursorAdapter(
+     const stopAll: CursorAdapterShape["stopAll"] = () =>
+       Effect.forEach(sessions.values(), stopSessionInternal, { discard: true });
+ 
++    // Never-started proof only: nothing is stopped, closed, or synthesized.
++    const retireIdleSessions: NonNullable<CursorAdapterShape["retireIdleSessions"]> = () =>
++      Effect.sync((): ProviderIdleRetirementResult =>
++        startAttempted
++          ? {
++              status: "blocked",
++              reason:
++                "A Cursor session start was attempted in this adapter generation; native retirement is unsupported.",
++            }
++          : sessions.size > 0
++            ? {
++                status: "blocked",
++                reason: "Cursor adapter holds sessions without a recorded start attempt.",
++              }
++            : { status: "retired" },
++      );
++
+     yield* Effect.addFinalizer(() =>
+       Effect.forEach(sessions.values(), stopSessionInternal, { discard: true }).pipe(
+         Effect.catch((cause) =>
+@@ -1224,6 +1252,7 @@ export function makeCursorAdapter(
+       listSessions,
+       hasSession,
+       stopAll,
++      retireIdleSessions,
+       streamEvents,
+     } satisfies CursorAdapterShape;
+   });
+diff --git a/apps/server/src/provider/Layers/GrokAdapter.test.ts b/apps/server/src/provider/Layers/GrokAdapter.test.ts
+index 41fa6ed0f..d0044881b 100644
+--- a/apps/server/src/provider/Layers/GrokAdapter.test.ts
++++ b/apps/server/src/provider/Layers/GrokAdapter.test.ts
+@@ -2457,4 +2457,136 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+       // hang until the suite timeout instead of failing here.
+     }).pipe(TestClock.withLive),
+   );
++
++  // Retirement is a never-started proof scoped to one adapter object; every
++  // case below gets its own generation from `makeTestAdapter`.
++  const startInput = (threadId: ThreadId) => ({
++    threadId,
++    provider: ProviderDriverKind.make("grok"),
++    cwd: process.cwd(),
++    runtimeMode: "full-access" as const,
++    modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
++  });
++
++  it.effect("retires a never-started adapter generation without touching its event source", () =>
++    Effect.gen(function* () {
++      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
++      const adapter = yield* makeTestAdapter(wrapperPath);
++      const threadId = ThreadId.make("grok-retire-fresh");
++      const published: ProviderRuntimeEvent[] = [];
++      const sawSessionStarted = yield* Deferred.make<void>();
++      const consumer = yield* Stream.runForEach(adapter.streamEvents, (event) =>
++        Effect.sync(() => {
++          published.push(event);
++        }).pipe(
++          Effect.andThen(
++            event.type === "session.started"
++              ? Deferred.succeed(sawSessionStarted, undefined)
++              : Effect.void,
++          ),
++        ),
++      ).pipe(Effect.forkChild({ startImmediately: true }));
++
++      assert.deepStrictEqual(yield* adapter.retireIdleSessions(), { status: "retired" });
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.deepStrictEqual(published, []);
++
++      // The PubSub was not shut down: a later start still publishes through it.
++      yield* adapter.startSession(startInput(threadId));
++      yield* Deferred.await(sawSessionStarted).pipe(Effect.timeout("10 seconds"));
++
++      yield* adapter.stopSession(threadId);
++      yield* Fiber.interrupt(consumer);
++      // Live clock so the timeout above is real (see the test above).
++    }).pipe(TestClock.withLive),
++  );
++
++  it.effect("blocks retirement as soon as a session start is in flight", () =>
++    Effect.gen(function* () {
++      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
++      const threadId = ThreadId.make("grok-retire-in-flight");
++
++      // Park the start at the native request log: the first ACP request is
++      // logged after the attempt flag flips and before the session registers.
++      const startReached = yield* Deferred.make<void>();
++      const startRelease = yield* Deferred.make<void>();
++      const adapter = yield* makeTestAdapter(wrapperPath, {
++        nativeEventLogger: {
++          filePath: "memory://grok-retire-in-flight",
++          write: () =>
++            Deferred.succeed(startReached, undefined).pipe(
++              Effect.andThen(Deferred.await(startRelease)),
++            ),
++          close: () => Effect.void,
++        },
++      });
++
++      const startFiber = yield* adapter.startSession(startInput(threadId)).pipe(Effect.forkChild);
++      yield* Deferred.await(startReached).pipe(Effect.timeout("10 seconds"));
++
++      // Nothing is registered yet; the start-attempt flag alone must block,
++      // and retirement neither releases nor cancels the parked start.
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.equal(yield* Deferred.isDone(startRelease), false);
++
++      yield* Deferred.succeed(startRelease, undefined);
++      const session = yield* Fiber.join(startFiber).pipe(Effect.timeout("10 seconds"));
++      assert.equal(session.threadId, threadId);
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      yield* adapter.stopSession(threadId);
++      // Live clock so the timeouts above are real (see the test above).
++    }).pipe(TestClock.withLive),
++  );
++
++  it.effect("keeps retirement blocked after a failed start", () =>
++    Effect.gen(function* () {
++      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
++      const adapter = yield* makeTestAdapter(wrapperPath);
++      const failure = yield* Effect.flip(
++        adapter.startSession({
++          ...startInput(ThreadId.make("grok-retire-failed-start")),
++          provider: ProviderDriverKind.make("cursor"),
++        }),
++      );
++
++      assert.equal(failure._tag, "ProviderAdapterValidationError");
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++    }),
++  );
++
++  it.effect("keeps retirement blocked after a started session stops", () =>
++    Effect.gen(function* () {
++      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
++      const adapter = yield* makeTestAdapter(wrapperPath);
++      const threadId = ThreadId.make("grok-retire-after-stop");
++      const published: ProviderRuntimeEvent[] = [];
++      const sawSessionExited = yield* Deferred.make<void>();
++      const consumer = yield* Stream.runForEach(adapter.streamEvents, (event) =>
++        Effect.sync(() => {
++          published.push(event);
++        }).pipe(
++          Effect.andThen(
++            event.type === "session.exited"
++              ? Deferred.succeed(sawSessionExited, undefined)
++              : Effect.void,
++          ),
++        ),
++      ).pipe(Effect.forkChild({ startImmediately: true }));
++
++      yield* adapter.startSession(startInput(threadId));
++      yield* adapter.stopSession(threadId);
++      yield* Deferred.await(sawSessionExited).pipe(Effect.timeout("10 seconds"));
++      assert.deepStrictEqual(yield* adapter.listSessions(), []);
++
++      // An empty session list is not proof; the used generation stays blocked
++      // and retirement synthesizes no second exit.
++      assert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      assert.equal(published.filter((event) => event.type === "session.exited").length, 1);
++      yield* Fiber.interrupt(consumer);
++      // Live clock so the timeout above is real (see the test above).
++    }).pipe(TestClock.withLive),
++  );
+ });
+diff --git a/apps/server/src/provider/Layers/GrokAdapter.ts b/apps/server/src/provider/Layers/GrokAdapter.ts
+index 25188adcf..164a17e61 100644
+--- a/apps/server/src/provider/Layers/GrokAdapter.ts
++++ b/apps/server/src/provider/Layers/GrokAdapter.ts
+@@ -80,6 +80,7 @@ import {
+   XAiExitPlanModeRequest,
+ } from "../acp/XAiAcpExtension.ts";
+ import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
++import type { ProviderIdleRetirementResult } from "../Services/ProviderAdapter.ts";
+ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+ 
+ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+@@ -363,6 +364,16 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+     const sessions = new Map<ThreadId, GrokSessionContext>();
+     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
++    // Flips at `startSession` entry and never clears, so `retireIdleSessions`
++    // can only vouch for an adapter generation that never tried to spawn an
++    // ACP child or publish a native event. Grok has no exit proof after use,
++    // so a used generation stays blocked until the registry rebuilds it.
++    let startAttempted = false;
++    const recordStartAttempt = <A, E, R>(start: Effect.Effect<A, E, R>) =>
++      Effect.suspend(() => {
++        startAttempted = true;
++        return start;
++      });
+     const requestedTurnInactivityTimeoutMs = options?.turnInactivityTimeoutMs;
+     const turnInactivityTimeoutMs =
+       typeof requestedTurnInactivityTimeoutMs === "number" &&
+@@ -1469,7 +1480,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+ 
+           return session;
+         }).pipe(Effect.scoped),
+-      );
++      ).pipe(recordStartAttempt);
+ 
+     const sendTurn: GrokAdapterShape["sendTurn"] = (input) =>
+       Effect.gen(function* () {
+@@ -2116,6 +2127,23 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+     const stopAll: GrokAdapterShape["stopAll"] = () =>
+       Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
+ 
++    // Never-started proof only: nothing is stopped, closed, or synthesized.
++    const retireIdleSessions: NonNullable<GrokAdapterShape["retireIdleSessions"]> = () =>
++      Effect.sync((): ProviderIdleRetirementResult =>
++        startAttempted
++          ? {
++              status: "blocked",
++              reason:
++                "A Grok session start was attempted in this adapter generation; native retirement is unsupported.",
++            }
++          : sessions.size > 0
++            ? {
++                status: "blocked",
++                reason: "Grok adapter holds sessions without a recorded start attempt.",
++              }
++            : { status: "retired" },
++      );
++
+     yield* Effect.addFinalizer(() =>
+       Effect.ignore(stopAll()).pipe(
+         Effect.tap(() => PubSub.shutdown(runtimeEventPubSub)),
+@@ -2140,6 +2168,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+       listSessions,
+       hasSession,
+       stopAll,
++      retireIdleSessions,
+       streamEvents,
+     } satisfies GrokAdapterShape;
+   });
+diff --git a/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts b/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts
+index ee5767f9d..ef5a420f6 100644
+--- a/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts
++++ b/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts
+@@ -7583,4 +7583,137 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+       NodeAssert.deepEqual(closeCallsDuringRun, []);
+     }),
+   );
++
++  // Retirement is a never-started proof scoped to one adapter object, so these
++  // build their own adapter instead of sharing the layer's generation.
++  const makeFreshAdapter = makeOpenCodeAdapter(openCodeAdapterTestSettings);
++  const startInput = (threadId: ThreadId) => ({
++    provider: ProviderDriverKind.make("opencode"),
++    threadId,
++    runtimeMode: "full-access" as const,
++  });
++
++  it.effect("retires a never-started adapter generation without touching its event source", () =>
++    Effect.gen(function* () {
++      const adapter = yield* makeFreshAdapter;
++      const threadId = asThreadId("thread-opencode-retire-fresh");
++      const sawSessionStarted = yield* Deferred.make<void>();
++      const consumer = yield* Stream.runForEach(adapter.streamEvents, (event) =>
++        event.type === "session.started"
++          ? Deferred.succeed(sawSessionStarted, undefined)
++          : Effect.void,
++      ).pipe(Effect.forkChild({ startImmediately: true }));
++
++      NodeAssert.deepEqual(yield* adapter.retireIdleSessions(), { status: "retired" });
++      NodeAssert.deepEqual(yield* adapter.listSessions(), []);
++      NodeAssert.deepEqual(runtimeMock.state.closeCalls, []);
++      NodeAssert.deepEqual(runtimeMock.state.abortCalls, []);
++      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
++
++      // The runtime queue was not shut down: a later start still publishes.
++      yield* adapter.startSession(startInput(threadId));
++      // Live clock so the timeout is real under the suite's test clock.
++      yield* Deferred.await(sawSessionStarted).pipe(
++        Effect.timeout("10 seconds"),
++        TestClock.withLive,
++      );
++      yield* adapter.stopSession(threadId);
++      yield* Fiber.interrupt(consumer);
++    }),
++  );
++
++  it.effect("blocks retirement as soon as a session start is in flight", () =>
++    Effect.gen(function* () {
++      const adapter = yield* makeFreshAdapter;
++      const threadId = asThreadId("thread-opencode-retire-in-flight");
++      const eventSubscribeObserved = promiseWithResolvers<void>();
++      runtimeMock.state.autoConnect = false;
++      runtimeMock.state.eventSubscribeObserved = () => eventSubscribeObserved.resolve(undefined);
++
++      const startFiber = yield* adapter
++        .startSession(startInput(threadId))
++        .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
++      // Nothing is registered yet; the start-attempt flag alone must block.
++      NodeAssert.deepEqual(yield* adapter.listSessions(), []);
++      NodeAssert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++
++      // Retirement neither closed nor aborted the connecting session.
++      yield* Effect.promise(() => eventSubscribeObserved.promise).pipe(
++        Effect.timeout("10 seconds"),
++        TestClock.withLive,
++      );
++      NodeAssert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      NodeAssert.deepEqual(runtimeMock.state.closeCalls, []);
++      NodeAssert.deepEqual(runtimeMock.state.abortCalls, []);
++
++      yield* adapter.stopSession(threadId);
++      const startResult = yield* Fiber.join(startFiber).pipe(
++        Effect.timeout("10 seconds"),
++        TestClock.withLive,
++      );
++      NodeAssert.equal(startResult._tag, "Failure");
++      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
++      NodeAssert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++    }),
++  );
++
++  it.effect("keeps retirement blocked after a failed start", () =>
++    Effect.gen(function* () {
++      const adapter = yield* makeFreshAdapter;
++      const threadId = asThreadId("thread-opencode-retire-failed-start");
++      runtimeMock.state.autoConnect = false;
++
++      const startFiber = yield* adapter
++        .startSession(startInput(threadId))
++        .pipe(Effect.result, Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* advanceTestClock(10_000);
++      const startResult = yield* Fiber.join(startFiber).pipe(
++        Effect.timeout("10 seconds"),
++        TestClock.withLive,
++      );
++      NodeAssert.equal(startResult._tag, "Failure");
++      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
++
++      const closeCallsBefore = runtimeMock.state.closeCalls.length;
++      NodeAssert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      NodeAssert.equal(runtimeMock.state.closeCalls.length, closeCallsBefore);
++    }),
++  );
++
++  it.effect("keeps retirement blocked after a started session stops", () =>
++    Effect.gen(function* () {
++      const adapter = yield* makeFreshAdapter;
++      const threadId = asThreadId("thread-opencode-retire-after-stop");
++      const eventsFiber = yield* adapter.streamEvents.pipe(
++        Stream.filter((event) => event.threadId === threadId),
++        Stream.take(3),
++        Stream.runCollect,
++        Effect.forkChild({ startImmediately: true }),
++      );
++
++      yield* adapter.startSession(startInput(threadId));
++      yield* adapter.stopSession(threadId);
++      const events = Array.from(
++        yield* Fiber.join(eventsFiber).pipe(Effect.timeout("10 seconds"), TestClock.withLive),
++      );
++      NodeAssert.deepEqual(
++        events.map((event) => event.type),
++        ["session.started", "thread.started", "session.exited"],
++      );
++      NodeAssert.deepEqual(yield* adapter.listSessions(), []);
++      // Ordinary stop already aborted the native session and closed the client;
++      // snapshot both so retirement is measured against that baseline.
++      const closeCallsAfterStop = [...runtimeMock.state.closeCalls];
++      const abortCallsAfterStop = [...runtimeMock.state.abortCalls];
++      NodeAssert.deepEqual(closeCallsAfterStop, ["http://127.0.0.1:9999"]);
++      NodeAssert.equal(abortCallsAfterStop.length, 1);
++
++      // An empty session list is not proof; the used generation stays blocked
++      // and retirement adds no abort or close beyond the ordinary stop.
++      NodeAssert.equal((yield* adapter.retireIdleSessions()).status, "blocked");
++      NodeAssert.deepEqual(runtimeMock.state.closeCalls, closeCallsAfterStop);
++      NodeAssert.deepEqual(runtimeMock.state.abortCalls, abortCallsAfterStop);
++    }),
++  );
+ });
+diff --git a/apps/server/src/provider/Layers/OpenCodeAdapter.ts b/apps/server/src/provider/Layers/OpenCodeAdapter.ts
+index 742ee9b86..55ea5b33f 100644
+--- a/apps/server/src/provider/Layers/OpenCodeAdapter.ts
++++ b/apps/server/src/provider/Layers/OpenCodeAdapter.ts
+@@ -45,6 +45,7 @@ import {
+ } from "../Errors.ts";
+ import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
+ import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
++import type { ProviderIdleRetirementResult } from "../Services/ProviderAdapter.ts";
+ import {
+   buildOpenCodePermissionRules,
+   OpenCodeRuntime,
+@@ -960,6 +961,12 @@ export function makeOpenCodeAdapter(
+       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
+     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
++    // Flips at `startSession` entry and never clears, so `retireIdleSessions`
++    // can only vouch for an adapter generation that never tried to connect a
++    // server, create a client, or publish a native event. OpenCode has no exit
++    // proof after use (the map empties before contexts finish closing), so a
++    // used generation stays blocked until the registry rebuilds it.
++    let startAttempted = false;
+     const deleteContextIfCurrent = (context: OpenCodeSessionContext) => {
+       if (sessions.get(context.session.threadId) === context) {
+         sessions.delete(context.session.threadId);
+@@ -2806,6 +2813,7 @@ export function makeOpenCodeAdapter(
+ 
+     const startSession: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
+       function* (input) {
++        startAttempted = true;
+         const binaryPath = openCodeSettings.binaryPath;
+         const serverUrl = openCodeSettings.serverUrl;
+         const serverPassword = openCodeSettings.serverPassword;
+@@ -3838,6 +3846,23 @@ export function makeOpenCodeAdapter(
+         );
+       });
+ 
++    // Never-started proof only: nothing is stopped, closed, or synthesized.
++    const retireIdleSessions: NonNullable<OpenCodeAdapterShape["retireIdleSessions"]> = () =>
++      Effect.sync((): ProviderIdleRetirementResult =>
++        startAttempted
++          ? {
++              status: "blocked",
++              reason:
++                "An OpenCode session start was attempted in this adapter generation; native retirement is unsupported.",
++            }
++          : sessions.size > 0
++            ? {
++                status: "blocked",
++                reason: "OpenCode adapter holds sessions without a recorded start attempt.",
++              }
++            : { status: "retired" },
++      );
++
+     return {
+       provider: PROVIDER,
+       capabilities: {
+@@ -3855,6 +3880,7 @@ export function makeOpenCodeAdapter(
+       readThread,
+       rollbackThread,
+       stopAll,
++      retireIdleSessions,
+       get streamEvents() {
+         return Stream.fromQueue(runtimeEvents);
+       },
+diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
+index a84334a86..5c2e73b45 100644
+--- a/apps/server/src/provider/Layers/ProviderService.test.ts
++++ b/apps/server/src/provider/Layers/ProviderService.test.ts
+@@ -60,7 +60,10 @@ import {
+   ProviderWorkspaceMissingError,
+   type ProviderAdapterError,
+ } from "../Errors.ts";
+-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
++import type {
++  ProviderAdapterShape,
++  ProviderIdleRetirementResult,
++} from "../Services/ProviderAdapter.ts";
+ import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
+ import * as ProviderService from "../Services/ProviderService.ts";
+ import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
+@@ -5524,4 +5527,355 @@ describe("ProviderServiceLive update activity", () => {
+       );
+     }),
+   );
++
++  // --- Idle retirement preparation -----------------------------------------
++
++  describe("idle retirement preparation", () => {
++    const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
++
++    /** Gives a fake adapter an explicit, observable `retireIdleSessions`. */
++    const withRetirement = <
++      T extends { readonly adapter: ProviderAdapterShape<ProviderAdapterError> },
++    >(
++      base: T,
++      order: Array<string>,
++      label: string,
++      answer: () => ProviderIdleRetirementResult = () => ({ status: "retired" }),
++    ) => {
++      const retireIdleSessions = vi.fn(
++        (): Effect.Effect<ProviderIdleRetirementResult, ProviderAdapterError> =>
++          Effect.sync(() => {
++            order.push(label);
++            return answer();
++          }),
++      );
++      return { ...base, adapter: { ...base.adapter, retireIdleSessions }, retireIdleSessions };
++    };
++
++    /** Marks instances disabled in routing info; they stay live adapters. */
++    const withDisabled = (
++      registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"],
++      disabled: ReadonlySet<ProviderInstanceId>,
++    ): ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] => ({
++      ...registry,
++      getInstanceInfo: (instanceId) =>
++        Effect.map(registry.getInstanceInfo(instanceId), (info) => ({
++          ...info,
++          enabled: !disabled.has(instanceId),
++        })),
++    });
++
++    // A registry whose map edits and change publication are separate steps,
++    // so subscription lag is a state the test controls rather than a race.
++    const makeSteppedRegistry = Effect.gen(function* () {
++      const adapters = new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>();
++      const changes = yield* PubSub.unbounded<void>();
++      const unsupported = (instanceId: ProviderInstanceId) =>
++        new ProviderUnsupportedError({ provider: ProviderDriverKind.make(instanceId) });
++      const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
++        getByInstance: (instanceId) => {
++          const adapter = adapters.get(instanceId);
++          return adapter ? Effect.succeed(adapter) : Effect.fail(unsupported(instanceId));
++        },
++        getInstanceInfo: (instanceId) => {
++          const adapter = adapters.get(instanceId);
++          return adapter
++            ? Effect.succeed({
++                instanceId,
++                driverKind: adapter.provider,
++                displayName: undefined,
++                enabled: true,
++                continuationIdentity: {
++                  driverKind: adapter.provider,
++                  continuationKey: `${adapter.provider}:instance:${instanceId}`,
++                },
++              })
++            : Effect.fail(unsupported(instanceId));
++        },
++        listInstances: () => Effect.succeed(Array.from(adapters.keys())),
++        subscribeChanges: PubSub.subscribe(changes),
++      };
++      return {
++        registry,
++        set: (
++          instanceId: ProviderInstanceId,
++          adapter: ProviderAdapterShape<ProviderAdapterError>,
++        ) => adapters.set(instanceId, adapter),
++        remove: (instanceId: ProviderInstanceId) => adapters.delete(instanceId),
++        publish: PubSub.publish(changes, undefined),
++      };
++    });
++
++    const idleApi = (provider: ProviderService.ProviderService["Service"]) => {
++      const { prepareIdleRetirement, checkIdleRetirementReadiness } = provider;
++      if (prepareIdleRetirement === undefined || checkIdleRetirementReadiness === undefined) {
++        throw new Error("live ProviderService must supply idle retirement preparation");
++      }
++      return { prepare: prepareIdleRetirement(), check: checkIdleRetirementReadiness };
++    };
++
++    const buildProvider = (
++      activity: UpdateActivityShape,
++      registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"],
++    ) =>
++      Effect.gen(function* () {
++        const services = yield* Layer.build(makeOwnedProviderLayer(activity, registry));
++        return yield* ProviderService.ProviderService.pipe(Effect.provide(services));
++      });
++
++    const preparedToken = (result: ProviderService.ProviderIdlePreparationResult) => {
++      assert.equal(result.status, "prepared");
++      if (result.status !== "prepared") throw new Error("unreachable");
++      return result.token;
++    };
++
++    it.effect(
++      "blocks before any retirement when an adapter, even a disabled one, lacks proof",
++      () =>
++        Effect.gen(function* () {
++          const activity = yield* makeUpdateActivity();
++          const order: Array<string> = [];
++          const codex = withRetirement(makeFakeCodexAdapter(), order, "codex");
++          const claude = withRetirement(makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER), order, "claude");
++          const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
++          const provider = yield* buildProvider(
++            activity,
++            withDisabled(
++              makeStaticInstanceRegistry([
++                [codexInstanceId, codex.adapter],
++                [claudeInstanceId, claude.adapter],
++                [cursorInstanceId, cursor.adapter],
++              ]),
++              new Set([cursorInstanceId]),
++            ),
++          );
++          assert.equal((yield* provider.getInstanceInfo(cursorInstanceId)).enabled, false);
++
++          const result = yield* idleApi(provider).prepare;
++          assert.deepEqual(result, {
++            status: "blocked",
++            reason: "provider instance 'cursor' (cursor) cannot prove idle retirement",
++          });
++          assert.deepEqual(order, []);
++          assert.equal(codex.retireIdleSessions.mock.calls.length, 0);
++          assert.equal(claude.retireIdleSessions.mock.calls.length, 0);
++        }),
++    );
++
++    it.effect("retires every adapter in order and issues a proof that stays current", () =>
++      Effect.gen(function* () {
++        const activity = yield* makeUpdateActivity();
++        const order: Array<string> = [];
++        const codex = withRetirement(makeFakeCodexAdapter(), order, "codex");
++        const claude = withRetirement(makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER), order, "claude");
++        const provider = yield* buildProvider(
++          activity,
++          makeStaticInstanceRegistry([
++            [codexInstanceId, codex.adapter],
++            [claudeInstanceId, claude.adapter],
++          ]),
++        );
++        const api = idleApi(provider);
++
++        const token = preparedToken(yield* api.prepare);
++        assert.deepEqual(order, ["claude", "codex"]);
++        assert.deepEqual(yield* api.check(token), { status: "retired" });
++        // Reads are not mutations, and rechecking is idempotent.
++        assert.equal((yield* provider.listSessions()).length, 0);
++        yield* provider.getCapabilities(codexInstanceId);
++        assert.deepEqual(yield* api.check(token), { status: "retired" });
++        assert.equal(codex.stopAll.mock.calls.length, 0);
++        assert.equal(codex.stopSession.mock.calls.length, 0);
++
++        // A token is meaningful only to the service that issued it.
++        const other = yield* buildProvider(
++          yield* makeUpdateActivity(),
++          makeStaticInstanceRegistry([[codexInstanceId, codex.adapter]]),
++        );
++        assert.deepEqual(yield* idleApi(other).check(token), {
++          status: "blocked",
++          reason: "idle preparation token was not issued by this provider service",
++        });
++        const foreign: ProviderService.ProviderIdlePreparationToken = {
++          [ProviderService.ProviderIdlePreparationTokenTypeId]:
++            ProviderService.ProviderIdlePreparationTokenTypeId,
++        };
++        assert.equal((yield* api.check(foreign)).status, "blocked");
++      }),
++    );
++
++    it.effect.each([
++      { name: "busy", answer: { status: "busy", reason: "turn running" } as const },
++      { name: "blocked", answer: { status: "blocked", reason: "exit proof lost" } as const },
++    ])("an adapter answering $name stops the sequence and never issues a proof", ({ answer }) =>
++      Effect.gen(function* () {
++        const activity = yield* makeUpdateActivity();
++        const order: Array<string> = [];
++        const codex = withRetirement(makeFakeCodexAdapter(), order, "codex");
++        const claude = withRetirement(
++          makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER),
++          order,
++          "claude",
++          () => answer,
++        );
++        const provider = yield* buildProvider(
++          activity,
++          makeStaticInstanceRegistry([
++            [codexInstanceId, codex.adapter],
++            [claudeInstanceId, claude.adapter],
++          ]),
++        );
++        assert.deepEqual(yield* idleApi(provider).prepare, {
++          status: answer.status,
++          reason: `provider instance 'claudeAgent' (claudeAgent): ${answer.reason}`,
++        });
++        assert.deepEqual(order, ["claude"]);
++        assert.equal(codex.retireIdleSessions.mock.calls.length, 0);
++        assert.equal(claude.stopAll.mock.calls.length, 0);
++      }),
++    );
++
++    it.effect("rejects subscription lag, replacement, addition and removal of adapters", () =>
++      Effect.gen(function* () {
++        const activity = yield* makeUpdateActivity();
++        const order: Array<string> = [];
++        const stepped = yield* makeSteppedRegistry;
++        const generationA = withRetirement(
++          yield* makeOwnedFakeAdapter(activity, "codex-a"),
++          order,
++          "codex-a",
++        );
++        stepped.set(codexInstanceId, generationA.adapter);
++        const provider = yield* buildProvider(activity, stepped.registry);
++        yield* makeRequiredConsumers(provider);
++        yield* awaitActivity(activity, (state) => state.blockers.length === 0);
++        const api = idleApi(provider);
++        const first = preparedToken(yield* api.prepare);
++        assert.deepEqual(order, ["codex-a"]);
++
++        // Replacement the event reader has not caught up with: no retirement
++        // is attempted, and the earlier proof is stale.
++        const generationB = withRetirement(
++          yield* makeOwnedFakeAdapter(activity, "codex-b"),
++          order,
++          "codex-b",
++        );
++        stepped.set(codexInstanceId, generationB.adapter);
++        assert.deepEqual(yield* api.prepare, {
++          status: "busy",
++          reason: "provider event subscriptions have not caught up with the registry",
++        });
++        assert.deepEqual(order, ["codex-a"]);
++        assert.deepEqual(yield* api.check(first), {
++          status: "busy",
++          reason: "provider registry changed after idle preparation",
++        });
++
++        // Once the reader is wired for the new generation, it retires.
++        yield* stepped.publish;
++        yield* awaitActivity(
++          activity,
++          (state) => !state.blockers.some((blocker) => blocker.includes("codex-b")),
++        );
++        const second = preparedToken(yield* api.prepare);
++        assert.deepEqual(order, ["codex-a", "codex-b"]);
++        assert.deepEqual(yield* api.check(second), { status: "retired" });
++        assert.deepEqual(yield* api.check(first), {
++          status: "busy",
++          reason: "provider registry changed after idle preparation",
++        });
++
++        // An added instance the reader has not seen, then one it has.
++        const cursor = withRetirement(
++          yield* makeOwnedFakeAdapter(activity, "cursor-owned", CURSOR_DRIVER),
++          order,
++          "cursor",
++        );
++        stepped.set(cursorInstanceId, cursor.adapter);
++        assert.deepEqual(yield* api.check(second), {
++          status: "busy",
++          reason: "provider registry changed after idle preparation",
++        });
++        assert.equal((yield* api.prepare).status, "busy");
++        yield* stepped.publish;
++        yield* awaitActivity(
++          activity,
++          (state) => !state.blockers.some((blocker) => blocker.includes("cursor-owned")),
++        );
++        const third = preparedToken(yield* api.prepare);
++        assert.deepEqual(order, ["codex-a", "codex-b", "codex-b", "cursor"]);
++
++        // Removal the reader has not noticed: the proof is stale and no
++        // retirement runs against a set the reader disagrees with.
++        stepped.remove(cursorInstanceId);
++        assert.deepEqual(yield* api.check(third), {
++          status: "busy",
++          reason: "provider registry changed after idle preparation",
++        });
++        assert.deepEqual(yield* api.prepare, {
++          status: "busy",
++          reason: "provider event subscriptions have not caught up with the registry",
++        });
++        assert.deepEqual(order, ["codex-a", "codex-b", "codex-b", "cursor"]);
++      }),
++    );
++
++    it.effect("a public mutation invalidates the proof even when it fails", () =>
++      Effect.gen(function* () {
++        const activity = yield* makeUpdateActivity();
++        const codex = withRetirement(makeFakeCodexAdapter(), [], "codex");
++        const provider = yield* buildProvider(
++          activity,
++          makeStaticInstanceRegistry([[codexInstanceId, codex.adapter]]),
++        );
++        const api = idleApi(provider);
++        const stale = {
++          status: "busy",
++          reason: "a provider mutation was requested after idle preparation",
++        } as const;
++
++        const first = preparedToken(yield* api.prepare);
++        const stopped = yield* provider
++          .stopSession({ threadId: asThreadId("thread-never-started") })
++          .pipe(Effect.exit);
++        assert.isTrue(Exit.isFailure(stopped));
++        assert.equal((yield* provider.listSessions()).length, 0);
++        assert.deepEqual(yield* api.check(first), stale);
++
++        const second = preparedToken(yield* api.prepare);
++        const interrupted = yield* provider
++          .interruptTurn({ threadId: asThreadId("thread-never-started") })
++          .pipe(Effect.exit);
++        assert.isTrue(Exit.isFailure(interrupted));
++        assert.deepEqual(yield* api.check(second), stale);
++        assert.equal(codex.retireIdleSessions.mock.calls.length, 2);
++      }),
++    );
++
++    it.effect("a session that appears without the facade is still detected", () =>
++      Effect.gen(function* () {
++        const activity = yield* makeUpdateActivity();
++        const codex = withRetirement(makeFakeCodexAdapter(), [], "codex");
++        const provider = yield* buildProvider(
++          activity,
++          makeStaticInstanceRegistry([[codexInstanceId, codex.adapter]]),
++        );
++        const api = idleApi(provider);
++        const token = preparedToken(yield* api.prepare);
++        const threadId = asThreadId("thread-direct-start");
++        yield* codex.adapter.startSession({
++          threadId,
++          provider: CODEX_DRIVER,
++          providerInstanceId: codexInstanceId,
++          runtimeMode: "full-access",
++        });
++        assert.deepEqual(yield* api.check(token), {
++          status: "busy",
++          reason: "provider instance 'codex' (codex) has 1 live session(s)",
++        });
++        assert.equal(codex.stopSession.mock.calls.length, 0);
++        assert.equal(codex.retireIdleSessions.mock.calls.length, 1);
++      }),
++    );
++  });
+ });
+diff --git a/apps/server/src/provider/Layers/ProviderService.ts b/apps/server/src/provider/Layers/ProviderService.ts
+index ecee6b3ca..736ab3fa2 100644
+--- a/apps/server/src/provider/Layers/ProviderService.ts
++++ b/apps/server/src/provider/Layers/ProviderService.ts
+@@ -1192,6 +1192,157 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+     () => reconcileInstanceSubscriptions,
+   ).pipe(Effect.forkScoped);
+ 
++  // --- Idle retirement preparation ------------------------------------------
++  //
++  // A provider generation is the adapter object itself: the registry rebuilds
++  // an instance by replacing that object. The complete `instanceId -> adapter`
++  // inventory, read twice and compared by identity, is therefore the only
++  // usable generation snapshot, and `subscribedAdapters` (updated after the
++  // registry's change stream) is required to match it as proof that this
++  // service has claimed the event reader for every current generation. Any
++  // public mutating facade entry bumps the epoch, even if the call fails, so a
++  // token can never outlive a session started after it was issued.
++  type AdapterInventory = ReadonlyArray<
++    readonly [ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>]
++  >;
++  let mutationEpoch = 0;
++  const issuedPreparations = new WeakMap<
++    ProviderService.ProviderIdlePreparationToken,
++    { readonly inventory: AdapterInventory; readonly epoch: number }
++  >();
++
++  const readAdapterInventory: Effect.Effect<AdapterInventory | undefined> = Effect.gen(
++    function* () {
++      const ids = [...(yield* registry.listInstances())].sort();
++      const inventory: Array<AdapterInventory[number]> = [];
++      for (const id of ids) {
++        const adapter = yield* registry.getByInstance(id).pipe(Effect.option);
++        if (Option.isNone(adapter)) return undefined;
++        inventory.push([id, adapter.value]);
++      }
++      return inventory;
++    },
++  );
++
++  const sameInventory = (left: AdapterInventory, right: AdapterInventory): boolean =>
++    left.length === right.length &&
++    left.every(([id, adapter], index) => right[index]?.[0] === id && right[index]?.[1] === adapter);
++
++  // Two consecutive reads must agree on the exact id set and every adapter
++  // identity; a reconcile racing either read makes a lookup fail or an
++  // identity differ, and is reported as drift rather than guessed around.
++  const stabilizeAdapterInventory = Effect.gen(function* () {
++    const first = yield* readAdapterInventory;
++    if (first === undefined) return undefined;
++    const second = yield* readAdapterInventory;
++    if (second === undefined || !sameInventory(first, second)) return undefined;
++    return second;
++  });
++
++  const subscriptionsMatch = (inventory: AdapterInventory) =>
++    Effect.map(
++      Ref.get(subscribedAdapters),
++      (subscribed) =>
++        subscribed.size === inventory.length &&
++        inventory.every(([id, adapter]) => subscribed.get(id) === adapter),
++    );
++
++  const preparationBusy = (reason: string) =>
++    ({ status: "busy", reason }) satisfies ProviderService.ProviderIdlePreparationResult;
++  const preparationBlocked = (reason: string) =>
++    ({ status: "blocked", reason }) satisfies ProviderService.ProviderIdlePreparationResult;
++  const describeInstance = (
++    instanceId: ProviderInstanceId,
++    adapter: ProviderAdapterShape<ProviderAdapterError>,
++  ) => `provider instance '${instanceId}' (${adapter.provider})`;
++
++  const prepareIdleRetirement: NonNullable<ProviderServiceMethod<"prepareIdleRetirement">> =
++    Effect.fn("prepareIdleRetirement")(function* () {
++      const epoch = mutationEpoch;
++      const inventory = yield* stabilizeAdapterInventory;
++      if (inventory === undefined) {
++        return preparationBusy("provider registry changed while taking inventory");
++      }
++      // The whole generation must be able to prove retirement before any
++      // adapter is asked to retire. Disabled instances are live adapters too.
++      const retirements: Array<
++        readonly [
++          ProviderInstanceId,
++          ProviderAdapterShape<ProviderAdapterError>,
++          NonNullable<ProviderAdapterShape<ProviderAdapterError>["retireIdleSessions"]>,
++        ]
++      > = [];
++      for (const [instanceId, adapter] of inventory) {
++        if (adapter.retireIdleSessions === undefined) {
++          return preparationBlocked(
++            `${describeInstance(instanceId, adapter)} cannot prove idle retirement`,
++          );
++        }
++        retirements.push([instanceId, adapter, adapter.retireIdleSessions]);
++      }
++      if (!(yield* subscriptionsMatch(inventory))) {
++        return preparationBusy("provider event subscriptions have not caught up with the registry");
++      }
++      for (const [instanceId, adapter, retireIdleSessions] of retirements) {
++        const result = yield* retireIdleSessions();
++        if (result.status !== "retired") {
++          return {
++            status: result.status,
++            reason: `${describeInstance(instanceId, adapter)}: ${result.reason}`,
++          } satisfies ProviderService.ProviderIdlePreparationResult;
++        }
++      }
++      const after = yield* stabilizeAdapterInventory;
++      if (after === undefined || !sameInventory(inventory, after)) {
++        return preparationBusy("provider registry changed during idle retirement");
++      }
++      if (!(yield* subscriptionsMatch(after))) {
++        return preparationBusy("provider event subscriptions changed during idle retirement");
++      }
++      if (mutationEpoch !== epoch) {
++        return preparationBusy("a provider mutation was requested during idle retirement");
++      }
++      const token: ProviderService.ProviderIdlePreparationToken = Object.freeze({
++        [ProviderService.ProviderIdlePreparationTokenTypeId]:
++          ProviderService.ProviderIdlePreparationTokenTypeId as typeof ProviderService.ProviderIdlePreparationTokenTypeId,
++      });
++      issuedPreparations.set(token, { inventory, epoch });
++      return { status: "prepared", token } satisfies ProviderService.ProviderIdlePreparationResult;
++    });
++
++  const checkIdleRetirementReadiness: NonNullable<
++    ProviderServiceMethod<"checkIdleRetirementReadiness">
++  > = Effect.fn("checkIdleRetirementReadiness")(function* (token) {
++    const issued = issuedPreparations.get(token);
++    if (issued === undefined) {
++      return preparationBlocked("idle preparation token was not issued by this provider service");
++    }
++    const stale = (reason: string) => preparationBusy(reason);
++    if (mutationEpoch !== issued.epoch) {
++      return stale("a provider mutation was requested after idle preparation");
++    }
++    const inventory = yield* stabilizeAdapterInventory;
++    if (inventory === undefined || !sameInventory(issued.inventory, inventory)) {
++      return stale("provider registry changed after idle preparation");
++    }
++    if (!(yield* subscriptionsMatch(inventory))) {
++      return stale("provider event subscriptions changed after idle preparation");
++    }
++    // Detects a session that appeared since the proof; it is not the proof.
++    for (const [instanceId, adapter] of inventory) {
++      const sessions = yield* adapter.listSessions();
++      if (sessions.length > 0) {
++        return stale(
++          `${describeInstance(instanceId, adapter)} has ${sessions.length} live session(s)`,
++        );
++      }
++    }
++    if (mutationEpoch !== issued.epoch) {
++      return stale("a provider mutation was requested after idle preparation");
++    }
++    return { status: "retired" } as const;
++  });
++
+   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
+     readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
+     readonly operation: string;
+@@ -2266,29 +2417,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+   // Internal callers (fallback compaction, recovery) use the inner functions
+   // under the caller's lease. Reads stay untracked, and the `runStopAll`
+   // shutdown finalizer above never waits on the registry.
++  //
++  // Every entry also invalidates outstanding idle preparation, before the
++  // lease and regardless of how the call ends: recovery runs beneath one of
++  // these wrappers, and a refused or failed call is still an attempt to
++  // change provider state that a retirement proof cannot vouch for.
++  const mutating = <A, E, R>(label: string, operation: Effect.Effect<A, E, R>) =>
++    Effect.suspend(() => {
++      mutationEpoch += 1;
++      return activity.track(label, operation);
++    });
+   return {
+     startSession: (threadId, input) =>
+-      activity.track("ProviderService.startSession", startSession(threadId, input)),
+-    sendTurn: (input) => activity.track("ProviderService.sendTurn", sendTurn(input)),
++      mutating("ProviderService.startSession", startSession(threadId, input)),
++    sendTurn: (input) => mutating("ProviderService.sendTurn", sendTurn(input)),
+     compactThread: (threadId, modelSelection, requestId) =>
+-      activity.track(
+-        "ProviderService.compactThread",
+-        compactThread(threadId, modelSelection, requestId),
+-      ),
+-    interruptTurn: (input) => activity.track("ProviderService.interruptTurn", interruptTurn(input)),
++      mutating("ProviderService.compactThread", compactThread(threadId, modelSelection, requestId)),
++    interruptTurn: (input) => mutating("ProviderService.interruptTurn", interruptTurn(input)),
+     respondToRequest: (input) =>
+-      activity.track("ProviderService.respondToRequest", respondToRequest(input)),
++      mutating("ProviderService.respondToRequest", respondToRequest(input)),
+     respondToUserInput: (input) =>
+-      activity.track("ProviderService.respondToUserInput", respondToUserInput(input)),
+-    stopSession: (input) => activity.track("ProviderService.stopSession", stopSession(input)),
++      mutating("ProviderService.respondToUserInput", respondToUserInput(input)),
++    stopSession: (input) => mutating("ProviderService.stopSession", stopSession(input)),
+     listSessions,
+     getCapabilities,
+     getInstanceInfo,
+     assertConversationRollbackSupported,
+     rollbackConversation: (input) =>
+-      activity.track("ProviderService.rollbackConversation", rollbackConversation(input)),
+-    uploadFeedback: (input) =>
+-      activity.track("ProviderService.uploadFeedback", uploadFeedback(input)),
++      mutating("ProviderService.rollbackConversation", rollbackConversation(input)),
++    uploadFeedback: (input) => mutating("ProviderService.uploadFeedback", uploadFeedback(input)),
++    prepareIdleRetirement,
++    checkIdleRetirementReadiness,
+     // Each access creates a fresh observer subscription so that multiple
+     // consumers (usage ingestion, relays, etc.) each independently receive all
+     // runtime events without holding update activity.
+diff --git a/apps/server/src/provider/Services/ProviderService.ts b/apps/server/src/provider/Services/ProviderService.ts
+index acdacee35..2b6c9d973 100644
+--- a/apps/server/src/provider/Services/ProviderService.ts
++++ b/apps/server/src/provider/Services/ProviderService.ts
+@@ -33,7 +33,10 @@ import type * as Scope from "effect/Scope";
+ import type * as Stream from "effect/Stream";
+ 
+ import type { ProviderServiceError } from "../Errors.ts";
+-import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
++import type {
++  ProviderAdapterCapabilities,
++  ProviderIdleRetirementResult,
++} from "./ProviderAdapter.ts";
+ import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+ import type { UpdateActivityUnavailableError } from "../../updateActivity.ts";
+ import type { RequiredSubscription } from "../../updateActivityFanout.ts";
+@@ -45,6 +48,32 @@ import type { RequiredSubscription } from "../../updateActivityFanout.ts";
+  */
+ export type ProviderRuntimeEventConsumer = "runtime-ingestion" | "checkpoint";
+ 
++export const ProviderIdlePreparationTokenTypeId: unique symbol = Symbol.for(
++  "t3/provider/Services/ProviderService/IdlePreparationToken",
++);
++
++/**
++ * Proof that every provider adapter retired its idle native resources for a
++ * managed update. Opaque and never serialized: it is meaningful only to the
++ * `ProviderService` that issued it, which keeps the adapter generations and
++ * mutation epoch it stands for privately. Anything else that looks like one
++ * is rejected by `checkIdleRetirementReadiness`.
++ */
++export interface ProviderIdlePreparationToken {
++  readonly [ProviderIdlePreparationTokenTypeId]: typeof ProviderIdlePreparationTokenTypeId;
++}
++
++/**
++ * Outcome of `prepareIdleRetirement`. `busy` is transient (registry or
++ * subscription drift, native work found, a concurrent mutation); `blocked`
++ * means some current adapter cannot prove retirement at all, so a managed
++ * update must not proceed on this provider generation.
++ */
++export type ProviderIdlePreparationResult =
++  | { readonly status: "prepared"; readonly token: ProviderIdlePreparationToken }
++  | { readonly status: "busy"; readonly reason: string }
++  | { readonly status: "blocked"; readonly reason: string };
++
+ /**
+  * ProviderServiceShape - Service API for provider session and turn orchestration.
+  */
+@@ -160,6 +189,30 @@ export interface ProviderServiceShape {
+     UpdateActivityUnavailableError,
+     Scope.Scope
+   >;
++
++  /**
++   * Asks every current adapter, disabled instances included, to retire its
++   * idle native resources through its explicit `retireIdleSessions`, and
++   * issues a token only if the whole registry generation was retired and
++   * nothing about it moved meanwhile. The caller holds exclusive mutation
++   * admission and has observed the update-activity registry idle. Optional
++   * only so unrelated typed fakes need not implement it: a consumer treats an
++   * absent method as `blocked`, and the live service always supplies it.
++   */
++  readonly prepareIdleRetirement?: () => Effect.Effect<
++    ProviderIdlePreparationResult,
++    ProviderServiceError
++  >;
++
++  /**
++   * Side-effect-free check that a token issued by this service still stands:
++   * same adapter generations, event readers wired for every one, no mutation
++   * requested since, and no live session anywhere. Never retires or stops
++   * anything; `retired` here means the earlier proof is still current.
++   */
++  readonly checkIdleRetirementReadiness?: (
++    token: ProviderIdlePreparationToken,
++  ) => Effect.Effect<ProviderIdleRetirementResult>;
+ }
+ 
+ /**
+diff --git a/apps/server/src/cloud/managedQueuedUpdate.test.ts b/apps/server/src/cloud/managedQueuedUpdate.test.ts
+index e06178cb..a67622b1 100644
+--- a/apps/server/src/cloud/managedQueuedUpdate.test.ts
++++ b/apps/server/src/cloud/managedQueuedUpdate.test.ts
+@@ -166,7 +166,11 @@ const observeCoordinator = (
+   admission: UpdateAdmission.UpdateAdmissionShape,
+   activity: UpdateActivity.UpdateActivityShape,
+ ) => {
+-  const real = IdleUpdateCoordinator.make({ admission, activity });
++  const real = IdleUpdateCoordinator.make({
++    admission,
++    activity,
++    preparation: { checkReadyForSeal: Effect.succeed({ status: "ready" as const }) },
++  });
+   let acceptedRuns = 0;
+   const tryActivate: IdleUpdateCoordinator.IdleUpdateCoordinatorShape["tryActivate"] = (
+     handoff,

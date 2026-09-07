@@ -1,0 +1,1346 @@
+diff --git a/apps/server/src/cloud/managedQueuedUpdate.test.ts b/apps/server/src/cloud/managedQueuedUpdate.test.ts
+new file mode 100644
+index 00000000..e06178cb
+--- /dev/null
++++ b/apps/server/src/cloud/managedQueuedUpdate.test.ts
+@@ -0,0 +1,647 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
++import * as Deferred from "effect/Deferred";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as FileSystem from "effect/FileSystem";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++import * as Scope from "effect/Scope";
++import { TestClock } from "effect/testing";
++
++import * as UpdateActivity from "../updateActivity.ts";
++import * as UpdateAdmission from "../updateAdmission.ts";
++import * as IdleUpdateCoordinator from "./idleUpdateCoordinator.ts";
++import { make, type ResolvedManagedRuntime } from "./managedQueuedUpdate.ts";
++import {
++  ManagedArtifactSourceError,
++  ManagedRuntimeStageError,
++  type ManagedRuntimeStager,
++} from "./managedRuntime.ts";
++import type { QueuedUpdateShape, StagedArtifact } from "./queuedUpdate.ts";
++import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
++import {
++  SERVICE_LAUNCHER_CONTEXT_ENV,
++  SERVICE_LAUNCHER_PROTOCOL,
++  type ServiceLauncherChildMessage,
++  type ServiceLauncherParentMessage,
++} from "./serviceProtocol.ts";
++
++const INSTALLED = "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a";
++const TARGET = "0.0.38-nightly.20260905.3.managed.2.p6d1933416d7a";
++const NEWER = "0.0.38-nightly.20260905.3.managed.3.p6d1933416d7a";
++const DB_PATH = "/srv/t3/state.sqlite";
++const POLL = Duration.minutes(5);
++const ADMISSION_BUSY = "busy: client commands or another maintenance own update admission";
++
++const artifactFor = (version: string, cut = 1): string =>
++  `managed-server-darwin-arm64:${version}#${cut}`;
++
++const UnknownJson = Schema.fromJsonString(Schema.Unknown);
++const decodeJson = Schema.decodeUnknownEffect(UnknownJson);
++
++type SendMode = "ok" | "throw" | "callback-error" | "silent";
++
++/** In-process stand-in for the launcher's IPC channel, recording every send into the shared log. */
++class FakeLauncherProcess {
++  readonly connected = true;
++  readonly env: Record<string, string | undefined>;
++  readonly sent: ServiceLauncherChildMessage[] = [];
++  sendMode: SendMode = "silent";
++  readonly #listeners = new Map<string, Set<(...args: ReadonlyArray<unknown>) => void>>();
++  readonly #sendWaiters = new Set<{
++    readonly count: number;
++    readonly deferred: Deferred.Deferred<void>;
++  }>();
++  readonly #log: string[];
++
++  constructor(log: string[]) {
++    this.#log = log;
++    this.env = {
++      [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify({
++        protocol: SERVICE_LAUNCHER_PROTOCOL,
++        childVersion: INSTALLED,
++      }),
++    };
++  }
++
++  send = (message: ServiceLauncherChildMessage, callback?: (error: Error | null) => void) => {
++    this.sent.push(message);
++    this.#log.push(
++      message.type === "request-update" ? `send:${message.targetVersion}` : "send:other",
++    );
++    for (const waiter of this.#sendWaiters) {
++      if (this.sent.length >= waiter.count) {
++        this.#sendWaiters.delete(waiter);
++        Deferred.doneUnsafe(waiter.deferred, Effect.void);
++      }
++    }
++    switch (this.sendMode) {
++      case "throw":
++        throw new Error("channel closed");
++      case "callback-error":
++        callback?.(new Error("EPIPE"));
++        return false;
++      case "silent":
++        return true;
++      case "ok":
++        callback?.(null);
++        return true;
++    }
++  };
++
++  /** Resolves once at least `count` messages have been sent. */
++  awaitSend(count = 1): Effect.Effect<void> {
++    return Effect.suspend(() => {
++      if (this.sent.length >= count) return Effect.void;
++      const deferred = Deferred.makeUnsafe<void>();
++      this.#sendWaiters.add({ count, deferred });
++      return Deferred.await(deferred);
++    });
++  }
++
++  on = (event: "message" | "disconnect", listener: (...args: ReadonlyArray<unknown>) => void) => {
++    const listeners = this.#listeners.get(event) ?? new Set();
++    listeners.add(listener);
++    this.#listeners.set(event, listeners);
++  };
++
++  off = (event: "message" | "disconnect", listener: (...args: ReadonlyArray<unknown>) => void) => {
++    this.#listeners.get(event)?.delete(listener);
++  };
++
++  emit(message: ServiceLauncherParentMessage) {
++    for (const listener of this.#listeners.get("message") ?? []) listener(message);
++  }
++
++  disconnect() {
++    for (const listener of this.#listeners.get("disconnect") ?? []) listener();
++  }
++}
++
++interface FakeRuntimeOptions {
++  /** What `stage` reports, when it should disagree with the selection. */
++  readonly stageResult?: StagedArtifact;
++  readonly verifyFails?: boolean;
++}
++
++/** One release selection with a stager bound to it; every call lands in the shared log. */
++const makeRuntime = (
++  log: string[],
++  version: string,
++  artifactId: string,
++  options: FakeRuntimeOptions = {},
++): ResolvedManagedRuntime => {
++  const stager: ManagedRuntimeStager = {
++    stage: (targetVersion) =>
++      Effect.sync(() => {
++        log.push(`stage:${targetVersion}@${artifactId}`);
++        return options.stageResult ?? { version, artifactId };
++      }),
++    verifyStaged: (staged) =>
++      Effect.suspend(() => {
++        log.push(`verify:${staged.version}@${staged.artifactId}`);
++        return options.verifyFails
++          ? Effect.fail(
++              new ManagedRuntimeStageError({
++                step: "verifying the staged runtime",
++                reason: "the staged runtime holds a different artifact",
++              }),
++            )
++          : Effect.succeed({ versionDir: "", entryPath: "", sentinelPath: "" });
++      }),
++  };
++  return { version, artifactId, stager };
++};
++
++/**
++ * The real coordinator on the real gates. The queue's handoff notification is
++ * observed on its way through so the tests can prove it ran exactly once; the
++ * coordinator's algorithm is untouched.
++ */
++const observeCoordinator = (
++  admission: UpdateAdmission.UpdateAdmissionShape,
++  activity: UpdateActivity.UpdateActivityShape,
++) => {
++  const real = IdleUpdateCoordinator.make({ admission, activity });
++  let acceptedRuns = 0;
++  const tryActivate: IdleUpdateCoordinator.IdleUpdateCoordinatorShape["tryActivate"] = (
++    handoff,
++    onHandoffAccepted,
++  ) =>
++    real.tryActivate(
++      handoff,
++      Effect.andThen(
++        Effect.sync(() => {
++          acceptedRuns += 1;
++        }),
++        onHandoffAccepted,
++      ),
++    );
++  const phase = Effect.map(real.state, (state) => state.phase);
++  return { tryActivate, phase, acceptedRuns: () => acceptedRuns };
++};
++
++const setup = Effect.fn("setup")(function* (options?: {
++  readonly statePath?: string;
++  /**
++   * Owns the coordinator, the launcher client and the controller. The gates
++   * are built in the enclosing scope: a server layer closes the queue before
++   * the admission and activity services it depends on, so this is the order
++   * a real shutdown observes.
++   */
++  readonly scope?: Scope.Scope;
++}) {
++  const fs = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const statePath =
++    options?.statePath ??
++    path.join(
++      yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-queued-update-test-" }),
++      "runtime",
++      "queued-update.json",
++    );
++  const log: string[] = [];
++  const runtimes = new Map<string, ResolvedManagedRuntime>([
++    [TARGET, makeRuntime(log, TARGET, artifactFor(TARGET))],
++    [NEWER, makeRuntime(log, NEWER, artifactFor(NEWER))],
++  ]);
++  const host = new FakeLauncherProcess(log);
++  const admission = yield* UpdateAdmission.make();
++  const activity = yield* UpdateActivity.make();
++
++  const process = Effect.gen(function* () {
++    const coordinator = observeCoordinator(admission, activity);
++    const launcher = yield* ServiceLauncherClient.make({ currentVersion: INSTALLED }).pipe(
++      Effect.provideService(ServiceLauncherClient.ServiceLauncherHostProcess, host),
++      Effect.provideService(HostProcessEnvironment, host.env),
++    );
++    const controller = yield* make({
++      statePath,
++      installedVersion: INSTALLED,
++      pollInterval: POLL,
++      dbPath: DB_PATH,
++      resolve: (exactVersion) =>
++        Effect.suspend(() => {
++          log.push(`resolve:${exactVersion}`);
++          const runtime = runtimes.get(exactVersion);
++          return runtime === undefined
++            ? Effect.fail(new ManagedArtifactSourceError({ reason: `no release ${exactVersion}` }))
++            : Effect.succeed(runtime);
++        }),
++      coordinator,
++      launcher,
++    });
++    return { coordinator, controller };
++  });
++  const started = yield* options?.scope ? Scope.provide(process, options.scope) : process;
++
++  const readState = fs.readFileString(statePath).pipe(Effect.flatMap(decodeJson));
++  return { ...started, admission, activity, log, runtimes, host, statePath, readState };
++});
++
++type Harness = Effect.Success<ReturnType<typeof setup>>;
++
++const awaitStage = (controller: QueuedUpdateShape, stage: string) =>
++  controller.awaitState((state) => state.stage === stage && state.reason !== undefined);
++
++const provide = <A, E>(
++  effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path | Scope.Scope>,
++) => effect.pipe(Effect.scoped, Effect.provide(NodeServices.layer));
++
++const rejectedReason = (error: { readonly _tag: string; readonly reason?: unknown }) =>
++  error._tag === "QueuedUpdateRejectedError"
++    ? error.reason
++    : assert.fail(`unexpected ${error._tag}`);
++
++/** Both gates open, nothing outstanding, no shutdown authorized, and both usable. */
++const gatesOpen = Effect.fn("gatesOpen")(function* (harness: Harness) {
++  const { admission, activity } = harness;
++  assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++  assert.include(yield* activity.state, {
++    phase: "open",
++    outstanding: 0,
++    idleShutdownAuthorized: false,
++  });
++  yield* admission.withAdmission(Effect.void);
++  (yield* activity.acquire("probe")).release();
++});
++
++/**
++ * Both gates latched for the rest of the process: client commands rejected,
++ * activity sealed with idle shutdown authorized, and the admission permit
++ * unstealable by any later maintenance claim.
++ */
++const gatesLatched = Effect.fn("gatesLatched")(function* (harness: Harness) {
++  const { admission, activity } = harness;
++  assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++  assert.include(yield* activity.state, { phase: "sealed", idleShutdownAuthorized: true });
++  assert.equal(
++    (yield* admission.withAdmission(Effect.void).pipe(Effect.flip))._tag,
++    "UpdateAdmissionClosedError",
++  );
++  assert.equal((yield* activity.acquire("late agent").pipe(Effect.flip)).reason, "sealed");
++  assert.deepStrictEqual(yield* admission.tryWithMaintenance(Effect.void), { status: "busy" });
++  assert.deepStrictEqual(yield* admission.tryWithHandoffMaintenance(() => Effect.void), {
++    status: "busy",
++  });
++});
++
++/** Every queue command is refused while the attempt owns `updating`. */
++const commandsRefused = Effect.fn("commandsRefused")(function* (
++  harness: Harness,
++  reason: "activation-in-progress" | "handoff-accepted",
++) {
++  const { controller } = harness;
++  assert.equal(rejectedReason(yield* controller.cancel.pipe(Effect.flip)), reason);
++  assert.equal(rejectedReason(yield* controller.retry.pipe(Effect.flip)), reason);
++  assert.equal(rejectedReason(yield* controller.queue(NEWER).pipe(Effect.flip)), reason);
++});
++
++const updatingOnDisk = Effect.fn("updatingOnDisk")(function* (harness: Harness, cut = 1) {
++  assert.deepStrictEqual(yield* harness.readState, {
++    version: 1,
++    stage: "updating",
++    targetVersion: TARGET,
++    staged: { version: TARGET, artifactId: artifactFor(TARGET, cut) },
++  });
++});
++
++/** Queue the target on an idle server and wait until the launcher request is on the wire. */
++const queueUntilDispatched = Effect.fn("queueUntilDispatched")(function* (harness: Harness) {
++  yield* harness.controller.queue(TARGET);
++  yield* harness.host.awaitSend();
++  assert.deepStrictEqual(harness.log, [
++    `resolve:${TARGET}`,
++    `stage:${TARGET}@${artifactFor(TARGET)}`,
++    `verify:${TARGET}@${artifactFor(TARGET)}`,
++    `send:${TARGET}`,
++  ]);
++  assert.deepStrictEqual(harness.host.sent, [
++    { type: "request-update", targetVersion: TARGET, dbPath: DB_PATH },
++  ]);
++  assert.equal(yield* harness.coordinator.phase, "attempting");
++  assert.equal((yield* harness.controller.getState).stage, "updating");
++});
++
++describe("managedQueuedUpdate", () => {
++  it.effect(
++    "stages the exact selection, rechecks it under the seal, and holds the gates once accepted",
++    () =>
++      provide(
++        Effect.gen(function* () {
++          const scope = yield* Scope.make();
++          const harness = yield* setup({ scope });
++          const { controller, coordinator, host } = harness;
++          yield* queueUntilDispatched(harness);
++          yield* gatesLatched(harness);
++
++          host.emit({ type: "update-accepted", updateId: "launcher-id" });
++          const handedOff = yield* controller.awaitState((state) => state.handoffAccepted);
++          assert.equal(handedOff.stage, "updating");
++          assert.equal(yield* coordinator.phase, "accepted");
++          assert.equal(coordinator.acceptedRuns(), 1);
++          yield* gatesLatched(harness);
++          yield* commandsRefused(harness, "handoff-accepted");
++
++          // The owning scope closing (process exit) interrupts the parked attempt
++          // but cannot revoke the acceptance, reopen a gate, or notify the queue
++          // a second time.
++          yield* Scope.close(scope, Exit.void);
++          assert.equal(yield* coordinator.phase, "accepted");
++          assert.equal(coordinator.acceptedRuns(), 1);
++          yield* gatesLatched(harness);
++          yield* commandsRefused(harness, "handoff-accepted");
++          yield* updatingOnDisk(harness);
++          assert.equal(host.sent.length, 1);
++        }),
++      ),
++  );
++
++  it.effect("a selection the stager does not reproduce fails before any recheck or IPC", () =>
++    provide(
++      Effect.gen(function* () {
++        const harness = yield* setup();
++        const { controller, log, runtimes, host, coordinator } = harness;
++        runtimes.set(
++          TARGET,
++          makeRuntime(log, TARGET, artifactFor(TARGET), {
++            stageResult: { version: TARGET, artifactId: artifactFor(TARGET, 2) },
++          }),
++        );
++        yield* controller.queue(TARGET);
++        const failedArtifact = yield* awaitStage(controller, "failed");
++        assert.include(failedArtifact.reason, "does not match its resolved release selection");
++
++        // A feed that answers with another version is equally not this target.
++        runtimes.set(TARGET, makeRuntime(log, NEWER, artifactFor(NEWER)));
++        yield* controller.retry;
++        const failedVersion = yield* awaitStage(controller, "failed");
++        assert.include(failedVersion.reason, `resolved t3@${TARGET} to t3@${NEWER}`);
++
++        runtimes.delete(TARGET);
++        yield* controller.retry;
++        const unresolved = yield* awaitStage(controller, "failed");
++        assert.include(unresolved.reason, `no release ${TARGET}`);
++
++        assert.deepStrictEqual(log, [
++          `resolve:${TARGET}`,
++          `stage:${TARGET}@${artifactFor(TARGET)}`,
++          `resolve:${TARGET}`,
++          `resolve:${TARGET}`,
++        ]);
++        assert.deepStrictEqual(host.sent, []);
++        assert.equal(yield* coordinator.phase, "ready");
++        yield* gatesOpen(harness);
++      }),
++    ),
++  );
++
++  it.effect("a superseding target activates only through its own selection's stager", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, log, host, activity } = yield* setup();
++        const lease = yield* activity.acquire("agent turn");
++        yield* controller.queue(TARGET);
++        yield* awaitStage(controller, "queued");
++        yield* controller.queue(NEWER);
++        const waiting = yield* controller.awaitState(
++          (state) =>
++            state.stage === "queued" && state.targetVersion === NEWER && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(waiting.staged, { version: NEWER, artifactId: artifactFor(NEWER) });
++        assert.deepStrictEqual(host.sent, []);
++
++        lease.release();
++        yield* TestClock.adjust(POLL);
++        yield* host.awaitSend();
++        assert.deepStrictEqual(log, [
++          `resolve:${TARGET}`,
++          `stage:${TARGET}@${artifactFor(TARGET)}`,
++          `resolve:${NEWER}`,
++          `stage:${NEWER}@${artifactFor(NEWER)}`,
++          `verify:${NEWER}@${artifactFor(NEWER)}`,
++          `send:${NEWER}`,
++        ]);
++        assert.deepStrictEqual(host.sent, [
++          { type: "request-update", targetVersion: NEWER, dbPath: DB_PATH },
++        ]);
++      }),
++    ),
++  );
++
++  it.effect("a restart re-resolves and re-stages the exact target before any activation", () =>
++    provide(
++      Effect.gen(function* () {
++        const first = yield* Scope.make();
++        const before = yield* setup({ scope: first });
++        const lease = yield* before.activity.acquire("agent turn");
++        yield* before.controller.queue(TARGET);
++        yield* awaitStage(before.controller, "queued");
++        lease.release();
++        yield* Scope.close(first, Exit.void);
++        assert.deepStrictEqual(yield* before.readState, {
++          version: 1,
++          stage: "queued",
++          targetVersion: TARGET,
++          staged: { version: TARGET, artifactId: artifactFor(TARGET) },
++          reason: "busy: 1 agent operation(s) in flight",
++        });
++        assert.deepStrictEqual(before.host.sent, []);
++
++        // The next process re-cuts the same version: the persisted artifact is
++        // discarded, the feed is asked again, and only the new artifact is
++        // rechecked and dispatched.
++        const after = yield* setup({ statePath: before.statePath });
++        after.runtimes.set(TARGET, makeRuntime(after.log, TARGET, artifactFor(TARGET, 2)));
++        const booted = yield* after.controller.getState;
++        assert.deepStrictEqual([booted.stage, booted.staged], ["downloading", undefined]);
++        yield* after.host.awaitSend();
++        assert.deepStrictEqual(after.log, [
++          `resolve:${TARGET}`,
++          `stage:${TARGET}@${artifactFor(TARGET, 2)}`,
++          `verify:${TARGET}@${artifactFor(TARGET, 2)}`,
++          `send:${TARGET}`,
++        ]);
++        yield* updatingOnDisk(after, 2);
++        assert.deepStrictEqual(
++          before.log.filter((entry) => entry.startsWith("verify")),
++          [],
++        );
++      }),
++    ),
++  );
++
++  it.effect("a busy server is answered promptly with both gates untouched", () =>
++    provide(
++      Effect.gen(function* () {
++        const harness = yield* setup();
++        const { controller, log, host, admission, activity, coordinator } = harness;
++        const lease = yield* activity.acquire("agent turn");
++        yield* controller.queue(TARGET);
++        const busy = yield* awaitStage(controller, "queued");
++        assert.equal(busy.reason, "busy: 1 agent operation(s) in flight");
++        assert.deepStrictEqual(log, [
++          `resolve:${TARGET}`,
++          `stage:${TARGET}@${artifactFor(TARGET)}`,
++        ]);
++        assert.deepStrictEqual(host.sent, []);
++        assert.equal(yield* coordinator.phase, "ready");
++        assert.deepStrictEqual(yield* admission.state, { phase: "open", inFlight: 0 });
++        assert.include(yield* activity.state, { phase: "open", idleShutdownAuthorized: false });
++        // The approval that finishes the turn is still admitted.
++        yield* admission.withAdmission(Effect.sync(() => lease.release()));
++        yield* gatesOpen(harness);
++
++        // An in-flight client command is busy too, with the seal never taken.
++        const command = yield* Deferred.make<void>();
++        const admitted = yield* Effect.forkChild(admission.withAdmission(Deferred.await(command)), {
++          startImmediately: true,
++        });
++        yield* TestClock.adjust(POLL);
++        const stillBusy = yield* controller.awaitState(
++          (state) => state.stage === "queued" && state.reason === ADMISSION_BUSY,
++        );
++        assert.equal(stillBusy.stage, "queued");
++        assert.include(yield* activity.state, { phase: "open", idleShutdownAuthorized: false });
++        assert.deepStrictEqual(host.sent, []);
++        yield* Deferred.succeed(command, undefined);
++        yield* Fiber.join(admitted);
++
++        yield* TestClock.adjust(POLL);
++        yield* host.awaitSend();
++        assert.deepStrictEqual(log.slice(2), [
++          `verify:${TARGET}@${artifactFor(TARGET)}`,
++          `send:${TARGET}`,
++        ]);
++        assert.equal(host.sent.length, 1);
++        assert.equal((yield* controller.getState).stage, "updating");
++        yield* gatesLatched(harness);
++      }),
++    ),
++  );
++
++  it.effect("a failed pre-dispatch identity recheck fails the attempt with nothing sent", () =>
++    provide(
++      Effect.gen(function* () {
++        const harness = yield* setup();
++        const { controller, log, runtimes, host, coordinator } = harness;
++        runtimes.set(TARGET, makeRuntime(log, TARGET, artifactFor(TARGET), { verifyFails: true }));
++        yield* controller.queue(TARGET);
++        const failed = yield* awaitStage(controller, "failed");
++        assert.equal(
++          failed.reason,
++          "Managed runtime staging failed while verifying the staged runtime: the staged runtime holds a different artifact",
++        );
++        assert.deepStrictEqual(failed.staged, { version: TARGET, artifactId: artifactFor(TARGET) });
++        assert.deepStrictEqual(log, [
++          `resolve:${TARGET}`,
++          `stage:${TARGET}@${artifactFor(TARGET)}`,
++          `verify:${TARGET}@${artifactFor(TARGET)}`,
++        ]);
++        assert.deepStrictEqual(host.sent, []);
++        assert.equal(yield* coordinator.phase, "ready");
++        yield* gatesOpen(harness);
++        yield* TestClock.adjust(POLL);
++        assert.equal(log.length, 3);
++      }),
++    ),
++  );
++
++  it.effect("a tagged launcher rejection reopens both gates and records the failure", () =>
++    provide(
++      Effect.gen(function* () {
++        const harness = yield* setup();
++        const { controller, host, coordinator } = harness;
++        yield* queueUntilDispatched(harness);
++
++        host.emit({ type: "update-rejected", reason: "requires local update" });
++        const failed = yield* awaitStage(controller, "failed");
++        assert.equal(failed.reason, "requires local update");
++        assert.isFalse(failed.handoffAccepted);
++        assert.equal(yield* coordinator.phase, "ready");
++        assert.equal(coordinator.acceptedRuns(), 0);
++        yield* gatesOpen(harness);
++
++        // The queue is usable again: retry re-stages and reaches a fresh handoff.
++        yield* controller.retry;
++        yield* host.awaitSend(2);
++        assert.equal(host.sent.length, 2);
++        assert.equal(yield* coordinator.phase, "attempting");
++        yield* gatesLatched(harness);
++      }),
++    ),
++  );
++
++  /**
++   * After dispatch, every exit but a tagged rejection is an unknown outcome:
++   * the launcher may already be restarting the service. The gates must stay
++   * latched and the queue must hold durable `updating` with no command able to
++   * retry or cancel, both while the process runs on and once its scope closes.
++   */
++  const uncertainAfterDispatch = (mode: SendMode | "disconnect" | "timeout" | "interrupt") =>
++    provide(
++      Effect.gen(function* () {
++        const scope = yield* Scope.make();
++        const harness = yield* setup({ scope });
++        const { controller, host, coordinator } = harness;
++        if (mode === "throw" || mode === "callback-error") host.sendMode = mode;
++        yield* controller.queue(TARGET);
++        yield* host.awaitSend();
++        switch (mode) {
++          case "disconnect":
++            host.disconnect();
++            break;
++          case "timeout":
++            yield* TestClock.adjust("30 seconds");
++            break;
++          case "interrupt":
++            // Process shutdown mid-request: the wait is interruptible, so the
++            // close returns promptly with the reservation still on disk.
++            yield* Scope.close(scope, Exit.void);
++            break;
++          default:
++            break;
++        }
++        yield* Effect.yieldNow;
++
++        const settled = Effect.fn("settled")(function* () {
++          assert.equal(yield* coordinator.phase, "uncertain");
++          assert.equal(coordinator.acceptedRuns(), 0);
++          const state = yield* controller.getState;
++          assert.equal(state.stage, "updating");
++          assert.isFalse(state.handoffAccepted);
++          yield* updatingOnDisk(harness);
++          yield* gatesLatched(harness);
++          yield* commandsRefused(harness, "activation-in-progress");
++        });
++        yield* settled();
++
++        if (mode !== "interrupt") {
++          // No re-ask on the poll interval, and a late reply reaches no listener.
++          yield* TestClock.adjust(POLL);
++          host.emit({ type: "update-accepted", updateId: "late" });
++          yield* Effect.yieldNow;
++          yield* settled();
++          yield* Scope.close(scope, Exit.void);
++        }
++        yield* settled();
++        assert.equal(host.sent.length, 1);
++      }),
++    );
++
++  it.effect("a synchronous send throw after dispatch is uncertain", () =>
++    uncertainAfterDispatch("throw"),
++  );
++  it.effect("a send callback error after dispatch is uncertain", () =>
++    uncertainAfterDispatch("callback-error"),
++  );
++  it.effect("a disconnect after dispatch is uncertain", () => uncertainAfterDispatch("disconnect"));
++  it.effect("a timeout after dispatch is uncertain", () => uncertainAfterDispatch("timeout"));
++  it.effect("an interruption after dispatch is uncertain", () =>
++    uncertainAfterDispatch("interrupt"),
++  );
++});
+diff --git a/apps/server/src/cloud/managedQueuedUpdate.ts b/apps/server/src/cloud/managedQueuedUpdate.ts
+new file mode 100644
+index 00000000..197ecab6
+--- /dev/null
++++ b/apps/server/src/cloud/managedQueuedUpdate.ts
+@@ -0,0 +1,179 @@
++/**
++ * ManagedQueuedUpdate - the managed-release adapter between the durable
++ * `QueuedUpdate` controller, the selection-bound `ManagedRuntimeStager`, the
++ * idle handoff coordinator, and the service launcher IPC.
++ *
++ * The queue owns staging order, retry timing, persistence, and the activation
++ * fiber; the coordinator owns the update gates. This module only binds each
++ * staging attempt to one exact feed selection and stager, rechecks that exact
++ * staged artifact under the coordinator's seal, and submits the protocol-2
++ * launcher request with its lifecycle points wired to the held gates.
++ *
++ * It never calls `ServerSelfUpdate.update` or `ensurePinnedRuntimeInstalled`:
++ * both may install stock npm bytes for a version-only sentinel, which is
++ * incompatible with managed artifact identity.
++ *
++ * @module ManagedQueuedUpdate
++ */
++import type * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++
++import type { IdleHandoffControl, IdleUpdateCoordinatorShape } from "./idleUpdateCoordinator.ts";
++import type { ManagedArtifactSourceError, ManagedRuntimeStager } from "./managedRuntime.ts";
++import * as QueuedUpdate from "./queuedUpdate.ts";
++import type { ServiceLauncherClient } from "./serviceLauncherClient.ts";
++
++/** One exact release selection, with the stager bound to that selection's source. */
++export interface ResolvedManagedRuntime {
++  readonly version: string;
++  readonly artifactId: string;
++  readonly stager: ManagedRuntimeStager;
++}
++
++/**
++ * Resolves an exact version, never `latest`, to its release selection. The
++ * production resolver is built from the release feed; HTTP policy lives there.
++ */
++export type ResolveManagedRuntime = (
++  exactVersion: string,
++) => Effect.Effect<ResolvedManagedRuntime, ManagedArtifactSourceError>;
++
++export interface ManagedQueuedUpdateDependencies {
++  readonly statePath: string;
++  readonly installedVersion: string;
++  readonly pollInterval: Duration.Input;
++  /** Live database the launcher snapshots and the candidate is trialled against. */
++  readonly dbPath: string;
++  readonly resolve: ResolveManagedRuntime;
++  /**
++   * Owns both update gates. Its handoff control's three members are exactly
++   * the launcher request's lifecycle points, so it is handed to the transport
++   * as is.
++   */
++  readonly coordinator: Pick<IdleUpdateCoordinatorShape, "tryActivate">;
++  readonly launcher: Pick<ServiceLauncherClient["Service"], "requestUpdate">;
++}
++
++interface Binding {
++  readonly staged: QueuedUpdate.StagedArtifact;
++  readonly stager: ManagedRuntimeStager;
++}
++
++const bindingKey = (staged: QueuedUpdate.StagedArtifact): string =>
++  `${staged.version}\0${staged.artifactId}`;
++
++const stepError = (
++  step: QueuedUpdate.QueuedUpdateStepError["step"],
++  reason: string,
++  cause?: unknown,
++) =>
++  cause === undefined
++    ? new QueuedUpdate.QueuedUpdateStepError({ step, reason })
++    : new QueuedUpdate.QueuedUpdateStepError({ step, reason, cause });
++
++export const make = Effect.fn("cloud.managed_queued_update.make")(function* (
++  deps: ManagedQueuedUpdateDependencies,
++) {
++  /**
++   * Exact `{ staged, stager }` associations made by this process, keyed by
++   * version and artifact ID. Activation uses only the stager that produced the
++   * artifact it is asked to activate; a later feed selection for the same
++   * version cannot substitute for it. Nothing here survives a restart: the
++   * queue re-enters `downloading` for a nonterminal target, so the resolver and
++   * stager run again before any activation.
++   */
++  const bindings = new Map<string, Binding>();
++
++  const stage = Effect.fn("cloud.managed_queued_update.stage")(function* (targetVersion: string) {
++    const resolved = yield* deps
++      .resolve(targetVersion)
++      .pipe(
++        Effect.mapError((error) =>
++          stepError(
++            "stage",
++            `Could not resolve managed release t3@${targetVersion}: ${error.reason}`,
++            error,
++          ),
++        ),
++      );
++    if (resolved.version !== targetVersion) {
++      return yield* stepError(
++        "stage",
++        `The managed release feed resolved t3@${targetVersion} to t3@${resolved.version}.`,
++      );
++    }
++    const staged = yield* resolved.stager
++      .stage(targetVersion)
++      .pipe(Effect.mapError((error) => stepError("stage", error.message, error)));
++    if (staged.version !== resolved.version || staged.artifactId !== resolved.artifactId) {
++      return yield* stepError(
++        "stage",
++        `The staged artifact for t3@${targetVersion} does not match its resolved release selection.`,
++      );
++    }
++    bindings.set(bindingKey(staged), { staged, stager: resolved.stager });
++    return staged;
++  });
++
++  /**
++   * Runs inside the coordinator's mask with both gates held. The client
++   * interprets the launcher's acknowledgement uninterruptibly, so `control`
++   * sees `dispatchStarted` immediately before the send, `definitivelyRejected`
++   * only for a tagged rejection, and `accepted` before the ID is returned.
++   * After acceptance the process is committed to restart, so this parks
++   * interruptibly instead of returning an answer the queue could act on.
++   */
++  const submitLauncherUpdate = (control: IdleHandoffControl, targetVersion: string) =>
++    deps.launcher.requestUpdate({ targetVersion, dbPath: deps.dbPath }, control).pipe(
++      Effect.mapError((error) =>
++        stepError(
++          "activate",
++          error._tag === "ServiceLauncherRejectedError"
++            ? error.reason
++            : `Could not ask the service launcher to activate t3@${targetVersion}: ${error.message}`,
++          error,
++        ),
++      ),
++      Effect.tap((updateId) =>
++        Effect.logInfo("Managed update handed off to the service launcher.", {
++          updateId,
++          targetVersion,
++        }),
++      ),
++      Effect.andThen(Effect.never),
++    );
++
++  const tryActivate: QueuedUpdate.QueuedUpdateDependencies["tryActivate"] = (
++    staged,
++    onHandoffAccepted,
++  ) =>
++    Effect.suspend(() => {
++      const binding = bindings.get(bindingKey(staged));
++      if (binding === undefined) {
++        return Effect.fail(
++          stepError(
++            "activate",
++            `t3@${staged.version} was not staged by this process; it must be staged again before activation.`,
++          ),
++        );
++      }
++      return deps.coordinator.tryActivate(
++        (control) =>
++          // The exact bound stager's cheap local identity recheck, then IPC.
++          // Never `stage`, a sentinel-only check, or a feed lookup here.
++          binding.stager.verifyStaged(staged).pipe(
++            Effect.mapError((error) => stepError("activate", error.message, error)),
++            Effect.andThen(submitLauncherUpdate(control, staged.version)),
++          ),
++        onHandoffAccepted,
++      );
++    });
++
++  return yield* QueuedUpdate.make({
++    statePath: deps.statePath,
++    installedVersion: deps.installedVersion,
++    pollInterval: deps.pollInterval,
++    stage,
++    tryActivate,
++  });
++});
+diff --git a/apps/server/src/cloud/selfUpdate.test.ts b/apps/server/src/cloud/selfUpdate.test.ts
+index e6d8010f..5611124a 100644
+--- a/apps/server/src/cloud/selfUpdate.test.ts
++++ b/apps/server/src/cloud/selfUpdate.test.ts
+@@ -17,9 +17,15 @@ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
+ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
+ import * as ServerSelfUpdate from "./selfUpdate.ts";
+ 
++const STOCK_VERSION = "1.0.0";
++const MANAGED_VERSION = "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a";
++const MANAGED_TARGET = "0.0.38-nightly.20260905.3.managed.2.p6d1933416d7a";
++
+ interface HarnessOptions {
+   readonly mode?: "web" | "desktop";
+   readonly managed?: boolean;
++  /** The version this server runs, injected so tests never depend on the source tree's stamp. */
++  readonly currentVersion?: string;
+   readonly preflight?: "ready" | "blocked";
+   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
+   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
+@@ -89,7 +95,9 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
+   const config = yield* ServerConfig.ServerConfig.pipe(
+     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+   );
+-  const selfUpdate = yield* ServerSelfUpdate.make().pipe(
++  const selfUpdate = yield* ServerSelfUpdate.make({
++    currentVersion: options.currentVersion ?? STOCK_VERSION,
++  }).pipe(
+     Effect.provideService(ProcessRunner.ProcessRunner, runner),
+     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
+     Effect.provideService(
+@@ -333,6 +341,29 @@ it.layer(NodeServices.layer)("server self update", (it) => {
+     }),
+   );
+ 
++  it.effect("never takes the npm path for a managed server or a managed target", () =>
++    Effect.gen(function* () {
++      const managedServer = yield* makeHarness({ currentVersion: MANAGED_VERSION });
++      const stockServer = yield* makeHarness({ currentVersion: STOCK_VERSION });
++      for (const [harness, targetVersion] of [
++        [managedServer, MANAGED_TARGET],
++        [managedServer, "1.1.0"],
++        [stockServer, MANAGED_TARGET],
++      ] as const) {
++        const error = yield* harness.selfUpdate.update({ targetVersion }).pipe(Effect.flip);
++        expect(error.reason).toContain("durable managed update queue");
++        expect(error.reason).toContain(targetVersion);
++      }
++      expect([...managedServer.order, ...stockServer.order]).toEqual([]);
++
++      // The guard is not the in-flight lock: a stock target still installs afterwards.
++      expect((yield* stockServer.selfUpdate.update({ targetVersion: "1.1.0" })).method).toBe(
++        "boot-service",
++      );
++      expect(stockServer.order).toEqual(["install", "preflight", "accept"]);
++    }),
++  );
++
+   it.effect("rejects invalid versions and desktop-managed servers before staging", () =>
+     Effect.gen(function* () {
+       const web = yield* makeHarness();
+diff --git a/apps/server/src/cloud/selfUpdate.ts b/apps/server/src/cloud/selfUpdate.ts
+index 3cea3079..382f168f 100644
+--- a/apps/server/src/cloud/selfUpdate.ts
++++ b/apps/server/src/cloud/selfUpdate.ts
+@@ -17,9 +17,11 @@ import * as FileSystem from "effect/FileSystem";
+ import * as Layer from "effect/Layer";
+ import * as Path from "effect/Path";
+ 
++import packageJson from "../../package.json" with { type: "json" };
+ import * as ServerConfig from "../config.ts";
+ import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
+ import * as ProcessRunner from "../processRunner.ts";
++import { parseManagedReleaseVersion } from "./managedRelease.ts";
+ import {
+   ensurePinnedRuntimeInstalled,
+   PinnedRuntimeInstallError,
+@@ -163,7 +165,10 @@ export const withRunningThreadContinuation = Effect.fn(
+   });
+ });
+ 
+-export const make = Effect.fn("cloud.server_self_update.make")(function* () {
++export const make = Effect.fn("cloud.server_self_update.make")(function* (options?: {
++  readonly currentVersion?: string;
++}) {
++  const currentVersion = options?.currentVersion ?? packageJson.version;
+   const serverConfig = yield* ServerConfig.ServerConfig;
+   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
+   const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
+@@ -204,6 +209,18 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
+     if (!isExactServiceVersion(targetVersion)) {
+       return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
+     }
++    // The path below installs stock npm bytes into a pinned version directory
++    // and trusts a version-only sentinel. Managed releases are content-bound
++    // artifacts owned by the durable managed update queue, so neither a managed
++    // server nor a managed target may take it.
++    if (
++      parseManagedReleaseVersion(currentVersion) !== undefined ||
++      parseManagedReleaseVersion(targetVersion) !== undefined
++    ) {
++      return yield* failWith(
++        `Managed t3 releases are owned by the durable managed update queue; t3@${targetVersion} cannot be installed through this update request.`,
++      );
++    }
+     if (yield* Ref.getAndSet(inFlight, true)) {
+       return yield* failWith("A server update is already in progress.");
+     }
+diff --git a/apps/server/src/cloud/serviceLauncherClient.test.ts b/apps/server/src/cloud/serviceLauncherClient.test.ts
+index eab09354..03c00d90 100644
+--- a/apps/server/src/cloud/serviceLauncherClient.test.ts
++++ b/apps/server/src/cloud/serviceLauncherClient.test.ts
+@@ -1,7 +1,10 @@
+ import { expect, it } from "@effect/vitest";
+ import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
++import * as Cause from "effect/Cause";
+ import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
+ import * as Fiber from "effect/Fiber";
++import { TestClock } from "effect/testing";
+ 
+ import {
+   SERVICE_LAUNCHER_CONTEXT_ENV,
+@@ -11,20 +14,39 @@ import {
+ } from "./serviceProtocol.ts";
+ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
+ 
++type SendMode = "ok" | "throw" | "callback-error" | "silent";
++
+ class FakeLauncherProcess {
+   readonly connected = true;
+   readonly env: Record<string, string | undefined>;
+   readonly sent: ServiceLauncherChildMessage[] = [];
++  /** Lifecycle events observed so far at the moment each message was sent. */
++  readonly eventsAtSend: string[][] = [];
++  sendMode: SendMode = "ok";
+   readonly #listeners = new Map<string, Set<(...args: ReadonlyArray<unknown>) => void>>();
++  readonly #events: string[];
+ 
+-  constructor(context: unknown) {
+-    this.env = { [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) };
++  constructor(context: unknown, events: string[] = []) {
++    this.#events = events;
++    this.env =
++      context === undefined ? {} : { [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) };
+   }
+ 
+   send = (message: ServiceLauncherChildMessage, callback?: (error: Error | null) => void) => {
+     this.sent.push(message);
+-    callback?.(null);
+-    return true;
++    this.eventsAtSend.push([...this.#events]);
++    switch (this.sendMode) {
++      case "throw":
++        throw new Error("channel closed");
++      case "callback-error":
++        callback?.(new Error("EPIPE"));
++        return false;
++      case "silent":
++        return true;
++      case "ok":
++        callback?.(null);
++        return true;
++    }
+   };
+ 
+   on = (event: "message" | "disconnect", listener: (...args: ReadonlyArray<unknown>) => void) => {
+@@ -37,9 +59,19 @@ class FakeLauncherProcess {
+     this.#listeners.get(event)?.delete(listener);
+   };
+ 
+-  emit(message: ServiceLauncherParentMessage) {
++  emit(message: ServiceLauncherParentMessage | { readonly type: "garbage" }) {
+     for (const listener of this.#listeners.get("message") ?? []) listener(message);
+   }
++
++  disconnect() {
++    for (const listener of this.#listeners.get("disconnect") ?? []) listener();
++  }
++
++  listenerCount() {
++    let count = 0;
++    for (const listeners of this.#listeners.values()) count += listeners.size;
++    return count;
++  }
+ }
+ 
+ const makeClient = (host: FakeLauncherProcess, currentVersion: string) =>
+@@ -48,6 +80,24 @@ const makeClient = (host: FakeLauncherProcess, currentVersion: string) =>
+     Effect.provideService(HostProcessEnvironment, host.env),
+   );
+ 
++const UPDATE = { targetVersion: "1.1.0", dbPath: "/tmp/state.sqlite" };
++
++/** A managed 1.0.0 child with a recording lifecycle attached to one update request. */
++const requestWithLifecycle = Effect.fn("requestWithLifecycle")(function* () {
++  const events: string[] = [];
++  const host = new FakeLauncherProcess(
++    { protocol: SERVICE_LAUNCHER_PROTOCOL, childVersion: "1.0.0" },
++    events,
++  );
++  const client = yield* makeClient(host, "1.0.0");
++  const lifecycle: ServiceLauncherClient.ServiceLauncherUpdateLifecycle = {
++    dispatchStarted: () => void events.push("dispatch"),
++    definitivelyRejected: () => void events.push("rejected"),
++    accepted: Effect.sync(() => void events.push("accepted")),
++  };
++  return { host, events, request: client.requestUpdate(UPDATE, lifecycle) };
++});
++
+ it.effect("waits for the launcher to durably commit the trial update ID", () =>
+   Effect.gen(function* () {
+     const pending = {
+@@ -75,6 +125,7 @@ it.effect("waits for the launcher to durably commit the trial update ID", () =>
+     };
+     host.emit({ type: "committed", updateId: committed.id });
+     expect(yield* Fiber.join(prepared)).toEqual(committed);
++    expect(host.listenerCount()).toBe(0);
+   }),
+ );
+ 
+@@ -85,16 +136,16 @@ it.effect("returns the launcher-generated ID only after update acceptance", () =
+       childVersion: "1.0.0",
+     });
+     const client = yield* makeClient(host, "1.0.0");
+-    const requested = yield* Effect.forkChild(
+-      client.requestUpdate({ targetVersion: "1.1.0", dbPath: "/tmp/state.sqlite" }),
+-      { startImmediately: true },
+-    );
++    const requested = yield* Effect.forkChild(client.requestUpdate(UPDATE), {
++      startImmediately: true,
++    });
+     yield* Effect.yieldNow;
+     host.emit({
+       type: "update-accepted",
+       updateId: "launcher-id",
+     });
+     expect(yield* Fiber.join(requested)).toBe("launcher-id");
++    expect(host.listenerCount()).toBe(0);
+   }),
+ );
+ 
+@@ -105,10 +156,9 @@ it.effect("preserves a launcher rejection as a distinct error", () =>
+       childVersion: "1.0.0",
+     });
+     const client = yield* makeClient(host, "1.0.0");
+-    const requested = yield* Effect.forkChild(
+-      client.requestUpdate({ targetVersion: "1.1.0", dbPath: "/tmp/state.sqlite" }),
+-      { startImmediately: true },
+-    );
++    const requested = yield* Effect.forkChild(client.requestUpdate(UPDATE), {
++      startImmediately: true,
++    });
+     yield* Effect.yieldNow;
+     host.emit({ type: "update-rejected", reason: "requires local update" });
+     expect(yield* Fiber.join(requested).pipe(Effect.flip)).toMatchObject({
+@@ -116,6 +166,7 @@ it.effect("preserves a launcher rejection as a distinct error", () =>
+       targetVersion: "1.1.0",
+       reason: "requires local update",
+     });
++    expect(host.listenerCount()).toBe(0);
+   }),
+ );
+ 
+@@ -136,3 +187,135 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
+     expect(error.message).toBe("The service launcher supplied invalid startup context.");
+   }),
+ );
++
++it.effect(
++  "marks dispatch immediately before the send and accepts exactly once before returning",
++  () =>
++    Effect.gen(function* () {
++      const { host, events, request } = yield* requestWithLifecycle();
++      const requested = yield* Effect.forkChild(request, { startImmediately: true });
++      yield* Effect.yieldNow;
++      expect(host.eventsAtSend).toEqual([["dispatch"]]);
++      expect(events).toEqual(["dispatch"]);
++
++      // Unrelated and malformed traffic settles nothing and marks nothing.
++      host.emit({ type: "committed", updateId: "other" });
++      host.emit({ type: "garbage" });
++      yield* Effect.yieldNow;
++      expect(requested.pollUnsafe()).toBeUndefined();
++      expect(events).toEqual(["dispatch"]);
++
++      host.emit({ type: "update-accepted", updateId: "launcher-id" });
++      expect(yield* Fiber.join(requested)).toBe("launcher-id");
++      expect(events).toEqual(["dispatch", "accepted"]);
++      expect(host.listenerCount()).toBe(0);
++
++      // A duplicate late reply reaches no listener.
++      host.emit({ type: "update-accepted", updateId: "launcher-id" });
++      expect(events).toEqual(["dispatch", "accepted"]);
++    }),
++);
++
++it.effect("marks a tagged launcher rejection definite exactly once", () =>
++  Effect.gen(function* () {
++    const { host, events, request } = yield* requestWithLifecycle();
++    const requested = yield* Effect.forkChild(request, { startImmediately: true });
++    yield* Effect.yieldNow;
++    host.emit({ type: "update-rejected", reason: "requires local update" });
++    const error = yield* Fiber.join(requested).pipe(Effect.flip);
++    expect(error._tag).toBe("ServiceLauncherRejectedError");
++    expect(events).toEqual(["dispatch", "rejected"]);
++    expect(host.listenerCount()).toBe(0);
++    host.emit({ type: "update-rejected", reason: "again" });
++    expect(events).toEqual(["dispatch", "rejected"]);
++  }),
++);
++
++it.effect("a synchronous send throw is dispatched but never definite", () =>
++  Effect.gen(function* () {
++    const { host, events, request } = yield* requestWithLifecycle();
++    host.sendMode = "throw";
++    const error = yield* request.pipe(Effect.flip);
++    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "send" });
++    expect(events).toEqual(["dispatch"]);
++    expect(host.listenerCount()).toBe(0);
++  }),
++);
++
++it.effect("a send callback error is dispatched but never definite", () =>
++  Effect.gen(function* () {
++    const { host, events, request } = yield* requestWithLifecycle();
++    host.sendMode = "callback-error";
++    const error = yield* request.pipe(Effect.flip);
++    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "send" });
++    expect(events).toEqual(["dispatch"]);
++    expect(host.listenerCount()).toBe(0);
++  }),
++);
++
++it.effect("a disconnect after dispatch is uncertain and ignores later replies", () =>
++  Effect.gen(function* () {
++    const { host, events, request } = yield* requestWithLifecycle();
++    host.sendMode = "silent";
++    const requested = yield* Effect.forkChild(request, { startImmediately: true });
++    yield* Effect.yieldNow;
++    host.disconnect();
++    const error = yield* Fiber.join(requested).pipe(Effect.flip);
++    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "disconnect" });
++    expect(events).toEqual(["dispatch"]);
++    expect(host.listenerCount()).toBe(0);
++    host.emit({ type: "update-rejected", reason: "late" });
++    host.emit({ type: "update-accepted", updateId: "late" });
++    expect(events).toEqual(["dispatch"]);
++  }),
++);
++
++it.effect("a timeout after dispatch is uncertain and ignores later replies", () =>
++  Effect.gen(function* () {
++    const { host, events, request } = yield* requestWithLifecycle();
++    host.sendMode = "silent";
++    const requested = yield* Effect.forkChild(request, { startImmediately: true });
++    yield* Effect.yieldNow;
++    yield* TestClock.adjust("29 seconds");
++    expect(requested.pollUnsafe()).toBeUndefined();
++    yield* TestClock.adjust("1 second");
++    const error = yield* Fiber.join(requested).pipe(Effect.flip);
++    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "timeout" });
++    expect(events).toEqual(["dispatch"]);
++    expect(host.listenerCount()).toBe(0);
++    host.emit({ type: "update-accepted", updateId: "late" });
++    expect(events).toEqual(["dispatch"]);
++  }),
++);
++
++it.effect("interruption after dispatch releases listeners without a definite answer", () =>
++  Effect.gen(function* () {
++    const { host, events, request } = yield* requestWithLifecycle();
++    host.sendMode = "silent";
++    const requested = yield* Effect.forkChild(request, { startImmediately: true });
++    yield* Effect.yieldNow;
++    yield* Fiber.interrupt(requested);
++    const exit = yield* Fiber.await(requested);
++    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
++    expect(events).toEqual(["dispatch"]);
++    expect(host.listenerCount()).toBe(0);
++  }),
++);
++
++it.effect("an unmanaged server fails before any dispatch", () =>
++  Effect.gen(function* () {
++    const events: string[] = [];
++    const host = new FakeLauncherProcess(undefined, events);
++    const client = yield* makeClient(host, "1.0.0");
++    const error = yield* client
++      .requestUpdate(UPDATE, {
++        dispatchStarted: () => void events.push("dispatch"),
++        definitivelyRejected: () => void events.push("rejected"),
++        accepted: Effect.sync(() => void events.push("accepted")),
++      })
++      .pipe(Effect.flip);
++    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "unmanaged" });
++    expect(events).toEqual([]);
++    expect(host.sent).toEqual([]);
++  }),
++);
+diff --git a/apps/server/src/cloud/serviceLauncherClient.ts b/apps/server/src/cloud/serviceLauncherClient.ts
+index 970c72ce..a9e0b275 100644
+--- a/apps/server/src/cloud/serviceLauncherClient.ts
++++ b/apps/server/src/cloud/serviceLauncherClient.ts
+@@ -96,14 +96,32 @@ export const ServiceLauncherHostProcess = Context.Reference<ServiceLauncherProce
+   },
+ );
+ 
++/**
++ * Lifecycle points of one update request, for a caller that holds update gates
++ * across the handoff. `dispatchStarted` runs synchronously immediately before
++ * the message is handed to the IPC channel: from then on any exit other than a
++ * tagged launcher rejection is an uncertain outcome. `definitivelyRejected`
++ * runs only for an `update-rejected` reply, and `accepted` runs for an
++ * `update-accepted` reply before the launcher ID is returned. Send failures,
++ * disconnects, timeouts, and unrelated replies call neither of the latter.
++ */
++export interface ServiceLauncherUpdateLifecycle {
++  readonly dispatchStarted: () => void;
++  readonly definitivelyRejected: () => void;
++  readonly accepted: Effect.Effect<void>;
++}
++
+ export class ServiceLauncherClient extends Context.Service<
+   ServiceLauncherClient,
+   {
+     readonly managed: boolean;
+-    readonly requestUpdate: (input: {
+-      readonly targetVersion: string;
+-      readonly dbPath: string;
+-    }) => Effect.Effect<string, ServiceLauncherClientError | ServiceLauncherRejectedError>;
++    readonly requestUpdate: (
++      input: {
++        readonly targetVersion: string;
++        readonly dbPath: string;
++      },
++      lifecycle?: ServiceLauncherUpdateLifecycle,
++    ) => Effect.Effect<string, ServiceLauncherClientError | ServiceLauncherRejectedError>;
+     readonly prepareTrial: Effect.Effect<
+       ServerSelfUpdateOutcome | undefined,
+       ServiceLauncherClientError
+@@ -150,6 +168,7 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
+   const exchange = (
+     message: ServiceLauncherChildMessage,
+     accept: (reply: ServiceLauncherParentMessage) => boolean,
++    onDispatch?: () => void,
+   ) =>
+     Effect.callback<ServiceLauncherParentMessage, ServiceLauncherClientError>((resume) => {
+       if (!managed) {
+@@ -179,6 +198,9 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
+ 
+       host.on("message", onMessage);
+       host.on("disconnect", onDisconnect);
++      // Marked before the send so a synchronous throw, a callback error, or a
++      // later disconnect all count as outcomes the peer may already have seen.
++      onDispatch?.();
+       try {
+         host.send(message, (error) => {
+           if (error !== null) {
+@@ -199,22 +221,36 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
+       }),
+     );
+ 
+-  const requestUpdate = (input: { readonly targetVersion: string; readonly dbPath: string }) =>
+-    exchange(
+-      { type: "request-update", ...input },
+-      (reply) => reply.type === "update-accepted" || reply.type === "update-rejected",
+-    ).pipe(
+-      Effect.flatMap((reply) =>
+-        reply.type === "update-accepted"
+-          ? Effect.succeed(reply.updateId)
+-          : reply.type === "update-rejected"
+-            ? Effect.fail(
++  // Waiting for the reply stays interruptible so a closing scope is not held
++  // up by a silent launcher, but the reply is interpreted in one
++  // uninterruptible region: nothing can land between the launcher's
++  // acknowledgement and the caller's `accepted` or `definitivelyRejected`.
++  const requestUpdate: ServiceLauncherClient["Service"]["requestUpdate"] = (input, lifecycle) =>
++    Effect.uninterruptibleMask((restore) =>
++      restore(
++        exchange(
++          { type: "request-update", ...input },
++          (reply) => reply.type === "update-accepted" || reply.type === "update-rejected",
++          lifecycle?.dispatchStarted,
++        ),
++      ).pipe(
++        Effect.flatMap((reply) => {
++          if (reply.type === "update-accepted") {
++            return (lifecycle?.accepted ?? Effect.void).pipe(Effect.as(reply.updateId));
++          }
++          if (reply.type === "update-rejected") {
++            return Effect.suspend(() => {
++              lifecycle?.definitivelyRejected();
++              return Effect.fail(
+                 new ServiceLauncherRejectedError({
+                   targetVersion: input.targetVersion,
+                   reason: reply.reason,
+                 }),
+-              )
+-            : Effect.die("service launcher returned an impossible update response"),
++              );
++            });
++          }
++          return Effect.die("service launcher returned an impossible update response");
++        }),
+       ),
+     );
+ 
