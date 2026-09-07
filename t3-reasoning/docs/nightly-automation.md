@@ -205,9 +205,10 @@ The job runs the helper with `--destination "$RUNNER_TEMP/t3-nightly-candidate"`
 and `--work "$RUNNER_TEMP/t3-nightly-work"`, and passes `--current-release`
 only when `t3-reasoning/upstream-release.json` is tracked (the first run is the
 bootstrap). Exit 0 and 2 are consumed by reading `result.json`; exit 1 fails
-the step with no report. `result.json` and `patch-check.json` are always
-retained as the run artifact `t3-nightly-discovery-report`; prepared trees
-stay under the work directory and never leave the runner.
+the step with no report. The run artifact `t3-nightly-discovery-report`
+retains `result.json` for `ready`, `unchanged`, and `conflict`, plus
+`patch-check.json` for `ready`. Exit 1 produces no report artifact. Prepared
+trees stay under the work directory and never leave the runner.
 
 | Status | Behavior |
 | --- | --- |
