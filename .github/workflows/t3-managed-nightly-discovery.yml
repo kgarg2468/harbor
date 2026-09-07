@@ -1,0 +1,457 @@
+name: t3-managed-nightly-discovery
+
+# Trusted default-branch discovery of the newest published upstream T3
+# Nightly. Runs the checked-in helper, keeps its report as a run artifact, does
+# nothing on `unchanged`, fails visibly on `conflict`, and on `ready` proposes
+# a candidate PR that changes exactly `t3-reasoning/source.lock.json` (commit
+# line only) and `t3-reasoning/upstream-release.json`. The candidate commit is
+# built through the Git data API from the checked-out base tree plus those two
+# blobs, so nothing else can be pushed and no credential ever enters git
+# configuration. Refs are only ever created, never force-updated; an existing
+# candidate branch is reused only once its head is proven to be exactly that
+# commit (single parent on the base branch, only those two blobs changed).
+# Because a token-created push and PR do not launch the ordinary push/pull_request
+# workflows, the run explicitly dispatches the exact-head checker
+# (`t3-managed-nightly-candidate.yml`) on the default branch with the PR
+# number and the pushed SHA. Nothing here builds, signs, publishes, merges,
+# installs, or changes repository settings. The contract is documented in
+# t3-reasoning/docs/nightly-automation.md.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+# One discovery at a time; a run that is already publishing must finish.
+concurrency:
+  group: t3-managed-nightly-discovery
+  cancel-in-progress: false
+
+env:
+  BASE_BRANCH: main
+  CANDIDATE_BRANCH_PREFIX: t3/nightly-candidate/
+  CHECKER_WORKFLOW: t3-managed-nightly-candidate.yml
+
+jobs:
+  discover:
+    # Trusted default-branch code only, whether scheduled or dispatched.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write # create the candidate blobs, tree, commit, and branch ref
+      pull-requests: write # open the candidate PR
+      actions: write # dispatch the exact-head checker
+    steps:
+      - name: Check out trusted default-branch code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.13.1"
+
+      - name: Show toolchain
+        run: node --version && git --version && gh --version && jq --version
+
+      - name: Discover the newest published Nightly
+        id: discover
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESTINATION: ${{ runner.temp }}/t3-nightly-candidate
+          WORK: ${{ runner.temp }}/t3-nightly-work
+        run: |
+          set -euo pipefail
+          args=(--lock t3-reasoning/source.lock.json --destination "${DESTINATION}" --work "${WORK}")
+          if [ -f t3-reasoning/upstream-release.json ]; then
+            args+=(--current-release t3-reasoning/upstream-release.json)
+          else
+            echo "::notice::no tracked upstream-release.json yet; running the initial provenance bootstrap"
+          fi
+          set +e
+          node t3-reasoning/scripts/discover-upstream-nightly.mjs "${args[@]}"
+          code=$?
+          set -e
+          case "${code}" in
+            0|2) ;;
+            *)
+              echo "::error::discover-upstream-nightly exited ${code}; no report was written"
+              exit "${code}"
+              ;;
+          esac
+          status="$(jq -r '.status' "${DESTINATION}/result.json")"
+          case "${code}:${status}" in
+            0:ready|0:unchanged|2:conflict) ;;
+            *)
+              echo "::error::inconsistent discovery outcome: exit ${code}, status ${status}"
+              exit 1
+              ;;
+          esac
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "## t3 managed Nightly discovery"
+            echo
+            echo "- status: \`${status}\`"
+            jq -r '
+              (if .current then "- current: `\(.current.tag)` at `\(.current.commit)`" else "- current: no tracked provenance (bootstrap); lock pins `\(.lock.commit)`" end),
+              (if .latest then "- newest published: `\(.latest.tag)` (release \(.latest.releaseId), published \(.latest.publishedAt))" else empty end),
+              (if .candidate then "- candidate: `\(.candidate.tag)` at `\(.candidate.commit)` (release \(.candidate.releaseId), published \(.candidate.publishedAt))" else empty end),
+              (if .conflict then "- conflict: variant `\(.conflict.variant)` rejects `\(.conflict.failedPatch)`" else empty end)
+            ' "${DESTINATION}/result.json"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # The report is retained on every outcome that produced one. Only the
+      # report files are uploaded: prepared source trees live under the
+      # separate work directory and never leave the runner.
+      - name: Retain the discovery report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: t3-nightly-discovery-report
+          path: |
+            ${{ runner.temp }}/t3-nightly-candidate/result.json
+            ${{ runner.temp }}/t3-nightly-candidate/patch-check.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Fail on a patch conflict
+        if: steps.discover.outputs.status == 'conflict'
+        env:
+          DESTINATION: ${{ runner.temp }}/t3-nightly-candidate
+        run: |
+          set -euo pipefail
+          jq -r '"::error::\(.candidate.tag) at \(.candidate.commit): variant \(.conflict.variant) rejects \(.conflict.failedPatch); the patch must be re-ported by hand"' \
+            "${DESTINATION}/result.json"
+          jq -r '.conflict.diagnostics[]?' "${DESTINATION}/result.json"
+          exit 1
+
+      - name: Propose the candidate PR and dispatch the exact-head checker
+        if: steps.discover.outputs.status == 'ready'
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HARBOR_CHECKOUT: ${{ github.workspace }}
+          CANDIDATE_DIR: ${{ runner.temp }}/t3-nightly-candidate
+          BASE_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/publish-candidate.mjs" <<'PUBLISH_CANDIDATE_EOF'
+          // Trusted publisher for a `ready` discovery report. Everything it
+          // needs arrives through the environment; no input is interpolated
+          // into a shell. GitHub is reached only through `gh api` with argv
+          // and a JSON body on stdin.
+          import { spawn } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { appendFile, copyFile, readFile } from "node:fs/promises";
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          class PublishError extends Error {}
+          const fail = (message) => {
+            throw new PublishError(message);
+          };
+          const env = (name) => {
+            const value = process.env[name];
+            if (typeof value !== "string" || value === "") fail(`${name} is required in the environment`);
+            return value;
+          };
+
+          const LOCK = "t3-reasoning/source.lock.json";
+          const PROVENANCE = "t3-reasoning/upstream-release.json";
+          const COMMIT_RE = /^[0-9a-f]{40}$/;
+
+          const checkout = env("HARBOR_CHECKOUT");
+          const candidateDir = env("CANDIDATE_DIR");
+          const repository = env("GITHUB_REPOSITORY");
+          const owner = repository.split("/")[0];
+          const baseBranch = env("BASE_BRANCH");
+          const baseSha = env("BASE_SHA");
+          const branchPrefix = env("CANDIDATE_BRANCH_PREFIX");
+          const checkerWorkflow = env("CHECKER_WORKFLOW");
+          const runUrl = env("RUN_URL");
+          if (!COMMIT_RE.test(baseSha)) fail(`BASE_SHA ${baseSha} is not a full lowercase SHA-1`);
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) fail(`GITHUB_REPOSITORY ${repository} is not owner/repo`);
+
+          const scripts = path.join(checkout, "t3-reasoning", "scripts");
+          const discover = await import(pathToFileURL(path.join(scripts, "discover-upstream-nightly.mjs")).href);
+          const release = await import(pathToFileURL(path.join(scripts, "resolve-managed-release.mjs")).href);
+
+          function run(command, args, { cwd = checkout, input = "" } = {}) {
+            return new Promise((resolve, reject) => {
+              const child = spawn(command, args, {
+                cwd,
+                env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
+                stdio: ["pipe", "pipe", "pipe"],
+              });
+              let stdout = "";
+              let stderr = "";
+              child.stdout.on("data", (chunk) => (stdout += chunk));
+              child.stderr.on("data", (chunk) => (stderr += chunk));
+              child.on("error", reject);
+              child.on("close", (code) => {
+                if (code === 0) return resolve(stdout);
+                const tail = stderr.trim().split("\n").slice(-6).join(" ");
+                reject(new PublishError(`${command} ${args.slice(0, 3).join(" ")} exited ${code}: ${tail}`));
+              });
+              child.stdin.end(input);
+            });
+          }
+          const git = async (...args) => (await run("git", args)).trim();
+          // Porcelain lines keep their leading status columns.
+          const porcelain = async () =>
+            (await run("git", ["status", "--porcelain", "--untracked-files=all"])).split("\n").filter((line) => line !== "");
+
+          // GitHub REST through gh: endpoints are built here from the fixed
+          // repository, never from a response. A 204 (dispatch) has no body.
+          async function api(method, endpoint, body) {
+            const args = ["api", "--method", method, `/repos/${repository}/${endpoint}`];
+            if (body !== undefined) args.push("--input", "-");
+            const stdout = await run("gh", args, { input: body === undefined ? "" : JSON.stringify(body) });
+            if (stdout.trim() === "") return null;
+            try {
+              return JSON.parse(stdout);
+            } catch {
+              fail(`${method} ${endpoint} returned invalid JSON`);
+            }
+          }
+
+          const blobSha = (bytes) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+          const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+          // 1. The report and the two candidate files.
+          const result = JSON.parse(await readFile(path.join(candidateDir, "result.json"), "utf8"));
+          if (result.tool !== "discover-upstream-nightly" || result.status !== "ready") {
+            fail(`report status is ${JSON.stringify(result.status)}; only a ready report is published`);
+          }
+          const candidateLockText = await readFile(path.join(candidateDir, "source.lock.json"), "utf8");
+          const provenanceText = await readFile(path.join(candidateDir, "upstream-release.json"), "utf8");
+
+          // 2. The trusted checkout must be exactly the base commit and clean.
+          if ((await git("rev-parse", "HEAD")) !== baseSha) fail("checkout HEAD is not the trusted base commit");
+          if ((await porcelain()).length !== 0) fail("checkout is not clean before publishing");
+          const baseTree = await git("rev-parse", "HEAD^{tree}");
+
+          // 3. The candidate lock is the base lock with only the commit line
+          //    changed; the provenance names that commit and this report.
+          const baseLockPath = path.join(checkout, LOCK);
+          const baseLockText = await readFile(baseLockPath, "utf8");
+          const baseLock = await release.readVerifiedLock(baseLockPath);
+          const candidateLock = JSON.parse(candidateLockText);
+          if (!COMMIT_RE.test(candidateLock.commit)) fail("candidate lock commit is not a full lowercase SHA-1");
+          if (candidateLock.commit === baseLock.commit) {
+            fail(
+              "candidate lock pins the commit the checkout already pins; a provenance-only bootstrap " +
+                "is not proposed automatically, commit upstream-release.json by hand",
+            );
+          }
+          if (candidateLockText !== discover.candidateLockText(baseLockText, baseLock, candidateLock.commit)) {
+            fail("candidate lock differs from the base lock in more than the commit line");
+          }
+          const provenance = discover.validateProvenance(JSON.parse(provenanceText), "candidate provenance");
+          if (provenance.commit !== candidateLock.commit) fail("candidate provenance commit differs from the candidate lock commit");
+          if (!same(result.candidate, provenance)) fail("report candidate differs from the emitted provenance record");
+          if (!same(result.candidateLock, { previousCommit: baseLock.commit, commit: candidateLock.commit })) {
+            fail("report candidateLock does not describe base -> candidate");
+          }
+          let current = null;
+          try {
+            current = discover.validateProvenance(JSON.parse(await readFile(path.join(checkout, PROVENANCE), "utf8")), "tracked provenance");
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+          if (current !== null) {
+            if (current.commit !== baseLock.commit) fail("tracked provenance does not name the base lock commit");
+            if (release.compareExactVersions(provenance.version, current.version) <= 0) {
+              fail(`candidate ${provenance.version} does not advance the tracked ${current.version}`);
+            }
+          }
+
+          // 4. Copy exactly the two files into the checkout and require that the
+          //    working tree shows nothing else. The diff is the reviewable change.
+          await copyFile(path.join(candidateDir, "source.lock.json"), path.join(checkout, LOCK));
+          await copyFile(path.join(candidateDir, "upstream-release.json"), path.join(checkout, PROVENANCE));
+          const status = (await porcelain()).sort();
+          const expectedStatus = [` M ${LOCK}`, current === null ? `?? ${PROVENANCE}` : ` M ${PROVENANCE}`].sort();
+          if (!same(status, expectedStatus)) fail(`unexpected working tree changes: ${JSON.stringify(status)}`);
+          const lockDiff = await run("git", ["--no-pager", "diff", "--", LOCK]);
+          process.stdout.write(lockDiff);
+
+          // 5. Deterministic branch; the two blobs are named by their git ids.
+          const branch = `${branchPrefix}${provenance.version}`;
+          const files = [
+            { path: LOCK, bytes: Buffer.from(candidateLockText, "utf8") },
+            { path: PROVENANCE, bytes: Buffer.from(provenanceText, "utf8") },
+          ].map((file) => ({ ...file, sha: blobSha(file.bytes) }));
+
+          const refs = await api("GET", `git/matching-refs/heads/${branch}`);
+          if (!Array.isArray(refs)) fail("matching-refs did not return a list");
+          const existing = refs.find((ref) => ref?.ref === `refs/heads/${branch}`) ?? null;
+          const pulls = (await api("GET", `pulls?state=all&base=${encodeURIComponent(baseBranch)}&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=100`)) ?? [];
+          if (!Array.isArray(pulls)) fail("pulls listing did not return a list");
+          const related = pulls.filter(
+            (pr) => pr?.head?.ref === branch && pr?.base?.ref === baseBranch && pr?.head?.repo?.full_name === repository && pr?.base?.repo?.full_name === repository,
+          );
+          const open = related.filter((pr) => pr.state === "open");
+          const closed = related.filter((pr) => pr.state !== "open");
+
+          let headSha;
+          let pr;
+          let reused = false;
+          if (existing !== null) {
+            // The branch already exists. It is reused only when its head is
+            // exactly the deterministic candidate commit and either an open PR
+            // owns that head or no PR was ever opened for it (a previous run
+            // failed between push and PR creation). Anything else is a
+            // collision that a person must resolve; nothing is overwritten.
+            if (existing.object?.type !== "commit" || !COMMIT_RE.test(existing.object?.sha ?? "")) fail(`branch ${branch} does not name a commit`);
+            headSha = existing.object.sha;
+            for (const file of files) {
+              const entry = await api("GET", `contents/${file.path}?ref=${headSha}`);
+              if (entry?.type !== "file" || entry?.sha !== file.sha) {
+                fail(
+                  `branch ${branch} already exists at ${headSha} with a different ${file.path}; ` +
+                    "refusing to overwrite it (no force push). Close its PR and delete the branch by hand.",
+                );
+              }
+            }
+
+            // Two matching blobs do not prove the head is the candidate: a
+            // branch can carry them beside extra files or extra commits.
+            // Require exactly the deterministic candidate commit: a single
+            // parent that is the trusted base commit or an ancestor of it on
+            // the base branch, and a tree that differs from that parent's
+            // tree in nothing but the two candidate blobs. Only such a head
+            // is reused or gets its missing PR created; anything else is
+            // refused before any write or dispatch.
+            const refuse = `branch ${branch} already exists at ${headSha}`;
+            const because = "refusing to reuse it (no force push). Close its PR and delete the branch by hand.";
+            const head = await api("GET", `git/commits/${headSha}`);
+            const parents = Array.isArray(head?.parents) ? head.parents : [];
+            if (head?.sha !== headSha || parents.length !== 1 || !COMMIT_RE.test(parents[0]?.sha ?? "")) {
+              fail(`${refuse} and that is not a single-parent commit; ${because}`);
+            }
+            const parentSha = parents[0].sha;
+            if (parentSha !== baseSha) {
+              const compare = await api("GET", `compare/${parentSha}...${baseSha}?per_page=1`);
+              if (compare?.status !== "ahead") fail(`${refuse} with parent ${parentSha}, which is not on ${baseBranch}; ${because}`);
+            }
+            const parentTree = parentSha === baseSha ? baseTree : (await api("GET", `git/commits/${parentSha}`))?.tree?.sha;
+            const headTree = head.tree?.sha;
+            if (!COMMIT_RE.test(parentTree ?? "") || !COMMIT_RE.test(headTree ?? "")) fail(`${refuse} and its tree or its parent's tree could not be read; ${because}`);
+            const isPlainFile = (entry) => entry?.type === "blob" && entry?.mode === "100644";
+            async function treeEntries(sha) {
+              const tree = await api("GET", `git/trees/${sha}`);
+              if (tree?.sha !== sha || tree.truncated === true || !Array.isArray(tree.tree)) fail(`${refuse} and tree ${sha} could not be listed completely; ${because}`);
+              return new Map(tree.tree.map((entry) => [entry?.path, entry]));
+            }
+            // Leaf differences between two trees, descending only into
+            // subtrees that differ and stopping as soon as more than the two
+            // candidate paths differ.
+            async function treeChanges(fromSha, toSha, prefix, changes) {
+              if (fromSha === toSha) return changes;
+              const from = await treeEntries(fromSha);
+              const to = await treeEntries(toSha);
+              for (const name of new Set([...from.keys(), ...to.keys()])) {
+                const a = from.get(name) ?? null;
+                const b = to.get(name) ?? null;
+                if (a !== null && b !== null && a.sha === b.sha && a.mode === b.mode && a.type === b.type) continue;
+                if (a?.type === "tree" && b?.type === "tree") await treeChanges(a.sha, b.sha, `${prefix}${name}/`, changes);
+                else changes.push({ path: `${prefix}${name}`, from: a, to: b });
+                if (changes.length > files.length) fail(`${refuse} and differs from its parent in more than the two candidate files; ${because}`);
+              }
+              return changes;
+            }
+            const changes = await treeChanges(parentTree, headTree, "", []);
+            const changedPaths = changes.map((change) => change.path).sort();
+            const expectedPaths = files.map((file) => file.path).sort();
+            if (!same(changedPaths, expectedPaths)) {
+              fail(`${refuse} and changes ${JSON.stringify(changedPaths)} against its parent, not exactly ${JSON.stringify(expectedPaths)}; ${because}`);
+            }
+            for (const change of changes) {
+              const file = files.find((candidate) => candidate.path === change.path);
+              if (!isPlainFile(change.to) || change.to.sha !== file.sha) fail(`${refuse} and ${change.path} at its head is not the expected plain candidate file; ${because}`);
+              if (change.from !== null && !isPlainFile(change.from)) fail(`${refuse} and ${change.path} replaces something other than a plain file; ${because}`);
+            }
+
+            if (open.length > 1) fail(`branch ${branch} has ${open.length} open PRs; expected at most one`);
+            if (open.length === 1) {
+              if (open[0].head.sha !== headSha) fail(`PR #${open[0].number} head ${open[0].head.sha} differs from branch head ${headSha}`);
+              pr = open[0];
+              reused = true;
+            } else if (closed.length > 0) {
+              fail(`branch ${branch} exists and its PR #${closed[0].number} is closed; not reopening it automatically`);
+            }
+          } else {
+            if (related.length > 0) fail(`no branch ${branch}, but PR #${related[0].number} already used that name; refusing to recreate it`);
+            for (const file of files) {
+              const blob = await api("POST", "git/blobs", { content: file.bytes.toString("base64"), encoding: "base64" });
+              if (blob?.sha !== file.sha) fail(`uploaded blob for ${file.path} is ${blob?.sha}, expected ${file.sha}`);
+            }
+            const tree = await api("POST", "git/trees", {
+              base_tree: baseTree,
+              tree: files.map((file) => ({ path: file.path, mode: "100644", type: "blob", sha: file.sha })),
+            });
+            if (!COMMIT_RE.test(tree?.sha ?? "")) fail("tree creation did not return a sha");
+            const message =
+              `t3: follow upstream Nightly ${provenance.version}\n\n` +
+              `Upstream ${provenance.tag} (release ${provenance.releaseId}, published ${provenance.publishedAt}).\n` +
+              `Pinned commit ${baseLock.commit} -> ${provenance.commit}.\n\n` +
+              `Proposed by ${runUrl}\n`;
+            const commit = await api("POST", "git/commits", { message, tree: tree.sha, parents: [baseSha] });
+            if (!COMMIT_RE.test(commit?.sha ?? "")) fail("commit creation did not return a sha");
+            const ref = await api("POST", "git/refs", { ref: `refs/heads/${branch}`, sha: commit.sha });
+            if (ref?.object?.sha !== commit.sha) fail(`branch ${branch} was not created at ${commit.sha}`);
+            headSha = commit.sha;
+          }
+
+          if (pr === undefined) {
+            const body =
+              "Automated managed Nightly candidate from the trusted discovery workflow.\n\n" +
+              "| | |\n|---|---|\n" +
+              `| Upstream tag | \`${provenance.tag}\` |\n` +
+              `| Release id | ${provenance.releaseId} |\n` +
+              `| Published | ${provenance.publishedAt} |\n` +
+              `| Previous commit | \`${baseLock.commit}\` |\n` +
+              `| Candidate commit | \`${provenance.commit}\` |\n\n` +
+              `This PR changes exactly \`${LOCK}\` (commit line only) and \`${PROVENANCE}\`. ` +
+              `Both catalog variants applied cleanly to the candidate commit in ${runUrl}. ` +
+              "The exact-head checker `t3-managed-nightly-candidate` is dispatched for the pushed head and " +
+              "publishes its verdict as the `t3-managed-nightly-candidate` commit status. " +
+              "Do not push further commits to this branch; close it and rerun discovery instead.\n";
+            pr = await api("POST", "pulls", {
+              title: `t3: follow upstream Nightly ${provenance.version}`,
+              head: branch,
+              base: baseBranch,
+              body,
+            });
+            if (!Number.isSafeInteger(pr?.number) || pr?.head?.sha !== headSha) fail("PR creation did not return the expected head");
+          }
+
+          // 6. Explicit checker dispatch on the trusted default branch.
+          await api("POST", `actions/workflows/${checkerWorkflow}/dispatches`, {
+            ref: baseBranch,
+            inputs: { pull_request_number: String(pr.number), head_sha: headSha },
+          });
+
+          const lines = [
+            `branch=${branch}`,
+            `head_sha=${headSha}`,
+            `pull_request=${pr.number}`,
+            `pull_request_url=${pr.html_url ?? ""}`,
+            `reused=${reused}`,
+          ];
+          if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `${lines.join("\n")}\n`);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            await appendFile(
+              process.env.GITHUB_STEP_SUMMARY,
+              `- candidate PR: #${pr.number} (${reused ? "reused" : "created"}) on \`${branch}\` at \`${headSha}\`\n` +
+                `- checker dispatched: \`${checkerWorkflow}\` on \`${baseBranch}\` for head \`${headSha}\`\n`,
+            );
+          }
+          console.log(`publish-candidate: PR #${pr.number} ${reused ? "reused" : "created"} at ${headSha}; checker dispatched`);
+          PUBLISH_CANDIDATE_EOF
+          node "${RUNNER_TEMP}/publish-candidate.mjs"

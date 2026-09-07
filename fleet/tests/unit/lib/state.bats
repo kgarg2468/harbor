@@ -34,7 +34,11 @@ setup() {
   LOCK_SHA=3b1f9e2c4d5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e
   FLAGS='operator=harbor authorized-key-source=/home/ubuntu/.ssh/authorized_keys adopt-firewall=no adopt-tailscale=no allow-lan-ssh=no harden-sshd=no tailscale-ssh=no'
   NODEJS=22.16.0
-  TSOWN=pre-existing
+  # The default pair is an ownership Harbor holds and the version it holds it at, so the
+  # key order test below reads a version rather than the blank a pre-existing Tailscale
+  # renders; the blanking is asserted where the vocabulary is.
+  TSOWN=harbor-installed
+  TSVER=1.86.2
   OPERATOR=harbor
   OPUID=4242
   OPGID=4243
@@ -49,7 +53,7 @@ teardown() {
 record() {
   # The row as node/bootstrap.sh calls it, with this test's values.
   harbor_state_record "${FIX_ROOT}" "${TAG}" "${ENTRYPOINT}" "${LOCK_SHA}" "${FLAGS}" \
-    "${NODEJS}" "${TSOWN}" "${OPERATOR}" "${OPUID}" "${OPGID}" "${OPHOME}"
+    "${NODEJS}" "${TSOWN}" "${TSVER}" "${OPERATOR}" "${OPUID}" "${OPGID}" "${OPHOME}"
 }
 
 key_raw() {
@@ -61,7 +65,7 @@ key_raw() {
 seed_record() {
   # seed_record TAG TIMESTAMP: a record an earlier run of this row left behind.
   harbor_state_record_render "${1}" "${ENTRYPOINT}" "${LOCK_SHA}" "${FLAGS}" "${NODEJS}" \
-    "${TSOWN}" "${OPERATOR}" "${OPUID}" "${OPGID}" "${OPHOME}" "${2}" >"${RECORD}"
+    "${TSOWN}" "${TSVER}" "${OPERATOR}" "${OPUID}" "${OPGID}" "${OPHOME}" "${2}" >"${RECORD}"
   chmod 0644 "${RECORD}"
 }
 
@@ -89,13 +93,14 @@ assert_entry() {
   assert_line --index 4 "  \"flags\": \"${FLAGS}\","
   assert_line --index 5 "  \"nodejs_version\": \"${NODEJS}\","
   assert_line --index 6 "  \"tailscale_ownership\": \"${TSOWN}\","
-  assert_line --index 7 "  \"operator\": \"${OPERATOR}\","
-  assert_line --index 8 "  \"operator_uid\": ${OPUID},"
-  assert_line --index 9 "  \"operator_gid\": ${OPGID},"
-  assert_line --index 10 "  \"operator_home\": \"${OPHOME}\","
-  assert_line --index 11 "  \"timestamp\": \"${stamp}\""
-  assert_line --index 12 '}'
-  assert_equal "${#lines[@]}" 13
+  assert_line --index 7 "  \"tailscale_version\": \"${TSVER}\","
+  assert_line --index 8 "  \"operator\": \"${OPERATOR}\","
+  assert_line --index 9 "  \"operator_uid\": ${OPUID},"
+  assert_line --index 10 "  \"operator_gid\": ${OPGID},"
+  assert_line --index 11 "  \"operator_home\": \"${OPHOME}\","
+  assert_line --index 12 "  \"timestamp\": \"${stamp}\""
+  assert_line --index 13 '}'
+  assert_equal "${#lines[@]}" 14
   # The timestamp is the one format design section 5.7 compares lexicographically, UTC
   # at one-second resolution.
   assert_regex "${stamp}" '^[0-9]{8}T[0-9]{6}Z$'
@@ -154,21 +159,28 @@ assert_entry() {
   assert_output 0001-file.json
 }
 
-@test "the Tailscale ownership is one of the three design section 5.2 names, with no version key here" {
-  # This release installs no Tailscale and adopts none, so pre-existing is what
-  # node/bootstrap.sh records and no version key is written beside it. The other two
-  # words are the vocabulary slice 3d makes reachable, and the version key is its own to
-  # add: this library refuses anything outside the three and invents no version.
+@test "the Tailscale ownership is one of the three design section 5.2 names, and the version is named only beside the two Harbor holds" {
+  # All three words are accepted, and each decides for itself whether a version is named
+  # beside it. A harbor-installed or an adopted Tailscale is one Harbor moved to the lock,
+  # so the version it has is the record's to carry; a pre-existing one is neither, so the
+  # key is blank however loudly the caller passes a version. Anything outside the three is
+  # refused, because a record naming an ownership teardown cannot read is one Harbor would
+  # have to refuse to act on later.
   local word
-  for word in pre-existing harbor-installed adopted; do
+  for word in harbor-installed adopted; do
     rm -f "${RECORD}"
     TSOWN="${word}"
     run record
     assert_success
     assert_equal "$(key_raw tailscale_ownership)" "\"${word}\""
-    run cat "${RECORD}"
-    refute_output --partial 'tailscale_version'
+    assert_equal "$(key_raw tailscale_version)" "\"${TSVER}\""
   done
+  rm -f "${RECORD}"
+  TSOWN=pre-existing
+  run record
+  assert_success
+  assert_equal "$(key_raw tailscale_ownership)" '"pre-existing"'
+  assert_equal "$(key_raw tailscale_version)" '""'
   rm -f "${RECORD}"
   TSOWN=installed
   run record
@@ -176,6 +188,30 @@ assert_entry() {
   assert_output --partial 'state.tailscale_ownership'
   assert_output --partial 'installed'
   assert [ ! -e "${RECORD}" ]
+}
+
+@test "an ownership Harbor holds with no version is refused with nothing written" {
+  # The version is the pin section 6.4's harbor upgrade compares the installed daemon
+  # against, so an ownership that claims Harbor put the daemon there and names no version
+  # is a record no later command could use. The refusal is raised where the ownership and
+  # the uid and gid refusals are, before anything is rendered and before an entry exists.
+  run record
+  assert_success
+  local word
+  TSVER=""
+  for word in harbor-installed adopted; do
+    rm -f "${RECORD}"
+    TSOWN="${word}"
+    run record
+    assert_equal "${status}" 3
+    assert_output --partial 'state.tailscale_version'
+    assert_output --partial "${word}"
+    assert [ ! -e "${RECORD}" ]
+  done
+  # Neither refusal journaled anything: both run before the entry is created, so the
+  # journal still holds only the entry the successful call above wrote.
+  run ls -A "${FIX_ROOT}/journal"
+  assert_output 0001-file.json
 }
 
 @test "a rerun that finds the record identical journals observed, rewrites nothing, and keeps the timestamp" {
