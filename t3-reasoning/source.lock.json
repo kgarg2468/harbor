@@ -89,14 +89,14 @@
       "sha256": "a6be628e58c97494288906820fdedb40a3aec873fb7a9a0980022c29c1a5255e"
     },
     {
-      "id": "native-activity",
-      "path": "patches/0015-native-activity.patch",
-      "sha256": "0ddc965500d08328f1c89050650a7d3b6b148c3363e6003b31814bb79c2c5f43"
-    },
-    {
       "id": "managed-queue-handoff",
       "path": "patches/0021-managed-queue-handoff.patch",
       "sha256": "9097865599e7caafb54260c0097f8459c2d59914b321f5b846fd94d8601a3f27"
+    },
+    {
+      "id": "native-activity",
+      "path": "patches/0015-native-activity.patch",
+      "sha256": "0ddc965500d08328f1c89050650a7d3b6b148c3363e6003b31814bb79c2c5f43"
     },
     {
       "id": "idle-preparation",
@@ -127,8 +127,8 @@
       "managed-runtime-transaction",
       "shared-default",
       "managed-release-feed",
-      "native-activity",
       "managed-queue-handoff",
+      "native-activity",
       "idle-preparation"
     ],
     "reasoning": [
@@ -148,8 +148,8 @@
       "managed-runtime-transaction",
       "shared-default",
       "managed-release-feed",
-      "native-activity",
       "managed-queue-handoff",
+      "native-activity",
       "idle-preparation",
       "reasoning-identity"
     ]
