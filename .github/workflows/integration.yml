@@ -192,7 +192,13 @@ jobs:
       - name: Record what the lane's own stub answers (evidence of nothing)
         run: |
           set -euo pipefail
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get purge -y tailscale
+          # Only if there is one to purge. The reading above may have made no
+          # measurement at all -- the Ubuntu archive on this image carries no
+          # tailscale -- and apt-get purge exits 100 for a package it cannot even
+          # name, which would fail this step over the absence it is trying to create.
+          if dpkg-query -s tailscale >/dev/null 2>&1; then
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get purge -y tailscale
+          fi
           # A vendor source written by the opt-in reading above must go before the
           # local repository is built, or the local repository would inherit it.
           sudo rm -f /etc/apt/sources.list.d/tailscale.list

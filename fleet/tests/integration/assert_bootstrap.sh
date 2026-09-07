@@ -19,6 +19,20 @@ set -euo pipefail
   exit 1
 }
 
+# --after-recovery: this node reached its state through a crash and a rerun rather
+# than a single clean run, which changes exactly one thing about what the journal may
+# hold. Everything else asserted below is the same node either way, which is the whole
+# claim the converge legs exist to make.
+after_recovery=0
+case "${1:-}" in
+  --after-recovery) after_recovery=1 ;;
+  '') ;;
+  *)
+    printf 'assert_bootstrap.sh: unknown argument %s\n' "${1}" >&2
+    exit 1
+    ;;
+esac
+
 scenario="$(cat "${IT_SCENARIO_FILE}")"
 tag="$(it_release_tag)"
 release="${IT_INSTALL_ROOT}/${tag}"
@@ -323,7 +337,23 @@ it_contains 'record says Harbor installed Tailscale' \
 # ---------------------------------------------------------------------------
 section 'the journal'
 # ---------------------------------------------------------------------------
-it_eq 'every entry is applied' applied "$(it_journal_phases | tr '\n' ' ' | sed 's/ *$//')"
+phases="$(it_journal_phases | tr '\n' ' ' | sed 's/ *$//')"
+if [ "${after_recovery}" = 1 ]; then
+  # A crash on a prepared entry is reverted by the recovery scan of the rerun, and
+  # that is design section 3.7 deciding the mutation never happened rather than damage
+  # left behind: the observed state matched the entry's pre_state exactly. So after a
+  # converge leg the journal legitimately carries reverted entries beside applied
+  # ones, and only a phase that is neither is a finding. A prepared entry surviving
+  # the rerun would be one, and so would an undecidable one.
+  case "${phases}" in
+    applied | 'applied reverted' | reverted)
+      it_pass "every entry is applied or reverted (${phases})"
+      ;;
+    *) it_fail "a journal entry is neither applied nor reverted: ${phases}" ;;
+  esac
+else
+  it_eq 'every entry is applied' applied "${phases}"
+fi
 created="$(it_journal_count created)"
 observed="$(it_journal_count observed)"
 if [ "${created}" -gt 0 ]; then
