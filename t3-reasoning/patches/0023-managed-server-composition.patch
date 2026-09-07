@@ -1,0 +1,733 @@
+diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
+index 1f4083d1..5e3a4591 100644
+--- a/apps/server/src/server.test.ts
++++ b/apps/server/src/server.test.ts
+@@ -55,10 +55,12 @@ import { assert, it } from "@effect/vitest";
+ import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
+ import * as Clock from "effect/Clock";
+ import * as Config from "effect/Config";
++import * as Context from "effect/Context";
+ import * as Deferred from "effect/Deferred";
+ import * as DateTime from "effect/DateTime";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+@@ -68,6 +70,7 @@ import * as PubSub from "effect/PubSub";
+ import * as Ref from "effect/Ref";
+ import * as Queue from "effect/Queue";
+ import * as Schema from "effect/Schema";
++import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ import * as TestClock from "effect/testing/TestClock";
+ import * as Tracer from "effect/Tracer";
+@@ -95,9 +98,34 @@ const decodeTransferShellSnapshot = Schema.decodeUnknownEffect(
+ );
+ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+ 
++import packageJson from "../package.json" with { type: "json" };
+ import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+ import * as ServerConfig from "./config.ts";
+-import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
++import {
++  HTTP_ROUTER_CONFIG,
++  makeManagedUpdateRuntimeLayer,
++  makeRoutesLayer,
++  makeSelectionBoundManagedRuntimeResolver,
++  resolveManagedServerTarget,
++} from "./server.ts";
++import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
++import * as IdleUpdatePreparation from "./cloud/idleUpdatePreparation.ts";
++import {
++  MANAGED_RELEASE_REPOSITORY,
++  MANAGED_RELEASE_TAG_PREFIX,
++  type ManagedReleaseSelection,
++} from "./cloud/managedReleaseSource.ts";
++import { ManagedArtifactSourceError, type ManagedRuntimeStager } from "./cloud/managedRuntime.ts";
++import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
++import type { ProviderIdleRetirementResult } from "./provider/Services/ProviderAdapter.ts";
++import {
++  type ProviderIdlePreparationResult,
++  type ProviderIdlePreparationToken,
++  ProviderIdlePreparationTokenTypeId,
++} from "./provider/Services/ProviderService.ts";
++import type { ResourceMonitorLinuxLibc } from "./resourceTelemetry/ResourceMonitorBinary.ts";
++import { UpdateActivity, UpdateActivityLive } from "./updateActivity.ts";
++import * as UpdateAdmission from "./updateAdmission.ts";
+ import {
+   isThreadDetailEvent,
+   resolveAvailableEditorsForConfig,
+@@ -11362,6 +11390,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
+   );
+ });
+ 
++// The production managed-update composition, built over fakes at the exact
++// layer boundary `server.ts` uses. No transport consumes `QueuedUpdate` yet, so
++// caller independence is proven with short-lived caller scopes rather than
++// route or WebSocket clients; that coverage belongs with the future trigger.
++it.layer(NodeServices.layer)("managed update composition", (it) => {
++  const MANAGED_TARGET = "0.0.38-nightly.20260906.1.managed.1.p6d1933416d7a";
++  const MANAGED_NEWER = "0.0.38-nightly.20260906.1.managed.2.p6d1933416d7a";
++  const MANAGED_UNKNOWN = "0.0.38-nightly.20260906.1.managed.3.p6d1933416d7a";
++  const NOT_PREPARED = "busy: idle providers are not prepared";
++  const ADMISSION_BUSY = "client commands or another maintenance own update admission";
++
++  /** A distinguishable selection whose source and archive are never meant to be touched. */
++  const makeSelection = (version: string, cut: number): ManagedReleaseSelection => ({
++    repository: MANAGED_RELEASE_REPOSITORY,
++    releaseId: cut,
++    tag: `${MANAGED_RELEASE_TAG_PREFIX}${version}`,
++    version,
++    publishedAt: "2026-09-06T00:00:00Z",
++    githubImmutable: true,
++    manifestSha256: "a".repeat(64),
++    releaseInputSha256: "b".repeat(64),
++    artifactId: `managed-server-darwin-arm64@sha256:${String(cut).repeat(64)}`,
++    source: {
++      readDocuments: () => Effect.die(`release documents for ${version} must not be read`),
++      openArchive: () => Effect.die(`archive for ${version} must not be opened`),
++    },
++  });
++
++  interface ManagedCalls {
++    readonly resolve: Array<string>;
++    stage: number;
++    verify: number;
++    launcher: number;
++    prepare: number;
++    check: number;
++  }
++
++  /**
++   * Builds `makeManagedUpdateRuntimeLayer` the way production does, over a
++   * temp base directory, a fake exact resolver, fake launcher, fake provider
++   * hooks, and the real gates, in a manually owned server scope. `hold`
++   * gates each fake staging attempt so tests can observe it in flight.
++   */
++  const makeManagedFixture = Effect.fn("makeManagedFixture")(function* (input: {
++    readonly hold: (targetVersion: string) => Effect.Effect<void>;
++  }) {
++    const fs = yield* FileSystem.FileSystem;
++    const path = yield* Path.Path;
++    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-composition-" });
++    const statePath = path.join(baseDir, "runtime", "queued-update.json");
++    const dbPath = path.join(baseDir, "userdata", "state.sqlite");
++    const calls: ManagedCalls = {
++      resolve: [],
++      stage: 0,
++      verify: 0,
++      launcher: 0,
++      prepare: 0,
++      check: 0,
++    };
++    const token: ProviderIdlePreparationToken = {
++      [ProviderIdlePreparationTokenTypeId]: ProviderIdlePreparationTokenTypeId,
++    };
++
++    const providerLayer = Layer.mock(ProviderService.ProviderService)({
++      prepareIdleRetirement: () =>
++        Effect.sync((): ProviderIdlePreparationResult => {
++          calls.prepare += 1;
++          return { status: "prepared", token };
++        }),
++      checkIdleRetirementReadiness: (candidate) =>
++        Effect.sync((): ProviderIdleRetirementResult => {
++          calls.check += 1;
++          return candidate === token
++            ? { status: "retired" }
++            : { status: "blocked", reason: "token was not issued by this service" };
++        }),
++    });
++    const launcherLayer = Layer.succeed(
++      ServiceLauncherClient.ServiceLauncherClient,
++      ServiceLauncherClient.ServiceLauncherClient.of({
++        managed: true,
++        requestUpdate: () =>
++          Effect.suspend(() => {
++            calls.launcher += 1;
++            return Effect.fail(
++              new ServiceLauncherClient.ServiceLauncherClientError({ operation: "unmanaged" }),
++            );
++          }),
++        prepareTrial: Effect.succeed(undefined),
++      }),
++    );
++    const resolve = makeSelectionBoundManagedRuntimeResolver({
++      feed: {
++        resolve: (exactVersion) =>
++          Effect.sync(() => {
++            calls.resolve.push(exactVersion);
++            return makeSelection(exactVersion, calls.resolve.length);
++          }),
++      },
++      makeStager: (selection) =>
++        Effect.succeed<ManagedRuntimeStager>({
++          stage: (targetVersion) =>
++            Effect.suspend(() => {
++              calls.stage += 1;
++              return input
++                .hold(targetVersion)
++                .pipe(Effect.as({ version: selection.version, artifactId: selection.artifactId }));
++            }),
++          verifyStaged: () =>
++            Effect.suspend(() => {
++              calls.verify += 1;
++              return Effect.die("staged runtime verification must not run in this slice");
++            }),
++        }),
++    });
++
++    const serverScope = yield* Scope.make();
++    yield* Effect.addFinalizer(() => Scope.close(serverScope, Exit.void));
++    const context = yield* Layer.buildWithScope(
++      makeManagedUpdateRuntimeLayer({
++        statePath,
++        installedVersion: packageJson.version,
++        pollInterval: Duration.seconds(30),
++        dbPath,
++        resolve,
++      }).pipe(
++        Layer.provideMerge(Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer)),
++        Layer.provide(Layer.mergeAll(providerLayer, launcherLayer)),
++      ),
++      serverScope,
++    );
++
++    return {
++      baseDir,
++      statePath,
++      calls,
++      queue: Context.get(context, QueuedUpdate.QueuedUpdate),
++      preparation: Context.get(context, IdleUpdatePreparation.IdleUpdatePreparation),
++      coordinator: Context.get(context, IdleUpdateCoordinator.IdleUpdateCoordinator),
++      activity: Context.get(context, UpdateActivity),
++      admission: Context.get(context, UpdateAdmission.UpdateAdmission),
++      closeServer: Scope.close(serverScope, Exit.void),
++    };
++  });
++
++  const untouched: ManagedCalls = {
++    resolve: [],
++    stage: 0,
++    verify: 0,
++    launcher: 0,
++    prepare: 0,
++    check: 0,
++  };
++
++  it.effect("ships managed updates only to Darwin arm64 and Linux x64 glibc", () =>
++    Effect.sync(() => {
++      assert.deepStrictEqual(resolveManagedServerTarget("darwin", "arm64", undefined), {
++        platform: "darwin",
++        arch: "arm64",
++      });
++      assert.deepStrictEqual(resolveManagedServerTarget("linux", "x64", "gnu"), {
++        platform: "linux",
++        arch: "x64",
++        libc: "glibc",
++      });
++      const unsupported: ReadonlyArray<
++        readonly [NodeJS.Platform, NodeJS.Architecture, ResourceMonitorLinuxLibc | undefined]
++      > = [
++        ["linux", "x64", "musl"],
++        ["linux", "x64", undefined],
++        ["linux", "arm64", "gnu"],
++        ["linux", "arm64", "musl"],
++        ["darwin", "x64", undefined],
++        ["win32", "x64", undefined],
++        ["win32", "arm64", undefined],
++        ["freebsd", "x64", undefined],
++      ];
++      for (const [platform, architecture, libc] of unsupported) {
++        assert.isUndefined(
++          resolveManagedServerTarget(platform, architecture, libc),
++          `${platform}-${architecture}-${libc ?? "none"}`,
++        );
++      }
++    }),
++  );
++
++  it.effect("binds each exact resolution to its own selection and stager", () =>
++    Effect.gen(function* () {
++      const targetSelection = makeSelection(MANAGED_TARGET, 1);
++      const newerSelection = makeSelection(MANAGED_NEWER, 2);
++      const selections = new Map([
++        [MANAGED_TARGET, targetSelection],
++        [MANAGED_NEWER, newerSelection],
++      ]);
++      const requested: Array<string> = [];
++      const stagers = new Map<ManagedReleaseSelection, ManagedRuntimeStager>();
++      const resolve = makeSelectionBoundManagedRuntimeResolver({
++        // Only `resolve`: the helper's accepted feed interface has no `latest`.
++        feed: {
++          resolve: (exactVersion) =>
++            Effect.suspend(() => {
++              requested.push(exactVersion);
++              const selection = selections.get(exactVersion);
++              return selection === undefined
++                ? Effect.fail(
++                    new ManagedArtifactSourceError({ reason: `no release for ${exactVersion}` }),
++                  )
++                : Effect.succeed(selection);
++            }),
++        },
++        makeStager: (selection) =>
++          Effect.sync((): ManagedRuntimeStager => {
++            const stager: ManagedRuntimeStager = {
++              stage: () => Effect.die(`stager for ${selection.version} must not stage here`),
++              verifyStaged: () =>
++                Effect.die(`stager for ${selection.version} must not verify here`),
++            };
++            stagers.set(selection, stager);
++            return stager;
++          }),
++      });
++
++      const first = yield* resolve(MANAGED_TARGET);
++      const second = yield* resolve(MANAGED_NEWER);
++      assert.deepStrictEqual(requested, [MANAGED_TARGET, MANAGED_NEWER]);
++      assert.strictEqual(first.version, MANAGED_TARGET);
++      assert.strictEqual(first.artifactId, targetSelection.artifactId);
++      assert.strictEqual(first.stager, stagers.get(targetSelection));
++      assert.strictEqual(second.version, MANAGED_NEWER);
++      assert.strictEqual(second.artifactId, newerSelection.artifactId);
++      assert.strictEqual(second.stager, stagers.get(newerSelection));
++      assert.notStrictEqual(first.stager, second.stager);
++      assert.strictEqual(stagers.size, 2);
++
++      const failure = yield* resolve(MANAGED_UNKNOWN).pipe(Effect.flip);
++      assert.instanceOf(failure, ManagedArtifactSourceError);
++      assert.deepStrictEqual(requested, [MANAGED_TARGET, MANAGED_NEWER, MANAGED_UNKNOWN]);
++      assert.strictEqual(stagers.size, 2);
++    }),
++  );
++
++  it.effect(
++    "builds a dormant queue, preparation owner, and coordinator without starting work",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fs = yield* FileSystem.FileSystem;
++          const fixture = yield* makeManagedFixture({ hold: () => Effect.void });
++          yield* Effect.yieldNow;
++
++          assert.deepStrictEqual(fixture.calls, untouched);
++          assert.include(yield* fixture.queue.getState, {
++            stage: "current",
++            installedVersion: packageJson.version,
++            targetVersion: packageJson.version,
++            handoffAccepted: false,
++            durable: true,
++          });
++          assert.deepStrictEqual(yield* fixture.preparation.state, { phase: "idle" });
++          assert.deepStrictEqual(yield* fixture.coordinator.state, { phase: "ready" });
++          assert.include(yield* fixture.activity.state, { phase: "open", outstanding: 0 });
++          assert.deepStrictEqual(yield* fixture.admission.state, { phase: "open", inFlight: 0 });
++          // A clean installation writes nothing: the state file only exists once a target is queued.
++          assert.isFalse(yield* fs.exists(fixture.statePath));
++          assert.deepStrictEqual(yield* fs.readDirectory(fixture.baseDir), []);
++        }),
++      ),
++  );
++
++  it.effect("owns one queue worker that outlives callers and stops with the server scope", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const targetStarted = yield* Deferred.make<void>();
++        const targetRelease = yield* Deferred.make<void>();
++        const newerStarted = yield* Deferred.make<void>();
++        const newerInterrupted = yield* Deferred.make<void>();
++        const fixture = yield* makeManagedFixture({
++          hold: (targetVersion) =>
++            targetVersion === MANAGED_TARGET
++              ? Deferred.succeed(targetStarted, undefined).pipe(
++                  Effect.andThen(Deferred.await(targetRelease)),
++                )
++              : Deferred.succeed(newerStarted, undefined).pipe(
++                  Effect.andThen(Effect.never),
++                  Effect.onInterrupt(() => Deferred.succeed(newerInterrupted, undefined)),
++                ),
++        });
++
++        // Two short-lived callers issue the same durable command.
++        const callerA = yield* Scope.make();
++        const callerB = yield* Scope.make();
++        const commandA = yield* Effect.forkIn(fixture.queue.queue(MANAGED_TARGET), callerA);
++        const commandB = yield* Effect.forkIn(fixture.queue.queue(MANAGED_TARGET), callerB);
++        const [stateA, stateB] = yield* Effect.all([Fiber.join(commandA), Fiber.join(commandB)]);
++        assert.include(stateA, {
++          stage: "downloading",
++          targetVersion: MANAGED_TARGET,
++          durable: true,
++        });
++        assert.include(stateB, {
++          stage: "downloading",
++          targetVersion: MANAGED_TARGET,
++          durable: true,
++        });
++
++        yield* Deferred.await(targetStarted);
++        assert.deepStrictEqual(fixture.calls.resolve, [MANAGED_TARGET]);
++        assert.strictEqual(fixture.calls.stage, 1);
++
++        // Ending both callers while staging is held does not cancel the server-owned worker.
++        yield* Scope.close(callerA, Exit.void);
++        yield* Scope.close(callerB, Exit.void);
++        yield* Effect.yieldNow;
++        assert.strictEqual((yield* fixture.queue.getState).stage, "downloading");
++        yield* Deferred.succeed(targetRelease, undefined);
++
++        // Staged, then the automatic activation attempt is declined by the
++        // coordinator because nothing has requested idle preparation.
++        const declined = yield* fixture.queue.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.deepStrictEqual(declined.staged, {
++          version: MANAGED_TARGET,
++          artifactId: makeSelection(MANAGED_TARGET, 1).artifactId,
++        });
++        assert.strictEqual(declined.reason, NOT_PREPARED);
++        assert.deepStrictEqual(fixture.calls.resolve, [MANAGED_TARGET]);
++        assert.strictEqual(fixture.calls.stage, 1);
++        assert.strictEqual(fixture.calls.verify, 0);
++        assert.strictEqual(fixture.calls.launcher, 0);
++        assert.strictEqual(fixture.calls.prepare, 0);
++        assert.include(yield* fixture.activity.state, { phase: "open", outstanding: 0 });
++        assert.deepStrictEqual(yield* fixture.admission.state, { phase: "open", inFlight: 0 });
++
++        // Durable state lives only at the fixed production path under the base directory.
++        assert.isTrue(yield* fs.exists(fixture.statePath));
++        assert.deepStrictEqual(yield* fs.readDirectory(fixture.baseDir), ["runtime"]);
++        assert.deepStrictEqual(yield* fs.readDirectory(path.join(fixture.baseDir, "runtime")), [
++          "queued-update.json",
++        ]);
++
++        // Closing the server scope interrupts a pending stage and waits for its finalizer.
++        yield* fixture.queue.queue(MANAGED_NEWER);
++        yield* Deferred.await(newerStarted);
++        assert.deepStrictEqual(fixture.calls.resolve, [MANAGED_TARGET, MANAGED_NEWER]);
++        assert.isFalse(yield* Deferred.isDone(newerInterrupted));
++        yield* fixture.closeServer;
++        assert.isTrue(yield* Deferred.isDone(newerInterrupted));
++      }),
++    ),
++  );
++
++  it.effect("preparation and coordinator share the runtime's activity and admission gates", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* makeManagedFixture({ hold: () => Effect.void });
++        let handoffs = 0;
++        const attempt = fixture.coordinator.tryActivate(
++          () =>
++            Effect.sync((): QueuedUpdate.ActivationDeclined => {
++              handoffs += 1;
++              return { status: "busy", reason: "test handoff declined" };
++            }),
++          Effect.void,
++        );
++
++        // An agent lease taken from the shared registry blocks both.
++        const lease = yield* fixture.activity.acquire("agent turn");
++        assert.deepStrictEqual(yield* fixture.preparation.request, {
++          phase: "busy",
++          reason: "1 agent operation(s) in flight",
++        });
++        assert.deepStrictEqual(yield* attempt, {
++          status: "busy",
++          reason: "1 agent operation(s) in flight",
++        });
++        lease.release();
++
++        // A client command admitted through the shared gate blocks both.
++        yield* fixture.admission.withAdmission(
++          Effect.gen(function* () {
++            assert.deepStrictEqual(yield* fixture.preparation.request, { phase: "preparing" });
++            assert.deepStrictEqual(yield* fixture.preparation.settled, {
++              phase: "busy",
++              reason: ADMISSION_BUSY,
++            });
++            assert.deepStrictEqual(yield* attempt, { status: "busy", reason: ADMISSION_BUSY });
++          }),
++        );
++        assert.strictEqual(fixture.calls.prepare, 0);
++        assert.strictEqual(handoffs, 0);
++
++        // Idle: preparation retires through the provider and the coordinator
++        // seals on that exact proof, then a declined handoff reopens both gates.
++        assert.deepStrictEqual(yield* fixture.preparation.request, { phase: "preparing" });
++        assert.deepStrictEqual(yield* fixture.preparation.settled, { phase: "prepared" });
++        assert.strictEqual(fixture.calls.prepare, 1);
++        assert.deepStrictEqual(yield* attempt, { status: "busy", reason: "test handoff declined" });
++        assert.strictEqual(handoffs, 1);
++        assert.strictEqual(fixture.calls.check, 1);
++        assert.deepStrictEqual(yield* fixture.preparation.state, { phase: "prepared" });
++        assert.deepStrictEqual(yield* fixture.coordinator.state, { phase: "ready" });
++        assert.include(yield* fixture.activity.state, {
++          phase: "open",
++          outstanding: 0,
++          idleShutdownAuthorized: false,
++        });
++        assert.deepStrictEqual(yield* fixture.admission.state, { phase: "open", inFlight: 0 });
++        assert.deepStrictEqual(fixture.calls.resolve, []);
++        assert.strictEqual(fixture.calls.launcher, 0);
++      }),
++    ),
++  );
++});
++
+ it.live(
+   "reports thread HTTP and WebSocket transfer budgets",
+   () =>
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 7e4543a5..bbd73aec 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -4,11 +4,13 @@ import * as Duration from "effect/Duration";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
+ import * as Schedule from "effect/Schedule";
+ import * as Stream from "effect/Stream";
+ import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
+ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+ 
++import packageJson from "../package.json" with { type: "json" };
+ import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+ import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
+ import * as ServerConfig from "./config.ts";
+@@ -112,6 +114,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
+ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
+ import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
+ import * as CloudCliState from "./cloud/CliState.ts";
++import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
++import * as IdleUpdatePreparation from "./cloud/idleUpdatePreparation.ts";
++import { makeManagedCandidateProcess } from "./cloud/managedCandidateProcess.ts";
++import type { ManagedServerTarget } from "./cloud/managedRelease.ts";
++import {
++  type ManagedReleaseFeed,
++  type ManagedReleaseSelection,
++  makeGitHubManagedReleaseFeed,
++} from "./cloud/managedReleaseSource.ts";
++import * as ManagedQueuedUpdate from "./cloud/managedQueuedUpdate.ts";
++import {
++  ManagedArtifactSourceError,
++  type ManagedRuntimeStager,
++  makeManagedRuntimeStager,
++  makeSnapshotMigrationValidator,
++} from "./cloud/managedRuntime.ts";
++import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
+ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+ import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
+ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+@@ -128,12 +147,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+ import * as UsageService from "./usage/UsageService.ts";
+ import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+ import { UpdateActivityLive } from "./updateActivity.ts";
++import * as UpdateAdmission from "./updateAdmission.ts";
+ import {
+   clearPersistedServerRuntimeState,
+   makePersistedServerRuntimeState,
+   persistServerRuntimeState,
+ } from "./serverRuntimeState.ts";
+ import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
++import {
++  HostProcessArchitecture,
++  HostProcessExecutablePath,
++  HostProcessPlatform,
++} from "@t3tools/shared/hostProcess";
+ import * as NetService from "@t3tools/shared/Net";
+ import * as RelayClient from "@t3tools/shared/relayClient";
+ import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
+@@ -418,6 +443,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
+   ),
+ );
+ 
++/**
++ * Managed releases ship exactly two server artifacts. Every other host keeps a
++ * dormant queue whose exact-version resolver fails; there is no fallback
++ * target, so an unsupported host can never stage a runtime built for another.
++ */
++export function resolveManagedServerTarget(
++  platform: NodeJS.Platform,
++  architecture: NodeJS.Architecture,
++  linuxLibc: ResourceMonitorBinary.ResourceMonitorLinuxLibc | undefined,
++): ManagedServerTarget | undefined {
++  if (platform === "darwin" && architecture === "arm64") {
++    return { platform: "darwin", arch: "arm64" };
++  }
++  if (platform === "linux" && architecture === "x64" && linuxLibc === "gnu") {
++    return { platform: "linux", arch: "x64", libc: "glibc" };
++  }
++  return undefined;
++}
++
++/**
++ * Binds each exact resolution to the feed selection it came from: a fresh
++ * stager over that selection's source, reporting that selection's version and
++ * artifact ID. The queue only ever asks for an exact version, so `latest` is
++ * deliberately outside the accepted feed interface.
++ */
++export const makeSelectionBoundManagedRuntimeResolver =
++  (input: {
++    readonly feed: Pick<ManagedReleaseFeed, "resolve">;
++    readonly makeStager: (
++      selection: ManagedReleaseSelection,
++    ) => Effect.Effect<ManagedRuntimeStager>;
++  }): ManagedQueuedUpdate.ResolveManagedRuntime =>
++  (exactVersion) =>
++    input.feed.resolve(exactVersion).pipe(
++      Effect.flatMap((selection) =>
++        input.makeStager(selection).pipe(
++          Effect.map((stager) => ({
++            version: selection.version,
++            artifactId: selection.artifactId,
++            stager,
++          })),
++        ),
++      ),
++    );
++
++/**
++ * Server-scope composition of the managed update queue: the runtime's shared
++ * activity and admission gates, one idle preparation owner, one
++ * preparation-aware coordinator, and one durable queue whose worker lives in
++ * the enclosing layer scope. Exported only so the server test can build this
++ * exact production boundary over fakes.
++ */
++export const makeManagedUpdateRuntimeLayer = (input: {
++  readonly statePath: string;
++  readonly installedVersion: string;
++  readonly pollInterval: Duration.Input;
++  readonly dbPath: string;
++  readonly resolve: ManagedQueuedUpdate.ResolveManagedRuntime;
++}) =>
++  Layer.effect(
++    QueuedUpdate.QueuedUpdate,
++    Effect.gen(function* () {
++      const coordinator = yield* IdleUpdateCoordinator.IdleUpdateCoordinator;
++      const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
++      return yield* ManagedQueuedUpdate.make({ ...input, coordinator, launcher });
++    }),
++  ).pipe(
++    Layer.provideMerge(
++      IdleUpdateCoordinator.layer.pipe(Layer.provideMerge(IdleUpdatePreparation.layer)),
++    ),
++  );
++
++// One activity registry and one admission gate for the provider runtime, the
++// idle preparation owner, the coordinator, and the queue. Provided once inside
++// the runtime dependencies so every consumer sees the same pair.
++const UpdateGatesLive = Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer);
++
++// The queue is dormant until a later trigger queues an exact version: nothing
++// here polls the feed, requests preparation, or queues anything. A supported
++// host gets one candidate runner, one snapshot validator, and one GitHub feed
++// for the server's lifetime, with a fresh stager per exact selection.
++const ManagedUpdateRuntimeLive = Layer.unwrap(
++  Effect.gen(function* () {
++    const config = yield* ServerConfig.ServerConfig;
++    const path = yield* Path.Path;
++    const platform = yield* HostProcessPlatform;
++    const architecture = yield* HostProcessArchitecture;
++    const linuxLibc =
++      platform === "linux" ? yield* ResourceMonitorBinary.ResourceMonitorHostLinuxLibc : undefined;
++    const hostTarget = resolveManagedServerTarget(platform, architecture, linuxLibc);
++
++    let resolve: ManagedQueuedUpdate.ResolveManagedRuntime;
++    if (hostTarget === undefined) {
++      const unsupported = new ManagedArtifactSourceError({
++        reason: `managed server updates are unsupported on ${platform}-${architecture}${
++          linuxLibc === undefined ? "" : `-${linuxLibc}`
++        }`,
++      });
++      resolve = () => Effect.fail(unsupported);
++    } else {
++      const nodeExecutable = yield* HostProcessExecutablePath;
++      const candidate = makeManagedCandidateProcess({
++        nodeExecutable,
++        scratchParent: config.stateDir,
++      });
++      const validateMigration = yield* makeSnapshotMigrationValidator({
++        liveDatabasePath: config.dbPath,
++        candidate,
++      });
++      const feed = yield* makeGitHubManagedReleaseFeed({ hostTarget });
++      resolve = makeSelectionBoundManagedRuntimeResolver({
++        feed,
++        makeStager: (selection) =>
++          makeManagedRuntimeStager({
++            baseDir: config.baseDir,
++            hostTarget,
++            candidate,
++            source: selection.source,
++            validateMigration,
++          }).pipe(Effect.provideService(Path.Path, path)),
++      });
++    }
++
++    return makeManagedUpdateRuntimeLayer({
++      statePath: path.join(config.baseDir, "runtime", "queued-update.json"),
++      installedVersion: packageJson.version,
++      pollInterval: Duration.seconds(30),
++      dbPath: config.dbPath,
++      resolve,
++    });
++  }),
++);
++
+ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
+   // Subscribes to `account.rate-limits.updated` so usage bars track live
+   // telemetry instead of waiting for the next status probe.
+@@ -485,7 +643,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+   // driver context the registry captures for later `reconcile` calls. A
+   // per-service provide, or one nested inside hydration, would split the
+   // count.
+-  Layer.provideMerge(UpdateActivityLive),
++  Layer.provideMerge(UpdateGatesLive),
+ ).pipe(
+   Layer.provideMerge(AntigravityInstallation.layer),
+   // Shared native/canonical NDJSON writers used by both the per-instance
+@@ -744,19 +902,24 @@ export const makeServerLayer = Layer.unwrap(
+       }),
+     );
+ 
+-    const runtimeServicesLive = ServerRuntimeStartup.layerWithOptions({
+-      activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
+-      abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
+-      awaitAuxiliaryParked: Effect.all(
+-        [
+-          Deferred.await(runtimeStateParked),
+-          Deferred.await(cloudLinkParked),
+-          Deferred.await(routesReady),
+-          ...(config.tailscaleServeEnabled ? [Deferred.await(tailscaleParked)] : []),
+-        ],
+-        { concurrency: "unbounded" },
+-      ).pipe(Effect.asVoid),
+-    }).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
++    // The managed update queue sits beside startup, outside routes and client
++    // scopes, so it shares the runtime's update gates and launcher client.
++    const runtimeServicesLive = Layer.mergeAll(
++      ServerRuntimeStartup.layerWithOptions({
++        activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
++        abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
++        awaitAuxiliaryParked: Effect.all(
++          [
++            Deferred.await(runtimeStateParked),
++            Deferred.await(cloudLinkParked),
++            Deferred.await(routesReady),
++            ...(config.tailscaleServeEnabled ? [Deferred.await(tailscaleParked)] : []),
++          ],
++          { concurrency: "unbounded" },
++        ).pipe(Effect.asVoid),
++      }),
++      ManagedUpdateRuntimeLive,
++    ).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
+ 
+     const routesLayer = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(launcherLayer)), {
+       disableLogger: !config.logWebSocketEvents,
