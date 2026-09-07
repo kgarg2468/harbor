@@ -349,12 +349,13 @@ const DROPPED_ENV_KEYS = new Set([
   "RUSTFLAGS",
   "CARGO_ENCODED_RUSTFLAGS",
   "COPYFILE_DISABLE",
+  "GITHUB_REPOSITORY",
 ]);
 
 // The environment every build tool runs with: the caller's ordinary tool
 // environment (PATH, HOME, temp, toolchain homes) minus every build alias,
 // identity override, tracing value, Node loader hook, package-manager target
-// override, and cargo target/flag override, plus exactly the four canonical
+// override, cargo target/flag override, and release-feed selector, plus exactly the four canonical
 // public values and the compile-time product variant (managed-nightly unless
 // the caller names the other closed variant).
 export function buildChildEnvironment(baseEnv, publicConfig, expectedVariant = MANAGED_NIGHTLY_VARIANT) {

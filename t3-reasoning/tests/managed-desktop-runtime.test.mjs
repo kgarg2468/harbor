@@ -322,6 +322,7 @@ function build(fx, opts = {}, overrides = {}) {
       T3CODE_DESKTOP_SKIP_BUILD: "1",
       T3CODE_DESKTOP_MOCK_UPDATES: "1",
       T3CODE_PRODUCT_VARIANT: "stock",
+      GITHUB_REPOSITORY: "t3dotgg/t3code",
       CSC_LINK: "/fixture/cert.p12",
     },
     node: FAKE_NODE,
@@ -479,7 +480,7 @@ describe("buildManagedDesktopRuntime", () => {
       for (const call of fx.calls.filter((c) => c.command === "pnpm" || c.command === FAKE_NODE)) {
         assert.equal(call.env.T3CODE_PRODUCT_VARIANT, variant, "the child product variant is the selected variant");
         assert.equal(call.env.T3CODE_RELAY_URL, PUBLIC_CONFIG.T3CODE_RELAY_URL);
-        for (const key of ["VITE_T3CODE_RELAY_URL", "NODE_OPTIONS", "ELECTRON_RUN_AS_NODE", "T3CODE_DESKTOP_SIGNED", "T3CODE_DESKTOP_SKIP_BUILD", "T3CODE_DESKTOP_MOCK_UPDATES"]) {
+        for (const key of ["VITE_T3CODE_RELAY_URL", "NODE_OPTIONS", "ELECTRON_RUN_AS_NODE", "T3CODE_DESKTOP_SIGNED", "T3CODE_DESKTOP_SKIP_BUILD", "T3CODE_DESKTOP_MOCK_UPDATES", "GITHUB_REPOSITORY"]) {
           assert.equal(call.env[key], undefined, `${key} is scrubbed`);
         }
         assert.equal(call.env.CSC_LINK, "/fixture/cert.p12", "ordinary tool environment passes through; signing is the source builder's default-off concern");

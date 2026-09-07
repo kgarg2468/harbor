@@ -494,6 +494,7 @@ describe("configuration handling", () => {
         CARGO_BUILD_TARGET: "x86_64-unknown-linux-musl",
         RUSTFLAGS: "-C target-cpu=native",
         CARGO_ENCODED_RUSTFLAGS: "x",
+        GITHUB_REPOSITORY: "t3dotgg/t3code",
         EMPTY: undefined,
       },
       PUBLIC_CONFIG,
@@ -502,7 +503,7 @@ describe("configuration handling", () => {
   });
 
   it("stamps the default, an explicit managed-nightly, or an explicit reasoning variant and refuses any other", () => {
-    const base = { PATH: "/usr/bin", HOME: "/home/x", T3CODE_PRODUCT_VARIANT: "reasoning" };
+    const base = { PATH: "/usr/bin", HOME: "/home/x", T3CODE_PRODUCT_VARIANT: "reasoning", GITHUB_REPOSITORY: "t3dotgg/t3code" };
     const expected = { PATH: "/usr/bin", HOME: "/home/x", ...PUBLIC_CONFIG };
     assert.deepEqual(buildChildEnvironment(base, PUBLIC_CONFIG), { ...expected, T3CODE_PRODUCT_VARIANT: "managed-nightly" });
     assert.deepEqual(buildChildEnvironment(base, PUBLIC_CONFIG, "managed-nightly"), { ...expected, T3CODE_PRODUCT_VARIANT: "managed-nightly" });
