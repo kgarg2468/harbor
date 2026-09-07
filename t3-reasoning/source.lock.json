@@ -89,6 +89,11 @@
       "sha256": "a6be628e58c97494288906820fdedb40a3aec873fb7a9a0980022c29c1a5255e"
     },
     {
+      "id": "managed-queue-handoff",
+      "path": "patches/0021-managed-queue-handoff.patch",
+      "sha256": "9097865599e7caafb54260c0097f8459c2d59914b321f5b846fd94d8601a3f27"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "3c242c29b863494e637a339b45788ea056c67b312bbdb98871eae8349ee66897"
@@ -111,7 +116,8 @@
       "candidate-process",
       "managed-runtime-transaction",
       "shared-default",
-      "managed-release-feed"
+      "managed-release-feed",
+      "managed-queue-handoff"
     ],
     "reasoning": [
       "reasoning-full",
@@ -130,6 +136,7 @@
       "managed-runtime-transaction",
       "shared-default",
       "managed-release-feed",
+      "managed-queue-handoff",
       "reasoning-identity"
     ]
   }
