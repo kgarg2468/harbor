@@ -1,0 +1,1178 @@
+diff --git a/apps/server/src/cloud/managedNightlyUpdate.test.ts b/apps/server/src/cloud/managedNightlyUpdate.test.ts
+new file mode 100644
+index 00000000..8b7a6430
+--- /dev/null
++++ b/apps/server/src/cloud/managedNightlyUpdate.test.ts
+@@ -0,0 +1,866 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Logger from "effect/Logger";
++import * as Path from "effect/Path";
++import * as Schema from "effect/Schema";
++import * as Scope from "effect/Scope";
++import * as Semaphore from "effect/Semaphore";
++import { TestClock } from "effect/testing";
++
++import type {
++  ProviderIdlePreparationResult,
++  ProviderIdlePreparationToken,
++} from "../provider/Services/ProviderService.ts";
++import {
++  ProviderIdlePreparationTokenTypeId,
++  ProviderService,
++} from "../provider/Services/ProviderService.ts";
++import type { ProviderIdleRetirementResult } from "../provider/Services/ProviderAdapter.ts";
++import {
++  makeManagedUpdateRuntimeLayer,
++  makeSelectionBoundManagedRuntimeResolver,
++} from "../server.ts";
++import { UpdateActivity, UpdateActivityLive } from "../updateActivity.ts";
++import * as UpdateAdmission from "../updateAdmission.ts";
++import * as IdleUpdatePreparation from "./idleUpdatePreparation.ts";
++import type { IdleUpdatePreparationState } from "./idleUpdatePreparation.ts";
++import {
++  discoverAndQueue,
++  make,
++  prepareIfQueued,
++  type ManagedNightlyUpdateDependencies,
++  type ManagedNightlyUpdateStep,
++} from "./managedNightlyUpdate.ts";
++import {
++  MANAGED_RELEASE_REPOSITORY,
++  MANAGED_RELEASE_TAG_PREFIX,
++  type ManagedReleaseSelection,
++} from "./managedReleaseSource.ts";
++import { ManagedArtifactSourceError, type ManagedRuntimeStager } from "./managedRuntime.ts";
++import * as QueuedUpdate from "./queuedUpdate.ts";
++import {
++  QueuedUpdateRejectedError,
++  type QueuedUpdateShape,
++  type QueuedUpdateStage,
++  type QueuedUpdateState,
++} from "./queuedUpdate.ts";
++import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
++
++const INSTALLED = "0.0.38-nightly.20260906.1.managed.1.p6d1933416d7a";
++const OLDER = "0.0.37-nightly.20260905.1.managed.9.p6d1933416d7a";
++const TARGET = "0.0.38-nightly.20260906.1.managed.2.p6d1933416d7a";
++const NEWER = "0.0.38-nightly.20260906.1.managed.3.p6d1933416d7a";
++const NEWEST = "0.0.38-nightly.20260906.1.managed.4.p6d1933416d7a";
++const DISCOVERY = Duration.hours(4);
++const RETRY = Duration.seconds(30);
++
++/** A selection whose source must never be touched by the scheduler. */
++const selectionFor = (version: string): ManagedReleaseSelection => ({
++  repository: MANAGED_RELEASE_REPOSITORY,
++  releaseId: 1,
++  tag: `${MANAGED_RELEASE_TAG_PREFIX}${version}`,
++  version,
++  publishedAt: "2026-09-06T00:00:00Z",
++  githubImmutable: true,
++  manifestSha256: "a".repeat(64),
++  releaseInputSha256: "b".repeat(64),
++  artifactId: `managed-server-darwin-arm64@sha256:${"c".repeat(64)}`,
++  source: {
++    readDocuments: () => Effect.die(`documents of ${version} must not be read by the scheduler`),
++    openArchive: () => Effect.die(`archive of ${version} must not be opened by the scheduler`),
++  },
++});
++
++const artifactFor = (version: string): QueuedUpdate.StagedArtifact => ({
++  version,
++  artifactId: `artifact-${version}`,
++});
++
++/** Signed-looking text that must never reach a scheduler log. */
++const SIGNED_URL = "https://objects.example/asset?X-Amz-Signature=SECRET";
++
++// --- fakes ---------------------------------------------------------------------------
++
++/** In-memory queue with the real `awaitState` contract: durable matches only, waiters removed on interrupt. */
++const makeFakeQueue = (initial?: Partial<QueuedUpdateState>) => {
++  let state: QueuedUpdateState = {
++    stage: "current",
++    installedVersion: INSTALLED,
++    targetVersion: INSTALLED,
++    staged: undefined,
++    reason: undefined,
++    handoffAccepted: false,
++    durable: true,
++    ...initial,
++  };
++  const waiters = new Set<{
++    readonly predicate: (state: QueuedUpdateState) => boolean;
++    readonly deferred: Deferred.Deferred<QueuedUpdateState>;
++  }>();
++  const calls: Array<string> = [];
++  let reject: QueuedUpdateRejectedError["reason"] | undefined;
++
++  const set = (next: Partial<QueuedUpdateState>) => {
++    state = { ...state, ...next };
++    for (const waiter of waiters) {
++      if (state.durable && waiter.predicate(state)) {
++        waiters.delete(waiter);
++        Deferred.doneUnsafe(waiter.deferred, Effect.succeed(state));
++      }
++    }
++  };
++  const transition = (stage: QueuedUpdateStage, targetVersion: string, durable = true) =>
++    set({
++      stage,
++      targetVersion,
++      durable,
++      staged: stage === "queued" || stage === "updating" ? artifactFor(targetVersion) : undefined,
++      reason: undefined,
++    });
++
++  const shape: Pick<QueuedUpdateShape, "queue" | "getState" | "awaitState"> = {
++    queue: (targetVersion) =>
++      Effect.suspend(() => {
++        calls.push(targetVersion);
++        if (reject !== undefined) {
++          return Effect.fail(new QueuedUpdateRejectedError({ reason: reject }));
++        }
++        transition("downloading", targetVersion);
++        return Effect.succeed(state);
++      }),
++    getState: Effect.sync(() => state),
++    awaitState: (predicate) =>
++      Effect.suspend(() => {
++        if (state.durable && predicate(state)) return Effect.succeed(state);
++        const waiter = { predicate, deferred: Deferred.makeUnsafe<QueuedUpdateState>() };
++        waiters.add(waiter);
++        return Deferred.await(waiter.deferred).pipe(
++          Effect.onInterrupt(() => Effect.sync(() => waiters.delete(waiter))),
++        );
++      }),
++  };
++
++  return {
++    shape,
++    calls,
++    transition,
++    set,
++    rejectWith: (reason: QueuedUpdateRejectedError["reason"] | undefined) => {
++      reject = reason;
++    },
++    waiterCount: () => waiters.size,
++  };
++};
++
++/** In-memory preparation owner: `request` answers a scripted state and publishes it. */
++const makeFakePreparation = (initial: IdleUpdatePreparationState = { phase: "idle" }) => {
++  let state = initial;
++  let answer: IdleUpdatePreparationState = {
++    phase: "busy",
++    reason: "1 agent operation(s) in flight",
++  };
++  let requests = 0;
++  return {
++    shape: {
++      request: Effect.sync(() => {
++        requests += 1;
++        state = answer;
++        return state;
++      }),
++      state: Effect.sync(() => state),
++    },
++    requests: () => requests,
++    set: (next: IdleUpdatePreparationState) => {
++      state = next;
++    },
++    answerWith: (next: IdleUpdatePreparationState) => {
++      answer = next;
++    },
++  };
++};
++
++type Discovery = Effect.Effect<ManagedReleaseSelection | undefined, ManagedArtifactSourceError>;
++
++/** A feed whose next answer is scripted, counting evaluations and optionally holding each read. */
++const makeFakeFeed = (initial: string | undefined) => {
++  let version = initial;
++  let failure: ManagedArtifactSourceError | undefined;
++  let hold: Deferred.Deferred<void> | undefined;
++  let reads = 0;
++  const started = new Set<Deferred.Deferred<void>>();
++  const latest: Discovery = Effect.suspend(() => {
++    reads += 1;
++    for (const signal of started) Deferred.doneUnsafe(signal, Effect.void);
++    started.clear();
++    const gate = hold === undefined ? Effect.void : Deferred.await(hold);
++    return gate.pipe(
++      Effect.andThen(
++        Effect.suspend(() =>
++          failure !== undefined
++            ? Effect.fail(failure)
++            : Effect.succeed(version === undefined ? undefined : selectionFor(version)),
++        ),
++      ),
++    );
++  });
++  return {
++    latest,
++    reads: () => reads,
++    publish: (next: string | undefined) => {
++      version = next;
++      failure = undefined;
++    },
++    fail: (error: ManagedArtifactSourceError | undefined) => {
++      failure = error;
++    },
++    holdUntil: (gate: Deferred.Deferred<void> | undefined) => {
++      hold = gate;
++    },
++    /** Resolves when the next read begins. */
++    nextRead: Effect.suspend(() => {
++      const signal = Deferred.makeUnsafe<void>();
++      started.add(signal);
++      return Deferred.await(signal);
++    }),
++  };
++};
++
++interface Fixture {
++  readonly queue: ReturnType<typeof makeFakeQueue>;
++  readonly preparation: ReturnType<typeof makeFakePreparation>;
++  readonly feed: ReturnType<typeof makeFakeFeed>;
++  readonly scope: Scope.Closeable;
++  readonly close: Effect.Effect<void>;
++}
++
++/** Builds the scheduler in a manually owned scope so tests control its lifetime. */
++const start = Effect.fn("start")(function* (input?: {
++  readonly enabled?: boolean;
++  readonly feed?: string | undefined;
++  readonly queue?: Partial<QueuedUpdateState>;
++  readonly preparation?: IdleUpdatePreparationState;
++  readonly discoverLatest?: Discovery | undefined;
++}): Effect.fn.Return<Fixture, never, Scope.Scope> {
++  const queue = makeFakeQueue(input?.queue);
++  const preparation = makeFakePreparation(input?.preparation);
++  const feed = makeFakeFeed(input?.feed);
++  const scope = yield* Scope.make();
++  yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
++  const deps: ManagedNightlyUpdateDependencies = {
++    enabled: input?.enabled ?? true,
++    installedVersion: INSTALLED,
++    discoveryInterval: DISCOVERY,
++    preparationRetryInterval: RETRY,
++    discoverLatest:
++      input !== undefined && "discoverLatest" in input ? input.discoverLatest : feed.latest,
++    queue: queue.shape,
++    preparation: preparation.shape,
++  };
++  yield* Scope.provide(make(deps), scope);
++  return { queue, preparation, feed, scope, close: Scope.close(scope, Exit.void) };
++});
++
++/** Lets every runnable fiber make progress without moving the clock. */
++const settle = Effect.gen(function* () {
++  for (let i = 0; i < 8; i += 1) yield* Effect.yieldNow;
++});
++
++const advance = (duration: Duration.Input) =>
++  TestClock.adjust(duration).pipe(Effect.andThen(settle));
++
++describe("managedNightlyUpdate", () => {
++  it.effect("disabled construction starts nothing and touches nothing", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const disabled = yield* start({ enabled: false, feed: NEWER });
++        const noFeed = yield* start({ discoverLatest: undefined, feed: NEWER });
++        yield* advance(Duration.times(DISCOVERY, 3));
++        for (const fixture of [disabled, noFeed]) {
++          assert.strictEqual(fixture.feed.reads(), 0);
++          assert.deepStrictEqual(fixture.queue.calls, []);
++          assert.strictEqual(fixture.queue.waiterCount(), 0);
++          assert.strictEqual(fixture.preparation.requests(), 0);
++        }
++      }),
++    ),
++  );
++
++  it.effect("queues the exact selected version at once and never prepares while downloading", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        // Activity is notionally busy: preparation would answer busy, but it must not even be asked.
++        const fixture = yield* start({ feed: TARGET });
++        yield* settle;
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++        assert.include(yield* fixture.queue.shape.getState, {
++          stage: "downloading",
++          targetVersion: TARGET,
++          durable: true,
++        });
++        assert.strictEqual(fixture.preparation.requests(), 0);
++
++        yield* advance(RETRY);
++        yield* advance(DISCOVERY);
++        assert.strictEqual(fixture.feed.reads(), 2);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++        assert.strictEqual(fixture.preparation.requests(), 0);
++      }),
++    ),
++  );
++
++  it.effect(
++    "requests preparation only for a durable queued target, retrying busy after the interval",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fixture = yield* start({ feed: TARGET });
++          yield* settle;
++
++          // Undurable `queued` is not acted on; only its barrier landing is.
++          fixture.queue.transition("queued", TARGET, false);
++          yield* settle;
++          assert.strictEqual(fixture.preparation.requests(), 0);
++          fixture.queue.set({ durable: true });
++          yield* settle;
++          assert.strictEqual(fixture.preparation.requests(), 1);
++          assert.deepStrictEqual(yield* fixture.preparation.shape.state, {
++            phase: "busy",
++            reason: "1 agent operation(s) in flight",
++          });
++
++          // Busy retries only once the retry interval has fully elapsed.
++          yield* advance(Duration.subtract(RETRY, Duration.seconds(1)));
++          assert.strictEqual(fixture.preparation.requests(), 1);
++          yield* advance(Duration.seconds(1));
++          assert.strictEqual(fixture.preparation.requests(), 2);
++
++          // Once the owner reports prepared, no further request is made.
++          fixture.preparation.answerWith({ phase: "prepared" });
++          yield* advance(RETRY);
++          assert.strictEqual(fixture.preparation.requests(), 3);
++          yield* advance(Duration.times(RETRY, 4));
++          assert.strictEqual(fixture.preparation.requests(), 3);
++
++          // Non-queued stages never request, however long they last.
++          fixture.preparation.set({ phase: "idle" });
++          for (const stage of ["current", "failed", "updating", "downloading"] as const) {
++            fixture.queue.transition(stage, stage === "current" ? INSTALLED : TARGET);
++            yield* advance(Duration.times(RETRY, 3));
++            assert.strictEqual(fixture.preparation.requests(), 3, stage);
++          }
++          assert.strictEqual(fixture.queue.calls.length, 1);
++        }),
++      ),
++  );
++
++  it.effect("never supersedes the target while preparation is preparing or prepared", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* start({ feed: TARGET });
++        yield* settle;
++        // The owner is already running when staging finishes.
++        fixture.preparation.set({ phase: "preparing" });
++        fixture.queue.transition("queued", TARGET);
++        fixture.feed.publish(NEWER);
++
++        yield* advance(DISCOVERY);
++        assert.strictEqual(fixture.feed.reads(), 2);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++
++        fixture.preparation.set({ phase: "prepared" });
++        yield* advance(DISCOVERY);
++        assert.strictEqual(fixture.feed.reads(), 3);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++        // The preparation loop also leaves a prepared owner alone.
++        assert.strictEqual(fixture.preparation.requests(), 0);
++
++        // A stale or busy proof reopens supersession on the next discovery.
++        fixture.preparation.set({ phase: "busy", reason: "provider mutated since preparation" });
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, NEWER]);
++        assert.include(yield* fixture.queue.shape.getState, {
++          stage: "downloading",
++          targetVersion: NEWER,
++        });
++      }),
++    ),
++  );
++
++  it.effect(
++    "a discovery result racing a queued-state preparation lands in one of two safe orders",
++    () =>
++      Effect.gen(function* () {
++        const run = Effect.fn("run")(function* (first: "discovery" | "preparation") {
++          const queue = makeFakeQueue({
++            stage: "queued",
++            targetVersion: TARGET,
++            staged: artifactFor(TARGET),
++          });
++          const preparation = makeFakePreparation();
++          preparation.answerWith({ phase: "preparing" });
++          const gate = yield* Semaphore.make(1);
++          const step: ManagedNightlyUpdateStep = {
++            installedVersion: INSTALLED,
++            discoverLatest: Effect.succeed(selectionFor(NEWER)),
++            queue: queue.shape,
++            preparation: preparation.shape,
++            gate,
++          };
++          // The test holds the permit: discovery has its network result, and
++          // the preparation loop has just seen durable `queued`; both now wait
++          // on the same permit in the order they arrived.
++          const held = yield* Deferred.make<void>();
++          const holder = yield* Effect.forkChild(gate.withPermits(1)(Deferred.await(held)));
++          yield* Effect.yieldNow;
++          const steps = {
++            discovery: () => Effect.forkChild(discoverAndQueue(step)),
++            preparation: () => Effect.forkChild(prepareIfQueued(step)),
++          };
++          const second = first === "discovery" ? "preparation" : "discovery";
++          const a = yield* steps[first]();
++          yield* Effect.yieldNow;
++          const b = yield* steps[second]();
++          yield* Effect.yieldNow;
++          yield* Deferred.succeed(held, undefined);
++          yield* Fiber.join(holder);
++          yield* Fiber.join(a);
++          yield* Fiber.join(b);
++          return {
++            queued: queue.calls,
++            requests: preparation.requests(),
++            state: yield* queue.shape.getState,
++            preparationState: yield* preparation.shape.state,
++          };
++        });
++
++        const discoveryFirst = yield* run("discovery");
++        assert.deepStrictEqual(discoveryFirst.queued, [NEWER]);
++        assert.strictEqual(discoveryFirst.requests, 0);
++        assert.include(discoveryFirst.state, { stage: "downloading", targetVersion: NEWER });
++        assert.deepStrictEqual(discoveryFirst.preparationState, { phase: "idle" });
++
++        const preparationFirst = yield* run("preparation");
++        assert.deepStrictEqual(preparationFirst.queued, []);
++        assert.strictEqual(preparationFirst.requests, 1);
++        assert.include(preparationFirst.state, { stage: "queued", targetVersion: TARGET });
++        assert.deepStrictEqual(preparationFirst.preparationState, { phase: "preparing" });
++      }),
++  );
++
++  it.effect("applies the exact version policy against installed and pending targets", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* start({ feed: undefined });
++        yield* settle;
++        assert.strictEqual(fixture.feed.reads(), 1);
++
++        // Absent, equal, and older selections are no-ops against `current`.
++        for (const version of [undefined, INSTALLED, OLDER]) {
++          fixture.feed.publish(version);
++          yield* advance(DISCOVERY);
++          assert.deepStrictEqual(fixture.queue.calls, [], String(version));
++        }
++
++        // A strictly newer target is queued exactly as the feed named it.
++        fixture.feed.publish(TARGET);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++
++        // An equal pending target that is downloading or queued is left to the queue.
++        for (const stage of ["downloading", "queued"] as const) {
++          fixture.queue.transition(stage, TARGET);
++          yield* advance(DISCOVERY);
++          assert.deepStrictEqual(fixture.queue.calls, [TARGET], stage);
++        }
++        // Older than the pending target: never a downgrade, even while it is failed.
++        fixture.queue.transition("failed", NEWER);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++
++        // An equal failed target is restaged once per discovery tick.
++        fixture.queue.transition("failed", TARGET);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET]);
++        assert.include(yield* fixture.queue.shape.getState, { stage: "downloading" });
++        fixture.queue.transition("failed", TARGET);
++        fixture.preparation.set({ phase: "prepared" });
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET]);
++        fixture.preparation.set({ phase: "idle" });
++
++        // A strictly newer target supersedes a downloading or queued one.
++        fixture.feed.publish(NEWER);
++        fixture.queue.transition("downloading", TARGET);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET, NEWER]);
++        fixture.feed.publish(NEWEST);
++        fixture.queue.transition("queued", NEWER);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET, NEWER, NEWEST]);
++
++        // Nothing is queued during an activation attempt or after a handoff.
++        fixture.queue.transition("updating", NEWEST);
++        fixture.feed.publish(NEWEST);
++        yield* advance(DISCOVERY);
++        fixture.queue.set({ handoffAccepted: true });
++        yield* advance(DISCOVERY);
++        fixture.queue.transition("queued", NEWEST);
++        fixture.queue.set({ handoffAccepted: true });
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET, NEWER, NEWEST]);
++      }),
++    ),
++  );
++
++  it.effect("feed and queue failures leave preparation alone and do not end the loop", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* start({ feed: TARGET });
++        fixture.feed.fail(
++          new ManagedArtifactSourceError({
++            reason: "listing releases page 1: GitHub returned HTTP 403 (rate limited or forbidden)",
++            cause: new Error(`request to ${SIGNED_URL} failed`),
++          }),
++        );
++        yield* settle;
++        assert.strictEqual(fixture.feed.reads(), 1);
++        assert.deepStrictEqual(fixture.queue.calls, []);
++        assert.strictEqual(fixture.preparation.requests(), 0);
++
++        // The next tick succeeds and queues normally.
++        fixture.feed.publish(TARGET);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET]);
++
++        // A rejected queue command is logged; the loop keeps its cadence and
++        // the queue keeps whatever it held.
++        fixture.queue.transition("failed", TARGET);
++        fixture.queue.rejectWith("activation-in-progress");
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET]);
++        assert.include(yield* fixture.queue.shape.getState, {
++          stage: "failed",
++          targetVersion: TARGET,
++        });
++        assert.strictEqual(fixture.preparation.requests(), 0);
++        fixture.queue.rejectWith(undefined);
++        yield* advance(DISCOVERY);
++        assert.deepStrictEqual(fixture.queue.calls, [TARGET, TARGET, TARGET]);
++        assert.include(yield* fixture.queue.shape.getState, { stage: "downloading" });
++      }),
++    ),
++  );
++
++  it.effect("scheduler warnings carry the feed's reason, never its cause", () => {
++    const logged: Array<string> = [];
++    // Scheduler logs pass their fields as a second message part, so the whole
++    // message is the surface an operator would see.
++    const logger = Logger.make<unknown, void>((options) => {
++      const parts = Array.isArray(options.message) ? options.message : [options.message];
++      logged.push(
++        parts.map((value) => (typeof value === "string" ? value : JSON.stringify(value))).join(" "),
++      );
++    });
++    return Effect.gen(function* () {
++      const queue = makeFakeQueue();
++      const preparation = makeFakePreparation();
++      const step: ManagedNightlyUpdateStep = {
++        installedVersion: INSTALLED,
++        discoverLatest: Effect.fail(
++          new ManagedArtifactSourceError({
++            reason: "downloading the manifest: request failed",
++            cause: new Error(`GET ${SIGNED_URL}`),
++          }),
++        ),
++        queue: queue.shape,
++        preparation: preparation.shape,
++        gate: yield* Semaphore.make(1),
++      };
++      yield* discoverAndQueue(step);
++      assert.strictEqual(logged.length, 1);
++      assert.include(logged[0], "downloading the manifest: request failed");
++      assert.notInclude(logged[0], "X-Amz-Signature");
++      assert.deepStrictEqual(queue.calls, []);
++      assert.strictEqual(preparation.requests(), 0);
++    }).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
++  });
++
++  it.effect("closing the scheduler scope ends both fibers wherever they are waiting", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        // In-flight discovery: the feed read is held open when the scope closes.
++        const inFlight = yield* start({ feed: TARGET });
++        yield* settle;
++        const gate = yield* Deferred.make<void>();
++        inFlight.feed.holdUntil(gate);
++        yield* advance(DISCOVERY);
++        assert.strictEqual(inFlight.feed.reads(), 2);
++        yield* inFlight.close;
++        yield* Deferred.succeed(gate, undefined);
++        yield* advance(Duration.times(DISCOVERY, 2));
++        assert.strictEqual(inFlight.feed.reads(), 2);
++        assert.deepStrictEqual(inFlight.queue.calls, [TARGET]);
++
++        // Queued-state wait: the queue's waiter is removed with the fiber.
++        const waiting = yield* start({ feed: undefined });
++        yield* settle;
++        assert.strictEqual(waiting.queue.waiterCount(), 1);
++        yield* waiting.close;
++        assert.strictEqual(waiting.queue.waiterCount(), 0);
++        waiting.queue.transition("queued", TARGET);
++        yield* advance(Duration.times(RETRY, 2));
++        assert.strictEqual(waiting.preparation.requests(), 0);
++
++        // Retry sleep and owner observation: a busy request is pending its retry
++        // and a preparing owner is being left alone.
++        const retrying = yield* start({ feed: TARGET });
++        yield* settle;
++        retrying.queue.transition("queued", TARGET);
++        yield* settle;
++        assert.strictEqual(retrying.preparation.requests(), 1);
++        retrying.preparation.set({ phase: "preparing" });
++        yield* retrying.close;
++        retrying.preparation.set({ phase: "idle" });
++        yield* advance(Duration.times(RETRY, 3));
++        yield* advance(DISCOVERY);
++        assert.strictEqual(retrying.preparation.requests(), 1);
++        assert.strictEqual(retrying.feed.reads(), 1);
++        assert.deepStrictEqual(retrying.queue.calls, [TARGET]);
++      }),
++    ),
++  );
++
++  it.effect("checks immediately, then once per interval, without overlapping slow checks", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* start({ feed: undefined });
++        yield* settle;
++        assert.strictEqual(fixture.feed.reads(), 1);
++        yield* advance(Duration.subtract(DISCOVERY, Duration.seconds(1)));
++        assert.strictEqual(fixture.feed.reads(), 1);
++        yield* advance(Duration.seconds(1));
++        assert.strictEqual(fixture.feed.reads(), 2);
++
++        // A check that outlasts the whole interval delays the next rather than overlapping it.
++        const slow = yield* Deferred.make<void>();
++        fixture.feed.holdUntil(slow);
++        yield* advance(DISCOVERY);
++        assert.strictEqual(fixture.feed.reads(), 3);
++        yield* advance(Duration.times(DISCOVERY, 2));
++        assert.strictEqual(fixture.feed.reads(), 3);
++        fixture.feed.holdUntil(undefined);
++        yield* Deferred.succeed(slow, undefined);
++        yield* settle;
++        assert.strictEqual(fixture.feed.reads(), 3);
++        yield* advance(DISCOVERY);
++        assert.strictEqual(fixture.feed.reads(), 4);
++        assert.deepStrictEqual(fixture.queue.calls, []);
++      }),
++    ),
++  );
++});
++
++// --- integration ---------------------------------------------------------------------
++
++const PersistedState = Schema.fromJsonString(
++  Schema.Struct({
++    stage: Schema.String,
++    targetVersion: Schema.String,
++  }),
++);
++const decodePersisted = Schema.decodeUnknownEffect(PersistedState);
++
++/**
++ * The scheduler over the production `makeManagedUpdateRuntimeLayer`: a real
++ * durable queue at a temporary path, real preparation owner, coordinator and
++ * gates, with only the feed, stager, provider hooks and launcher faked.
++ */
++it.layer(NodeServices.layer)("managedNightlyUpdate over the managed update runtime", (it) => {
++  it.effect("downloads while an agent works, prepares once idle, and hands off exactly once", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-nightly-" });
++        const statePath = path.join(baseDir, "runtime", "queued-update.json");
++        const calls = {
++          resolve: [] as Array<string>,
++          stage: 0,
++          verify: 0,
++          launcher: 0,
++          prepare: 0,
++          check: 0,
++        };
++        const token: ProviderIdlePreparationToken = {
++          [ProviderIdlePreparationTokenTypeId]: ProviderIdlePreparationTokenTypeId,
++        };
++        const stageStarted = yield* Deferred.make<void>();
++        const stageRelease = yield* Deferred.make<void>();
++        const handedOff = yield* Deferred.make<string>();
++
++        const providerLayer = Layer.mock(ProviderService)({
++          prepareIdleRetirement: () =>
++            Effect.sync((): ProviderIdlePreparationResult => {
++              calls.prepare += 1;
++              return { status: "prepared", token };
++            }),
++          checkIdleRetirementReadiness: (candidate) =>
++            Effect.sync((): ProviderIdleRetirementResult => {
++              calls.check += 1;
++              return candidate === token
++                ? { status: "retired" }
++                : { status: "blocked", reason: "token was not issued by this service" };
++            }),
++        });
++        const launcherLayer = Layer.succeed(
++          ServiceLauncherClient.ServiceLauncherClient,
++          ServiceLauncherClient.ServiceLauncherClient.of({
++            managed: true,
++            requestUpdate: (input, lifecycle) =>
++              Effect.gen(function* () {
++                calls.launcher += 1;
++                lifecycle?.dispatchStarted();
++                yield* lifecycle?.accepted ?? Effect.void;
++                yield* Deferred.succeed(handedOff, input.targetVersion);
++                return `update-${calls.launcher}`;
++              }),
++            prepareTrial: Effect.succeed(undefined),
++          }),
++        );
++        const feed = makeFakeFeed(TARGET);
++        const resolve = makeSelectionBoundManagedRuntimeResolver({
++          feed: {
++            resolve: (exactVersion) =>
++              Effect.sync(() => {
++                calls.resolve.push(exactVersion);
++                return selectionFor(exactVersion);
++              }),
++          },
++          makeStager: (selection) =>
++            Effect.succeed<ManagedRuntimeStager>({
++              stage: () =>
++                Effect.gen(function* () {
++                  calls.stage += 1;
++                  yield* Deferred.succeed(stageStarted, undefined);
++                  yield* Deferred.await(stageRelease);
++                  return { version: selection.version, artifactId: selection.artifactId };
++                }),
++              verifyStaged: () =>
++                Effect.sync(() => {
++                  calls.verify += 1;
++                  return { versionDir: baseDir, entryPath: baseDir, sentinelPath: baseDir };
++                }),
++            }),
++        });
++
++        const serverScope = yield* Scope.make();
++        yield* Effect.addFinalizer(() => Scope.close(serverScope, Exit.void));
++        const context = yield* Layer.buildWithScope(
++          makeManagedUpdateRuntimeLayer({
++            statePath,
++            installedVersion: INSTALLED,
++            pollInterval: RETRY,
++            dbPath: path.join(baseDir, "state.sqlite"),
++            resolve,
++          }).pipe(
++            Layer.provideMerge(Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer)),
++            Layer.provide(Layer.mergeAll(providerLayer, launcherLayer)),
++          ),
++          serverScope,
++        );
++        const queue = Context.get(context, QueuedUpdate.QueuedUpdate);
++        const preparation = Context.get(context, IdleUpdatePreparation.IdleUpdatePreparation);
++        const activity = Context.get(context, UpdateActivity);
++        const admission = Context.get(context, UpdateAdmission.UpdateAdmission);
++
++        // An agent turn is in flight before the scheduler even starts.
++        const lease = yield* activity.acquire("agent turn");
++        yield* Scope.provide(
++          make({
++            enabled: true,
++            installedVersion: INSTALLED,
++            discoveryInterval: DISCOVERY,
++            preparationRetryInterval: RETRY,
++            discoverLatest: feed.latest,
++            queue,
++            preparation: preparation,
++          }),
++          serverScope,
++        );
++
++        // Discovery queues durably and staging starts while the agent works.
++        yield* Deferred.await(stageStarted);
++        assert.deepStrictEqual(calls.resolve, [TARGET]);
++        assert.strictEqual(calls.stage, 1);
++        assert.include(yield* queue.getState, { stage: "downloading", targetVersion: TARGET });
++        assert.include(yield* decodePersisted(yield* fs.readFileString(statePath)), {
++          stage: "downloading",
++          targetVersion: TARGET,
++        });
++        assert.strictEqual(calls.prepare, 0);
++
++        // Staged: the queue's own attempt is declined by the busy registry and
++        // the scheduler's preparation request is answered busy without retiring.
++        yield* Deferred.succeed(stageRelease, undefined);
++        const declined = yield* queue.awaitState(
++          (state) => state.stage === "queued" && state.reason !== undefined,
++        );
++        assert.strictEqual(declined.reason, "busy: 1 agent operation(s) in flight");
++        assert.include(yield* decodePersisted(yield* fs.readFileString(statePath)), {
++          stage: "queued",
++          targetVersion: TARGET,
++        });
++        yield* settle;
++        assert.strictEqual(calls.prepare, 0);
++        assert.strictEqual(calls.check, 0);
++        assert.strictEqual(calls.verify, 0);
++        assert.strictEqual(calls.launcher, 0);
++        assert.deepStrictEqual(yield* preparation.state, {
++          phase: "busy",
++          reason: "1 agent operation(s) in flight",
++        });
++        assert.include(yield* activity.state, { phase: "open", outstanding: 1 });
++
++        // Idle: the preparation retry retires through the provider exactly once,
++        // and the queue's next activation retry seals on that proof and hands off.
++        lease.release();
++        yield* advance(RETRY);
++        assert.deepStrictEqual(yield* preparation.settled, { phase: "prepared" });
++        assert.strictEqual(calls.prepare, 1);
++        yield* advance(RETRY);
++        assert.strictEqual(yield* Deferred.await(handedOff), TARGET);
++        const accepted = yield* queue.awaitState((state) => state.handoffAccepted);
++        assert.include(accepted, { stage: "updating", targetVersion: TARGET, durable: true });
++        assert.include(yield* decodePersisted(yield* fs.readFileString(statePath)), {
++          stage: "updating",
++          targetVersion: TARGET,
++        });
++        assert.strictEqual(calls.launcher, 1);
++        assert.strictEqual(calls.verify, 1);
++        assert.strictEqual(calls.check, 1);
++        assert.strictEqual(calls.prepare, 1);
++        assert.include(yield* activity.state, { phase: "sealed", idleShutdownAuthorized: true });
++        assert.deepStrictEqual(yield* admission.state, { phase: "maintenance", inFlight: 0 });
++
++        // Later discovery and retry ticks change nothing after acceptance.
++        feed.publish(NEWER);
++        yield* advance(DISCOVERY);
++        yield* advance(DISCOVERY);
++        assert.strictEqual(feed.reads(), 3);
++        assert.deepStrictEqual(calls.resolve, [TARGET]);
++        assert.strictEqual(calls.stage, 1);
++        assert.strictEqual(calls.launcher, 1);
++        assert.strictEqual(calls.prepare, 1);
++        assert.include(yield* queue.getState, { stage: "updating", handoffAccepted: true });
++      }),
++    ),
++  );
++});
+diff --git a/apps/server/src/cloud/managedNightlyUpdate.ts b/apps/server/src/cloud/managedNightlyUpdate.ts
+new file mode 100644
+index 00000000..cce6b676
+--- /dev/null
++++ b/apps/server/src/cloud/managedNightlyUpdate.ts
+@@ -0,0 +1,233 @@
++/**
++ * ManagedNightlyUpdate - the server-scoped trigger that moves a managed
++ * server onto the next nightly release without any client involvement.
++ *
++ * Two independent loops, both owned by the server scope:
++ *
++ * - **Discovery** asks the fixed release feed for its latest managed version
++ *   immediately and then on a spaced interval, and durably queues a strictly
++ *   newer exact version. Download, verification and candidate checks then run
++ *   inside the queue while agents may still be working.
++ * - **Preparation** waits for the queue to hold a durable `queued` target and
++ *   only then asks the idle preparation owner to retire idle provider
++ *   resources; a busy answer is retried on a bounded interval. The queue's own
++ *   activation retry consumes the resulting proof and hands off.
++ *
++ * The feed read runs outside the scheduler's one permit; every state recheck
++ * together with the queue or preparation call runs under it, so discovery can
++ * never start a long download for a newer target after preparation has begun
++ * retiring resources for the current one, and preparation can never retire
++ * for a target that discovery has just superseded. The scheduler persists
++ * nothing: `QueuedUpdate.queue` is the durable record, and the queue's boot
++ * reconciliation resumes a nonterminal target on restart.
++ *
++ * @module ManagedNightlyUpdate
++ */
++import type * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Semaphore from "effect/Semaphore";
++
++import {
++  IdleUpdatePreparation,
++  type IdleUpdatePreparationShape,
++  type IdleUpdatePreparationState,
++} from "./idleUpdatePreparation.ts";
++import { parseManagedReleaseVersion } from "./managedRelease.ts";
++import type { ManagedReleaseSelection } from "./managedReleaseSource.ts";
++import type { ManagedArtifactSourceError } from "./managedRuntime.ts";
++import { QueuedUpdate, type QueuedUpdateShape, type QueuedUpdateState } from "./queuedUpdate.ts";
++import { ServiceLauncherClient } from "./serviceLauncherClient.ts";
++import { compareExactServiceVersions } from "./serviceProtocol.ts";
++
++export interface ManagedNightlyUpdateDependencies {
++  /** False keeps the composed queue dormant: no fiber, timer, feed, queue, or preparation call. */
++  readonly enabled: boolean;
++  readonly installedVersion: string;
++  readonly discoveryInterval: Duration.Input;
++  readonly preparationRetryInterval: Duration.Input;
++  /** The constructed feed's `latest`; undefined on a host without a managed server target. */
++  readonly discoverLatest:
++    | Effect.Effect<ManagedReleaseSelection | undefined, ManagedArtifactSourceError>
++    | undefined;
++  readonly queue: Pick<QueuedUpdateShape, "queue" | "getState" | "awaitState">;
++  readonly preparation: Pick<IdleUpdatePreparationShape, "request" | "state">;
++}
++
++/**
++ * What one scheduler step needs: the enabled dependencies plus the permit
++ * both steps share. Exported so tests can drive one step at a time with the
++ * exact code the loops run.
++ */
++export interface ManagedNightlyUpdateStep {
++  readonly installedVersion: string;
++  readonly discoverLatest: Effect.Effect<
++    ManagedReleaseSelection | undefined,
++    ManagedArtifactSourceError
++  >;
++  readonly queue: ManagedNightlyUpdateDependencies["queue"];
++  readonly preparation: ManagedNightlyUpdateDependencies["preparation"];
++  /** One permit around every state recheck and the queue/preparation call; network reads stay outside it. */
++  readonly gate: Semaphore.Semaphore;
++}
++
++const isDurablyQueued = (state: QueuedUpdateState): boolean =>
++  state.durable && state.stage === "queued";
++
++/**
++ * Whether the selected exact version should be handed to `queue.queue` given
++ * the current queue and preparation state. Pure so the policy reads in one
++ * place; the caller has already taken the permit.
++ */
++const shouldQueue = (
++  selectedVersion: string,
++  installedVersion: string,
++  state: QueuedUpdateState,
++  preparationPhase: IdleUpdatePreparationState["phase"],
++): boolean => {
++  // A retirement in progress, or a valid proof waiting for the queue's next
++  // activation attempt, must not be undercut by a fresh long download.
++  if (preparationPhase === "preparing" || preparationPhase === "prepared") return false;
++  // Committed to restart, or an activation attempt whose answer is unknown.
++  if (state.handoffAccepted || state.stage === "updating") return false;
++  if (compareExactServiceVersions(selectedVersion, installedVersion) <= 0) return false;
++  if (state.stage === "current") return true;
++  const order = compareExactServiceVersions(selectedVersion, state.targetVersion);
++  // Never downgrade a pending target.
++  if (order < 0) return false;
++  // The queue already owns an equal target unless that target failed, in
++  // which case the same-target command is the queue's intentional restage.
++  if (order === 0) return state.stage === "failed";
++  return true;
++};
++
++/**
++ * One discovery step: read the feed outside the permit, then decide and queue
++ * under it. Feed and queue failures are logged and end the step; nothing
++ * cancels, edits, or prepares on their behalf. Error text is the feed's own
++ * reason, never a cause that may carry a signed redirect URL.
++ */
++export const discoverAndQueue = (step: ManagedNightlyUpdateStep): Effect.Effect<void> =>
++  step.discoverLatest.pipe(
++    Effect.flatMap((selection) => {
++      if (selection === undefined) return Effect.void;
++      const version = selection.version;
++      return step.gate.withPermits(1)(
++        Effect.gen(function* () {
++          const state = yield* step.queue.getState;
++          const preparation = yield* step.preparation.state;
++          if (!shouldQueue(version, step.installedVersion, state, preparation.phase)) return;
++          yield* step.queue.queue(version).pipe(
++            Effect.tap((queued) =>
++              Effect.logInfo("Managed nightly update queued.", {
++                targetVersion: queued.targetVersion,
++                stage: queued.stage,
++              }),
++            ),
++            Effect.catch((error) =>
++              Effect.logWarning("Managed nightly update could not be queued.", {
++                targetVersion: version,
++                reason: error.message,
++              }),
++            ),
++          );
++        }),
++      );
++    }),
++    Effect.catch((error) =>
++      Effect.logWarning("Managed nightly release discovery failed.", { reason: error.reason }),
++    ),
++  );
++
++/**
++ * One preparation step: under the permit, require a durable `queued` target
++ * and no owner or proof already in place, then ask for idle preparation once.
++ * The owner itself rechecks activity and admission; a busy answer is left for
++ * the next retry and never awaited here.
++ */
++export const prepareIfQueued = (step: ManagedNightlyUpdateStep): Effect.Effect<void> =>
++  step.gate.withPermits(1)(
++    Effect.gen(function* () {
++      const state = yield* step.queue.getState;
++      if (!isDurablyQueued(state) || state.handoffAccepted) return;
++      const preparation = yield* step.preparation.state;
++      if (preparation.phase === "preparing" || preparation.phase === "prepared") return;
++      const requested = yield* step.preparation.request;
++      yield* Effect.logDebug("Managed nightly update requested idle preparation.", {
++        targetVersion: state.targetVersion,
++        phase: requested.phase,
++      });
++    }),
++  );
++
++/**
++ * Starts at most one discovery fiber and one preparation fiber in the
++ * caller's scope and returns at once. Disabled construction does nothing.
++ */
++export const make = Effect.fn("cloud.managed_nightly_update.make")(function* (
++  deps: ManagedNightlyUpdateDependencies,
++) {
++  const { discoverLatest } = deps;
++  if (!deps.enabled || discoverLatest === undefined) return;
++  const step: ManagedNightlyUpdateStep = {
++    installedVersion: deps.installedVersion,
++    discoverLatest,
++    queue: deps.queue,
++    preparation: deps.preparation,
++    gate: yield* Semaphore.make(1),
++  };
++
++  // Immediate check, then one check per interval measured from the end of
++  // the previous one, so a slow feed read can never overlap the next.
++  const discovery = Effect.forever(
++    discoverAndQueue(step).pipe(Effect.andThen(Effect.sleep(deps.discoveryInterval))),
++  );
++  // Waiting on the queue happens outside the permit; the sleep after each
++  // step bounds retries while the target stays queued.
++  const preparation = Effect.forever(
++    deps.queue
++      .awaitState(isDurablyQueued)
++      .pipe(
++        Effect.andThen(prepareIfQueued(step)),
++        Effect.andThen(Effect.sleep(deps.preparationRetryInterval)),
++      ),
++  );
++
++  yield* Effect.forkScoped(discovery);
++  yield* Effect.forkScoped(preparation);
++  yield* Effect.logInfo("Managed nightly update scheduler started.", {
++    installedVersion: deps.installedVersion,
++  });
++});
++
++export interface ManagedNightlyUpdateLayerOptions {
++  readonly installedVersion: string;
++  readonly discoveryInterval: Duration.Input;
++  readonly preparationRetryInterval: Duration.Input;
++  readonly discoverLatest: ManagedNightlyUpdateDependencies["discoverLatest"];
++}
++
++/**
++ * Production wiring over the queue, preparation owner, and launcher client the
++ * managed update runtime already shares. Enabled only for a launcher-managed
++ * process running a managed release version on a host with a real feed, so a
++ * stock or development server is never moved onto the managed channel.
++ */
++export const layer = (options: ManagedNightlyUpdateLayerOptions) =>
++  Layer.effectDiscard(
++    Effect.gen(function* () {
++      const launcher = yield* ServiceLauncherClient;
++      const queue = yield* QueuedUpdate;
++      const preparation = yield* IdleUpdatePreparation;
++      const managedVersion = parseManagedReleaseVersion(options.installedVersion) !== undefined;
++      const enabled = launcher.managed && managedVersion && options.discoverLatest !== undefined;
++      if (!enabled) {
++        yield* Effect.logDebug("Managed nightly update scheduler is disabled.", {
++          launcherManaged: launcher.managed,
++          managedVersion,
++          supportedHost: options.discoverLatest !== undefined,
++        });
++      }
++      yield* make({ ...options, enabled, queue, preparation });
++    }),
++  );
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index b158ee00..2f9ceb27 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -117,6 +117,7 @@ import * as CloudCliState from "./cloud/CliState.ts";
+ import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
+ import * as IdleUpdatePreparation from "./cloud/idleUpdatePreparation.ts";
+ import { makeManagedCandidateProcess } from "./cloud/managedCandidateProcess.ts";
++import * as ManagedNightlyUpdate from "./cloud/managedNightlyUpdate.ts";
+ import type { ManagedServerTarget } from "./cloud/managedRelease.ts";
+ import {
+   type ManagedReleaseFeed,
+@@ -521,10 +522,11 @@ export const makeManagedUpdateRuntimeLayer = (input: {
+ // the runtime dependencies so every consumer sees the same pair.
+ const UpdateGatesLive = Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer);
+ 
+-// The queue is dormant until a later trigger queues an exact version: nothing
+-// here polls the feed, requests preparation, or queues anything. A supported
+-// host gets one candidate runner, one snapshot validator, and one GitHub feed
+-// for the server's lifetime, with a fresh stager per exact selection.
++// A supported host gets one candidate runner, one snapshot validator, and one
++// GitHub feed for the server's lifetime, with a fresh stager per exact
++// selection. The same feed's `latest` drives the nightly scheduler, which is
++// what queues exact versions; it stays dormant on unsupported, unmanaged, or
++// stock-version servers, where nothing polls the feed or requests preparation.
+ const ManagedUpdateRuntimeLive = Layer.unwrap(
+   Effect.gen(function* () {
+     const config = yield* ServerConfig.ServerConfig;
+@@ -536,6 +538,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+     const hostTarget = resolveManagedServerTarget(platform, architecture, linuxLibc);
+ 
+     let resolve: ManagedQueuedUpdate.ResolveManagedRuntime;
++    let discoverLatest: ManagedReleaseFeed["latest"] | undefined;
+     if (hostTarget === undefined) {
+       const unsupported = new ManagedArtifactSourceError({
+         reason: `managed server updates are unsupported on ${platform}-${architecture}${
+@@ -554,6 +557,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+         candidate,
+       });
+       const feed = yield* makeGitHubManagedReleaseFeed({ hostTarget });
++      discoverLatest = feed.latest;
+       resolve = makeSelectionBoundManagedRuntimeResolver({
+         feed,
+         makeStager: (selection) =>
+@@ -567,13 +571,21 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+       });
+     }
+ 
+-    return makeManagedUpdateRuntimeLayer({
++    const managedUpdateRuntimeLayer = makeManagedUpdateRuntimeLayer({
+       statePath: path.join(config.baseDir, "runtime", "queued-update.json"),
+       installedVersion: packageJson.version,
+       pollInterval: Duration.seconds(30),
+       dbPath: config.dbPath,
+       resolve,
+     });
++    // Same queue and preparation owner as the runtime layer; the launcher
++    // client comes from the shared `launcherLayer` below.
++    return ManagedNightlyUpdate.layer({
++      installedVersion: packageJson.version,
++      discoveryInterval: Duration.hours(4),
++      preparationRetryInterval: Duration.seconds(30),
++      discoverLatest,
++    }).pipe(Layer.provideMerge(managedUpdateRuntimeLayer));
+   }),
+ );
+ 
