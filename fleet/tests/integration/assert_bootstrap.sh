@@ -59,8 +59,19 @@ section 're-exec: the rows ran from the installed copy, not from the checkout'
 # ---------------------------------------------------------------------------
 log="$(cat "${IT_HARBOR_LOG}")"
 it_file 'the bootstrap log' 0600 root root "${IT_HARBOR_LOG}"
-it_contains 're-exec of the installed entrypoint' \
-  "exec ${IT_LINK} bootstrap" "${log}"
+# Only a run that started from the checkout re-execs. A run started from the installed
+# entrypoint already is the installed copy, and re-execing would be a second process
+# for no reason, so the absence of an exec line there is the design working rather than
+# a row that did not run. The converge legs rerun with --from auto and land on the
+# installed entrypoint, and four of them crash before the first run ever writes the
+# line, which is exactly the case this distinction covers.
+if [ "$(cat "${IT_ENTRYPOINT_FILE}")" = "${IT_FLEET}/bin/harbor" ]; then
+  it_contains 're-exec of the installed entrypoint' \
+    "exec ${IT_LINK} bootstrap" "${log}"
+else
+  it_eq 'the run was already the installed entrypoint, so it re-execs nothing' \
+    "${IT_LINK}" "$(cat "${IT_ENTRYPOINT_FILE}")"
+fi
 # The checkout rules of design section 6.1 are what let this run install anything:
 # harbor_checkout_tag refuses a tree that is dirty, carries an untracked file, or sits
 # anywhere but exactly at a tag. There is no separate line announcing that, and the

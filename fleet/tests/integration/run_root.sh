@@ -64,6 +64,7 @@ esac
 }
 
 scenario="$(cat "${IT_SCENARIO_FILE}")"
+printf '%s\n' "${entrypoint}" >"${IT_ENTRYPOINT_FILE}"
 
 # The argument vector, built as an array so that every variable root is given is
 # one literal element of the sudo env list and nothing is word-split into it.

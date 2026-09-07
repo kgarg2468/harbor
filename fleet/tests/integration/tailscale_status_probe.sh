@@ -146,6 +146,24 @@ printf 'tailscaled.sock after %ss: %s\n' "${waited}" \
   "$([ -S /var/run/tailscale/tailscaled.sock ] && printf present || printf absent)"
 sudo systemctl is-active tailscaled || printf '(tailscaled is not active)\n'
 
+# A daemon that never started measures nothing. The readings below are about what a
+# real never-logged-in tailscaled answers, and against a dead socket every one of them
+# would be the CLI failing to connect, which is a different question with the same exit
+# code -- and reporting that as issue #63 would be inventing a result. The archive
+# package carries no unit on this image, which is exactly how this was reached.
+if ! sudo systemctl is-active --quiet tailscaled; then
+  banner 'MEASUREMENT NOT MADE'
+  printf 'tailscaled did not start, so no reading here is a reading of a daemon.\n'
+  printf 'Nothing about issue #63 is asserted.\n'
+  summary '**Issue #63: measurement not made.** The package installed in `'"${mode}"'` mode'
+  summary 'never produced a running tailscaled on this image, so every status reading would'
+  summary 'have measured a missing socket rather than a never-logged-in daemon. **Nothing'
+  summary 'about issue #63 is asserted here.** Run this workflow through `workflow_dispatch`'
+  summary 'with `measure_vendor_tailscale: true` for the definitive reading against the'
+  summary 'pinned vendor daemon.'
+  exit 0
+fi
+
 banner 'reading 1..3: daemon running, never logged in'
 record root-json sudo tailscale status --json
 record root-plain sudo tailscale status

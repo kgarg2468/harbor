@@ -26,6 +26,12 @@ IT_BASELINE="${IT_ROOT}/baseline"
 IT_SHIM_LOG="${IT_STATE}/shim.log"
 IT_MUT_LOG="${IT_STATE}/mutations.log"
 IT_SCENARIO_FILE="${IT_STATE}/scenario"
+# Which entrypoint the last run_root.sh invoked. A run started from the checkout
+# stages the release and re-execs the installed copy; a run started from the
+# installed entrypoint is already that copy and correctly re-execs nothing. Only the
+# first can be asserted to have logged an exec, so the assertions read this rather
+# than assuming which kind of run they are looking at.
+IT_ENTRYPOINT_FILE="${IT_STATE}/last-entrypoint"
 
 # The PATH root runs with. The wrapper directory is first so that Harbor's ufw,
 # curl, apt-get, systemctl and loginctl calls are observable; everything after it
