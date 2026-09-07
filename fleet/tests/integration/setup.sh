@@ -75,6 +75,13 @@ sudo install -d -m 0755 -o root -g root \
 # to record that it did. Nothing secret is ever written to them.
 sudo install -m 0666 -o root -g root /dev/null "${IT_SHIM_LOG}"
 sudo install -m 0666 -o root -g root /dev/null "${IT_MUT_LOG}"
+# The stand-in daemon's BackendState, seeded at the not-logged-in pre-state every
+# bootstrap in this lane measures. It is world-writable for the same reason the two
+# logs above are: harbor auth tailscale is the operator's command, so the stub's "up"
+# runs unprivileged and has to be able to record the transition to Running. Nothing
+# secret is ever written to it, and the login URL never is.
+printf 'NeedsLogin\n' | sudo tee "${IT_TS_BACKEND}" >/dev/null
+sudo chmod 0666 "${IT_TS_BACKEND}"
 
 # ---------------------------------------------------------------------------
 step 'wrappers'

@@ -17,9 +17,17 @@
 #                             current stable CLI does, so the lane exercises the
 #                             probe-based branch of the operator row rather than
 #                             the exact-value branch.
+#   tailscale up --hostname=NAME   the attended login of design sections 3.6 and
+#                             5.3, which harbor auth tailscale runs as the
+#                             operator without sudo. It prints a login URL on the
+#                             terminal and moves BackendState from NeedsLogin to
+#                             Running, which is the transition that command waits
+#                             for. No tailnet is reached and no auth key exists:
+#                             the "approval" is the printed URL and nothing else,
+#                             and an --authkey of any spelling is refused.
 #   tailscale version         prints the version the package carries.
-# Anything else is refused loudly. tailscale up, login, logout and serve are
-# refused on purpose: the lane never logs a node in and holds no auth key.
+# Anything else is refused loudly. tailscale login, logout, serve, funnel and down
+# stay refused on purpose: the lane never logs a node in to a real tailnet.
 #
 # The daemon this stands in for is never contacted, so this stub CANNOT settle
 # issue #63 (whether a real never-logged-in tailscaled exits 0 for
@@ -31,7 +39,17 @@ it_state=/opt/harbor-it/state
 it_shim_log="${it_state}/shim.log"
 it_mut_log="${it_state}/mutations.log"
 it_operator_file="${it_state}/tailscale.operator"
+it_backend_file="${it_state}/tailscale.backend"
 it_version_file=/usr/share/harbor-integration/tailscale-version
+# The login URL "up" prints. Design section 3.6 says that URL reaches the operator's
+# terminal and no log, and an absence assertion proves nothing unless the string it
+# looks for is one that really was printed, so it is a fixed literal on both sides
+# rather than anything either side generates. This stub is installed inside the
+# locally built package and cannot source tests/integration/lib/common.sh, so the
+# same literal is spelled there as IT_LOGIN_URL; keep the two byte for byte in step.
+# The host is under the reserved .invalid domain: nothing resolves it and nothing
+# secret is involved.
+it_login_url="https://login.tailscale-integration.invalid/a/f00dcafe0123456789"
 
 it_log() {
   local kind line arg
@@ -66,6 +84,17 @@ it_operator() {
   fi
 }
 
+# The BackendState this stand-in reports. NeedsLogin until an "up" has run, which is
+# the pre-state every bootstrap in this lane measures; the standalone status probe
+# installs this stub with no lane state at all and gets the same default.
+it_backend() {
+  if [ -r "${it_backend_file}" ]; then
+    cat "${it_backend_file}"
+  else
+    printf 'NeedsLogin\n'
+  fi
+}
+
 it_user="$(id -un)"
 
 case "${1:-}" in
@@ -82,13 +111,22 @@ case "${1:-}" in
         exit 1
         ;;
     esac
+    it_backend_state="$(it_backend)"
+    if [ "${it_backend_state}" = Running ]; then
+      it_want_running=true
+    else
+      it_want_running=false
+    fi
+    # AuthURL stays empty in every reading. The login URL belongs to the terminal
+    # "up" printed it on and to nothing that reads status, least of all to a caller
+    # that might log what it read.
     printf '{\n'
     printf '  "Version": "%s",\n' "$(it_version)"
-    printf '  "BackendState": "NeedsLogin",\n'
+    printf '  "BackendState": "%s",\n' "${it_backend_state}"
     printf '  "AuthURL": "",\n'
     printf '  "TailscaleIPs": null,\n'
     printf '  "Self": null,\n'
-    printf '  "Health": ["state=NeedsLogin, wantRunning=false"],\n'
+    printf '  "Health": ["state=%s, wantRunning=%s"],\n' "${it_backend_state}" "${it_want_running}"
     printf '  "MagicDNSSuffix": "",\n'
     printf '  "CurrentTailnet": null,\n'
     printf '  "Peer": null,\n'
@@ -125,7 +163,60 @@ case "${1:-}" in
     it_log inspect "$@"
     it_version
     ;;
-  up | login | logout | serve | funnel | down)
+  up)
+    it_log mutate "$@"
+    # The argv is logged above and carries no URL, which is the point: what this
+    # subcommand prints below never reaches shim.log or mutations.log, and the
+    # integration assertions look for it in both.
+    #
+    # Run by the operator without sudo, which is what the design section 5.2 grant
+    # exists for; root may run it too and nobody else may, exactly as status does.
+    if [ "${it_user}" != root ] && [ "${it_user}" != "$(it_operator)" ]; then
+      printf 'Access denied: this command is available only to the operator or root\n' >&2
+      exit 1
+    fi
+    [ -d "${it_state}" ] || {
+      printf 'integration tailscale stub: %s is missing, so a login cannot be recorded\n' "${it_state}" >&2
+      exit 1
+    }
+    shift
+    it_hostname=""
+    for it_arg in "$@"; do
+      case "${it_arg}" in
+        --hostname=*) it_hostname="${it_arg#--hostname=}" ;;
+        --ssh)
+          # This release ships with the design section 3.6 --ssh gate closed:
+          # vendor-smoke/tailscale-ssh.probe records result=not-run. A Harbor that
+          # passed --ssh anyway would be acting on a measurement nobody made, so the
+          # stand-in refuses it loudly rather than letting the lane pass quietly.
+          printf 'integration tailscale stub: refusing --ssh; the release under test records the --ssh gate as not run\n' >&2
+          exit 64
+          ;;
+        --auth-key* | --authkey*)
+          printf 'integration tailscale stub: refusing an auth key; the lane holds none and never logs in to a real tailnet\n' >&2
+          exit 64
+          ;;
+        *)
+          printf 'integration tailscale stub: unsupported "up" flag: %s\n' "${it_arg}" >&2
+          exit 64
+          ;;
+      esac
+    done
+    [ -n "${it_hostname}" ] || {
+      printf 'integration tailscale stub: "up" needs --hostname=NAME\n' >&2
+      exit 64
+    }
+    # The vendor prints the login URL on the terminal it was invoked from and
+    # nowhere else, and Harbor passes that output straight through without
+    # capturing it (design section 5.3).
+    printf 'To authenticate, visit:\n\n\t%s\n\n' "${it_login_url}"
+    # No tailnet is reached and no approval is waited for: printing the URL is the
+    # whole login here, and the backend moves NeedsLogin -> Running, which is the
+    # transition harbor auth tailscale polls status for.
+    printf 'Running\n' >"${it_backend_file}"
+    printf 'Success.\n'
+    ;;
+  login | logout | serve | funnel | down)
     it_log mutate "$@"
     printf 'integration tailscale stub: refusing "%s"; the lane never logs a node in and holds no auth key\n' "${1}" >&2
     exit 64
