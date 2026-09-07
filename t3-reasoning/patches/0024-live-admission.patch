@@ -1,0 +1,2057 @@
+diff --git a/apps/server/src/bin.test.ts b/apps/server/src/bin.test.ts
+index 817e2077..0736529e 100644
+--- a/apps/server/src/bin.test.ts
++++ b/apps/server/src/bin.test.ts
+@@ -35,6 +35,7 @@ import {
+ } from "./cloud/serviceProtocol.ts";
+ import * as ServerConfig from "./config.ts";
+ import { UpdateActivityLive } from "./updateActivity.ts";
++import * as UpdateAdmission from "./updateAdmission.ts";
+ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+ import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+@@ -365,6 +366,9 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
+     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
+       Layer.provide(orchestrationHttpApiLayer),
+       Layer.provide(environmentAuthenticatedAuthLayer),
++      Layer.provide(
++        UpdateAdmission.middlewareLayer.pipe(Layer.provideMerge(UpdateAdmission.layer)),
++      ),
+     );
+     const appLayer = HttpRouter.serve(routesLayer, {
+       disableListenLog: true,
+diff --git a/apps/server/src/http.ts b/apps/server/src/http.ts
+index 290b73b4..1fcef30f 100644
+--- a/apps/server/src/http.ts
++++ b/apps/server/src/http.ts
+@@ -47,6 +47,7 @@ import {
+ } from "./auth/http.ts";
+ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+ import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
++import * as UpdateAdmission from "./updateAdmission.ts";
+ 
+ const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
+ const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
+@@ -429,12 +430,26 @@ export const attachmentUploadRouteLayer = HttpRouter.add(
+       });
+     }
+ 
+-    // Keep the request stream in the route scope until the response is sent.
+-    const bodyPull = yield* Stream.toPull(request.stream);
+-    const stored = yield* storeAttachmentUpload(claims, Stream.fromPull(Effect.succeed(bodyPull)));
+-    return stored.ok
+-      ? HttpServerResponse.empty({ status: 204 })
+-      : HttpServerResponse.text(stored.detail, { status: stored.status });
++    // The upload is a client mutation outside the schema API, so it claims
++    // update admission itself: one claim while bytes and the `.part` file are
++    // live. Token and length validation above stay outside the gate, so an
++    // invalid upload still answers 404/400 during maintenance.
++    const admission = yield* UpdateAdmission.UpdateAdmission;
++    return yield* admission
++      .withAdmission(
++        Effect.gen(function* () {
++          // Keep the request stream in the route scope until the response is sent.
++          const bodyPull = yield* Stream.toPull(request.stream);
++          const stored = yield* storeAttachmentUpload(
++            claims,
++            Stream.fromPull(Effect.succeed(bodyPull)),
++          );
++          return stored.ok
++            ? HttpServerResponse.empty({ status: 204 })
++            : HttpServerResponse.text(stored.detail, { status: stored.status });
++        }),
++      )
++      .pipe(Effect.catchTag("UpdateAdmissionClosedError", HttpServerRespondable.toResponse));
+   }),
+ );
+ 
+diff --git a/apps/server/src/mcp/McpHttpServer.test.ts b/apps/server/src/mcp/McpHttpServer.test.ts
+index 5627d144..48264790 100644
+--- a/apps/server/src/mcp/McpHttpServer.test.ts
++++ b/apps/server/src/mcp/McpHttpServer.test.ts
+@@ -4,6 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+ import * as Schema from "effect/Schema";
+ import * as Stream from "effect/Stream";
+@@ -13,6 +14,7 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
+ import * as McpHttpServer from "./McpHttpServer.ts";
+ import * as McpInvocationContext from "./McpInvocationContext.ts";
+ import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
++import * as UpdateAdmission from "../updateAdmission.ts";
+ 
+ const environmentId = EnvironmentId.make("environment-mcp-test");
+ const threadId = ThreadId.make("thread-mcp-test");
+@@ -40,6 +42,7 @@ const client = McpSchema.McpServerClient.of({
+ const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
+   Layer.provideMerge(McpServer.McpServer.layer),
+   Layer.provideMerge(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
++  Layer.provideMerge(UpdateAdmission.layer),
+ );
+ 
+ it("normalizes empty successful notification responses to accepted", () => {
+@@ -416,3 +419,106 @@ it.effect("registers annotated tools and preserves authenticated request context
+     }),
+   ).pipe(Effect.provide(TestLayer)),
+ );
++
++// Tools that drive the page are client mutations: refused while the server is
++// closed for maintenance, and counted in flight until the host answers or the
++// caller gives up. Observing tools stay open.
++it.effect("admits driving tools and keeps observing tools open during maintenance", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const server = yield* McpServer.McpServer;
++      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
++      const admission = yield* UpdateAdmission.UpdateAdmission;
++      const routed: string[] = [];
++      let clickGate:
++        | { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
++        | undefined;
++      const events = yield* broker.connect({ clientId: "mcp-admission-client", environmentId });
++      yield* Stream.runForEach(events, (event) => {
++        if (event.type === "connected") return Effect.void;
++        routed.push(event.request.operation);
++        const respond = broker.respond({
++          clientId: "mcp-admission-client",
++          connectionId: event.connectionId,
++          requestId: event.request.requestId,
++          ok: true,
++          result:
++            event.request.operation === "status"
++              ? {
++                  available: true,
++                  visible: true,
++                  tabId,
++                  url: "http://example.test/",
++                  title: "Example",
++                  loading: false,
++                }
++              : undefined,
++        });
++        const gate = event.request.operation === "click" ? clickGate : undefined;
++        return gate === undefined
++          ? respond
++          : Deferred.succeed(gate.entered, undefined).pipe(
++              Effect.andThen(Deferred.await(gate.release)),
++              Effect.andThen(respond),
++            );
++      }).pipe(Effect.forkScoped);
++      yield* Effect.yieldNow;
++      const callTool = (name: string, args: Record<string, unknown>) =>
++        server
++          .callTool({ name, arguments: args })
++          .pipe(
++            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
++            Effect.provideService(McpSchema.McpServerClient, client),
++          );
++
++      const closed = yield* Deferred.make<void>();
++      const reopen = yield* Deferred.make<void>();
++      const maintenance = yield* admission
++        .withMaintenance(
++          Deferred.succeed(closed, undefined).pipe(Effect.andThen(Deferred.await(reopen))),
++        )
++        .pipe(Effect.forkScoped);
++      yield* Deferred.await(closed);
++
++      const status = yield* callTool("preview_status", {});
++      expect(status.isError).toBe(false);
++      const refused = yield* callTool("preview_click", { x: 10, y: 10 });
++      expect(refused.isError).toBe(true);
++      expect(refused.content).toEqual([
++        { type: "text", text: "Server is closed for maintenance; retry the command shortly" },
++      ]);
++      expect(routed).toEqual(["status"]);
++      yield* Deferred.succeed(reopen, undefined);
++      yield* Fiber.join(maintenance);
++
++      // A click the host has not answered yet holds its claim.
++      const held = { entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
++      clickGate = held;
++      const click = yield* callTool("preview_click", { x: 10, y: 10 }).pipe(Effect.forkScoped);
++      yield* Deferred.await(held.entered);
++      expect((yield* admission.state).inFlight).toBe(1);
++      expect((yield* admission.tryWithMaintenance(Effect.void)).status).toBe("busy");
++      yield* Deferred.succeed(held.release, undefined);
++      expect((yield* Fiber.join(click)).isError).toBe(false);
++      yield* admission.withMaintenance(Effect.void);
++      expect((yield* admission.state).inFlight).toBe(0);
++
++      // The caller giving up releases the claim as well.
++      const abandoned = {
++        entered: yield* Deferred.make<void>(),
++        release: yield* Deferred.make<void>(),
++      };
++      clickGate = abandoned;
++      const interrupted = yield* callTool("preview_click", { x: 10, y: 10 }).pipe(
++        Effect.forkScoped,
++      );
++      yield* Deferred.await(abandoned.entered);
++      expect((yield* admission.tryWithMaintenance(Effect.void)).status).toBe("busy");
++      yield* Fiber.interrupt(interrupted);
++      yield* admission.withMaintenance(Effect.void);
++      expect((yield* admission.state).inFlight).toBe(0);
++      yield* Deferred.succeed(abandoned.release, undefined);
++      expect(routed).toEqual(["status", "click", "click"]);
++    }),
++  ).pipe(Effect.provide(TestLayer)),
++);
+diff --git a/apps/server/src/mcp/toolkits/preview/handlers.ts b/apps/server/src/mcp/toolkits/preview/handlers.ts
+index c501ee08..2b81b32d 100644
+--- a/apps/server/src/mcp/toolkits/preview/handlers.ts
++++ b/apps/server/src/mcp/toolkits/preview/handlers.ts
+@@ -1,5 +1,6 @@
+ import * as Effect from "effect/Effect";
+ import type {
++  PreviewAutomationError,
+   PreviewAutomationOperation,
+   PreviewAutomationOpenInput,
+   PreviewAutomationRecordingArtifact,
+@@ -9,10 +10,12 @@ import type {
+   PreviewAutomationSnapshot,
+   PreviewAutomationStatus,
+   PreviewTabId,
++  UpdateAdmissionClosedError,
+ } from "@t3tools/contracts";
+ 
+ import * as McpInvocationContext from "../../McpInvocationContext.ts";
+ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
++import * as UpdateAdmission from "../../../updateAdmission.ts";
+ import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
+ 
+ /**
+@@ -34,67 +37,92 @@ export function normalizePreviewOpenInput(
+   };
+ }
+ 
+-const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
++interface TargetedInput {
++  readonly tabId?: PreviewTabId | undefined;
++  readonly [key: string]: unknown;
++}
++
++const brokerRequest = Effect.fn("PreviewToolkit.brokerRequest")(function* (
+   operation: PreviewAutomationOperation,
+-  input: unknown,
++  input: TargetedInput,
+   timeoutMs?: number,
+-  tabId?: PreviewTabId,
+-): Effect.fn.Return<
+-  A,
+-  import("@t3tools/contracts").PreviewAutomationError,
+-  McpInvocationContext.McpInvocationContext | PreviewAutomationBroker.PreviewAutomationBroker
+-> {
++) {
+   const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+-  const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+-  return yield* broker.invoke<A>({
++  const { tabId, ...operationInput } = input;
++  return {
+     scope,
+     operation,
+-    input,
++    input: operationInput,
+     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+     ...(tabId === undefined ? {} : { tabId }),
+-  });
++  };
+ });
+ 
+-const invokeTargeted = <A>(
++/** Observes the page; stays available while the server is closed for maintenance. */
++const invokeRead = Effect.fn("PreviewToolkit.invokeRead")(function* <A>(
+   operation: PreviewAutomationOperation,
+-  input: {
+-    readonly tabId?: PreviewTabId | undefined;
+-    readonly [key: string]: unknown;
+-  },
++  input: TargetedInput,
+   timeoutMs?: number,
+-) => {
+-  const { tabId, ...operationInput } = input;
+-  return invoke<A>(operation, operationInput, timeoutMs, tabId);
+-};
++): Effect.fn.Return<
++  A,
++  PreviewAutomationError,
++  McpInvocationContext.McpInvocationContext | PreviewAutomationBroker.PreviewAutomationBroker
++> {
++  const request = yield* brokerRequest(operation, input, timeoutMs);
++  const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
++  return yield* broker.invoke<A>(request);
++});
++
++/**
++ * Drives the page; one admission claim covers the complete broker round trip,
++ * so a maintenance restart waits for the host's response or the caller's
++ * cancellation, and a closed gate refuses before any request reaches the host.
++ */
++const invokeMutation = Effect.fn("PreviewToolkit.invokeMutation")(function* <A>(
++  operation: PreviewAutomationOperation,
++  input: TargetedInput,
++  timeoutMs?: number,
++): Effect.fn.Return<
++  A,
++  PreviewAutomationError | UpdateAdmissionClosedError,
++  | McpInvocationContext.McpInvocationContext
++  | PreviewAutomationBroker.PreviewAutomationBroker
++  | UpdateAdmission.UpdateAdmission
++> {
++  const request = yield* brokerRequest(operation, input, timeoutMs);
++  const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
++  const admission = yield* UpdateAdmission.UpdateAdmission;
++  return yield* admission.withAdmission(broker.invoke<A>(request));
++});
+ 
+ const handlers = {
+-  preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
++  preview_status: (input) => invokeRead<PreviewAutomationStatus>("status", input ?? {}),
+   preview_open: (input) =>
+-    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
++    invokeMutation<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
+   preview_navigate: (input) =>
+-    invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
++    invokeMutation<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
+   preview_resize: (input) =>
+-    invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
++    invokeMutation<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
+   preview_set_appearance: (input) =>
+-    invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
++    invokeMutation<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
+   preview_snapshot: (input) => {
+     // Output selection is MCP-only; the browser still produces a complete snapshot.
+     const { includeImage: _includeImage, ...operationInput } = input ?? {};
+-    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
++    return invokeRead<PreviewAutomationSnapshot>("snapshot", operationInput);
+   },
+   preview_click: (input) =>
+-    invokeTargeted<void>("click", input, input.timeoutMs).pipe(Effect.as({})),
+-  preview_type: (input) => invokeTargeted<void>("type", input, input.timeoutMs).pipe(Effect.as({})),
+-  preview_press: (input) => invokeTargeted<void>("press", input).pipe(Effect.as({})),
+-  preview_scroll: (input) => invokeTargeted<void>("scroll", input).pipe(Effect.as({})),
++    invokeMutation<void>("click", input, input.timeoutMs).pipe(Effect.as({})),
++  preview_type: (input) => invokeMutation<void>("type", input, input.timeoutMs).pipe(Effect.as({})),
++  preview_press: (input) => invokeMutation<void>("press", input).pipe(Effect.as({})),
++  preview_scroll: (input) => invokeMutation<void>("scroll", input).pipe(Effect.as({})),
+   preview_evaluate: (input) =>
+-    invokeTargeted<unknown>("evaluate", input).pipe(Effect.map((result) => result ?? null)),
++    invokeMutation<unknown>("evaluate", input).pipe(Effect.map((result) => result ?? null)),
+   preview_wait_for: (input) =>
+-    invokeTargeted<void>("waitFor", input, input.timeoutMs).pipe(Effect.as({})),
++    invokeRead<void>("waitFor", input, input.timeoutMs).pipe(Effect.as({})),
+   preview_recording_start: (input) =>
+-    invokeTargeted<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
++    invokeMutation<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
+   preview_recording_stop: (input) =>
+-    invokeTargeted<PreviewAutomationRecordingArtifact>("recordingStop", input ?? {}),
++    invokeMutation<PreviewAutomationRecordingArtifact>("recordingStop", input ?? {}),
+ } satisfies Parameters<typeof PreviewToolkit.toLayer>[0];
+ 
+ const { preview_snapshot, ...standardHandlers } = handlers;
+diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
+index ab8d1580..d9f4dbb7 100644
+--- a/apps/server/src/mcp/toolkits/preview/tools.ts
++++ b/apps/server/src/mcp/toolkits/preview/tools.ts
+@@ -17,18 +17,26 @@ import {
+   PreviewAutomationTabTargetInput,
+   PreviewAutomationTypeInput,
+   PreviewAutomationWaitForInput,
++  UpdateAdmissionClosedError,
+ } from "@t3tools/contracts";
+ import * as Schema from "effect/Schema";
+ import { Tool, Toolkit } from "effect/unstable/ai";
+ 
+ import * as McpInvocationContext from "../../McpInvocationContext.ts";
+ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
++import * as UpdateAdmission from "../../../updateAdmission.ts";
+ 
+ const dependencies = [
+   McpInvocationContext.McpInvocationContext,
+   PreviewAutomationBroker.PreviewAutomationBroker,
+ ];
+ 
++// Tools that drive the browser are client mutations: they claim update
++// admission around the broker call and can be refused during maintenance.
++// The observing tools stay available so an agent can still read the page.
++const mutationDependencies = [...dependencies, UpdateAdmission.UpdateAdmission];
++const PreviewMutationFailure = Schema.Union([PreviewAutomationError, UpdateAdmissionClosedError]);
++
+ const PreviewActionResult = Schema.Record(Schema.String, Schema.Never).annotate({
+   description: "The preview action completed successfully.",
+ });
+@@ -64,8 +72,8 @@ export const PreviewOpenTool = browserTool(
+       "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab.",
+     parameters: PreviewAutomationOpenInput,
+     success: PreviewAutomationStatus,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   })
+     .annotate(Tool.Title, "Open browser preview")
+     .annotate(Tool.Destructive, false),
+@@ -77,8 +85,8 @@ export const PreviewNavigateTool = safeBrowserTool(
+       "Navigate a collaborative browser tab. Pass tabId to target a specific tab, plus {url:'https://t3.chat'} for a website or {target:{kind:'environment-port',port:5173}} for a dev server. Exactly one of url or target is required.",
+     parameters: PreviewAutomationNavigateInput,
+     success: PreviewAutomationStatus,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Navigate browser preview"),
+ );
+ 
+@@ -88,8 +96,8 @@ export const PreviewResizeTool = safeBrowserTool(
+       "Resize a collaborative browser tab, optionally selected by tabId. Use {mode:'fill'}, {mode:'freeform',width:1024,height:768}, or {mode:'preset',preset:'iphone-12-pro',orientation:'portrait'}. This changes CSS layout breakpoints without changing the desktop browser user agent.",
+     parameters: PreviewAutomationResizeInput,
+     success: PreviewAutomationResizeResult,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   })
+     .annotate(Tool.Title, "Resize browser viewport")
+     .annotate(Tool.Idempotent, true),
+@@ -101,8 +109,8 @@ export const PreviewSetAppearanceTool = safeBrowserTool(
+       "Emulate prefers-color-scheme in a collaborative browser tab, optionally selected by tabId. Use {colorScheme:'dark'} or {colorScheme:'light'} to preview the page in that appearance, and {colorScheme:'system'} to clear the override and follow the OS appearance.",
+     parameters: PreviewAutomationSetColorSchemeInput,
+     success: PreviewAutomationSetColorSchemeResult,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   })
+     .annotate(Tool.Title, "Set preview appearance")
+     .annotate(Tool.Idempotent, true),
+@@ -133,8 +141,8 @@ export const PreviewClickTool = browserTool(
+       "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together.",
+     parameters: PreviewAutomationClickInput,
+     success: PreviewActionResult,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Click preview page"),
+ );
+ 
+@@ -144,8 +152,8 @@ export const PreviewTypeTool = browserTool(
+       "Insert literal text into one input in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; set clear=true to replace existing text.",
+     parameters: PreviewAutomationTypeInput,
+     success: PreviewActionResult,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Type into preview page"),
+ );
+ 
+@@ -155,8 +163,8 @@ export const PreviewPressTool = browserTool(
+       "Press one keyboard key in the tab selected by tabId, or this agent session's current tab when omitted. Examples: {key:'Enter'}, {key:'Escape'}, or {key:'a',modifiers:['Meta']}.",
+     parameters: PreviewAutomationPressInput,
+     success: PreviewActionResult,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Press key in preview page"),
+ );
+ 
+@@ -166,8 +174,8 @@ export const PreviewScrollTool = safeBrowserTool(
+       "Scroll the tab selected by tabId, or this agent session's current tab when omitted. Positive deltaY scrolls down and positive deltaX scrolls right; a locator/selector targets a container.",
+     parameters: PreviewAutomationScrollInput,
+     success: PreviewActionResult,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Scroll preview page"),
+ );
+ 
+@@ -177,8 +185,8 @@ export const PreviewEvaluateTool = browserTool(
+       "Evaluate JavaScript in the tab selected by tabId, or this agent session's current tab when omitted. Returns a serializable result up to 64 KB; the expression may mutate page state.",
+     parameters: PreviewAutomationEvaluateInput,
+     success: Schema.Unknown,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Evaluate JavaScript in preview"),
+ );
+ 
+@@ -199,8 +207,8 @@ export const PreviewRecordingStartTool = safeBrowserTool(
+       "Start recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted.",
+     parameters: PreviewAutomationTabTargetInput,
+     success: PreviewAutomationRecordingStatus,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Start browser recording"),
+ );
+ 
+@@ -210,8 +218,8 @@ export const PreviewRecordingStopTool = safeBrowserTool(
+       "Stop recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted, and save it as a local evidence artifact.",
+     parameters: PreviewAutomationTabTargetInput,
+     success: PreviewAutomationRecordingArtifact,
+-    failure: PreviewAutomationError,
+-    dependencies,
++    failure: PreviewMutationFailure,
++    dependencies: mutationDependencies,
+   }).annotate(Tool.Title, "Stop browser recording"),
+ );
+ 
+diff --git a/apps/server/src/provider/AntigravityInstallation.test.ts b/apps/server/src/provider/AntigravityInstallation.test.ts
+index 0528cb49..529f5f15 100644
+--- a/apps/server/src/provider/AntigravityInstallation.test.ts
++++ b/apps/server/src/provider/AntigravityInstallation.test.ts
+@@ -23,6 +23,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
+ import * as NodeCrypto from "node:crypto";
+ 
+ import {
++  AntigravityInstallationError,
+   makeAntigravityInstallation,
+   type AntigravityExecutable,
+   type AntigravityInstallation,
+@@ -30,6 +31,8 @@ import {
+ } from "./AntigravityInstallation.ts";
+ import { ANTIGRAVITY_AUTH_BROWSER_MARKER } from "./antigravityAuthSupport.ts";
+ import type { AntigravityReleaseAsset } from "./antigravityRelease.ts";
++import { UpdateActivity } from "../updateActivity.ts";
++import * as UpdateActivityModule from "../updateActivity.ts";
+ 
+ const serverContents = "antigravity runtime\n";
+ const harnessContents = "local harness\n";
+@@ -158,6 +161,7 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
+   const requests: string[] = [];
+   const validations: Array<{ executable: AntigravityExecutable; version: string }> = [];
+   const installationFs = options.fileSystem ?? fs;
++  const activity = yield* UpdateActivityModule.make();
+   const trackedFs = FileSystem.FileSystem.of({
+     ...installationFs,
+     makeTempDirectoryScoped: (settings) =>
+@@ -182,6 +186,7 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
+         }),
+   }).pipe(
+     Effect.provideService(FileSystem.FileSystem, trackedFs),
++    Effect.provideService(UpdateActivity, activity),
+     Effect.provideService(HostProcessPlatform, platform),
+     Effect.provideService(HostProcessArchitecture, "x64"),
+     Effect.provideService(HostProcessEnvironment, { PATH: options.path ?? "" }),
+@@ -216,9 +221,19 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
+       ),
+     ),
+   );
+-  return { installation, fs, path, baseDir, requests, validations, stagingReleased };
++  return { installation, fs, path, baseDir, requests, validations, stagingReleased, activity };
+ });
+ 
++/** Resolves once the activity registry counts nothing outstanding. */
++const awaitActivityIdle = (activity: UpdateActivityModule.UpdateActivityShape) =>
++  Effect.gen(function* () {
++    let state = yield* activity.state;
++    while (state.outstanding !== 0) {
++      state = yield* activity.awaitChange(state.revision);
++    }
++    return state;
++  });
++
+ const terminalState = (installation: AntigravityInstallation["Service"]) =>
+   installation.changes.pipe(
+     Stream.filter((state) => ["succeeded", "failed", "cancelled"].includes(state.phase)),
+@@ -906,6 +921,75 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
+       }),
+   );
+ 
++  it.effect.each(["succeeded", "failed", "cancelled"] as const)(
++    "holds one activity lease from start until the install %s",
++    (outcome) =>
++      Effect.gen(function* () {
++        const entered = yield* Deferred.make<void>();
++        const release = yield* Deferred.make<void>();
++        const { installation, activity, stagingReleased } = yield* makeHarness({
++          previous: true,
++          body: Stream.concat(
++            Stream.make(completeArchive.subarray(0, 31)),
++            Stream.fromEffect(
++              Deferred.succeed(entered, undefined).pipe(
++                Effect.andThen(Deferred.await(release)),
++                Effect.as(completeArchive.subarray(31)),
++              ),
++            ),
++          ),
++          validate:
++            outcome === "failed"
++              ? () =>
++                  Effect.fail(
++                    new AntigravityInstallationError({
++                      operation: "validate",
++                      detail: "Validation rejected the runtime.",
++                    }),
++                  )
++              : undefined,
++        });
++        expect((yield* activity.state).outstanding).toBe(0);
++        const started = yield* installation.start;
++        yield* Deferred.await(entered);
++        // The download is a detached root: an idle update cannot seal past it.
++        expect((yield* activity.state).outstanding).toBe(1);
++        expect((yield* activity.trySealIdle).status).toBe("busy");
++
++        if (outcome === "cancelled") {
++          expect(
++            (yield* installation.cancel(started.operationId ?? "missing-operation-id")).phase,
++          ).toBe("cancelled");
++        } else {
++          yield* Deferred.succeed(release, undefined);
++        }
++        expect((yield* terminalState(installation)).phase).toBe(outcome);
++        const idle = yield* awaitActivityIdle(activity);
++        expect(idle.outstanding).toBe(0);
++        yield* Deferred.await(stagingReleased);
++        expect((yield* activity.trySealIdle).status).toBe("sealed");
++      }),
++  );
++
++  it.effect("refuses to start once activity is sealed, without downloading or changing state", () =>
++    Effect.gen(function* () {
++      const { installation, activity, requests } = yield* makeHarness({ previous: true });
++      const claim = yield* activity.trySealIdle;
++      expect(claim.status).toBe("sealed");
++      const before = yield* installation.state;
++      expect(yield* installation.start.pipe(Effect.flip)).toMatchObject({ operation: "start" });
++      expect(yield* installation.state).toEqual(before);
++      expect((yield* installation.state).phase).toBe("idle");
++      expect(requests).toEqual([]);
++      expect((yield* activity.state).outstanding).toBe(0);
++      if (claim.status === "sealed") claim.seal.release();
++      // Reopening restores the normal path, so the refusal was the seal alone.
++      expect((yield* installation.start).phase).toBe("downloading");
++      expect((yield* terminalState(installation)).phase).toBe("succeeded");
++      expect((yield* awaitActivityIdle(activity)).outstanding).toBe(0);
++    }),
++  );
++
+   it.effect("reports unsupported hosts without downloading or changing state", () =>
+     Effect.gen(function* () {
+       const { installation, requests } = yield* makeHarness({ asset: null, platform: "darwin" });
+diff --git a/apps/server/src/provider/AntigravityInstallation.ts b/apps/server/src/provider/AntigravityInstallation.ts
+index 5e89d2e3..383d3cf2 100644
+--- a/apps/server/src/provider/AntigravityInstallation.ts
++++ b/apps/server/src/provider/AntigravityInstallation.ts
+@@ -30,6 +30,7 @@ import type * as NodeStream from "node:stream";
+ import * as Yauzl from "yauzl";
+ 
+ import { ServerConfig } from "../config.ts";
++import { UpdateActivity } from "../updateActivity.ts";
+ import { makeAntigravityAcpRuntime } from "./acp/AntigravityAcpSupport.ts";
+ import {
+   buildAntigravityAcpSpawnInput,
+@@ -270,6 +271,10 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
+   const crypto = yield* Crypto.Crypto;
+   const http = yield* HttpClient.HttpClient;
+   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++  // The install outlives `start`, so it is a detached root that must own an
++  // activity lease of its own: without one an idle update could seal and
++  // restart the server halfway through a download or extraction.
++  const activity = yield* UpdateActivity;
+   const serviceScope = yield* Effect.scope;
+   const platform = yield* HostProcessPlatform;
+   const arch = yield* HostProcessArchitecture;
+@@ -792,6 +797,9 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
+             `Google does not publish an Antigravity runtime for ${platform}-${arch}. Use a supported remote environment or a custom executable.`,
+           );
+         }
++        // Sealed activity refuses here, before any state change or request;
++        // `wrapFailure` below turns that refusal into the start error.
++        const lease = yield* activity.acquire("antigravity install");
+         const operationId = yield* crypto.randomUUIDv4;
+         const next: ProviderInstallState = {
+           driver: DRIVER,
+@@ -807,23 +815,28 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
+         yield* SubscriptionRef.set(state, next);
+         const work = install(releaseAsset).pipe(
+           Effect.onExit((exit) =>
+-            Exit.isFailure(exit)
+-              ? SubscriptionRef.update(state, (value) => {
+-                  if (value.operationId !== operationId || value.phase === "succeeded")
+-                    return value;
+-                  const error = Cause.findErrorOption(exit.cause);
+-                  const cancelled = Cause.hasInterruptsOnly(exit.cause);
+-                  return {
+-                    ...value,
+-                    phase: cancelled ? "cancelled" : "failed",
+-                    message: cancelled
+-                      ? "Installation cancelled. The previous runtime is unchanged."
+-                      : Option.isSome(error)
+-                        ? error.value.detail
+-                        : "Could not finish the Antigravity installation. Check disk space and directory access.",
+-                  } satisfies ProviderInstallState;
+-                })
+-              : Effect.void,
++            Effect.suspend(() => {
++              // Released before a failed or cancelled state is published, so an
++              // observer of that state never finds the install still counted.
++              lease.release();
++              return Exit.isFailure(exit)
++                ? SubscriptionRef.update(state, (value) => {
++                    if (value.operationId !== operationId || value.phase === "succeeded")
++                      return value;
++                    const error = Cause.findErrorOption(exit.cause);
++                    const cancelled = Cause.hasInterruptsOnly(exit.cause);
++                    return {
++                      ...value,
++                      phase: cancelled ? "cancelled" : "failed",
++                      message: cancelled
++                        ? "Installation cancelled. The previous runtime is unchanged."
++                        : Option.isSome(error)
++                          ? error.value.detail
++                          : "Could not finish the Antigravity installation. Check disk space and directory access.",
++                    } satisfies ProviderInstallState;
++                  })
++                : Effect.void;
++            }),
+           ),
+           Effect.ignoreCause,
+           Effect.ensuring(
+@@ -833,6 +846,9 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
+           ),
+         );
+         const fiber = yield* Effect.forkIn(Effect.interruptible(work), serviceScope);
++        // A child interrupted before its body starts never reaches the exit
++        // handler above; the observer still gives the lease back.
++        fiber.addObserver(() => lease.release());
+         running = { operationId, fiber };
+         return next;
+       }).pipe(Effect.uninterruptible),
+diff --git a/apps/server/src/provider/Layers/ProviderRegistry.test.ts b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
+index 53d3362e..74fc1fcf 100644
+--- a/apps/server/src/provider/Layers/ProviderRegistry.test.ts
++++ b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
+@@ -2273,8 +2273,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+           const providerRegistryLayer = ProviderRegistryLive.pipe(
+             Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+-            Layer.provideMerge(UpdateActivityLive),
+             Layer.provideMerge(AntigravityInstallation.layer),
++            Layer.provideMerge(UpdateActivityLive),
+             Layer.provideMerge(
+               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+             ),
+@@ -2375,8 +2375,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+           const providerRegistryLayer = ProviderRegistryLive.pipe(
+             Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+-            Layer.provideMerge(UpdateActivityLive),
+             Layer.provideMerge(AntigravityInstallation.layer),
++            Layer.provideMerge(UpdateActivityLive),
+             Layer.provideMerge(
+               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+             ),
+@@ -2492,8 +2492,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+           const providerRegistryLayer = ProviderRegistryLive.pipe(
+             Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+-            Layer.provideMerge(UpdateActivityLive),
+             Layer.provideMerge(AntigravityInstallation.layer),
++            Layer.provideMerge(UpdateActivityLive),
+             Layer.provideMerge(
+               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+             ),
+@@ -2555,8 +2555,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+             yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+             const providerRegistryLayer = ProviderRegistryLive.pipe(
+               Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+-              Layer.provideMerge(UpdateActivityLive),
+               Layer.provideMerge(AntigravityInstallation.layer),
++              Layer.provideMerge(UpdateActivityLive),
+               Layer.provideMerge(
+                 Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+               ),
+diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
+index 5e3a4591..51dc5048 100644
+--- a/apps/server/src/server.test.ts
++++ b/apps/server/src/server.test.ts
+@@ -533,6 +533,7 @@ const buildAppUnderTest = (options?: {
+     providerAuth?: Partial<ProviderAuthService["Service"]>;
+     providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
+     antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
++    updateAdmission?: UpdateAdmission.UpdateAdmission["Service"];
+     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
+     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
+     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
+@@ -1047,6 +1048,17 @@ const buildAppUnderTest = (options?: {
+     );
+ 
+     const appLayer = servedRoutesLayer.pipe(
++      // Outside `HttpRouter.serve`, as in production: the WebSocket route reads
++      // the RPC middleware from its handler context.
++      Layer.provide(
++        UpdateAdmission.middlewareLayer.pipe(
++          Layer.provideMerge(
++            options?.layers?.updateAdmission
++              ? Layer.succeed(UpdateAdmission.UpdateAdmission, options.layers.updateAdmission)
++              : UpdateAdmission.layer,
++          ),
++        ),
++      ),
+       Layer.provide(resourceTelemetryLayer),
+       Layer.provide(UsageService.layerTest),
+       Layer.provide(
+@@ -12099,3 +12111,229 @@ it.live(
+     }).pipe(Effect.provide(NodeServices.layer)),
+   120_000,
+ );
++
++// Live update admission: a maintenance restart must wait for admitted client
++// mutations and refuse new ones, while reads and subscriptions keep answering.
++it.layer(NodeServices.layer)("update admission over the transports", (it) => {
++  const installedRelayClient = {
++    status: "available" as const,
++    executablePath: "/tmp/t3/tools/cloudflared",
++    source: "managed" as const,
++    version: RelayClient.CLOUDFLARED_VERSION,
++  };
++
++  /** Closes the gate and resolves once it is closed; the caller reopens it via `release`. */
++  const holdMaintenance = (admission: UpdateAdmission.UpdateAdmission["Service"]) =>
++    Effect.gen(function* () {
++      const closed = yield* Deferred.make<void>();
++      const release = yield* Deferred.make<void>();
++      const fiber = yield* admission
++        .withMaintenance(
++          Deferred.succeed(closed, undefined).pipe(Effect.andThen(Deferred.await(release))),
++        )
++        .pipe(Effect.forkScoped);
++      yield* Deferred.await(closed);
++      return {
++        reopen: Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.join(fiber))),
++      };
++    });
++
++  it.effect("keeps maintenance busy while an admitted command or stream is in flight", () =>
++    Effect.gen(function* () {
++      const admission = yield* UpdateAdmission.make();
++      const settingsEntered = yield* Deferred.make<void>();
++      const settingsRelease = yield* Deferred.make<void>();
++      const installEntered = yield* Deferred.make<void>();
++      const installRelease = yield* Deferred.make<void>();
++      yield* buildAppUnderTest({
++        layers: {
++          updateAdmission: admission,
++          serverSettings: {
++            updateSettings: () =>
++              Deferred.succeed(settingsEntered, undefined).pipe(
++                Effect.andThen(Deferred.await(settingsRelease)),
++                Effect.as(DEFAULT_SERVER_SETTINGS),
++              ),
++          },
++          relayClient: {
++            installWithProgress: (report) =>
++              report({ type: "progress", stage: "checking" }).pipe(
++                Effect.andThen(Deferred.succeed(installEntered, undefined)),
++                Effect.andThen(Deferred.await(installRelease)),
++                Effect.andThen(report({ type: "progress", stage: "downloading" })),
++                Effect.as(installedRelayClient),
++              ),
++          },
++        },
++      });
++      const wsUrl = yield* getWsServerUrl("/ws");
++
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl, (client) =>
++          Effect.gen(function* () {
++            assert.equal((yield* admission.tryWithMaintenance(Effect.void)).status, "ran");
++
++            const update = yield* client[WS_METHODS.serverUpdateSettings]({ patch: {} }).pipe(
++              Effect.forkScoped,
++            );
++            yield* Deferred.await(settingsEntered);
++            assert.equal((yield* admission.state).inFlight, 1);
++            assert.equal((yield* admission.tryWithMaintenance(Effect.void)).status, "busy");
++            yield* Deferred.succeed(settingsRelease, undefined);
++            yield* Fiber.join(update);
++            // The drain wait is the receipt that the finished call gave its claim back.
++            yield* admission.withMaintenance(Effect.void);
++            assert.equal((yield* admission.state).inFlight, 0);
++
++            const install = yield* client[WS_METHODS.cloudInstallRelayClient]({}).pipe(
++              Stream.runCollect,
++              Effect.forkScoped,
++            );
++            yield* Deferred.await(installEntered);
++            // One claim covers the whole finite stream, not just its first event.
++            assert.equal((yield* admission.state).inFlight, 1);
++            assert.equal((yield* admission.tryWithMaintenance(Effect.void)).status, "busy");
++            yield* Deferred.succeed(installRelease, undefined);
++            assert.deepEqual(Array.from(yield* Fiber.join(install)), [
++              { type: "progress", stage: "checking" },
++              { type: "progress", stage: "downloading" },
++              { type: "complete", status: installedRelayClient },
++            ]);
++            yield* admission.withMaintenance(Effect.void);
++            assert.equal((yield* admission.state).inFlight, 0);
++          }),
++        ),
++      );
++    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
++  );
++
++  it.effect("refuses admitted RPCs during maintenance while reads and subscriptions answer", () =>
++    Effect.gen(function* () {
++      const admission = yield* UpdateAdmission.make();
++      let updates = 0;
++      yield* buildAppUnderTest({
++        layers: {
++          updateAdmission: admission,
++          serverSettings: {
++            updateSettings: () =>
++              Effect.sync(() => {
++                updates += 1;
++              }).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
++          },
++        },
++      });
++      // The session bootstrap is itself an admitted mutation, so pair first.
++      const wsUrl = yield* getWsServerUrl("/ws");
++      const maintenance = yield* holdMaintenance(admission);
++
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl, (client) =>
++          Effect.gen(function* () {
++            const refused = yield* client[WS_METHODS.serverUpdateSettings]({ patch: {} }).pipe(
++              Effect.flip,
++            );
++            assert.equal(refused._tag, "UpdateAdmissionClosedError");
++            assert.equal(updates, 0);
++
++            const settings = yield* client[WS_METHODS.serverGetSettings]({});
++            assert.isObject(settings);
++            const policy = yield* client[WS_METHODS.subscribeBackgroundPolicy]({}).pipe(
++              Stream.runHead,
++            );
++            assert.isTrue(Option.isSome(policy));
++          }),
++        ),
++      );
++
++      yield* maintenance.reopen;
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverUpdateSettings]({ patch: {} })),
++      );
++      assert.equal(updates, 1);
++    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
++  );
++
++  it.effect(
++    "answers admitted HTTP requests with 503 during maintenance before any engine work",
++    () =>
++      Effect.gen(function* () {
++        const admission = yield* UpdateAdmission.make();
++        const fileSystem = yield* FileSystem.FileSystem;
++        let dispatched = 0;
++        const config = yield* buildAppUnderTest({
++          layers: {
++            updateAdmission: admission,
++            orchestrationEngine: {
++              dispatch: () =>
++                Effect.sync(() => {
++                  dispatched += 1;
++                }).pipe(Effect.as({ sequence: 1 })),
++            },
++          },
++        });
++        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
++          prefix: "t3-admission-dispatch-",
++        });
++        const cookie = yield* getAuthenticatedSessionCookieHeader();
++        const wsUrl = yield* getWsServerUrl("/ws");
++        const issued = yield* Effect.scoped(
++          withWsRpcClient(wsUrl, (client) =>
++            client[WS_METHODS.attachmentsCreateUploadUrl]({
++              name: "screenshot.png",
++              mimeType: "image/png",
++              sizeBytes: 6,
++            }),
++          ),
++        );
++        const dispatchUrl = yield* getHttpServerUrl("/api/orchestration/dispatch");
++        const snapshotUrl = yield* getHttpServerUrl("/api/orchestration/snapshot");
++        const dispatch = (commandId: string) =>
++          fetchEffect(dispatchUrl, {
++            method: "POST",
++            headers: { cookie, "content-type": "application/json" },
++            body: jsonRequestBody({
++              type: "project.create",
++              commandId: CommandId.make(commandId),
++              projectId: ProjectId.make("project-admission"),
++              title: "Admission",
++              workspaceRoot,
++              createWorkspaceRootIfMissing: true,
++              defaultModelSelection: {
++                instanceId: ProviderInstanceId.make("codex"),
++                model: "gpt-5-codex",
++              },
++              createdAt: "2026-01-01T00:00:00.000Z",
++            }),
++          });
++        const upload = HttpClient.post(issued.relativeUrl, {
++          body: HttpBody.uint8Array(new Uint8Array([1, 2, 3, 4, 5, 6]), "image/png"),
++        });
++
++        const maintenance = yield* holdMaintenance(admission);
++
++        const refused = yield* dispatch("cmd-admission-refused");
++        assert.equal(refused.status, 503);
++        assert.equal(
++          (yield* responseJsonEffect<{ readonly _tag: string }>(refused))._tag,
++          "UpdateAdmissionClosedError",
++        );
++        assert.equal(dispatched, 0);
++
++        const snapshot = yield* fetchEffect(snapshotUrl, { headers: { cookie } });
++        assert.equal(snapshot.status, 200);
++
++        const refusedUpload = yield* upload;
++        assert.equal(refusedUpload.status, 503);
++        // Refused before the store ran: no final file, no `.part`, not even the directory.
++        const written = (yield* fileSystem.exists(config.attachmentsDir))
++          ? yield* fileSystem.readDirectory(config.attachmentsDir)
++          : [];
++        assert.deepEqual(written, []);
++
++        yield* maintenance.reopen;
++        assert.equal((yield* dispatch("cmd-admission-accepted")).status, 200);
++        assert.equal(dispatched, 1);
++        assert.equal((yield* upload).status, 204);
++      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
++  );
++});
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 003d64ff..b158ee00 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -638,15 +638,22 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+   // `providerInstances` hydration merges `settings.providers.<kind>`
+   // with explicit `providerInstances` entries on boot.
+   Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+-  // One registry for the engine, the provider runtime, every reactor, and
+-  // the Claude/Codex drivers. Memoized here, outside the instance-registry
+-  // hydration, so each requirer sees the same instance — including the
+-  // driver context the registry captures for later `reconcile` calls. A
+-  // per-service provide, or one nested inside hydration, would split the
+-  // count.
+-  Layer.provideMerge(UpdateGatesLive),
+ ).pipe(
+   Layer.provideMerge(AntigravityInstallation.layer),
++  // One registry for the engine, the provider runtime, every reactor, the
++  // Claude/Codex drivers, and the Antigravity installer's detached install
++  // root. Memoized here, outside the instance-registry hydration and after the
++  // installer, so each requirer sees the same instance — including the driver
++  // context the registry captures for later `reconcile` calls. A per-service
++  // provide, or one nested inside hydration, would split the count.
++  //
++  // The admission middleware sits here rather than in `makeRoutesLayer`: the
++  // WebSocket route consumes it inside a route handler, whose requirements only
++  // become real at `HttpRouter.serve`, so it must be satisfied from outside the
++  // served routes. The HTTP API endpoints, the raw attachment route, and the
++  // mutating MCP preview tools all claim the same gate.
++  Layer.provideMerge(UpdateAdmission.middlewareLayer),
++  Layer.provideMerge(UpdateGatesLive),
+   // Shared native/canonical NDJSON writers used by both the per-instance
+   // drivers (native stream, written from inside each `<X>Adapter`) and
+   // `ProviderService` (canonical stream, written after event normalization).
+diff --git a/apps/server/src/updateAdmission.ts b/apps/server/src/updateAdmission.ts
+index ba3bc93c..cf5af310 100644
+--- a/apps/server/src/updateAdmission.ts
++++ b/apps/server/src/updateAdmission.ts
+@@ -1,25 +1,18 @@
++import {
++  UpdateAdmissionClosedError,
++  UpdateAdmissionHttpMiddleware,
++  UpdateAdmissionRpcMiddleware,
++} from "@t3tools/contracts";
+ import * as Context from "effect/Context";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+-import * as Schema from "effect/Schema";
+ import * as Semaphore from "effect/Semaphore";
+ 
+-/**
+- * Raised for a client command that arrives while the server is closed for
+- * maintenance (self-update). Retryable: the gate reopens once maintenance ends.
+- */
+-export class UpdateAdmissionClosedError extends Schema.TaggedErrorClass<UpdateAdmissionClosedError>()(
+-  "UpdateAdmissionClosedError",
+-  {},
+-) {
+-  readonly retryable = true;
+-
+-  override get message(): string {
+-    return "Server is closed for maintenance; retry the command shortly";
+-  }
+-}
++// The error lives in the contracts package so the WebSocket, HTTP, and MCP
++// transports can declare it; the gate itself stays server-only.
++export { UpdateAdmissionClosedError };
+ 
+ export interface UpdateAdmissionState {
+   readonly phase: "open" | "maintenance";
+@@ -218,3 +211,22 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
+ });
+ 
+ export const layer = Layer.effect(UpdateAdmission, make());
++
++/**
++ * Transport middleware backed by the one shared gate. Provided once from the
++ * runtime layer, outside `HttpRouter.serve`, because the WebSocket route
++ * consumes it inside a route handler. An admitted WebSocket RPC or HTTP
++ * endpoint holds admission for its complete call, including a finite stream
++ * until it ends or the client cancels. Nothing below the transport claims
++ * admission again.
++ */
++export const middlewareLayer = Layer.mergeAll(
++  Layer.effect(
++    UpdateAdmissionRpcMiddleware,
++    Effect.map(UpdateAdmission, (admission) => (effect) => admission.withAdmission(effect)),
++  ),
++  Layer.effect(
++    UpdateAdmissionHttpMiddleware,
++    Effect.map(UpdateAdmission, (admission) => (effect) => admission.withAdmission(effect)),
++  ),
++);
+diff --git a/apps/web/test/environmentHttpTest.ts b/apps/web/test/environmentHttpTest.ts
+index ce43faac..b76a8e04 100644
+--- a/apps/web/test/environmentHttpTest.ts
++++ b/apps/web/test/environmentHttpTest.ts
+@@ -4,6 +4,7 @@ import {
+   EnvironmentAuthenticatedAuth,
+   EnvironmentAuthenticatedPrincipal,
+   EnvironmentHttpApi,
++  UpdateAdmissionHttpMiddleware,
+   type AuthBrowserSessionRequest,
+   type AuthBrowserSessionResult,
+   type AuthCreatePairingCredentialInput,
+@@ -119,6 +120,9 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
+         ),
+       ]),
+       Effect.provideService(EnvironmentAuthenticatedAuth, authenticatedAuth),
++      // The client tests exercise request shapes, not maintenance; admission is
++      // always open here.
++      Effect.provideService(UpdateAdmissionHttpMiddleware, (httpEffect) => httpEffect),
+       Effect.scoped,
+     ),
+   );
+diff --git a/packages/contracts/src/environmentHttp.test.ts b/packages/contracts/src/environmentHttp.test.ts
+index 4cd39074..60aef436 100644
+--- a/packages/contracts/src/environmentHttp.test.ts
++++ b/packages/contracts/src/environmentHttp.test.ts
+@@ -1,13 +1,16 @@
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ import {
++  EnvironmentAuthenticatedAuth,
+   EnvironmentAuthInvalidError,
++  EnvironmentHttpApi,
+   EnvironmentInternalError,
+   EnvironmentOperationForbiddenError,
+   EnvironmentRequestInvalidError,
+   EnvironmentResourceNotFoundError,
+   EnvironmentScopeRequiredError,
+ } from "./environmentHttp.ts";
++import { UpdateAdmissionClosedError, UpdateAdmissionHttpMiddleware } from "./updateAdmission.ts";
+ 
+ const traceId = "trace-1";
+ 
+@@ -60,3 +63,85 @@ describe("environment HTTP errors", () => {
+     });
+   });
+ });
++
++/**
++ * Every HTTP endpoint is either a client mutation, which claims update
++ * admission around its whole handler, or a read that must keep answering
++ * while the server is closed for maintenance. A new endpoint has to be placed
++ * on one side or the other here.
++ */
++describe("update admission classification", () => {
++  const admitted = [
++    "auth.browserSession",
++    "auth.token",
++    "auth.pairingCredential",
++    "auth.revokePairingLink",
++    "auth.revokeClient",
++    "auth.revokeOtherClients",
++    "orchestration.dispatch",
++    "connect.linkProof",
++    "connect.relayConfig",
++    "connect.unlink",
++    "connect.preferences",
++    "connect.mintCredential",
++    "connect.t3MintCredential",
++  ];
++  const excluded = [
++    "metadata.descriptor",
++    "auth.session",
++    "auth.webSocketTicket",
++    "auth.pairingLinks",
++    "auth.clients",
++    "orchestration.snapshot",
++    "orchestration.shellSnapshot",
++    "orchestration.threadSnapshot",
++    "pullRequests.diff",
++    "connect.linkState",
++    "connect.health",
++  ];
++  const endpoints = Object.values(EnvironmentHttpApi.groups).flatMap((group) =>
++    Object.values(group.endpoints).map((endpoint) => ({
++      name: `${group.identifier}.${endpoint.identifier}`,
++      middlewares: Array.from(endpoint.middlewares),
++    })),
++  );
++
++  it("admits exactly the client mutations", () => {
++    const actual = endpoints
++      .filter(({ middlewares }) => middlewares.includes(UpdateAdmissionHttpMiddleware))
++      .map(({ name }) => name)
++      .sort();
++    expect(actual).toEqual([...admitted].sort());
++  });
++
++  it("classifies every endpoint exactly once", () => {
++    expect(new Set([...admitted, ...excluded]).size).toBe(admitted.length + excluded.length);
++    expect([...admitted, ...excluded].sort()).toEqual(endpoints.map(({ name }) => name).sort());
++  });
++
++  // Middleware added later runs outside middleware added earlier, so admission
++  // must be registered before auth: an unauthenticated caller is refused by
++  // auth before it can ever be told the server is closed.
++  it("keeps auth outside admission on authenticated mutations", () => {
++    const authenticatedAdmitted = endpoints.filter(
++      ({ middlewares }) =>
++        middlewares.includes(UpdateAdmissionHttpMiddleware) &&
++        middlewares.includes(EnvironmentAuthenticatedAuth),
++    );
++    expect(authenticatedAdmitted.length).toBeGreaterThan(0);
++    for (const { middlewares } of authenticatedAdmitted) {
++      expect(middlewares.indexOf(UpdateAdmissionHttpMiddleware)).toBeLessThan(
++        middlewares.indexOf(EnvironmentAuthenticatedAuth),
++      );
++    }
++  });
++
++  // The schema API encodes a middleware failure at its `httpApiStatus`, so the
++  // annotation is what turns a refusal into a 503 the client can retry on.
++  it("answers a closed gate with a retryable 503", () => {
++    const error = new UpdateAdmissionClosedError();
++    expect(error.retryable).toBe(true);
++    expect(error.message).toContain("maintenance");
++    expect(UpdateAdmissionClosedError.ast.annotations?.httpApiStatus).toBe(503);
++  });
++});
+diff --git a/packages/contracts/src/environmentHttp.ts b/packages/contracts/src/environmentHttp.ts
+index 80d2a7a2..559c3f08 100644
+--- a/packages/contracts/src/environmentHttp.ts
++++ b/packages/contracts/src/environmentHttp.ts
+@@ -31,6 +31,7 @@ import {
+   TrimmedNonEmptyString,
+ } from "./baseSchemas.ts";
+ import { ExecutionEnvironmentDescriptor } from "./environment.ts";
++import { UpdateAdmissionHttpMiddleware } from "./updateAdmission.ts";
+ import {
+   ClientOrchestrationCommand,
+   DispatchResult,
+@@ -427,7 +428,7 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
+       payload: AuthBrowserSessionRequest,
+       success: AuthBrowserSessionResult,
+       error: EnvironmentSessionCreationErrors,
+-    }),
++    }).middleware(UpdateAdmissionHttpMiddleware),
+   )
+   .add(
+     HttpApiEndpoint.post("token", "/oauth/token", {
+@@ -435,7 +436,7 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
+       payload: AuthTokenExchangeRequest,
+       success: AuthAccessTokenResult,
+       error: EnvironmentTokenExchangeErrors,
+-    }),
++    }).middleware(UpdateAdmissionHttpMiddleware),
+   )
+   .add(
+     HttpApiEndpoint.post("webSocketTicket", "/api/auth/websocket-ticket", {
+@@ -450,7 +451,9 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
+       payload: AuthCreatePairingCredentialInput,
+       success: AuthPairingCredentialResult,
+       error: EnvironmentPairingCredentialErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.get("pairingLinks", "/api/auth/pairing-links", {
+@@ -465,7 +468,9 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
+       payload: AuthRevokePairingLinkInput,
+       success: AuthPairingLinkRevokeResult,
+       error: EnvironmentScopedOperationErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.get("clients", "/api/auth/clients", {
+@@ -480,14 +485,18 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
+       payload: AuthRevokeClientSessionInput,
+       success: AuthClientSessionRevokeResult,
+       error: EnvironmentSessionRevokeErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.post("revokeOtherClients", "/api/auth/clients/revoke-others", {
+       headers: OptionalBearerHeaders,
+       success: AuthOtherClientSessionsRevokeResult,
+       error: EnvironmentScopedOperationErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   ) {}
+ 
+ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
+@@ -534,7 +543,9 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
+       payload: ClientOrchestrationCommand,
+       success: DispatchResult,
+       error: EnvironmentOrchestrationDispatchErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   ) {}
+ 
+ /** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
+@@ -560,7 +571,9 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
+       payload: RelayLinkProofRequest,
+       success: RelayEnvironmentLinkProof,
+       error: EnvironmentHttpCloudErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.post("relayConfig", "/api/connect/relay-config", {
+@@ -568,7 +581,9 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
+       payload: RelayEnvironmentConfigRequest,
+       success: EnvironmentCloudRelayConfigResult,
+       error: [...EnvironmentHttpCloudErrors, EnvironmentCloudEndpointUnavailableError],
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.get("linkState", "/api/connect/link-state", {
+@@ -582,7 +597,9 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
+       headers: OptionalBearerHeaders,
+       success: EnvironmentCloudRelayConfigResult,
+       error: EnvironmentHttpCloudErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.post("preferences", "/api/connect/preferences", {
+@@ -590,7 +607,9 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
+       payload: EnvironmentCloudPreferencesRequest,
+       success: EnvironmentCloudLinkStateResult,
+       error: EnvironmentHttpCloudErrors,
+-    }).middleware(EnvironmentAuthenticatedAuth),
++    })
++      .middleware(UpdateAdmissionHttpMiddleware)
++      .middleware(EnvironmentAuthenticatedAuth),
+   )
+   .add(
+     HttpApiEndpoint.post("health", "/api/t3-connect/health", {
+@@ -604,14 +623,14 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
+       payload: RelayCloudMintCredentialRequest,
+       success: RelayEnvironmentMintResponse,
+       error: EnvironmentHttpCloudErrors,
+-    }),
++    }).middleware(UpdateAdmissionHttpMiddleware),
+   )
+   .add(
+     HttpApiEndpoint.post("t3MintCredential", "/api/t3-connect/mint-credential", {
+       payload: RelayCloudMintCredentialRequest,
+       success: RelayEnvironmentMintResponse,
+       error: EnvironmentHttpCloudErrors,
+-    }),
++    }).middleware(UpdateAdmissionHttpMiddleware),
+   ) {}
+ 
+ export class EnvironmentHttpApi extends HttpApi.make("environment")
+diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
+index 74a1b493..0c191e5b 100644
+--- a/packages/contracts/src/index.ts
++++ b/packages/contracts/src/index.ts
+@@ -38,4 +38,5 @@ export * from "./preview.ts";
+ export * from "./previewAutomation.ts";
+ export * from "./resourceTelemetry.ts";
+ export * from "./usage.ts";
++export * from "./updateAdmission.ts";
+ export * from "./rpc.ts";
+diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
+index 6a9adebd..56beabc7 100644
+--- a/packages/contracts/src/rpc.test.ts
++++ b/packages/contracts/src/rpc.test.ts
+@@ -2,7 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
+ import * as Exit from "effect/Exit";
+ import * as Schema from "effect/Schema";
+ 
+-import { WsSubscribeServerConfigRpc } from "./rpc.ts";
++import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
++import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
+ 
+ /**
+  * The client always sends `environmentThemes`, including to servers built
+@@ -29,3 +30,155 @@ describe("subscribeServerConfig payload compatibility", () => {
+     expect(decoded).toEqual({});
+   });
+ });
++
++/**
++ * Every WebSocket RPC is either a client mutation, which claims update
++ * admission for its whole call, or a read, subscription, update control, or
++ * automation host channel, which must keep working while the server is closed
++ * for maintenance. A new RPC has to be placed on one side or the other here.
++ */
++describe("update admission classification", () => {
++  const admitted = [
++    "orchestration.dispatchCommand",
++    "server.refreshProviders",
++    "server.updateProvider",
++    "provider.consumeResetCredit",
++    "provider.auth.start",
++    "provider.auth.complete",
++    "provider.auth.cancel",
++    "provider.auth.logout",
++    "provider.install.start",
++    "provider.install.cancel",
++    "provider.install.remove",
++    "server.upsertKeybinding",
++    "server.removeKeybinding",
++    "server.updateSettings",
++    "server.signalProcess",
++    "cloud.installRelayClient",
++    "pullRequests.runAction",
++    "pullRequests.update",
++    "pullRequests.comment",
++    "pullRequests.updateComment",
++    "pullRequests.submitReview",
++    "pullRequests.replyToThread",
++    "pullRequests.setThreadResolution",
++    "pullRequests.setReaction",
++    "pullRequests.requestReviewers",
++    "pullRequests.setLabels",
++    "sourceControl.cloneRepository",
++    "sourceControl.publishRepository",
++    "projects.writeFile",
++    "shell.openInEditor",
++    "agentSessions.import",
++    "attachments.createUploadUrl",
++    "attachments.delete",
++    "provider.uploadFeedback",
++    "vcs.pull",
++    "git.runStackedAction",
++    "git.preparePullRequestThread",
++    "vcs.createWorktree",
++    "vcs.removeWorktree",
++    "vcs.createRef",
++    "vcs.switchRef",
++    "vcs.init",
++    "terminal.open",
++    "terminal.write",
++    "terminal.resize",
++    "terminal.clear",
++    "terminal.restart",
++    "terminal.close",
++    "preview.open",
++    "preview.navigate",
++    "preview.resize",
++    "preview.refresh",
++    "preview.close",
++  ];
++  const excluded = [
++    // Reads.
++    "server.probe",
++    "server.getConfig",
++    "server.getSettings",
++    "server.discoverSourceControl",
++    "server.getTraceDiagnostics",
++    "server.getProcessDiagnostics",
++    "server.getHostResources",
++    "server.getProcessResourceHistory",
++    "server.getResourceTelemetryHistory",
++    "server.retryResourceTelemetry",
++    "server.getUsageSummary",
++    "server.refreshUsageRates",
++    "server.reportClientActivity",
++    "server.reportHostPowerState",
++    "server.getBackgroundPolicy",
++    "cloud.getRelayClientStatus",
++    "orchestration.getWorkflowScript",
++    "orchestration.getTurnDiff",
++    "orchestration.getFullThreadDiff",
++    "orchestration.searchThreads",
++    "orchestration.getArchivedShellSnapshot",
++    "pullRequests.list",
++    "pullRequests.listStats",
++    "pullRequests.summary",
++    "pullRequests.detail",
++    "pullRequests.activity",
++    "pullRequests.threadComments",
++    "pullRequests.diffFileContents",
++    "pullRequests.invalidate",
++    "pullRequests.reviewerCandidates",
++    "pullRequests.labelCandidates",
++    "sourceControl.lookupRepository",
++    "projects.searchEntries",
++    "projects.searchContents",
++    "projects.listEntries",
++    "projects.readFile",
++    "filesystem.browse",
++    "agentSessions.scan",
++    "assets.createUrl",
++    "vcs.refreshStatus",
++    "vcs.listRefs",
++    "git.resolvePullRequest",
++    "review.getDiffPreview",
++    "review.getDiffFileContents",
++    "terminal.attach",
++    "preview.list",
++    "preview.reportStatus",
++    // Update control: these drive maintenance and can never wait on it.
++    "server.updateServer",
++    "server.updateServerWithProgress",
++    "server.commitDesktopUpdate",
++    // Automation host channel: the host answers admitted tool calls through it.
++    "previewAutomation.connect",
++    "previewAutomation.respond",
++    "previewAutomation.focusHost",
++    // Subscriptions.
++    "provider.auth.subscribe",
++    "provider.install.subscribe",
++    "pullRequests.subscribeRefreshes",
++    "orchestration.subscribeShell",
++    "orchestration.subscribeThread",
++    "subscribeVcsStatus",
++    "subscribePreviewEvents",
++    "subscribeTerminalEvents",
++    "subscribeTerminalMetadata",
++    "subscribeServerConfig",
++    "subscribeServerLifecycle",
++    "subscribeAuthAccess",
++    "subscribeBackgroundPolicy",
++    "subscribeResourceTelemetry",
++    "subscribeDiscoveredLocalServers",
++  ];
++
++  it("admits exactly the client mutations", () => {
++    const actual = Array.from(WsRpcGroup.requests.values())
++      .filter((rpc) => (rpc.middlewares as ReadonlySet<unknown>).has(UpdateAdmissionRpcMiddleware))
++      .map((rpc) => rpc._tag)
++      .sort();
++    expect(actual).toEqual([...admitted].sort());
++  });
++
++  it("classifies every RPC exactly once", () => {
++    const all = Array.from(WsRpcGroup.requests.keys()).sort();
++    expect(new Set([...admitted, ...excluded]).size).toBe(admitted.length + excluded.length);
++    expect([...admitted, ...excluded].sort()).toEqual(all);
++  });
++});
+diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
+index 9dbcaa9f..3fdcf666 100644
+--- a/packages/contracts/src/rpc.ts
++++ b/packages/contracts/src/rpc.ts
+@@ -233,6 +233,7 @@ import {
+   SourceControlRepositoryInfo,
+   SourceControlRepositoryLookupInput,
+ } from "./sourceControl.ts";
++import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
+ import { VcsError } from "./vcs.ts";
+ 
+ export const WS_METHODS = {
+@@ -385,13 +386,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
+   payload: ServerUpsertKeybindingInput,
+   success: ServerUpsertKeybindingResult,
+   error: Schema.Union([KeybindingsConfigError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsServerRemoveKeybindingRpc = Rpc.make(WS_METHODS.serverRemoveKeybinding, {
+   payload: ServerRemoveKeybindingInput,
+   success: ServerRemoveKeybindingResult,
+   error: Schema.Union([KeybindingsConfigError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
+   payload: Schema.Struct({}),
+@@ -420,13 +421,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
+   }),
+   success: ServerProviderUpdatedPayload,
+   error: Schema.Union([EnvironmentAuthorizationError, ProviderSetupError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
+   payload: ServerProviderUpdateInput,
+   success: ServerProviderUpdatedPayload,
+   error: Schema.Union([ServerProviderUpdateError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const ProviderSetupRpcError = Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]);
+ 
+@@ -434,31 +435,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
+   payload: ProviderConsumeResetCreditInput,
+   success: ProviderConsumeResetCreditResult,
+   error: Schema.Union([ProviderSetupError, UsageLimitSourceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderAuthStartRpc = Rpc.make(WS_METHODS.providerAuthStart, {
+   payload: ProviderSetupInput,
+   success: ProviderAuthState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderAuthCompleteRpc = Rpc.make(WS_METHODS.providerAuthComplete, {
+   payload: ProviderAuthCompleteInput,
+   success: ProviderAuthState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderAuthCancelRpc = Rpc.make(WS_METHODS.providerAuthCancel, {
+   payload: ProviderAuthCancelInput,
+   success: ProviderAuthState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderAuthLogoutRpc = Rpc.make(WS_METHODS.providerAuthLogout, {
+   payload: ProviderSetupInput,
+   success: ProviderAuthState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderAuthSubscribeRpc = Rpc.make(WS_METHODS.providerAuthSubscribe, {
+   payload: ProviderSetupInput,
+@@ -471,13 +472,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
+   payload: ProviderSetupInput,
+   success: ProviderInstallState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderInstallCancelRpc = Rpc.make(WS_METHODS.providerInstallCancel, {
+   payload: ProviderInstallCancelInput,
+   success: ProviderInstallState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderInstallSubscribeRpc = Rpc.make(WS_METHODS.providerInstallSubscribe, {
+   payload: ProviderSetupInput,
+@@ -490,7 +491,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
+   payload: ProviderSetupInput,
+   success: ProviderInstallState,
+   error: ProviderSetupRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsServerUpdateServerRpc = Rpc.make(WS_METHODS.serverUpdateServer, {
+   payload: ServerSelfUpdateInput,
+@@ -521,7 +522,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
+   payload: Schema.Struct({ patch: ServerSettingsPatch }),
+   success: ServerSettings,
+   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
+   payload: Schema.Struct({}),
+@@ -588,7 +589,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
+   payload: ServerSignalProcessInput,
+   success: ServerSignalProcessResult,
+   error: EnvironmentAuthorizationError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsCloudGetRelayClientStatusRpc = Rpc.make(WS_METHODS.cloudGetRelayClientStatus, {
+   payload: Schema.Struct({}),
+@@ -601,7 +602,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
+   success: RelayClientInstallProgressEventSchema,
+   error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
+   stream: true,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
+   payload: ClientActivityReportInput,
+@@ -676,49 +677,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
+   payload: PullRequestActionInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsUpdateRpc = Rpc.make(WS_METHODS.pullRequestsUpdate, {
+   payload: PullRequestUpdateInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsCommentRpc = Rpc.make(WS_METHODS.pullRequestsComment, {
+   payload: PullRequestCommentInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsUpdateCommentRpc = Rpc.make(WS_METHODS.pullRequestsUpdateComment, {
+   payload: PullRequestCommentUpdateInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsSubmitReviewRpc = Rpc.make(WS_METHODS.pullRequestsSubmitReview, {
+   payload: PullRequestSubmitReviewInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsReplyToThreadRpc = Rpc.make(WS_METHODS.pullRequestsReplyToThread, {
+   payload: PullRequestThreadReplyInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsSetThreadResolutionRpc = Rpc.make(WS_METHODS.pullRequestsSetThreadResolution, {
+   payload: PullRequestThreadResolutionInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsSetReactionRpc = Rpc.make(WS_METHODS.pullRequestsSetReaction, {
+   payload: PullRequestReactionInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPullRequestsInvalidateRpc = Rpc.make(WS_METHODS.pullRequestsInvalidate, {
+   payload: PullRequestInvalidateInput,
+@@ -748,7 +749,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
+   payload: PullRequestReviewerRequestInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ /** Read when the label menu opens, for the same reason the reviewer candidates are. */
+ const WsPullRequestsLabelCandidatesRpc = Rpc.make(WS_METHODS.pullRequestsLabelCandidates, {
+@@ -761,7 +762,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
+   payload: PullRequestLabelChangeInput,
+   success: Schema.Void,
+   error: PullRequestRpcError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsSourceControlLookupRepositoryRpc = Rpc.make(WS_METHODS.sourceControlLookupRepository, {
+   payload: SourceControlRepositoryLookupInput,
+@@ -773,13 +774,13 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
+   payload: SourceControlCloneRepositoryInput,
+   success: SourceControlCloneRepositoryResult,
+   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPublishRepository, {
+   payload: SourceControlPublishRepositoryInput,
+   success: SourceControlPublishRepositoryResult,
+   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
+   payload: ProjectSearchEntriesInput,
+@@ -809,12 +810,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
+   payload: ProjectWriteFileInput,
+   success: ProjectWriteFileResult,
+   error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
+   payload: LaunchEditorInput,
+   error: Schema.Union([ExternalLauncherError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
+   payload: FilesystemBrowseInput,
+@@ -837,7 +838,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
+     AgentSessionScanError,
+     EnvironmentAuthorizationError,
+   ]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
+   payload: AssetCreateUrlInput,
+@@ -849,18 +850,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
+   payload: AttachmentCreateUploadUrlInput,
+   success: AttachmentCreateUploadUrlResult,
+   error: Schema.Union([AttachmentUploadSigningKeyError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsAttachmentsDeleteRpc = Rpc.make(WS_METHODS.attachmentsDelete, {
+   payload: AttachmentDeleteInput,
+   error: EnvironmentAuthorizationError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, {
+   payload: ProviderUploadFeedbackInput,
+   success: ProviderUploadFeedbackResult,
+   error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
+   payload: VcsStatusInput,
+@@ -873,7 +874,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
+   payload: VcsPullInput,
+   success: VcsPullResult,
+   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
+   payload: VcsStatusInput,
+@@ -886,7 +887,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+   success: GitActionProgressEvent,
+   error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+   stream: true,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
+   payload: GitPullRequestRefInput,
+@@ -898,7 +899,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
+   payload: GitPreparePullRequestThreadInput,
+   success: GitPreparePullRequestThreadResult,
+   error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
+   payload: VcsListRefsInput,
+@@ -910,29 +911,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
+   payload: VcsCreateWorktreeInput,
+   success: VcsCreateWorktreeResult,
+   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsVcsRemoveWorktreeRpc = Rpc.make(WS_METHODS.vcsRemoveWorktree, {
+   payload: VcsRemoveWorktreeInput,
+   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsVcsCreateRefRpc = Rpc.make(WS_METHODS.vcsCreateRef, {
+   payload: VcsCreateRefInput,
+   success: VcsCreateRefResult,
+   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsVcsSwitchRefRpc = Rpc.make(WS_METHODS.vcsSwitchRef, {
+   payload: VcsSwitchRefInput,
+   success: VcsSwitchRefResult,
+   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
+   payload: VcsInitInput,
+   error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ /**
+  * Ephemeral live diff preview for compact/mobile surfaces.
+@@ -955,7 +956,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
+   payload: TerminalOpenInput,
+   success: TerminalSessionSnapshot,
+   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
+   payload: TerminalAttachInput,
+@@ -967,56 +968,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
+ const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
+   payload: TerminalWriteInput,
+   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsTerminalResizeRpc = Rpc.make(WS_METHODS.terminalResize, {
+   payload: TerminalResizeInput,
+   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsTerminalClearRpc = Rpc.make(WS_METHODS.terminalClear, {
+   payload: TerminalClearInput,
+   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsTerminalRestartRpc = Rpc.make(WS_METHODS.terminalRestart, {
+   payload: TerminalRestartInput,
+   success: TerminalSessionSnapshot,
+   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
+   payload: TerminalCloseInput,
+   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
+   payload: PreviewOpenInput,
+   success: PreviewSessionSnapshot,
+   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPreviewNavigateRpc = Rpc.make(WS_METHODS.previewNavigate, {
+   payload: PreviewNavigateInput,
+   success: PreviewSessionSnapshot,
+   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPreviewResizeRpc = Rpc.make(WS_METHODS.previewResize, {
+   payload: PreviewResizeInput,
+   success: PreviewSessionSnapshot,
+   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPreviewRefreshRpc = Rpc.make(WS_METHODS.previewRefresh, {
+   payload: PreviewRefreshInput,
+   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPreviewCloseRpc = Rpc.make(WS_METHODS.previewClose, {
+   payload: PreviewCloseInput,
+   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
+   payload: PreviewListInput,
+@@ -1066,7 +1067,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
+   payload: ClientOrchestrationCommand,
+   success: OrchestrationRpcSchemas.dispatchCommand.output,
+   error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsOrchestrationGetWorkflowScriptRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getWorkflowScript, {
+   payload: OrchestrationRpcSchemas.getWorkflowScript.input,
+diff --git a/packages/contracts/src/updateAdmission.ts b/packages/contracts/src/updateAdmission.ts
+new file mode 100644
+index 00000000..2163c2cf
+--- /dev/null
++++ b/packages/contracts/src/updateAdmission.ts
+@@ -0,0 +1,51 @@
++import * as Schema from "effect/Schema";
++import * as HttpServerRespondable from "effect/unstable/http/HttpServerRespondable";
++import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
++import * as HttpApiMiddleware from "effect/unstable/httpapi/HttpApiMiddleware";
++import * as RpcMiddleware from "effect/unstable/rpc/RpcMiddleware";
++
++/**
++ * Raised for a client command that arrives while the server is closed for
++ * maintenance (self-update). Retryable: the gate reopens once maintenance ends.
++ *
++ * Declared through transport middleware, so every admitted WebSocket RPC, HTTP
++ * endpoint, and MCP tool carries it in its error channel without each handler
++ * naming it.
++ */
++export class UpdateAdmissionClosedError extends Schema.TaggedErrorClass<UpdateAdmissionClosedError>()(
++  "UpdateAdmissionClosedError",
++  {},
++  { httpApiStatus: 503 },
++) {
++  readonly retryable = true;
++
++  override get message(): string {
++    return "Server is closed for maintenance; retry the command shortly";
++  }
++
++  [HttpServerRespondable.symbol]() {
++    return HttpServerResponse.schemaJson(UpdateAdmissionClosedError)(this, { status: 503 });
++  }
++}
++
++/**
++ * Counts one WebSocket RPC as an in-flight client command for its whole
++ * lifetime, including a finite stream until it ends or the client cancels.
++ * Attached only to ordinary public mutations; reads, subscriptions, response
++ * channels, and update control stay outside the gate so maintenance can never
++ * deadlock against the work it waits for.
++ */
++export class UpdateAdmissionRpcMiddleware extends RpcMiddleware.Service<UpdateAdmissionRpcMiddleware>()(
++  "UpdateAdmissionRpcMiddleware",
++  { error: UpdateAdmissionClosedError },
++) {}
++
++/**
++ * The HTTP counterpart of `UpdateAdmissionRpcMiddleware`. Attached inside the
++ * authentication middleware, so an unauthenticated request never learns the
++ * maintenance state.
++ */
++export class UpdateAdmissionHttpMiddleware extends HttpApiMiddleware.Service<UpdateAdmissionHttpMiddleware>()(
++  "UpdateAdmissionHttpMiddleware",
++  { error: UpdateAdmissionClosedError },
++) {}
