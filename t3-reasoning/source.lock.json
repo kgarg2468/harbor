@@ -71,7 +71,7 @@
     {
       "id": "managed-runtime-transaction",
       "path": "patches/0019-managed-runtime-transaction.patch",
-      "sha256": "1ac7401667e79fc3233f9c11a35687fee5f21fbdbfe1da87b6f16643d96b0871"
+      "sha256": "19aeb429932431447c0766a1a780387e7775c0ac4b4acfe77c1e5631070042f2"
     },
     {
       "id": "reasoning-identity",

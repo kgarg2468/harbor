@@ -1,9 +1,9 @@
 diff --git a/apps/server/src/cloud/managedRuntime.test.ts b/apps/server/src/cloud/managedRuntime.test.ts
 new file mode 100644
-index 000000000..bee9d1b33
+index 000000000..1bb10d8e7
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntime.test.ts
-@@ -0,0 +1,1642 @@
+@@ -0,0 +1,1699 @@
 +// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - builds tar and release-document fixtures, inspects the staged tree directly, and forges records as plain JSON.
 +import * as NodeFSP from "node:fs/promises";
 +import * as NodePath from "node:path";
@@ -525,7 +525,7 @@ index 000000000..bee9d1b33
 +    Effect.map((error) => ({ step: error.step, reason: error.reason })),
 +  );
 +
-+/** After a refused staging nothing may remain beside published versions: no lock, no staging directory. */
++/** After a refused staging nothing may remain beside published versions: no staging directory. */
 +const onlyPublished = async (versionsDir: string, ...published: Array<string>) => {
 +  const entries = (await exists(versionsDir)) ? await NodeFSP.readdir(versionsDir) : [];
 +  assert.deepStrictEqual(entries.sort(), [...published].sort());
@@ -938,11 +938,6 @@ index 000000000..bee9d1b33
 +          });
 +          assert.isTrue(yield* isPending(fiber), label);
 +          assert.isTrue(yield* Effect.promise(() => exists(payload)), `${label}: payload retained`);
-+          const entries = yield* Effect.promise(() => NodeFSP.readdir(harness.versionsDir));
-+          assert.isTrue(
-+            entries.includes(`.staging-lock-${VERSION}`),
-+            `${label}: lock retained while held`,
-+          );
 +          yield* Deferred.succeed(held.release, undefined);
 +          yield* Fiber.join(interrupter);
 +          assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(fiber)), label);
@@ -952,7 +947,7 @@ index 000000000..bee9d1b33
 +      }),
 +  );
 +
-+  it.effect("serializes staging and refuses a version another process holds", () =>
++  it.effect("serializes staging across stager instances in one process", () =>
 +    Effect.gen(function* () {
 +      const candidate = fakeCandidate({ holdKind: "version" });
 +      const first = yield* setup({ candidate });
@@ -981,15 +976,77 @@ index 000000000..bee9d1b33
 +      assert.strictEqual(first.source.state.opened, 1);
 +      assert.strictEqual(first.migration.probes.length, 2);
 +      assertPrivateEntry(first, first.migration.probes[1]?.entryPath, "reuse");
++    }),
++  );
 +
-+      // A lock directory left by another process is busy, and is never removed.
-+      const lockPath = NodePath.join(first.versionsDir, `.staging-lock-${OTHER_VERSION}`);
-+      yield* Effect.promise(() => NodeFSP.mkdir(lockPath));
-+      const busy = yield* failure(first.stager, OTHER_VERSION);
-+      assert.strictEqual(busy.step, "claiming the version");
-+      assert.include(busy.reason, "another staging");
-+      assert.isTrue(yield* Effect.promise(() => exists(lockPath)));
-+      assert.strictEqual(first.source.state.documentReads, 2);
++  it.effect("ignores a lock directory left behind by a killed process", () =>
++    Effect.gen(function* () {
++      // Earlier builds claimed a fixed `.staging-lock-<version>` directory and
++      // could only remove it from a finalizer, so a SIGKILL or power loss
++      // blocked every later staging of that version. It is no longer ownership.
++      const harness = yield* setup();
++      const legacyLock = `.staging-lock-${VERSION}`;
++      yield* Effect.promise(() =>
++        NodeFSP.mkdir(NodePath.join(harness.versionsDir, legacyLock), { recursive: true }),
++      );
++
++      assert.deepStrictEqual(yield* harness.stager.stage(VERSION), {
++        version: VERSION,
++        artifactId: expectedArtifactId,
++      });
++      assert.strictEqual(harness.source.state.opened, 1);
++      assert.strictEqual(harness.migration.probes.length, 1);
++      yield* Effect.promise(() => onlyPublished(harness.versionsDir, VERSION, legacyLock));
++      assert.strictEqual(
++        yield* Effect.promise(() =>
++          NodeFSP.readFile(
++            NodePath.join(harness.versionDir, MANAGED_INSTALL_SENTINEL_FILE),
++            "utf8",
++          ),
++        ),
++        `${VERSION}\n`,
++      );
++    }),
++  );
++
++  it.effect("loses a publish race to another process without touching the winner", () =>
++    Effect.gen(function* () {
++      const harness = yield* setup();
++      const rename = vi.mocked(NodeFSP.rename);
++      const realRename = rename.getMockImplementation();
++      assert.isDefined(realRename);
++      let winner: Array<[string, string]> | undefined;
++      let conflict: string | undefined;
++      // The winner lands after the precheck and before the real rename, which
++      // then fails against the nonempty destination.
++      rename.mockImplementationOnce(async (from, to) => {
++        await writePublished(String(to), { sentinel: "winner\n", record: { winner: true } });
++        winner = await snapshotTree(String(to));
++        try {
++          await realRename(from, to);
++        } catch (error) {
++          conflict = (error as NodeJS.ErrnoException).code;
++          throw error;
++        }
++      });
++
++      const error = yield* failure(harness.stager);
++      assert.strictEqual(error.step, "publishing the managed runtime");
++      assert.include(error.reason, "appeared during staging");
++      assert.include(["EEXIST", "ENOTEMPTY"], conflict);
++      assert.isDefined(winner);
++      assert.deepStrictEqual(yield* Effect.promise(() => snapshotTree(harness.versionDir)), winner);
++      yield* Effect.promise(() => onlyPublished(harness.versionsDir, VERSION));
++
++      // Any other rename failure keeps its own reason.
++      const failing = yield* setup();
++      rename.mockImplementationOnce(() =>
++        Promise.reject(new Error("EIO: simulated rename failure")),
++      );
++      const other = yield* failure(failing.stager);
++      assert.strictEqual(other.step, "publishing the managed runtime");
++      assert.include(other.reason, "EIO");
++      yield* Effect.promise(() => onlyPublished(failing.versionsDir));
 +    }),
 +  );
 +
@@ -1337,7 +1394,7 @@ index 000000000..bee9d1b33
 +        });
 +        assert.isTrue(yield* isPending(heldFiber));
 +        const staging = (yield* Effect.promise(() => NodeFSP.readdir(held.versionsDir))).filter(
-+          (name) => name.startsWith(".staging-") && !name.startsWith(".staging-lock-"),
++          (name) => name.startsWith(".staging-"),
 +        );
 +        assert.strictEqual(staging.length, 1, "the directory exists while chmod is pending");
 +        chmodGate.release();
@@ -1648,10 +1705,10 @@ index 000000000..bee9d1b33
 +});
 diff --git a/apps/server/src/cloud/managedRuntime.ts b/apps/server/src/cloud/managedRuntime.ts
 new file mode 100644
-index 000000000..124fecb88
+index 000000000..5976d5f20
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntime.ts
-@@ -0,0 +1,1212 @@
+@@ -0,0 +1,1203 @@
 +// @effect-diagnostics nodeBuiltinImport:off - owns exclusive no-follow file creation, fsync of files and directories, and the rename that publishes a version; the Effect FileSystem does not expose these.
 +import * as NodeCrypto from "node:crypto";
 +import * as NodeFS from "node:fs";
@@ -1712,7 +1769,6 @@ index 000000000..124fecb88
 +const PACKAGE_DIR = "node_modules/t3";
 +const PACKAGE_NAME = "t3";
 +const STAGING_PREFIX = ".staging-";
-+const LOCK_PREFIX = ".staging-lock-";
 +const PAYLOAD_DIR = "payload";
 +const ARCHIVE_FILE = "archive.tar.gz";
 +const MAX_RECORD_BYTES = 64 * 1024;
@@ -1732,7 +1788,10 @@ index 000000000..124fecb88
 +const ELF_MACHINE_X86_64 = 0x3e;
 +
 +// Boot-service setup and remote update may build separate stagers; the whole
-+// transaction is serialized across every instance in this process.
++// transaction is serialized across every instance in this process. Across
++// processes there is no lock file: each attempt works in its own private
++// staging directory and the publishing rename is the only serialization point,
++// so a killed process leaves nothing that can block a later attempt.
 +const stagingLock = Semaphore.makeUnsafe(1);
 +
 +export class ManagedRuntimeStageError extends Schema.TaggedErrorClass<ManagedRuntimeStageError>()(
@@ -2715,14 +2774,23 @@ index 000000000..124fecb88
 +          ),
 +        );
 +        yield* fsStep("syncing the payload directory", () => syncPath(payloadDir));
++        // Another process may publish the same version at any point; a
++        // nonempty destination makes the rename fail with EEXIST or ENOTEMPTY
++        // and the winner is left untouched. The precheck only gives the same
++        // error earlier.
 +        yield* fsStep("publishing the managed runtime", async () => {
-+          if ((await lstatOrUndefined(paths.versionDir)) !== undefined) {
-+            throw stageError(
-+              "publishing the managed runtime",
-+              "the version directory appeared during staging",
-+            );
++          const appeared = stageError(
++            "publishing the managed runtime",
++            "the version directory appeared during staging",
++          );
++          if ((await lstatOrUndefined(paths.versionDir)) !== undefined) throw appeared;
++          try {
++            await NodeFSP.rename(payloadDir, paths.versionDir);
++          } catch (error) {
++            const code = (error as NodeJS.ErrnoException).code;
++            if (code === "EEXIST" || code === "ENOTEMPTY") throw appeared;
++            throw error;
 +          }
-+          await NodeFSP.rename(payloadDir, paths.versionDir);
 +        });
 +        // Published: from here the version directory is complete and is left alone whatever happens.
 +        yield* fsStep("syncing the versions directory", () => syncPath(layout.versionsDir));
@@ -2771,26 +2839,6 @@ index 000000000..124fecb88
 +          resolveLayout(options.baseDir, true),
 +        );
 +        const paths = pinnedRuntimePaths(path, layout.baseDir, targetVersion);
-+
-+        // Cooperating processes see this directory; an existing one means busy
-+        // and is never removed or aged out here.
-+        const lockPath = NodePath.join(layout.versionsDir, `${LOCK_PREFIX}${targetVersion}`);
-+        yield* Effect.acquireRelease(
-+          fsStep("claiming the version", async () => {
-+            try {
-+              await NodeFSP.mkdir(lockPath, { mode: 0o700 });
-+            } catch (error) {
-+              if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-+                throw stageError(
-+                  "claiming the version",
-+                  `another staging of ${targetVersion} owns ${lockPath}`,
-+                );
-+              }
-+              throw error;
-+            }
-+          }),
-+          () => Effect.promise(() => NodeFSP.rmdir(lockPath).catch(() => {})),
-+        );
 +
 +        const documents = yield* options.source
 +          .readDocuments(targetVersion)
