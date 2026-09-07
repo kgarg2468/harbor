@@ -33,6 +33,13 @@ deb="tailscale_${version}_amd64.deb"
   exit 1
 }
 
+# This script runs under sudo, and root on a hosted runner can carry umask 000,
+# which makes every mkdir below 0777. dpkg-deb refuses a control directory outside
+# 0755-0775 outright, and the rest would otherwise ship a package whose directories
+# are world-writable. The mode is set here rather than left to the caller's umask so
+# the package this lane builds is the same package on every machine.
+umask 022
+
 rm -rf "${build}" "${repo}"
 mkdir -p "${repo}" "${aptdir}/sources.list.d"
 
@@ -45,6 +52,9 @@ mkdir -p "${repo}" "${aptdir}/sources.list.d"
 pkg="${build}/tailscale"
 mkdir -p "${pkg}/DEBIAN" "${pkg}/usr/bin" "${pkg}/usr/lib/systemd/system" \
   "${pkg}/usr/share/harbor-integration"
+# Named rather than left to the umask above: this is the one mode dpkg-deb checks
+# and refuses the build over, so it is worth stating where the reason is visible.
+chmod 0755 "${pkg}/DEBIAN"
 
 install -m 0755 "${integration}/stub/tailscale" "${pkg}/usr/bin/tailscale"
 printf '%s\n' "${version}" >"${pkg}/usr/share/harbor-integration/tailscale-version"
