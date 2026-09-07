@@ -132,17 +132,21 @@ auth_run() {
   printf '+ exit %s\n' "${AUTH_RC}"
 }
 
-# auth_killed LABEL -- a run that ended at its --fail-after boundary. The hook SIGKILLs
-# the process, which arrives as 137; the exit 4 after the kill is the hook's own and is
-# reached only if the signal did not land. Anything else means the boundary was never
-# reached, and that is a finding, not a detail: every assertion after one of these
-# stands on where the run stopped.
+# auth_killed LABEL -- a run that died at its --fail-after boundary, which every
+# assertion after one of these stands on. Only the SIGKILL will do here.
+#
+# harbor_test_hook sends SIGKILL to HARBOR_PID and then exits 4 if it is still running,
+# and that second path is not the same event: exit 4 is an ordinary exit, so the EXIT
+# trap of lib/log.sh runs, and harbor_lock_release releases the very lock or gate the
+# next assertions are about to read. A run that ended that way has not left the
+# filesystem in the shape being asserted, so it is a failure here rather than a second
+# acceptable outcome, whatever it may be elsewhere.
 auth_killed() {
   case "${AUTH_RC}" in
     137) it_pass "${1}: the run was SIGKILLed at its boundary (exit 137)" ;;
-    4) it_pass "${1}: the run stopped at its boundary with the hook's own exit 4" ;;
+    4) it_fail "${1}: the hook's SIGKILL did not land and the run exited 4 through its EXIT trap, which releases the lock these assertions read" ;;
     0) it_fail "${1}: the run finished normally, so that boundary was never reached" ;;
-    *) it_fail "${1}: the run exited ${AUTH_RC}, which is neither the SIGKILL 137 nor the hook's 4" ;;
+    *) it_fail "${1}: the run exited ${AUTH_RC}, which is not the SIGKILL 137 this boundary owes" ;;
   esac
 }
 
