@@ -95,7 +95,7 @@ record() {
   mkdir -p "$(dirname "${RECORD}")"
   harbor_state_record_render v0.3.0 "${BATS_TEST_TMPDIR}/usr/local/bin/harbor" \
     3b1f9e2c4d5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e "${flags}" \
-    24.20.0 "${1}" "${OP}" 4242 4243 /home/harbor 20260906T000000Z >"${RECORD}"
+    24.20.0 "${1}" "${LOCKED}" "${OP}" 4242 4243 /home/harbor 20260906T000000Z >"${RECORD}"
 }
 
 probe() {
