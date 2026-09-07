@@ -251,7 +251,7 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
        const terminalId = nextTerminalId(allocatableActiveTerminalIds);
        const cwd = gitCwd ?? activeProject.workspaceRoot;
        useRightPanelStore
-@@ -5618,13 +5664,34 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5618,28 +5664,49 @@ export default function ChatView(props: ChatViewProps) {
      selectedProvider,
    ]);
    const handleRestoreThreadBranch = useCallback(() => {
@@ -282,28 +282,45 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
 +          },
 +    [environmentId, newWorkBlockedMessage],
 +  );
+   const feedbackBannerItems = useMemo(
+     () =>
+       feedbackSubmissions.flatMap((submission) => {
+         const item = feedbackBannerItem(submission, () => {
+           setFeedbackSubmissionsByThreadKey((current) => ({
+             ...current,
+             [routeThreadKey]: (current[routeThreadKey] ?? []).filter(
+               (entry) => entry.id !== submission.id,
+             ),
+           }));
+         });
+         return item ? [item] : [];
+       }),
+     [feedbackSubmissions, routeThreadKey],
+   );
    const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
 +    const newWorkBlockedItems = newWorkBlockedBannerItem === null ? [] : [newWorkBlockedBannerItem];
      const backgroundLivenessItems =
        backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
      const resumeCompactionItems =
-@@ -5636,6 +5703,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5651,7 +5718,8 @@ export default function ChatView(props: ChatViewProps) {
      if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
        return [
+         ...feedbackBannerItems,
          ...usageLimitsItems,
 +        ...newWorkBlockedItems,
          ...systemComposerBannerItems,
          ...backgroundLivenessItems,
          ...resumeCompactionItems,
-@@ -5645,6 +5713,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5661,7 +5729,8 @@ export default function ChatView(props: ChatViewProps) {
      }
      return [
+       ...feedbackBannerItems,
        ...usageLimitsItems,
 +      ...newWorkBlockedItems,
        ...systemComposerBannerItems,
        ...backgroundLivenessItems,
        ...resumeCompactionItems,
-@@ -5908,6 +5977,8 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5923,6 +5992,8 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.split") {
          event.preventDefault();
          event.stopPropagation();
@@ -312,7 +329,7 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
          if (terminalFocusOwner === "right-panel") {
            splitPanelTerminal();
            return;
-@@ -5922,6 +5993,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5937,6 +6008,7 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.splitVertical") {
          event.preventDefault();
          event.stopPropagation();
@@ -320,7 +337,7 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
          if (terminalFocusOwner === "right-panel") {
            splitPanelTerminal("vertical");
            return;
-@@ -5948,6 +6020,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5963,6 +6035,7 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.new") {
          event.preventDefault();
          event.stopPropagation();
@@ -328,7 +345,7 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
          if (terminalFocusOwner === "right-panel") {
            addTerminalSurface();
            return;
-@@ -5998,6 +6071,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6013,6 +6086,7 @@ export default function ChatView(props: ChatViewProps) {
      requestCloseTerminal,
      requestClosePanelTerminal,
      createNewTerminal,
@@ -336,7 +353,7 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
      setTerminalOpen,
      runProjectScript,
      splitTerminal,
-@@ -6153,6 +6227,22 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6168,6 +6242,22 @@ export default function ChatView(props: ChatViewProps) {
        notifyDirectAnnotationAttached();
        return;
      }
@@ -359,7 +376,7 @@ index faeab7e75ac6dfd488b4231c9833f2b50e782ccd..e4d12346f48cc3764426ab5e4cb7baea
      if (needsLoadBalancing) {
        toastManager.add({
          type: "warning",
-@@ -8007,11 +8097,15 @@ export default function ChatView(props: ChatViewProps) {
+@@ -8022,11 +8112,15 @@ export default function ChatView(props: ChatViewProps) {
                              isConnecting={isConnecting}
                              isSendBusy={isSendBusy}
                              sendDisabledReason={

@@ -1,7 +1,7 @@
 {
   "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
-  "commit": "98469159dd9e162a9c2f5cc4bbb2fbe89b3c4f67",
+  "commit": "357b8d5217cd62826767b6ce6d7c47915f2777d2",
   "patches": [
     {
       "id": "reasoning-full",
@@ -56,7 +56,7 @@
     {
       "id": "managed-runtime-stager",
       "path": "patches/0014-managed-runtime-stager.patch",
-      "sha256": "708040bf48daeda0742ad9b187caef85a3d53b7805cda8455a58539319579e03"
+      "sha256": "ee2aeab5d11e6d7f4432e0030500dcbac38b8834eaf3fb69a6260097be7b8009"
     },
     {
       "id": "desktop-reservation",
@@ -81,7 +81,7 @@
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "66ced494e5f39530e0791027a71f2422405511fc1c387cf0103a7f8474ef4cd9"
+      "sha256": "b777ffdc6ce9d012a543ef7f14a8e14a867d2171027469bc0e2a7f01e39362a5"
     },
     {
       "id": "managed-release-feed",
@@ -96,7 +96,7 @@
     {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
-      "sha256": "0ddc965500d08328f1c89050650a7d3b6b148c3363e6003b31814bb79c2c5f43"
+      "sha256": "f533ca63350e78edd51e4f245a178e0c7ebfb91625c935982ccfd766027a7d35"
     },
     {
       "id": "idle-preparation",

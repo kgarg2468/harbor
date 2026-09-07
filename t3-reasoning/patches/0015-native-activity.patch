@@ -352,7 +352,7 @@ index 4abb10554..193ed2e7c 100644
 +  // or closed registry refuses the operation before any routing or recovery.
 +  | UpdateActivityUnavailableError;
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-index 94d4de9e9..64c50966b 100644
+index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f701cf9fc0b 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 @@ -38,6 +38,12 @@ import * as TestClock from "effect/testing/TestClock";
@@ -500,10 +500,10 @@ index 94d4de9e9..64c50966b 100644
          });
        },
      };
-@@ -168,8 +261,13 @@ function makeHarness(config?: {
-   readonly claudeConfig?: Partial<ClaudeSettings>;
+@@ -169,8 +262,13 @@ function makeHarness(config?: {
    readonly instanceId?: ProviderInstanceId;
    readonly scopedLimitNames?: ClaudeAdapterLiveOptions["scopedLimitNames"];
+   readonly environment?: ClaudeAdapterLiveOptions["environment"];
 +  readonly updateActivity?: UpdateActivityShape;
 +  readonly nativeExit?: boolean;
 +  /** Each `createQuery` after the first gets its own fake, as a restarted CLI would. */
@@ -515,8 +515,8 @@ index 94d4de9e9..64c50966b 100644
    let createInput:
      | {
          readonly prompt: AsyncIterable<SDKUserMessage>;
-@@ -180,10 +278,15 @@ function makeHarness(config?: {
-   const adapterOptions: ClaudeAdapterLiveOptions = {
+@@ -182,10 +280,15 @@ function makeHarness(config?: {
+     ...(config?.environment ? { environment: config.environment } : {}),
      ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
      ...(config?.scopedLimitNames ? { scopedLimitNames: config.scopedLimitNames } : {}),
 +    ...(config?.updateActivity ? { updateActivity: config.updateActivity } : {}),
@@ -532,7 +532,7 @@ index 94d4de9e9..64c50966b 100644
      },
      ...(config?.nativeEventLogger
        ? {
-@@ -214,7 +317,10 @@ function makeHarness(config?: {
+@@ -216,7 +319,10 @@ function makeHarness(config?: {
        Layer.provideMerge(ServerSettingsService.layerTest()),
        Layer.provideMerge(NodeServices.layer),
      ),
@@ -544,7 +544,7 @@ index 94d4de9e9..64c50966b 100644
      getLastCreateQueryInput: () => createInput,
    };
  }
-@@ -6744,3 +6850,1871 @@ describe("ClaudeAdapterLive", () => {
+@@ -7151,3 +7257,1871 @@ describe("ClaudeAdapterLive", () => {
      );
    });
  });
@@ -2417,7 +2417,7 @@ index 94d4de9e9..64c50966b 100644
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index 478aebff5..9ad627052 100644
+index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a3bcea6cd 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
 @@ -8,7 +8,6 @@
@@ -2434,7 +2434,7 @@ index 478aebff5..9ad627052 100644
  import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 +import type { ActivityBlocker, ActivityLease, UpdateActivityShape } from "../../updateActivity.ts";
  import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
- import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+ import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
  import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
  import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
  import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
@@ -2470,7 +2470,7 @@ index 478aebff5..9ad627052 100644
  interface ClaudeResumeState {
    readonly threadId?: ThreadId;
    readonly resume?: string;
-@@ -285,8 +299,75 @@ function rememberPendingTaskModel(
+@@ -287,8 +301,75 @@ function rememberPendingTaskModel(
    }
  }
  
@@ -2546,7 +2546,7 @@ index 478aebff5..9ad627052 100644
    readonly promptQueue: Queue.Queue<PromptQueueItem>;
    readonly query: ClaudeQueryRuntime;
    streamFiber: Fiber.Fiber<void, Error> | undefined;
-@@ -331,6 +412,7 @@ interface ClaudeSessionContext {
+@@ -333,6 +414,7 @@ interface ClaudeSessionContext {
    /** Limits already announced for the running turn, keyed `window:resetsAt`. */
    announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
    stopped: boolean;
@@ -2554,7 +2554,7 @@ index 478aebff5..9ad627052 100644
  }
  
  interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
-@@ -338,6 +420,15 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
+@@ -340,6 +422,15 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
    readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
    readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
    readonly close: () => void;
@@ -2570,7 +2570,7 @@ index 478aebff5..9ad627052 100644
  }
  
  export interface ClaudeAdapterLiveOptions {
-@@ -352,6 +443,14 @@ export interface ClaudeAdapterLiveOptions {
+@@ -354,6 +445,14 @@ export interface ClaudeAdapterLiveOptions {
    readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
    /** Scoped-bucket names the driver's status probe last saw; see `claudeUsageLimits`. */
    readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
@@ -2585,7 +2585,7 @@ index 478aebff5..9ad627052 100644
  }
  
  function isUuid(value: string): boolean {
-@@ -1925,19 +2024,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -1943,19 +2042,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const managedNativeEventLogger =
      options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
  
@@ -2623,7 +2623,7 @@ index 478aebff5..9ad627052 100644
  
    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
    const randomUUIDv4 = crypto.randomUUIDv4.pipe(
-@@ -1954,8 +2065,327 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -1972,8 +2083,327 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const nextEventId = Effect.map(randomUUIDv4, (id) => EventId.make(id));
    const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
  
@@ -2953,7 +2953,7 @@ index 478aebff5..9ad627052 100644
  
    const logNativeSdkMessage = Effect.fnUntraced(function* (
      context: ClaudeSessionContext,
-@@ -3134,6 +3564,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3152,6 +3582,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      // Auto-start a synthetic turn for assistant messages that arrive without
      // an active turn (e.g., background agent/subagent responses between user prompts).
      if (!context.turnState) {
@@ -2963,9 +2963,9 @@ index 478aebff5..9ad627052 100644
        const turnId = TurnId.make(yield* randomUUIDv4);
        const startedAt = yield* nowIso;
        context.turnState = {
-@@ -3234,6 +3667,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
- 
-     const { status, errorMessage } = resultOutcome(message);
+@@ -3268,6 +3701,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+         : undefined);
+     const { status, errorMessage } = resultOutcome(message, failureHint);
  
 +    // Bookkeeping only: the cycle lease outlives the result until the CLI's
 +    // authoritative idle, which is what actually settles the loop.
@@ -2975,7 +2975,7 @@ index 478aebff5..9ad627052 100644
      if (status === "failed") {
        yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
      }
-@@ -3499,6 +3937,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3533,6 +3971,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            effort,
          });
          context.liveTaskIds.add(message.task_id);
@@ -2987,7 +2987,7 @@ index 478aebff5..9ad627052 100644
          yield* offerRuntimeEvent({
            ...base,
            type: "task.started",
-@@ -3581,6 +4024,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3615,6 +4058,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              ...taskLinkageFor(context.taskAgents, message.task_id),
            },
          });
@@ -2997,7 +2997,7 @@ index 478aebff5..9ad627052 100644
          return;
        }
        case "task_notification": {
-@@ -3607,6 +4053,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3641,6 +4087,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              ...taskLinkageFor(context.taskAgents, message.task_id),
            },
          });
@@ -3007,7 +3007,7 @@ index 478aebff5..9ad627052 100644
          return;
        }
        case "files_persisted":
-@@ -3662,6 +4111,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3696,6 +4145,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              reason: `session_state:${message.state}`,
            },
          });
@@ -3028,7 +3028,7 @@ index 478aebff5..9ad627052 100644
          return;
        case "notification":
          // User-facing CLI notification (e.g. context-limit warnings). Only
-@@ -3678,20 +4141,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3712,20 +4175,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          // by a different model.
          yield* emitRuntimeWarning(context, message.content, message);
          return;
@@ -3059,7 +3059,7 @@ index 478aebff5..9ad627052 100644
        case "control_request_progress":
        case "worker_shutting_down":
          return;
-@@ -3937,7 +4403,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3984,7 +4450,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      ).pipe(
        Stream.takeWhile(() => !context.stopped),
        Stream.runForEach((message) =>
@@ -3068,7 +3068,7 @@ index 478aebff5..9ad627052 100644
            Effect.mapError(
              (cause) =>
                new ProviderAdapterProcessError({
-@@ -3965,6 +4431,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4012,6 +4478,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            yield* completeTurn(context, "interrupted", "Claude runtime interrupted.");
          }
        } else {
@@ -3081,7 +3081,7 @@ index 478aebff5..9ad627052 100644
          const failures = exit.cause.reasons.flatMap((reason) =>
            Cause.isFailReason(reason) ? [reason.error] : [],
          );
-@@ -3989,6 +4461,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4036,6 +4508,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      options?: { readonly emitExitEvent?: boolean },
    ) {
      if (context.stopped) return;
@@ -3100,7 +3100,7 @@ index 478aebff5..9ad627052 100644
  
      // Schedule process termination before any cleanup that can wait on the
      // provider. The SDK closes stdin, then escalates from SIGTERM to SIGKILL.
-@@ -4001,7 +4485,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4048,7 +4532,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            detail: "Failed to close Claude runtime query.",
            cause,
          }),
@@ -3143,7 +3143,7 @@ index 478aebff5..9ad627052 100644
  
      context.stopped = true;
  
-@@ -4091,6 +4609,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4138,6 +4656,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      if (sessions.get(context.session.threadId) === context) {
        sessions.delete(context.session.threadId);
      }
@@ -3193,7 +3193,7 @@ index 478aebff5..9ad627052 100644
    });
  
    const requireSession = (
-@@ -4105,7 +4666,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4152,7 +4713,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          }),
        );
      }
@@ -3209,7 +3209,7 @@ index 478aebff5..9ad627052 100644
        return Effect.fail(
          new ProviderAdapterSessionClosedError({
            provider: PROVIDER,
-@@ -4335,35 +4903,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4382,35 +4950,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            ageMinutes: finiteNonNegativeInteger(request.payload.sessionAgeMinutes) ?? 0,
            estimatedTokens: finiteNonNegativeInteger(request.payload.estimatedTokens) ?? 0,
          });
@@ -3277,7 +3277,7 @@ index 478aebff5..9ad627052 100644
          );
  
          if (result.behavior !== "allow") {
-@@ -4402,7 +4974,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4449,7 +5021,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          // user via the user-input runtime event channel, regardless of
          // runtime mode (plan mode relies on this heavily).
          if (toolName === "AskUserQuestion") {
@@ -3290,7 +3290,7 @@ index 478aebff5..9ad627052 100644
          }
  
          if (toolName === "ExitPlanMode") {
-@@ -4435,6 +5011,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4482,6 +5058,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            } satisfies PermissionResult;
          }
  
@@ -3310,7 +3310,7 @@ index 478aebff5..9ad627052 100644
          const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
          const requestType = classifyRequestType(toolName);
          const detail = summarizeToolRequest(toolName, toolInput);
-@@ -4725,6 +5314,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4772,6 +5361,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
  
        const context: ClaudeSessionContext = {
          session,
@@ -3318,7 +3318,7 @@ index 478aebff5..9ad627052 100644
          promptQueue,
          query: queryRuntime,
          streamFiber: undefined,
-@@ -4750,6 +5340,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4797,6 +5387,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          lastThreadStartedId: undefined,
          announcedUsageLimits: undefined,
          stopped: false,
@@ -3326,7 +3326,7 @@ index 478aebff5..9ad627052 100644
        };
        yield* Ref.set(contextRef, context);
        sessions.set(threadId, context);
-@@ -4807,6 +5398,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4854,6 +5445,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              if (context.streamFiber === streamFiber) {
                context.streamFiber = undefined;
              }
@@ -3340,7 +3340,7 @@ index 478aebff5..9ad627052 100644
              return handleStreamExit(context, exit).pipe(
                Effect.catch((cause) =>
                  Effect.logError("Failed to close Claude runtime stream.", { cause }),
-@@ -4830,6 +5428,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4877,6 +5475,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
  
    const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
      const context = yield* requireSession(input.threadId);
@@ -3376,7 +3376,7 @@ index 478aebff5..9ad627052 100644
      const modelCatalog = yield* modelCatalogEffect;
      const selectedModel =
        input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
-@@ -4939,7 +5566,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4988,7 +5615,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
        Effect.provideService(FileSystem.FileSystem, fileSystem),
        Effect.provideService(Path.Path, path),
      );
@@ -3385,7 +3385,7 @@ index 478aebff5..9ad627052 100644
        fileSystem,
        attachmentsDir: serverConfig.attachmentsDir,
        boundInstanceId,
-@@ -4950,11 +5577,51 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4999,11 +5626,51 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            .map((skill) => skill.name),
        ),
      });
@@ -3442,7 +3442,7 @@ index 478aebff5..9ad627052 100644
  
      return {
        threadId: context.session.threadId,
-@@ -5028,7 +5695,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5077,7 +5744,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
  
    const stopSession: ClaudeAdapterShape["stopSession"] = Effect.fn("stopSession")(
      function* (threadId) {
@@ -3455,7 +3455,7 @@ index 478aebff5..9ad627052 100644
        yield* stopSessionInternal(context, {
          emitExitEvent: true,
        });
-@@ -5062,12 +5733,270 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5111,12 +5782,270 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const stopAll: ClaudeAdapterShape["stopAll"] = () =>
      stopSessions(Array.from(sessions.values()), true);
  
@@ -3727,7 +3727,7 @@ index 478aebff5..9ad627052 100644
        Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
      ),
    );
-@@ -5089,8 +6018,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5138,8 +6067,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      listSessions,
      hasSession,
      stopAll,
