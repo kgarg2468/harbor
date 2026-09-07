@@ -2,8 +2,9 @@
 // against a tiny prepared-source fixture: a real git repository holding a
 // synthetic upstream commit with one exact variant's patches applied as
 // uncommitted changes, plus a provenance record and lock. One fake runner
-// stands in for pnpm, the source tree's desktop builder, ditto, plutil, and
-// the packaged Electron executable: it materializes a ZIP into the owned
+// stands in for pnpm (including the `pnpm exec node` run of the source
+// tree's desktop builder), ditto, plutil, and the packaged Electron
+// executable: it materializes a ZIP into the owned
 // output directory, an `.app` tree when it receives the exact ditto call,
 // and deterministic plist / embedded-version output for the exact platform
 // commands. Git runs for real. Nothing here installs dependencies, runs
@@ -27,6 +28,7 @@ import {
   checkBundlePlist,
   checkMachOArm64Executable,
   desktopBuildArguments,
+  desktopBuildExecArguments,
   parseArgs,
   requireDesktopHost,
   selectDesktopArtifact,
@@ -46,7 +48,8 @@ const PUBLIC_CONFIG = {
   T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "fixture-cli-oauth-client",
 };
 const HOST = { platform: "darwin", arch: "arm64", nodeVersion: PINNED_NODE_VERSION };
-// The Node executable the builder is told to use; the fake runner matches it.
+// The Node executable the builder is told to use; the fake runner requires it
+// as the program `pnpm exec` runs. It is never spawned directly.
 const FAKE_NODE = "/fixture/bin/node";
 const VARIANTS = ["managed-nightly", "reasoning"];
 const DESKTOP = Object.fromEntries(VARIANTS.map((v) => [v, EXPECTED_ARTIFACTS.find((a) => a.kind === "desktop" && a.variant === v)]));
@@ -74,7 +77,7 @@ const HEADERS = {
   script: Buffer.from("#!/bin/sh\nexec electron\n"),
   short: Buffer.from([0xcf, 0xfa, 0xed, 0xfe]),
 };
-const ALLOWED_COMMANDS = new Set(["git", "pnpm", FAKE_NODE, DITTO, PLUTIL]);
+const ALLOWED_COMMANDS = new Set(["git", "pnpm", DITTO, PLUTIL]);
 const FORBIDDEN_ARGS = ["--skip-build", "--signed", "--mock-updates", "--publish", "--repo", "--repository", "-p", "--prepackaged"];
 
 function json(value) {
@@ -227,6 +230,11 @@ function plistFor(fx, opts) {
   return typeof opts.plist === "function" ? opts.plist(base) : { ...base, ...(opts.plist ?? {}) };
 }
 
+// The desktop build step is the one `pnpm exec` call.
+function isBuildCall({ command, args }) {
+  return command === "pnpm" && args[0] === "exec";
+}
+
 function fakeRunner(fx, opts = {}) {
   return async (spec) => {
     fx.calls.push(spec);
@@ -241,8 +249,12 @@ function fakeRunner(fx, opts = {}) {
         return { stdout: "", stderr: "" };
       }
     }
-    if (command === FAKE_NODE) {
-      assert.equal(args[0], "scripts/build-desktop-artifact.ts", "the source tree's own builder runs");
+    if (isBuildCall(spec)) {
+      // `pnpm exec <node> scripts/build-desktop-artifact.ts ...`: the explicit
+      // Node executable runs the source tree's own builder with the project
+      // bin directory on PATH, as a package script would see it.
+      assert.equal(args[1], FAKE_NODE, "pnpm exec runs the explicit Node executable");
+      assert.equal(args[2], "scripts/build-desktop-artifact.ts", "the source tree's own builder runs");
       const env = parseEnv(await readFile(path.join(fx.source, ".env"), "utf8"));
       assert.deepEqual(env, PUBLIC_CONFIG, "the build sees exactly the four public values in .env");
       const outputDir = args[args.indexOf("--output-dir") + 1];
@@ -333,8 +345,8 @@ function build(fx, opts = {}, overrides = {}) {
 
 function commandLabel(fx, { command, args }) {
   if (command === "git") return "git";
+  if (isBuildCall({ command, args })) return `pnpm exec ${args[1] === FAKE_NODE ? "node" : args[1]} ${args[2]}`;
   if (command === "pnpm") return `pnpm ${args[0]}`;
-  if (command === FAKE_NODE) return `node ${args[0]}`;
   if (command === DITTO) return "ditto";
   if (command === PLUTIL) return "plutil";
   if (command === fx.appExecutable) return `electron ${args.at(-1)}`;
@@ -385,6 +397,9 @@ describe("fixed identity", () => {
     assert.deepEqual(desktopBuildArguments("1.2.3", "/tmp/out"), [
       "scripts/build-desktop-artifact.ts", "--platform", "mac", "--target", "zip", "--arch", "arm64", "--build-version", "1.2.3", "--output-dir", "/tmp/out",
     ]);
+    assert.deepEqual(desktopBuildExecArguments("/opt/node", "1.2.3", "/tmp/out"), [
+      "exec", "/opt/node", "scripts/build-desktop-artifact.ts", "--platform", "mac", "--target", "zip", "--arch", "arm64", "--build-version", "1.2.3", "--output-dir", "/tmp/out",
+    ], "pnpm exec runs the explicit Node executable, then the builder arguments unchanged");
   });
 
   it("requires the decoded plist to carry the fixed identity, the release version, and exactly the expected schemes", () => {
@@ -460,7 +475,7 @@ describe("buildManagedDesktopRuntime", () => {
       // Order: source proof (git), stamp (in-process, before install), frozen install, full build, extraction, plist, embedded server, publish.
       assert.deepEqual(
         fx.calls.map((c) => commandLabel(fx, c)).filter((l) => l !== "git"),
-        ["pnpm --version", "pnpm install", "node scripts/build-desktop-artifact.ts", "ditto", "plutil", "electron --version"],
+        ["pnpm --version", "pnpm install", "pnpm exec node scripts/build-desktop-artifact.ts", "ditto", "plutil", "electron --version"],
       );
       assert.ok(fx.calls.some((c) => c.command === "git" && c.args.includes("write-tree")), "the source proof ran");
       const lastGit = fx.calls.map((c) => c.command).lastIndexOf("git");
@@ -471,13 +486,18 @@ describe("buildManagedDesktopRuntime", () => {
       assert.deepEqual(installCall.args, ["install", "--frozen-lockfile"]);
       assert.equal(installCall.cwd, fx.source);
 
-      // The source builder: exact arguments, an owned output directory inside the work directory, the sanitized environment.
-      const buildCall = fx.calls.find((c) => c.command === FAKE_NODE);
+      // The source builder: `pnpm exec` with the explicit Node executable and exact arguments, an owned output directory
+      // inside the work directory, the sanitized environment. Node is never spawned directly: only pnpm exec puts the
+      // tree's node_modules/.bin (where the builder finds `vp`) on PATH.
+      const buildCall = fx.calls.find((c) => isBuildCall(c));
       const outputDir = buildCall.args.at(-1);
-      assert.deepEqual(buildCall.args, desktopBuildArguments(version, outputDir));
+      assert.deepEqual(buildCall.args, ["exec", FAKE_NODE, ...desktopBuildArguments(version, outputDir)]);
+      assert.deepEqual(buildCall.args, desktopBuildExecArguments(FAKE_NODE, version, outputDir));
       assert.ok(outputDir.startsWith(`${fx.tmpRoot}${path.sep}t3-managed-desktop-`), "build output is owned by the work directory");
       assert.equal(buildCall.cwd, fx.source);
-      for (const call of fx.calls.filter((c) => c.command === "pnpm" || c.command === FAKE_NODE)) {
+      assert.ok(fx.calls.every((c) => c.command !== FAKE_NODE), "the Node executable is only ever run through pnpm exec");
+      assert.equal(fx.calls.filter((c) => isBuildCall(c)).length, 1, "the source builder runs exactly once");
+      for (const call of fx.calls.filter((c) => c.command === "pnpm")) {
         assert.equal(call.env.T3CODE_PRODUCT_VARIANT, variant, "the child product variant is the selected variant");
         assert.equal(call.env.T3CODE_RELAY_URL, PUBLIC_CONFIG.T3CODE_RELAY_URL);
         for (const key of ["VITE_T3CODE_RELAY_URL", "NODE_OPTIONS", "ELECTRON_RUN_AS_NODE", "T3CODE_DESKTOP_SIGNED", "T3CODE_DESKTOP_SKIP_BUILD", "T3CODE_DESKTOP_MOCK_UPDATES", "GITHUB_REPOSITORY"]) {
@@ -642,12 +662,12 @@ describe("failures after mutation publish nothing and clean up", () => {
   const nightlyId = "com\\.t3tools\\.t3code";
   const cases = [
     ["the frozen install rewrites the lock", { installMutatesLock: true }, /pnpm install modified pnpm-lock\.yaml/, "pnpm install"],
-    ["the desktop build rewrites a stamped manifest", { buildMutatesManifest: true }, /desktop artifact build modified apps\/desktop\/package\.json/, "node scripts/build-desktop-artifact.ts"],
-    ["the desktop build fails", { buildFails: true }, /desktop artifact build failed: .*boom/, "node scripts/build-desktop-artifact.ts"],
-    ["the build emits no ZIP", { zipNames: [] }, /emitted 0 ZIP archive\(s\) \(none\); expected exactly one/, "node scripts/build-desktop-artifact.ts"],
-    ["the build emits two ZIPs", { zipNames: ["a.zip", "b.zip"] }, /emitted 2 ZIP archive\(s\) \(a\.zip, b\.zip\); expected exactly one/, "node scripts/build-desktop-artifact.ts"],
-    ["the build emits an update feed beside the ZIP", { feedFile: "latest-mac.yml" }, /update feed metadata latest-mac\.yml; a managed build must not produce an update feed/, "node scripts/build-desktop-artifact.ts"],
-    ["the build emits a channel feed beside the ZIP", { feedFile: "beta-mac.yml" }, /update feed metadata beta-mac\.yml/, "node scripts/build-desktop-artifact.ts"],
+    ["the desktop build rewrites a stamped manifest", { buildMutatesManifest: true }, /desktop artifact build modified apps\/desktop\/package\.json/, "pnpm exec node scripts/build-desktop-artifact.ts"],
+    ["the desktop build fails", { buildFails: true }, /desktop artifact build failed: .*boom/, "pnpm exec node scripts/build-desktop-artifact.ts"],
+    ["the build emits no ZIP", { zipNames: [] }, /emitted 0 ZIP archive\(s\) \(none\); expected exactly one/, "pnpm exec node scripts/build-desktop-artifact.ts"],
+    ["the build emits two ZIPs", { zipNames: ["a.zip", "b.zip"] }, /emitted 2 ZIP archive\(s\) \(a\.zip, b\.zip\); expected exactly one/, "pnpm exec node scripts/build-desktop-artifact.ts"],
+    ["the build emits an update feed beside the ZIP", { feedFile: "latest-mac.yml" }, /update feed metadata latest-mac\.yml; a managed build must not produce an update feed/, "pnpm exec node scripts/build-desktop-artifact.ts"],
+    ["the build emits a channel feed beside the ZIP", { feedFile: "beta-mac.yml" }, /update feed metadata beta-mac\.yml/, "pnpm exec node scripts/build-desktop-artifact.ts"],
     ["extraction fails", { extractFails: true }, /ditto extraction failed: .*PKZip/, "ditto"],
     ["the archive holds no app", { noApp: true }, /holds 0 top-level \.app bundle\(s\) \(none\); expected exactly one/, "ditto"],
     ["the archive holds two apps", { extraApp: true }, /holds 2 top-level \.app bundle\(s\)/, "ditto"],
