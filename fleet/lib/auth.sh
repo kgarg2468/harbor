@@ -253,8 +253,19 @@ harbor_auth_cmd() {
     *) harbor_die 3 usage "${HARBOR_AUTH_USAGE}" ;;
   esac
   harbor_auth_refuse_root
-  record="${HARBOR_AUTH_FIXTURE_RECORD:-${HARBOR_AUTH_RECORD}}"
-  probe="${HARBOR_AUTH_FIXTURE_PROBE:-${HARBOR_ROOT}/${HARBOR_AUTH_PROBE_RELATIVE}}"
+  # The record and the probe are what this command reads to decide whose Tailscale
+  # this is and whether --ssh is a supported flag, so the stand-ins the tests point at
+  # them are honoured only under HARBOR_DEV, the same switch the installed-entrypoint
+  # check below already treats as the mark of a checkout. The operator this command
+  # runs as is untrusted (design section 2), and a released Harbor that took the path
+  # of its own authorization inputs from that account's environment would be reading
+  # its answer from the party it is deciding about.
+  record="${HARBOR_AUTH_RECORD}"
+  probe="${HARBOR_ROOT}/${HARBOR_AUTH_PROBE_RELATIVE}"
+  if [ -n "${HARBOR_DEV:-}" ]; then
+    record="${HARBOR_AUTH_FIXTURE_RECORD:-${record}}"
+    probe="${HARBOR_AUTH_FIXTURE_PROBE:-${probe}}"
+  fi
   harbor_entrypoint_check "${0}" "${record}"
   harbor_versions_load "$(harbor_versions_lock_path)"
   locked="$(harbor_version_require tailscale_version)" || exit "$?"
