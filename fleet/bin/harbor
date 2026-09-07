@@ -27,11 +27,19 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/lock.sh"
 # shellcheck source=lib/journal.sh
 . "${HARBOR_ROOT}/lib/journal.sh"
+# shellcheck source=lib/entrypoint.sh
+. "${HARBOR_ROOT}/lib/entrypoint.sh"
+# shellcheck source=lib/auth.sh
+. "${HARBOR_ROOT}/lib/auth.sh"
 harbor_usage() {
   cat <<'USAGE'
 usage: harbor <subcommand> [options]
 
 subcommands:
+  auth tailscale [--tailscale-ssh]    log this node in to its tailnet, attended, as the
+                                      operator (design section 3.6); --tailscale-ssh is
+                                      refused until the vendor-smoke probe records that
+                                      the operator can run the --ssh form without sudo
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
   help                                print this text
@@ -57,6 +65,10 @@ case "${harbor_cmd}" in
     # uses that are not sourced above.
     # shellcheck source=../node/bootstrap.sh
     . "${HARBOR_ROOT}/node/bootstrap.sh" ${1+"$@"}
+    ;;
+  auth)
+    shift
+    harbor_auth_cmd ${1+"$@"}
     ;;
   journal)
     shift

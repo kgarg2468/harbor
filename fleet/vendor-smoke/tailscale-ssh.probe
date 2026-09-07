@@ -1,0 +1,13 @@
+# The record of the design section 3.6 --ssh feature gate: whether the pinned Tailscale
+# lets the operator user run the exact form
+#   tailscale up --hostname=harbor-node --ssh
+# without sudo against a never-logged-in daemon. lib/auth.sh reads this file; the gate
+# opens only when result is accepted and tailscale_version equals the tailscale_version
+# versions.lock pins, and it is closed on any other value, on a missing key, and on a
+# missing or unreadable file. One key=value per line, no quoting. Rewrite it only from a
+# run of the vendor-smoke lane (design section 7) or from a manual acceptance recorded on
+# the pinned Tailscale, and move date and tailscale_version with it.
+date=2026-09-06
+tailscale_version=1.102.3
+result=not-run
+note=The probe has not been run. No Tailscale node was available to run it against when this record was written, so no operator user has attempted tailscale up --hostname=harbor-node --ssh without sudo on the pinned version, and neither an acceptance nor a refusal by the daemon has been observed. This result is the gate's fail-closed default and not a measurement: until a run records acceptance here, harbor auth tailscale runs tailscale up without --ssh and prints the root-owned alternative, sudo tailscale set --ssh, and --tailscale-ssh on the auth command is refused.
