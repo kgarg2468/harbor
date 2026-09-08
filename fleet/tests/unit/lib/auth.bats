@@ -221,25 +221,32 @@ assert_url_only_on_terminal() {
 
 # ---- the shipped gate -------------------------------------------------------------
 
-@test "gate: the shipped probe record ships the gate closed and says the probe has not been run" {
+@test "gate: the shipped probe record ships the gate closed on a measurement that was made" {
   assert [ -f "${SHIPPED}" ]
   run sed -n 's/^result=//p' "${SHIPPED}"
-  # not-run rather than refused: no daemon refused anything, because none was asked.
-  # The gate is closed on both, but the record is read by people as well as by the
-  # library, and refused would tell a reviewer a probe ran that never did.
-  assert_output not-run
+  # accepted-not-adopted rather than accepted, refused, or not-run. The vendor-smoke
+  # lane has run and the daemon did not refuse, so not-run and refused would both tell
+  # a reviewer something false; accepted would open the gate, and whether Harbor passes
+  # --ssh on every operator login is adopted deliberately rather than by a probe whose
+  # bound ran out at the login step. The gate is closed on everything but accepted, so
+  # the word carries the reason without changing the behaviour.
+  assert_output accepted-not-adopted
   run sed -n 's/^tailscale_version=//p' "${SHIPPED}"
   assert_output "${LOCKED}"
   run sed -n 's/^date=//p' "${SHIPPED}"
   assert_output --regexp '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-  run grep -c '^note=' "${SHIPPED}"
-  assert_output 1
+  # The record names the run it came from, so a reader can go and check it rather than
+  # take this file's word for the measurement.
+  run sed -n 's/^measured_by=//p' "${SHIPPED}"
+  assert_output --partial 'vendor-smoke'
   run sed -n 's/^note=//p' "${SHIPPED}"
-  assert_output --partial "has not been run"
-  assert_output --partial "not a measurement"
+  assert_output --partial "has been run"
+  assert_output --partial "did not refuse"
+  run sed -n 's/^note_gate=//p' "${SHIPPED}"
+  assert_output --partial "held closed on purpose"
   harbor_auth_ssh_gate "${SHIPPED}" "${LOCKED}"
   assert_equal "${HARBOR_AUTH_SSH_GATE}" closed
-  assert_regex "${HARBOR_AUTH_SSH_GATE_WHY}" "records result=not-run rather than accepted"
+  assert_regex "${HARBOR_AUTH_SSH_GATE_WHY}" "records result=accepted-not-adopted, and this gate opens only on result=accepted"
 }
 
 @test "gate: opens only on result=accepted for the pinned version, and is closed on every other reading" {
@@ -260,7 +267,7 @@ assert_url_only_on_terminal() {
   printf 'date=2026-09-06\ntailscale_version=%s\n' "${LOCKED}" >"${PROBE}"
   harbor_auth_ssh_gate "${PROBE}" "${LOCKED}"
   assert_equal "${HARBOR_AUTH_SSH_GATE}" closed
-  assert_regex "${HARBOR_AUTH_SSH_GATE_WHY}" "records result=nothing rather than accepted"
+  assert_regex "${HARBOR_AUTH_SSH_GATE_WHY}" "records result=nothing, and this gate opens only on result=accepted"
   printf 'result=accepted\n' >"${PROBE}"
   harbor_auth_ssh_gate "${PROBE}" "${LOCKED}"
   assert_equal "${HARBOR_AUTH_SSH_GATE}" closed
@@ -500,7 +507,7 @@ assert_url_only_on_terminal() {
   auth
   assert_success
   assert_output --partial "auth.ssh_gate: bootstrap recorded --tailscale-ssh for this node, but the vendor-smoke probe record ${PROBE}"
-  assert_output --partial "records result=refused rather than accepted"
+  assert_output --partial "records result=refused, and this gate opens only on result=accepted"
   assert_output --partial "so the login runs without --ssh"
   assert_output --partial "sudo tailscale set --ssh"
   run shim_lines
@@ -518,7 +525,7 @@ assert_url_only_on_terminal() {
   auth --tailscale-ssh
   assert_failure 3
   assert_output --partial "auth.ssh_gate: --tailscale-ssh is not a supported flag of this release"
-  assert_output --partial "records result=refused rather than accepted"
+  assert_output --partial "records result=refused, and this gate opens only on result=accepted"
   assert_output --partial "sudo tailscale set --ssh"
   assert [ ! -e "${HARBOR_SHIM_LOG}" ]
   assert [ ! -e "${FIX_ROOT}" ]
@@ -530,10 +537,10 @@ assert_url_only_on_terminal() {
   PROBE="${SHIPPED}"
   auth --tailscale-ssh
   assert_failure 3
-  # The shipped record says not-run, not refused: the two synthetic probes above model
-  # a daemon that refused, and this one is the release's own record of a probe nobody
-  # has run. Both close the gate, and the refusal names whichever it read.
-  assert_output --partial "records result=not-run rather than accepted"
+  # The shipped record says accepted-not-adopted, not refused: the two synthetic probes
+  # above model a daemon that refused, and this one is the release's own record of a
+  # daemon that did not. Both close the gate, and the refusal names whichever it read.
+  assert_output --partial "records result=accepted-not-adopted, and this gate opens only on result=accepted"
   assert [ ! -e "${HARBOR_SHIM_LOG}" ]
 }
 

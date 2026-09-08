@@ -178,7 +178,7 @@ it_contains 'and it records the operator this login runs as' \
 # The --ssh gate of design section 3.6, read out of the installed release rather than
 # out of the checkout, because the release is what the command executes from.
 it_file 'the vendor-smoke probe record in the release' 0644 root root "${probe}"
-it_contains 'the release records the --ssh gate as not run' 'result=not-run' "$(cat "${probe}")"
+it_contains 'the release records the --ssh gate as measured but not adopted' 'result=accepted-not-adopted' "$(cat "${probe}")"
 it_eq 'bootstrap granted the operator the Tailscale read' "${IT_OPERATOR}" "$(cat "${IT_TS_OPERATOR}")"
 it_eq 'and the stand-in daemon has never logged in' NeedsLogin "$(cat "${IT_TS_BACKEND}")"
 # Everything asserted below about "before the lock was taken" rests on this: bootstrap
@@ -193,7 +193,7 @@ auth_run -- --tailscale-ssh
 it_eq 'an explicit --tailscale-ssh exits 3' 3 "${AUTH_RC}"
 it_contains 'refused as an unsupported flag of this release' \
   '--tailscale-ssh is not a supported flag of this release' "${AUTH_OUT}"
-it_contains 'and it names the probe reading that closed the gate' 'result=not-run' "${AUTH_OUT}"
+it_contains 'and it names the probe reading that closed the gate' 'result=accepted-not-adopted' "${AUTH_OUT}"
 it_contains 'and it hands Tailscale SSH back to the owner' 'sudo tailscale set --ssh' "${AUTH_OUT}"
 it_file_absent 'refused before the operator state root existed, so before any lock' "${op_root}"
 auth_untouched 'the --tailscale-ssh refusal'

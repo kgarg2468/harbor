@@ -186,10 +186,12 @@ case "${1:-}" in
         --hostname=*) it_hostname="${it_arg#--hostname=}" ;;
         --ssh)
           # This release ships with the design section 3.6 --ssh gate closed:
-          # vendor-smoke/tailscale-ssh.probe records result=not-run. A Harbor that
-          # passed --ssh anyway would be acting on a measurement nobody made, so the
-          # stand-in refuses it loudly rather than letting the lane pass quietly.
-          printf 'integration tailscale stub: refusing --ssh; the release under test records the --ssh gate as not run\n' >&2
+          # vendor-smoke/tailscale-ssh.probe records result=accepted-not-adopted, so
+          # the gate opens only on result=accepted and no release under test passes
+          # the flag. A Harbor that passed --ssh anyway would be reaching past its own
+          # gate, so the stand-in refuses it loudly rather than letting the lane pass
+          # quietly.
+          printf 'integration tailscale stub: refusing --ssh; the release under test ships the --ssh gate closed\n' >&2
           exit 64
           ;;
         --auth-key* | --authkey*)
