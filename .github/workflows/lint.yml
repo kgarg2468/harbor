@@ -39,6 +39,7 @@ jobs:
           fleet/tests/integration/*.sh fleet/tests/integration/lib/*.sh
           fleet/tests/integration/bin/curl fleet/tests/integration/bin/passthrough
           fleet/tests/integration/bin/ufw fleet/tests/integration/stub/tailscale
+          fleet/vendor-smoke/*.sh
       - name: shfmt
         run: >
           shfmt -i 2 -ci -bn -d fleet/bin/harbor fleet/lib fleet/node fleet/tests/run_unit.sh
@@ -47,6 +48,7 @@ jobs:
           fleet/tests/integration/*.sh fleet/tests/integration/lib/*.sh
           fleet/tests/integration/bin/curl fleet/tests/integration/bin/passthrough
           fleet/tests/integration/bin/ufw fleet/tests/integration/stub/tailscale
+          fleet/vendor-smoke/*.sh
       - name: Placeholder scan
         run: fleet/tests/lint/placeholder_scan.sh
       - name: Engines check

@@ -4,10 +4,21 @@
 # without sudo against a never-logged-in daemon. lib/auth.sh reads this file; the gate
 # opens only when result is accepted and tailscale_version equals the tailscale_version
 # versions.lock pins, and it is closed on any other value, on a missing key, and on a
-# missing or unreadable file. One key=value per line, no quoting. Rewrite it only from a
-# run of the vendor-smoke lane (design section 7) or from a manual acceptance recorded on
-# the pinned Tailscale, and move date and tailscale_version with it.
-date=2026-09-06
+# missing or unreadable file. One key=value per line, no quoting.
+#
+# Rewrite it only from a run of the vendor-smoke lane (design section 7) or from a manual
+# acceptance recorded on the pinned Tailscale, and move date and tailscale_version with
+# it. Copy the measurement lines from that run; do not copy its result. The lane's result
+# is what the daemon did, and this one is what the release does about it, which is why a
+# lane that measured accepted sits here as accepted-not-adopted. Writing accepted opens
+# the gate and makes every operator login pass --ssh, so it is a decision taken with the
+# closed-gate tests and messages that assert the word this file carries, never a
+# transcription.
+date=2026-09-07
 tailscale_version=1.102.3
-result=not-run
-note=The probe has not been run. No Tailscale node was available to run it against when this record was written, so no operator user has attempted tailscale up --hostname=harbor-node --ssh without sudo on the pinned version, and neither an acceptance nor a refusal by the daemon has been observed. This result is the gate's fail-closed default and not a measurement: until a run records acceptance here, harbor auth tailscale runs tailscale up without --ssh and prints the root-owned alternative, sudo tailscale set --ssh, and --tailscale-ssh on the auth command is refused.
+result=accepted-not-adopted
+measured_by=vendor-smoke, https://github.com/kgarg2468/harbor/actions/runs/34148975143
+ssh_probe_exit=124
+ssh_probe_reason=login-step-reached
+note=The probe has been run and the daemon did not refuse. On the pinned tailscale 1.102.3 from stable/ubuntu/noble, an unprivileged account that had been named by sudo tailscale set --operator, and whose inherited sudo the lane revoked and verified refused, ran tailscale up --hostname=harbor-node --ssh without sudo against a never-logged-in daemon. The daemon neither rejected the flag nor refused the account for lack of authority: it accepted the invocation and proceeded to its login step, where the 45s bound ended the run (exit 124). No login was completed and no tailnet was reached, because the lane holds no Tailscale account and no auth key.
+note_gate=That measurement satisfies the section 3.6 condition as written, and the gate is still held closed on purpose, which is what accepted-not-adopted records. Reaching the login step proves the operator had the authority to run the form; it does not prove that Tailscale SSH would end up enabled and reachable on a node that completed the login, and the lane cannot prove the second without a real tailnet. Opening the gate makes Harbor pass --ssh on every operator login, so it is adopted deliberately rather than as a consequence of a probe that timed out. Until then harbor auth tailscale runs tailscale up without --ssh and prints the root-owned alternative, sudo tailscale set --ssh, and --tailscale-ssh on the auth command is refused.

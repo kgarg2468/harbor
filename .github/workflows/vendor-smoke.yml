@@ -1,0 +1,93 @@
+name: vendor-smoke
+
+# The vendor-smoke lane of design section 7: real installs of the pinned vendor
+# software, run against the real vendors rather than against a stand-in, so that
+# what Harbor assumes about them is measured rather than believed.
+#
+# This release ships the Tailscale half of it, which is what PR 3's merge gate
+# needs: the section 5.2 operator flow and the section 3.6 --ssh probe, verified
+# on the pinned Tailscale. The Node.js, Claude Code, Codex and t3 measurements
+# section 7 also names belong to the PRs that install those components, and this
+# file is where they are added.
+#
+# The lane holds no Tailscale account, no auth key, and no tailnet. It installs
+# the pinned package, starts tailscaled from the vendor's own systemd unit, and
+# leaves it logged out, which is precisely the state a freshly bootstrapped
+# Harbor node is in when the operator first runs harbor auth tailscale. It is
+# also the only state in which the section 3.6 question is worth asking.
+#
+# It records rather than asserts. A measurement that comes back "refused" or
+# "inconclusive" is not a failure of this lane; it is the answer, and the answer
+# keeps the --ssh gate closed. The job fails only when the measurement could not
+# be made at all -- when the pinned version is not installable from the pinned
+# channel, or the daemon never starts -- because that is a finding about the pin
+# rather than about the vendor's behaviour.
+#
+# The record it produces is never committed by this workflow. Moving the section
+# 3.6 gate is a human's decision, made by reading a run's verdict and copying it
+# into fleet/vendor-smoke/tailscale-ssh.probe by hand.
+
+on:
+  # Weekly, so that a vendor that changes its answer is found by a scheduled run
+  # rather than by a node in the field.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+  # Required on version-bump PRs, and on changes to the lane itself. Section 7
+  # keeps it off every other pull request on purpose: it reaches a vendor host,
+  # so a failure here must never block work that has nothing to do with the pins.
+  pull_request:
+    paths:
+      - fleet/versions.lock
+      - fleet/vendor-smoke/**
+      - .github/workflows/vendor-smoke.yml
+
+# Read-only. The lane checks out the repository, measures, and uploads its record
+# as an artifact; it writes nothing back.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tailscale:
+    name: the pinned Tailscale, never logged in
+    # The release Harbor targets, so the daemon under measurement is the daemon a
+    # real node would run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The probe's own preconditions -- it is not root, it has passwordless
+      # sudo, and no auth key is present in the environment -- are checked by the
+      # script itself, before it installs anything.
+      - name: Measure the pinned Tailscale
+        run: |
+          set -euo pipefail
+          fleet/vendor-smoke/tailscale_operator_probe.sh "${RUNNER_TEMP}/tailscale-probe.record"
+
+      # Uploaded whichever verdict came back, including the abort path's
+      # inconclusive record: a run that could not measure is itself worth
+      # keeping, and it is the file a human transcribes the gate from.
+      - name: Upload the record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-operator-probe
+          path: ${{ runner.temp }}/tailscale-probe.record
+          if-no-files-found: warn
+
+      # Deliberately narrow: the daemon's own unit status and nothing it printed
+      # in answer to a Harbor command. tailscale up prints a login URL, and no
+      # diagnostic step may be the thing that publishes one.
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set -uo pipefail
+          printf '===== the pinned package as dpkg sees it\n'
+          dpkg-query -W -f '${Package} ${Version} ${Status}\n' tailscale || printf '(not installed)\n'
+          printf '\n===== tailscaled.service\n'
+          systemctl --no-pager status tailscaled || true
