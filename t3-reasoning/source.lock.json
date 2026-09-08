@@ -124,6 +124,11 @@
       "sha256": "0ed8492f6233a48763ecc7c5ec6b1d7779af0fa4300b83a5b06dea1d4bf323d4"
     },
     {
+      "id": "managed-queue-controls",
+      "path": "patches/0027-managed-queue-controls.patch",
+      "sha256": "000c675f17c7ad3db4013a3859b024d39b960b9f978fc4cdba6ba1b01a018167"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "ec810bc93f35c387f64f02a384006d9865a6f86e9217feb40aab99d31c921ab3"
@@ -153,7 +158,8 @@
       "managed-server-composition",
       "live-admission",
       "managed-desktop-identity",
-      "managed-nightly-trigger"
+      "managed-nightly-trigger",
+      "managed-queue-controls"
     ],
     "reasoning": [
       "reasoning-full",
@@ -179,6 +185,7 @@
       "live-admission",
       "managed-desktop-identity",
       "managed-nightly-trigger",
+      "managed-queue-controls",
       "reasoning-identity"
     ]
   }
