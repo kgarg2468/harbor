@@ -129,6 +129,11 @@
       "sha256": "000c675f17c7ad3db4013a3859b024d39b960b9f978fc4cdba6ba1b01a018167"
     },
     {
+      "id": "desktop-reservation-transport",
+      "path": "patches/0028-desktop-reservation-transport.patch",
+      "sha256": "eeacc768a3f15f97aaed40480560e0ddb27c113e3ae17db1bf551d166d6c6d98"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "ec810bc93f35c387f64f02a384006d9865a6f86e9217feb40aab99d31c921ab3"
@@ -159,7 +164,8 @@
       "live-admission",
       "managed-desktop-identity",
       "managed-nightly-trigger",
-      "managed-queue-controls"
+      "managed-queue-controls",
+      "desktop-reservation-transport"
     ],
     "reasoning": [
       "reasoning-full",
@@ -186,6 +192,7 @@
       "managed-desktop-identity",
       "managed-nightly-trigger",
       "managed-queue-controls",
+      "desktop-reservation-transport",
       "reasoning-identity"
     ]
   }
