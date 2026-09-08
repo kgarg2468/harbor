@@ -96,7 +96,12 @@ harbor_auth_ssh_gate() {
   if [ ! -f "${probe}" ] || [ ! -r "${probe}" ]; then
     HARBOR_AUTH_SSH_GATE_WHY="the vendor-smoke probe record ${probe} is absent or unreadable, so nothing shows that the operator user can run tailscale up --hostname=${HARBOR_AUTH_HOSTNAME} --ssh without sudo"
   elif [ "${HARBOR_AUTH_PROBE_RESULT}" != "${HARBOR_AUTH_PROBE_ACCEPTED}" ]; then
-    HARBOR_AUTH_SSH_GATE_WHY="the vendor-smoke probe record ${probe} (${dated}) records result=${HARBOR_AUTH_PROBE_RESULT:-nothing} rather than ${HARBOR_AUTH_PROBE_ACCEPTED}, so no run has shown that the operator user can run tailscale up --hostname=${HARBOR_AUTH_HOSTNAME} --ssh without sudo on the pinned Tailscale"
+    # What the record says, and what the gate needs, without a claim about which of the
+    # two the difference is. A result may be missing because no run has been made, and it
+    # may be missing because a run was made and its answer is not one this release adopts;
+    # the record itself is where the difference is written, and a message that guessed
+    # would send an operator to rerun a probe that has already answered.
+    HARBOR_AUTH_SSH_GATE_WHY="the vendor-smoke probe record ${probe} (${dated}) records result=${HARBOR_AUTH_PROBE_RESULT:-nothing}, and this gate opens only on result=${HARBOR_AUTH_PROBE_ACCEPTED} for the pinned Tailscale, so Harbor runs tailscale up without --ssh; read that record for what was measured"
   elif [ "${HARBOR_AUTH_PROBE_VERSION}" != "${locked}" ]; then
     HARBOR_AUTH_SSH_GATE_WHY="the vendor-smoke probe record ${probe} (${dated}) records acceptance for tailscale ${HARBOR_AUTH_PROBE_VERSION:-an unnamed version}, not the ${locked} that ${HARBOR_VERSIONS_FILE:-versions.lock} pins"
   else
