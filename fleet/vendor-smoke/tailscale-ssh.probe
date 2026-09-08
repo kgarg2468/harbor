@@ -4,9 +4,16 @@
 # without sudo against a never-logged-in daemon. lib/auth.sh reads this file; the gate
 # opens only when result is accepted and tailscale_version equals the tailscale_version
 # versions.lock pins, and it is closed on any other value, on a missing key, and on a
-# missing or unreadable file. One key=value per line, no quoting. Rewrite it only from a
-# run of the vendor-smoke lane (design section 7) or from a manual acceptance recorded on
-# the pinned Tailscale, and move date and tailscale_version with it.
+# missing or unreadable file. One key=value per line, no quoting.
+#
+# Rewrite it only from a run of the vendor-smoke lane (design section 7) or from a manual
+# acceptance recorded on the pinned Tailscale, and move date and tailscale_version with
+# it. Copy the measurement lines from that run; do not copy its result. The lane's result
+# is what the daemon did, and this one is what the release does about it, which is why a
+# lane that measured accepted sits here as accepted-not-adopted. Writing accepted opens
+# the gate and makes every operator login pass --ssh, so it is a decision taken with the
+# closed-gate tests and messages that assert the word this file carries, never a
+# transcription.
 date=2026-09-07
 tailscale_version=1.102.3
 result=accepted-not-adopted

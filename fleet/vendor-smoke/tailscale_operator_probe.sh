@@ -13,11 +13,17 @@
 # Usage: fleet/vendor-smoke/tailscale_operator_probe.sh <record-file>
 #
 # The record is one key=value line per measurement, in the shape
-# fleet/vendor-smoke/tailscale-ssh.probe carries, so a human can transcribe this run's
-# answer into that file verbatim. lib/auth.sh reads date, tailscale_version, and result
-# out of it and ignores every other key, so the extra keys here are for the reviewer.
-# This script never writes that file itself: the gate's record is a human's to move,
-# from a run whose verdict a human has read.
+# fleet/vendor-smoke/tailscale-ssh.probe carries. lib/auth.sh reads date,
+# tailscale_version, and result out of it and ignores every other key, so the extra keys
+# here are for the reviewer. This script never writes that file itself: the gate's record
+# is a human's to move, from a run whose verdict a human has read.
+#
+# The result this lane emits is what the daemon did. The result the shipped record carries
+# is what this release does about it, and the two are not the same word by construction:
+# accepted here means the daemon did not refuse the operator the form, while accepted in
+# the shipped record opens the section 3.6 gate and makes every operator login pass --ssh.
+# So the measurement keys are transcribed and result is decided. A run whose measurement
+# already matches what the shipped record holds needs nothing transcribed at all.
 #
 # There is no Tailscale account in this lane, no auth key, and no tailnet. The daemon is
 # started and left logged out, which is the state a freshly bootstrapped Harbor node is
@@ -136,9 +142,11 @@ publish() {
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
   {
     printf '### Tailscale vendor-smoke record (tailscale %s)\n\n' "${tailscale_version}"
-    printf 'Transcribe these lines into `fleet/vendor-smoke/tailscale-ssh.probe` to move\n'
-    printf 'the design section 3.6 feature gate; `lib/auth.sh` reads `date`,\n'
-    printf '`tailscale_version`, and `result` and ignores the rest.\n\n'
+    printf 'This is what the daemon did. `fleet/vendor-smoke/tailscale-ssh.probe` is what\n'
+    printf 'the release does about it: copy the measurement lines into it, and set its\n'
+    printf '`result` deliberately rather than by transcription. `lib/auth.sh` reads `date`,\n'
+    printf '`tailscale_version`, and `result` from that file and ignores the rest, and it\n'
+    printf 'opens the design section 3.6 gate on `result=accepted` alone.\n\n'
     printf '```\n'
     cat "${work}/record"
     printf '```\n'
@@ -469,8 +477,14 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     case "${ssh_result}" in
       accepted)
         printf 'The pinned Tailscale **accepted** `--ssh` from the operator without sudo.\n'
-        printf 'Transcribing `result=accepted` with this `tailscale_version` opens the design\n'
-        printf 'section 3.6 gate in `lib/auth.sh`.\n'
+        printf 'This release already knows that and still ships the gate closed, as\n'
+        printf '`result=accepted-not-adopted` in `fleet/vendor-smoke/tailscale-ssh.probe`:\n'
+        printf 'reaching the login step shows the operator had the authority to run the form,\n'
+        printf 'not that Tailscale SSH ends up enabled and reachable on a node that finishes\n'
+        printf 'the login, and this lane holds no tailnet to show the second. **Do not**\n'
+        printf 'transcribe `result=accepted` to match this run. Writing that word makes every\n'
+        printf 'operator login pass `--ssh`, so it is an adoption decision, taken with the\n'
+        printf 'closed-gate tests and messages that assert the current word.\n'
         ;;
       refused)
         printf 'The pinned Tailscale **refused** `--ssh` from the operator without sudo\n'
