@@ -1,0 +1,1816 @@
+diff --git a/apps/server/src/cloud/managedRelease.test.ts b/apps/server/src/cloud/managedRelease.test.ts
+index 686dea73cb4ce82bc7a1c22be7a29d2b21e0da8b..2e5a56e539c45111a7ccace66de6e333ec7e3844 100644
+--- a/apps/server/src/cloud/managedRelease.test.ts
++++ b/apps/server/src/cloud/managedRelease.test.ts
+@@ -9,9 +9,12 @@ import {
+   MANAGED_RELEASE_MANIFEST_FILE,
+   parseManagedReleaseVersion,
+   sha256Hex,
++  verifyManagedDesktopReleaseDocuments,
+   verifyManagedReleaseDocuments,
++  type ManagedDesktopPresentationVariant,
+   type ManagedReleaseError,
+   type ManagedServerTarget,
++  type VerifiedManagedDesktopAsset,
+ } from "./managedRelease.ts";
+ 
+ // Golden cross-contract fixture: the exact `managed-release.json` and
+@@ -205,6 +208,64 @@ const rejection = (input: Parameters<typeof verify>[0]) =>
+     })),
+   );
+ 
++const verifyDesktop = (input: {
++  manifestBytes?: Uint8Array;
++  sumsBytes?: Uint8Array;
++  targetVersion?: string;
++  presentationVariant: ManagedDesktopPresentationVariant;
++}) =>
++  verifyManagedDesktopReleaseDocuments({
++    manifestBytes: input.manifestBytes ?? encoder.encode(GOLDEN_MANIFEST),
++    sumsBytes: input.sumsBytes ?? encoder.encode(GOLDEN_SUMS),
++    targetVersion: input.targetVersion ?? GOLDEN_VERSION,
++    presentationVariant: input.presentationVariant,
++  });
++
++const desktopRejection = (input: Parameters<typeof verifyDesktop>[0]) =>
++  verifyDesktop(input).pipe(
++    Effect.flip,
++    Effect.map((error: ManagedReleaseError) => ({
++      document: error.document,
++      reason: error.reason,
++    })),
++  );
++
++/** The exact desktop result the golden release yields for each closed presentation. */
++const GOLDEN_DESKTOP: Record<ManagedDesktopPresentationVariant, VerifiedManagedDesktopAsset> = {
++  "managed-nightly": {
++    version: GOLDEN_VERSION,
++    releaseArtifactId: "managed-nightly-darwin-arm64",
++    file: "nightly.zip",
++    bytes: 12,
++    sha256: "bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e",
++    manifestSha256: "bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51",
++    releaseInputSha256: "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++    platform: "darwin",
++    arch: "arm64",
++    format: "zip",
++    presentationVariant: "managed-nightly",
++    bundleId: "com.t3tools.t3code",
++    productName: "T3 Code (Nightly)",
++    urlSchemes: ["t3code", "t3code-dev"],
++  },
++  reasoning: {
++    version: GOLDEN_VERSION,
++    releaseArtifactId: "reasoning-darwin-arm64",
++    file: "reasoning.zip",
++    bytes: 14,
++    sha256: "a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20",
++    manifestSha256: "bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51",
++    releaseInputSha256: "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++    platform: "darwin",
++    arch: "arm64",
++    format: "zip",
++    presentationVariant: "reasoning",
++    bundleId: "com.t3tools.t3code.reasoning",
++    productName: "T3 Code (Reasoning)",
++    urlSchemes: ["t3code-reasoning"],
++  },
++};
++
+ describe("verifyManagedReleaseDocuments", () => {
+   it.effect("accepts the golden Harbor release and selects the host's server archive", () =>
+     Effect.gen(function* () {
+@@ -455,3 +516,170 @@ describe("verifyManagedReleaseDocuments", () => {
+     }),
+   );
+ });
++
++describe("verifyManagedDesktopReleaseDocuments", () => {
++  it.effect("selects the one fixed darwin/arm64 zip of each presentation variant", () =>
++    Effect.gen(function* () {
++      const nightly = yield* verifyDesktop({ presentationVariant: "managed-nightly" });
++      assert.deepStrictEqual(nightly, GOLDEN_DESKTOP["managed-nightly"]);
++      assert.strictEqual(
++        managedArtifactContentId(nightly),
++        "managed-nightly-darwin-arm64@sha256:bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e",
++      );
++      const reasoning = yield* verifyDesktop({ presentationVariant: "reasoning" });
++      assert.deepStrictEqual(reasoning, GOLDEN_DESKTOP.reasoning);
++      assert.strictEqual(
++        managedArtifactContentId(reasoning),
++        "reasoning-darwin-arm64@sha256:a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20",
++      );
++      assert.notStrictEqual(nightly.releaseArtifactId, reasoning.releaseArtifactId);
++      assert.notStrictEqual(nightly.sha256, reasoning.sha256);
++      assert.notStrictEqual(nightly.bundleId, reasoning.bundleId);
++      // The returned scheme list is a private copy; the fixed table cannot be mutated through it.
++      (nightly.urlSchemes as Array<string>).push("evil");
++      assert.deepStrictEqual(
++        (yield* verifyDesktop({ presentationVariant: "managed-nightly" })).urlSchemes,
++        ["t3code", "t3code-dev"],
++      );
++      // The same documents still yield the unchanged server result.
++      const server = yield* verify({ hostTarget: DARWIN });
++      assert.deepStrictEqual(server, {
++        version: GOLDEN_VERSION,
++        releaseArtifactId: "managed-server-darwin-arm64",
++        file: "server-darwin-arm64.tar.gz",
++        bytes: 14,
++        sha256: "416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492",
++        manifestSha256: nightly.manifestSha256,
++        releaseInputSha256: nightly.releaseInputSha256,
++        platform: "darwin",
++        arch: "arm64",
++        entry: "node_modules/t3/dist/bin.mjs",
++        launcherProtocol: 2,
++      });
++    }),
++  );
++
++  it.effect("refuses a presentation outside the closed set as a target error", () =>
++    Effect.gen(function* () {
++      for (const forgedVariant of ["common", "__proto__", "constructor", "", "MANAGED-NIGHTLY"]) {
++        const result = yield* desktopRejection({
++          presentationVariant: forgedVariant as ManagedDesktopPresentationVariant,
++        });
++        assert.strictEqual(result.document, "target", forgedVariant);
++        assert.include(result.reason, "not a managed desktop presentation variant", forgedVariant);
++      }
++      const malformed = yield* desktopRejection({
++        presentationVariant: "reasoning",
++        targetVersion: "0.0.38-nightly.20260905.3",
++      });
++      assert.strictEqual(malformed.document, "target");
++      const other = yield* desktopRejection({
++        presentationVariant: "reasoning",
++        targetVersion: "0.0.38-nightly.20260905.3.managed.2.p6d1933416d7a",
++      });
++      assert.include(other.reason, "not the requested");
++    }),
++  );
++
++  it.effect("refuses a re-signed manifest that changes the selected identity", () =>
++    Effect.gen(function* () {
++      const cases: Array<
++        [ManagedDesktopPresentationVariant, number, string, (artifact: Json) => void]
++      > = [
++        ["managed-nightly", 0, "presentationVariant", (a) => (a.presentationVariant = "reasoning")],
++        ["managed-nightly", 0, "variant", (a) => (a.variant = "reasoning")],
++        ["managed-nightly", 0, "platform", (a) => (a.platform = "linux")],
++        ["managed-nightly", 0, "arch", (a) => (a.arch = "x64")],
++        ["managed-nightly", 0, "format", (a) => (a.format = "dmg")],
++        ["managed-nightly", 0, "bundleId", (a) => (a.bundleId = "com.t3tools.t3code.evil")],
++        ["managed-nightly", 0, "productName", (a) => (a.productName = "T3 Code")],
++        ["managed-nightly", 0, "urlSchemes", (a) => a.urlSchemes.push("evil")],
++        ["managed-nightly", 0, "urlSchemes", (a) => (a.urlSchemes = a.urlSchemes.toReversed())],
++        ["managed-nightly", 0, "urlSchemes", (a) => a.urlSchemes.pop()],
++        ["reasoning", 1, "presentationVariant", (a) => (a.presentationVariant = "managed-nightly")],
++        ["reasoning", 1, "variant", (a) => (a.variant = "common")],
++        ["reasoning", 1, "platform", (a) => (a.platform = "darwin ")],
++        ["reasoning", 1, "arch", (a) => (a.arch = "universal")],
++        ["reasoning", 1, "format", (a) => (a.format = "zip ")],
++        ["reasoning", 1, "bundleId", (a) => (a.bundleId = "com.t3tools.t3code")],
++        ["reasoning", 1, "productName", (a) => (a.productName = "T3 Code (Nightly)")],
++        ["reasoning", 1, "urlSchemes", (a) => (a.urlSchemes = ["t3code"])],
++        ["reasoning", 1, "urlSchemes", (a) => (a.urlSchemes = [])],
++      ];
++      for (const [presentationVariant, index, key, mutate] of cases) {
++        const label = `${presentationVariant} ${key}`;
++        const documents = forged((m) => {
++          mutate(m.artifacts[index]);
++          // Keep the file extension consistent so only the identity field is under test.
++          if (key === "format")
++            m.artifacts[index].file = `${m.artifacts[index].id}.${m.artifacts[index].format}`;
++        });
++        const result = yield* desktopRejection({ ...documents, presentationVariant });
++        assert.strictEqual(result.document, "manifest", label);
++        assert.include(
++          result.reason,
++          `artifact ${GOLDEN_DESKTOP[presentationVariant].releaseArtifactId}: ${key} must be`,
++          label,
++        );
++      }
++      const swapped = yield* desktopRejection({
++        ...forged((m) => {
++          const [nightly, reasoning] = m.artifacts;
++          [nightly.id, reasoning.id] = [reasoning.id, nightly.id];
++        }),
++        presentationVariant: "managed-nightly",
++      });
++      assert.strictEqual(swapped.document, "manifest");
++      assert.include(swapped.reason, "must be");
++    }),
++  );
++
++  it.effect(
++    "keeps the whole four-artifact closure even when one desktop artifact is selected",
++    () =>
++      Effect.gen(function* () {
++        // Tampering with an artifact that is not the selection still refuses the release.
++        const otherDesktop = yield* desktopRejection({
++          ...forged((m) => (m.artifacts[1].bundleId = "com.t3tools.t3code.evil")),
++          presentationVariant: "managed-nightly",
++        });
++        assert.include(otherDesktop.reason, "artifact reasoning-darwin-arm64: bundleId must be");
++        const server = yield* desktopRejection({
++          ...forged((m) => (m.artifacts[2].entry = "node_modules/t3/dist/evil.mjs")),
++          presentationVariant: "reasoning",
++        });
++        assert.include(server.reason, "artifact managed-server-darwin-arm64: entry must be");
++        const linux = yield* desktopRejection({
++          ...forged((m) => m.artifacts.splice(3, 1)),
++          presentationVariant: "reasoning",
++        });
++        assert.include(linux.reason, "missing artifact(s) managed-server-linux-x64");
++        const provenance = yield* desktopRejection({
++          ...forged((m) => (m.builderRevision = "a".repeat(40))),
++          presentationVariant: "managed-nightly",
++        });
++        assert.include(provenance.reason, "releaseInputSha256");
++        // The checksum closure still names every file and covers the exact manifest bytes.
++        const sumsWithoutServer = GOLDEN_SUMS.split("\n")
++          .filter((line) => line !== "" && !line.includes("server-linux-x64"))
++          .join("\n");
++        const closure = yield* desktopRejection({
++          sumsBytes: encoder.encode(`${sumsWithoutServer}\n`),
++          presentationVariant: "managed-nightly",
++        });
++        assert.strictEqual(closure.document, "checksums");
++        assert.include(closure.reason, "expected exactly 5 entries");
++        const otherHash = yield* desktopRejection({
++          sumsBytes: encoder.encode(GOLDEN_SUMS.replace("a281fd08f7099cf8", "a281fd08f7099cf9")),
++          presentationVariant: "managed-nightly",
++        });
++        assert.include(otherHash.reason, "reasoning.zip disagrees");
++        const reserialized = yield* desktopRejection({
++          manifestBytes: encoder.encode(JSON.stringify(JSON.parse(GOLDEN_MANIFEST))),
++          presentationVariant: "reasoning",
++        });
++        assert.strictEqual(reserialized.document, "checksums");
++        assert.include(reserialized.reason, "manifest hash");
++      }),
++  );
++});
+diff --git a/apps/server/src/cloud/managedRelease.ts b/apps/server/src/cloud/managedRelease.ts
+index 8f040bb51e315f8edec1692e0d8f3c0441de5736..7ed3e90b1256565189af9f6325aef15301c65bdc 100644
+--- a/apps/server/src/cloud/managedRelease.ts
++++ b/apps/server/src/cloud/managedRelease.ts
+@@ -13,8 +13,9 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
+  * `managed-release.json` and covered, together with the manifest itself, by
+  * `SHA256SUMS`. This module authenticates the two downloaded documents as
+  * bytes, recomputes the release-input digest from the provenance the manifest
+- * carries, and selects the one server archive that fits the host. Nothing a
+- * manifest says becomes a URL or a path: the caller derives locations from a
++ * carries, and selects one archive: the server archive that fits the host, or
++ * the darwin/arm64 desktop archive of one closed presentation variant. Nothing
++ * a manifest says becomes a URL or a path: the caller derives locations from a
+  * trusted release base plus the validated bare file name.
+  */
+ 
+@@ -62,6 +63,34 @@ export type ManagedServerTarget =
+   | { readonly platform: "darwin"; readonly arch: "arm64" }
+   | { readonly platform: "linux"; readonly arch: "x64"; readonly libc: "glibc" };
+ 
++/** The closed set of desktop presentations a managed release publishes; each maps to exactly one fixed artifact. */
++export type ManagedDesktopPresentationVariant =
++  | typeof MANAGED_NIGHTLY_VARIANT
++  | typeof REASONING_VARIANT;
++
++export type ManagedDesktopReleaseArtifactId =
++  | "managed-nightly-darwin-arm64"
++  | "reasoning-darwin-arm64";
++
++const DESKTOP_ARTIFACT_IDS: Readonly<
++  Record<ManagedDesktopPresentationVariant, ManagedDesktopReleaseArtifactId>
++> = Object.freeze({
++  [MANAGED_NIGHTLY_VARIANT]: "managed-nightly-darwin-arm64",
++  [REASONING_VARIANT]: "reasoning-darwin-arm64",
++});
++
++export function isManagedDesktopPresentationVariant(
++  value: string,
++): value is ManagedDesktopPresentationVariant {
++  return Object.hasOwn(DESKTOP_ARTIFACT_IDS, value);
++}
++
++export function selectManagedDesktopArtifactId(
++  variant: ManagedDesktopPresentationVariant,
++): ManagedDesktopReleaseArtifactId {
++  return DESKTOP_ARTIFACT_IDS[variant];
++}
++
+ /**
+  * The fixed identity of every artifact a managed release publishes, in the
+  * writer's canonical order. Records must restate these values exactly.
+@@ -146,6 +175,30 @@ export interface VerifiedManagedServerAsset {
+   readonly launcherProtocol: typeof SERVICE_LAUNCHER_PROTOCOL;
+ }
+ 
++/**
++ * One desktop archive of a verified release together with the fixed bundle
++ * identity the manifest was proven to restate for it. Later consumers verify
++ * the extracted app bundle against these values, never against the manifest.
++ */
++export interface VerifiedManagedDesktopAsset {
++  readonly version: string;
++  readonly releaseArtifactId: ManagedDesktopReleaseArtifactId;
++  /** Bare basename inside the trusted release directory; never a URL. */
++  readonly file: string;
++  readonly bytes: number;
++  readonly sha256: string;
++  /** SHA-256 of the original manifest bytes, as `SHA256SUMS` covers them. */
++  readonly manifestSha256: string;
++  readonly releaseInputSha256: string;
++  readonly platform: "darwin";
++  readonly arch: "arm64";
++  readonly format: "zip";
++  readonly presentationVariant: ManagedDesktopPresentationVariant;
++  readonly bundleId: string;
++  readonly productName: string;
++  readonly urlSchemes: ReadonlyArray<string>;
++}
++
+ // --- schema --------------------------------------------------------------------
+ 
+ const Sha256Hex = Schema.String.check(Schema.isPattern(SHA256_RE));
+@@ -322,7 +375,7 @@ export function selectManagedServerArtifactId(
+ 
+ /** Content identity for the queued-update record: stable name plus archive digest. */
+ export function managedArtifactContentId(asset: {
+-  readonly releaseArtifactId: ManagedServerReleaseArtifactId;
++  readonly releaseArtifactId: ManagedServerReleaseArtifactId | ManagedDesktopReleaseArtifactId;
+   readonly sha256: string;
+ }): string {
+   return `${asset.releaseArtifactId}@sha256:${asset.sha256}`;
+@@ -519,15 +572,23 @@ function parseSha256Sums(sumsBytes: Uint8Array): ReadonlyMap<string, string> {
+ 
+ // --- entry point -----------------------------------------------------------------
+ 
+-export interface VerifyManagedReleaseDocumentsInput {
++/** The two documents plus the exact managed version the caller asked for; the manifest must name it. */
++interface ManagedReleaseDocumentsInput {
+   /** The manifest exactly as downloaded; its hash must appear in `SHA256SUMS`. */
+   readonly manifestBytes: Uint8Array;
+   readonly sumsBytes: Uint8Array;
+-  /** The exact managed version the caller asked for; the manifest must name it. */
+   readonly targetVersion: string;
++}
++
++export interface VerifyManagedReleaseDocumentsInput extends ManagedReleaseDocumentsInput {
+   readonly hostTarget: ManagedServerTarget;
+ }
+ 
++export interface VerifyManagedDesktopReleaseDocumentsInput extends ManagedReleaseDocumentsInput {
++  /** Selects the one fixed darwin/arm64 desktop artifact; never a host or a path. */
++  readonly presentationVariant: ManagedDesktopPresentationVariant;
++}
++
+ /**
+  * Authenticates the two release documents against each other and the
+  * request, then returns the single server artifact record for the host.
+@@ -535,33 +596,32 @@ export interface VerifyManagedReleaseDocumentsInput {
+  */
+ export const verifyManagedReleaseDocuments = Effect.fn("cloud.managed_release.verify_documents")(
+   function* (input: VerifyManagedReleaseDocumentsInput) {
+-    const prepared = yield* attempt(() => {
+-      if (parseManagedReleaseVersion(input.targetVersion) === undefined) {
+-        fail("target", `${JSON.stringify(input.targetVersion)} is not a managed release version`);
+-      }
+-      if (input.manifestBytes.byteLength === 0) fail("manifest", "empty");
+-      if (input.manifestBytes.byteLength > MAX_MANAGED_MANIFEST_BYTES)
+-        fail("manifest", "too large");
+-      const text = decodeUtf8Strict(input.manifestBytes, "manifest");
+-      try {
+-        return JSON.parse(text) as unknown;
+-      } catch {
+-        return fail("manifest", "not valid JSON");
+-      }
+-    });
+-    const manifest = yield* decodeManifest(prepared, { onExcessProperty: "error" }).pipe(
+-      Effect.mapError(
+-        (error) =>
+-          new ManagedReleaseError({
+-            document: "manifest",
+-            reason: `does not match the managed release schema: ${error.message}`,
+-          }),
+-      ),
+-    );
+-    return yield* attempt(() => selectVerifiedAsset(manifest, input));
++    const manifest = yield* decodeDocuments(input);
++    return yield* attempt(() => selectVerifiedServerAsset(manifest, input));
+   },
+ );
+ 
++/**
++ * The same authentication as `verifyManagedReleaseDocuments`, including the
++ * full four-artifact checksum closure, selecting the fixed darwin/arm64
++ * desktop artifact of one closed presentation variant instead of a server
++ * archive. Independent of the host running the verifier.
++ */
++export const verifyManagedDesktopReleaseDocuments = Effect.fn(
++  "cloud.managed_release.verify_desktop_documents",
++)(function* (input: VerifyManagedDesktopReleaseDocumentsInput) {
++  yield* attempt(() => {
++    if (!isManagedDesktopPresentationVariant(input.presentationVariant)) {
++      fail(
++        "target",
++        `${JSON.stringify(input.presentationVariant)} is not a managed desktop presentation variant`,
++      );
++    }
++  });
++  const manifest = yield* decodeDocuments(input);
++  return yield* attempt(() => selectVerifiedDesktopAsset(manifest, input));
++});
++
+ const isManagedReleaseError = Schema.is(ManagedReleaseError);
+ 
+ /** Runs a synchronous validator, moving its typed refusals into the error channel. */
+@@ -575,10 +635,43 @@ function attempt<A>(evaluate: () => A): Effect.Effect<A, ManagedReleaseError> {
+   });
+ }
+ 
+-function selectVerifiedAsset(
++/** Bounds, decodes and schema-checks the manifest bytes after proving the request names a managed version. */
++const decodeDocuments = Effect.fn("cloud.managed_release.decode_documents")(function* (
++  input: ManagedReleaseDocumentsInput,
++) {
++  const prepared = yield* attempt(() => {
++    if (parseManagedReleaseVersion(input.targetVersion) === undefined) {
++      fail("target", `${JSON.stringify(input.targetVersion)} is not a managed release version`);
++    }
++    if (input.manifestBytes.byteLength === 0) fail("manifest", "empty");
++    if (input.manifestBytes.byteLength > MAX_MANAGED_MANIFEST_BYTES) fail("manifest", "too large");
++    const text = decodeUtf8Strict(input.manifestBytes, "manifest");
++    try {
++      return JSON.parse(text) as unknown;
++    } catch {
++      return fail("manifest", "not valid JSON");
++    }
++  });
++  return yield* decodeManifest(prepared, { onExcessProperty: "error" }).pipe(
++    Effect.mapError(
++      (error) =>
++        new ManagedReleaseError({
++          document: "manifest",
++          reason: `does not match the managed release schema: ${error.message}`,
++        }),
++    ),
++  );
++});
++
++/**
++ * Provenance, the fixed artifact set, and the checksum closure over the
++ * manifest bytes plus all four archives: everything a selection shares
++ * before it picks one artifact.
++ */
++function verifyClosure(
+   manifest: ManagedReleaseManifest,
+-  input: VerifyManagedReleaseDocumentsInput,
+-): VerifiedManagedServerAsset {
++  input: ManagedReleaseDocumentsInput,
++): { readonly artifacts: ReadonlyMap<string, ArtifactRecord>; readonly manifestSha256: string } {
+   validateProvenance(manifest, input.targetVersion);
+   const artifacts = validateArtifacts(manifest);
+ 
+@@ -602,6 +695,14 @@ function selectVerifiedAsset(
+       fail("checksums", `hash for ${record.file} disagrees with the manifest`);
+     }
+   }
++  return { artifacts, manifestSha256 };
++}
++
++function selectVerifiedServerAsset(
++  manifest: ManagedReleaseManifest,
++  input: VerifyManagedReleaseDocumentsInput,
++): VerifiedManagedServerAsset {
++  const { artifacts, manifestSha256 } = verifyClosure(manifest, input);
+ 
+   const releaseArtifactId = selectManagedServerArtifactId(input.hostTarget);
+   const record = artifacts.get(releaseArtifactId);
+@@ -628,3 +729,50 @@ function selectVerifiedAsset(
+     launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
+   };
+ }
++
++function selectVerifiedDesktopAsset(
++  manifest: ManagedReleaseManifest,
++  input: VerifyManagedDesktopReleaseDocumentsInput,
++): VerifiedManagedDesktopAsset {
++  const { artifacts, manifestSha256 } = verifyClosure(manifest, input);
++
++  const releaseArtifactId = selectManagedDesktopArtifactId(input.presentationVariant);
++  const expected = EXPECTED_ARTIFACTS.find((artifact) => artifact.id === releaseArtifactId);
++  const record = artifacts.get(releaseArtifactId);
++  if (expected === undefined || expected.kind !== "desktop") {
++    return fail("manifest", `no desktop artifact for ${releaseArtifactId}`);
++  }
++  if (record === undefined || record.kind !== "desktop") {
++    return fail("manifest", `no desktop artifact for ${releaseArtifactId}`);
++  }
++  // `validateArtifacts` proved the record restates the fixed identity; the
++  // selection still refuses anything but the one darwin/arm64 zip of the
++  // requested variant so the returned literals are checked, not assumed.
++  if (
++    record.presentationVariant !== input.presentationVariant ||
++    record.platform !== expected.platform ||
++    record.arch !== expected.arch ||
++    record.format !== expected.format
++  ) {
++    fail(
++      "target",
++      `${releaseArtifactId} is not the ${expected.platform}/${expected.arch} ${expected.format} desktop artifact of ${input.presentationVariant}`,
++    );
++  }
++  return {
++    version: manifest.releaseVersion,
++    releaseArtifactId,
++    file: record.file,
++    bytes: record.bytes,
++    sha256: record.sha256,
++    manifestSha256,
++    releaseInputSha256: manifest.releaseInputSha256,
++    platform: expected.platform,
++    arch: expected.arch,
++    format: expected.format,
++    presentationVariant: input.presentationVariant,
++    bundleId: expected.bundleId,
++    productName: expected.productName,
++    urlSchemes: [...expected.urlSchemes],
++  };
++}
+diff --git a/apps/server/src/cloud/managedReleaseSource.test.ts b/apps/server/src/cloud/managedReleaseSource.test.ts
+index de5cf056147167907114e2eae87bd6d36eea911f..b12def254c50aca84b4f09049c7d5d960e694576 100644
+--- a/apps/server/src/cloud/managedReleaseSource.test.ts
++++ b/apps/server/src/cloud/managedReleaseSource.test.ts
+@@ -18,8 +18,12 @@ import {
+   MAX_MANAGED_MANIFEST_BYTES,
+   MAX_MANAGED_SUMS_BYTES,
+   sha256Hex,
++  verifyManagedDesktopReleaseDocuments,
+   verifyManagedReleaseDocuments,
++  type ManagedDesktopPresentationVariant,
++  type ManagedReleaseError,
+   type ManagedServerTarget,
++  type VerifiedManagedDesktopAsset,
+   type VerifiedManagedServerAsset,
+ } from "./managedRelease.ts";
+ import {
+@@ -161,6 +165,7 @@ a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20  reasoning.zip
+ `;
+ 
+ const DARWIN: ManagedServerTarget = { platform: "darwin", arch: "arm64" };
++const LINUX: ManagedServerTarget = { platform: "linux", arch: "x64", libc: "glibc" };
+ const API_ORIGIN = "https://api.github.com";
+ const RELEASES_PATH = `/repos/${MANAGED_RELEASE_REPOSITORY}/releases`;
+ const API = `${API_ORIGIN}${RELEASES_PATH}`;
+@@ -171,6 +176,15 @@ const ASSET = (id: number) => `${API}/assets/${id}`;
+ const DECOY = "https://attacker.example";
+ const TIME = "2026-09-06T00:00:00Z";
+ const SERVER_FILE = "server-darwin-arm64.tar.gz";
++const DESKTOP_VARIANTS: ReadonlyArray<ManagedDesktopPresentationVariant> = [
++  "managed-nightly",
++  "reasoning",
++];
++/** The fixed darwin/arm64 zip each presentation selects in the golden release. */
++const DESKTOP_FILE: Record<ManagedDesktopPresentationVariant, string> = {
++  "managed-nightly": "nightly.zip",
++  reasoning: "reasoning.zip",
++};
+ const encoder = new TextEncoder();
+ const decoder = new TextDecoder();
+ 
+@@ -232,6 +246,14 @@ const verifiedGolden = verifyManagedReleaseDocuments({
+   hostTarget: DARWIN,
+ });
+ 
++const verifiedGoldenDesktop = (presentationVariant: ManagedDesktopPresentationVariant) =>
++  verifyManagedDesktopReleaseDocuments({
++    manifestBytes: GOLDEN.manifest,
++    sumsBytes: GOLDEN.sums,
++    targetVersion: GOLDEN_VERSION,
++    presentationVariant,
++  });
++
+ // --- fake GitHub -------------------------------------------------------------------------
+ 
+ interface FakeAsset {
+@@ -421,7 +443,11 @@ interface FakeGitHub {
+   pending: (url: URL) => boolean;
+ }
+ 
+-function makeFake(input: { readonly releases?: Array<FakeRelease>; readonly pageSize?: number }) {
++function makeFake(input: {
++  readonly releases?: Array<FakeRelease>;
++  readonly pageSize?: number;
++  readonly hostTarget?: ManagedServerTarget;
++}) {
+   const fake: FakeGitHub = {
+     releases: input.releases ?? [],
+     pageSize: input.pageSize ?? 100,
+@@ -489,7 +515,7 @@ function makeFake(input: { readonly releases?: Array<FakeRelease>; readonly page
+   );
+ 
+   const feed: Effect.Effect<ManagedReleaseFeed> = makeGitHubManagedReleaseFeed({
+-    hostTarget: DARWIN,
++    hostTarget: input.hostTarget ?? DARWIN,
+   }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+ 
+   return { fake, feed };
+@@ -521,11 +547,19 @@ function latestWithTagMutation(mutate: (release: FakeRelease) => void) {
+   return { fake, latest: Effect.flatMap(feed, (feed) => feed.latest) };
+ }
+ 
+-/** Selects the golden release, then hands back a fake whose only later requests belong to the archive. */
+-const selectGolden = Effect.fn(function* (input?: {
++interface SelectionOverrides {
+   readonly assetResponse?: FakeGitHub["assetResponse"];
+   readonly intercept?: FakeGitHub["intercept"];
+-}) {
++}
++
++type ArchiveEffect = Effect.Effect<
++  Stream.Stream<Uint8Array, ManagedArtifactSourceError>,
++  ManagedArtifactSourceError,
++  Scope.Scope
++>;
++
++/** Selects the golden release, then hands back a fake whose only later requests belong to the archive. */
++const selectGolden = Effect.fn(function* (input?: SelectionOverrides) {
+   const release = goldenRelease();
+   const { fake, feed: makeFeed } = makeFake({ releases: [release] });
+   const feed = yield* makeFeed;
+@@ -534,9 +568,59 @@ const selectGolden = Effect.fn(function* (input?: {
+   fake.requests.length = 0;
+   if (input?.assetResponse) fake.assetResponse = input.assetResponse;
+   if (input?.intercept) fake.intercept = input.intercept;
+-  return { fake, feed, release, selection, verified };
++  const archive: ArchiveEffect = selection.source.openArchive(verified);
++  return { fake, feed, release, selection, verified, archive, file: SERVER_FILE };
++});
++
++/** The desktop counterpart of `selectGolden`: one presentation's fixed zip, selected through `resolveDesktop`. */
++const selectGoldenDesktop = Effect.fn(function* (
++  presentationVariant: ManagedDesktopPresentationVariant,
++  input?: SelectionOverrides & { readonly hostTarget?: ManagedServerTarget },
++) {
++  const release = goldenRelease();
++  const { fake, feed: makeFeed } = makeFake({
++    releases: [release],
++    ...(input?.hostTarget === undefined ? {} : { hostTarget: input.hostTarget }),
++  });
++  const feed = yield* makeFeed;
++  const selection = yield* feed.resolveDesktop(GOLDEN_VERSION, presentationVariant);
++  const verified = yield* verifiedGoldenDesktop(presentationVariant);
++  fake.requests.length = 0;
++  if (input?.assetResponse) fake.assetResponse = input.assetResponse;
++  if (input?.intercept) fake.intercept = input.intercept;
++  const archive: ArchiveEffect = selection.source.openArchive(verified);
++  return {
++    fake,
++    feed,
++    release,
++    selection,
++    verified,
++    archive,
++    file: DESKTOP_FILE[presentationVariant],
++  };
+ });
+ 
++/** Either selection helper, so archive transport tests run unchanged over server and desktop sources. */
++type SelectArchive = (input?: SelectionOverrides) => Effect.Effect<
++  {
++    readonly fake: FakeGitHub;
++    readonly release: FakeRelease;
++    readonly archive: ArchiveEffect;
++    readonly file: string;
++  },
++  ManagedArtifactSourceError | ManagedReleaseError
++>;
++
++/** Label, selector and the archive file each selection is bound to. */
++const ARCHIVE_SELECTIONS: ReadonlyArray<[string, SelectArchive, string]> = [
++  ["server", (input) => selectGolden(input), SERVER_FILE],
++  ...DESKTOP_VARIANTS.map((variant): [string, SelectArchive, string] => [
++    `desktop ${variant}`,
++    (input) => selectGoldenDesktop(variant, input),
++    DESKTOP_FILE[variant],
++  ]),
++];
++
+ // --- discovery ---------------------------------------------------------------------------
+ 
+ describe("makeGitHubManagedReleaseFeed discovery", () => {
+@@ -1217,85 +1301,100 @@ describe("makeGitHubManagedReleaseFeed source", () => {
+ 
+   it.effect("streams the archive from the fixed asset-id endpoint after re-reading the tag", () =>
+     Effect.gen(function* () {
+-      const { fake, release, selection, verified } = yield* selectGolden({
+-        assetResponse: (asset) =>
+-          streamResponse([asset.bytes.slice(0, 7), asset.bytes.slice(7)], {
+-            headers: { "content-length": String(asset.size) },
+-          }),
+-      });
+-      const serverAsset = assetOf(release, SERVER_FILE);
+-      const scope = yield* Scope.make();
+-      const stream = yield* selection.source.openArchive(verified).pipe(Scope.provide(scope));
+-      const chunks: Array<number> = [];
+-      yield* Stream.runForEach(stream, (chunk) => Effect.sync(() => chunks.push(chunk.byteLength)));
+-      assert.deepStrictEqual(chunks, [7, 7]);
+-      assert.deepStrictEqual(urlsOf(fake), [TAG(GOLDEN_VERSION), ASSET(serverAsset.id)]);
+-      const archiveRequest = fake.requests[1] as RecordedRequest;
+-      assert.strictEqual(archiveRequest.headers.accept, "application/octet-stream");
+-      assert.strictEqual(archiveRequest.headers["x-github-api-version"], "2026-03-10");
+-      assert.strictEqual(archiveRequest.redirect, "manual");
+-      assert.notProperty(archiveRequest.headers, "authorization");
+-      assert.isFalse(archiveRequest.signal.aborted);
+-      yield* Scope.close(scope, Exit.void);
+-      assert.isTrue(archiveRequest.signal.aborted);
++      for (const [label, select] of ARCHIVE_SELECTIONS) {
++        const { fake, release, archive, file } = yield* select({
++          assetResponse: (asset) =>
++            streamResponse([asset.bytes.slice(0, 7), asset.bytes.slice(7)], {
++              headers: { "content-length": String(asset.size) },
++            }),
++        });
++        const archiveAsset = assetOf(release, file);
++        const scope = yield* Scope.make();
++        const stream = yield* archive.pipe(Scope.provide(scope));
++        const chunks: Array<number> = [];
++        yield* Stream.runForEach(stream, (chunk) =>
++          Effect.sync(() => chunks.push(chunk.byteLength)),
++        );
++        assert.deepStrictEqual(chunks, [7, archiveAsset.size - 7], label);
++        // Only the fixed numeric asset-id endpoint: never the manifest file name, never a response URL.
++        assert.deepStrictEqual(urlsOf(fake), [TAG(GOLDEN_VERSION), ASSET(archiveAsset.id)], label);
++        assert.isFalse(
++          urlsOf(fake).some((url) => url.includes(DECOY) || url.includes(file)),
++          label,
++        );
++        const archiveRequest = fake.requests[1] as RecordedRequest;
++        assert.strictEqual(archiveRequest.headers.accept, "application/octet-stream", label);
++        assert.strictEqual(archiveRequest.headers["x-github-api-version"], "2026-03-10", label);
++        assert.strictEqual(archiveRequest.redirect, "manual", label);
++        assert.notProperty(archiveRequest.headers, "authorization", label);
++        assert.isFalse(archiveRequest.signal.aborted, label);
++        yield* Scope.close(scope, Exit.void);
++        assert.isTrue(archiveRequest.signal.aborted, label);
+ 
+-      fake.requests.length = 0;
+-      fake.assetResponse = (asset) => bytesResponse(asset.bytes, { "content-length": "13" });
+-      assert.include(
+-        yield* reasonOf(Effect.scoped(selection.source.openArchive(verified))),
+-        `Content-Length 13 is not the 14 bytes of ${SERVER_FILE}`,
+-      );
++        fake.requests.length = 0;
++        fake.assetResponse = (asset) =>
++          bytesResponse(asset.bytes, { "content-length": String(asset.size - 1) });
++        assert.include(
++          yield* reasonOf(Effect.scoped(archive)),
++          `Content-Length ${archiveAsset.size - 1} is not the ${archiveAsset.size} bytes of ${file}`,
++          label,
++        );
++      }
+     }),
+   );
+ 
+   it.effect("follows GitHub's asset redirect by hand with a fresh unversioned GET", () =>
+     Effect.gen(function* () {
+-      const objectUrl = "https://objects.example/blob/abc?X-Amz-Signature=SECRET-SIGNATURE";
+-      const serverBytes = assetOf(goldenRelease(), SERVER_FILE).bytes;
+-      const { fake, release, selection, verified } = yield* selectGolden({
+-        assetResponse: () => new Response(null, { status: 302, headers: { location: objectUrl } }),
+-        intercept: (_request, url) =>
+-          url.origin === "https://objects.example" ? bytesResponse(serverBytes) : undefined,
+-      });
+-      const collectArchive = Effect.scoped(
+-        Effect.flatMap(selection.source.openArchive(verified), Stream.runCollect),
+-      );
+-      const bytes = yield* collectArchive;
+-      assert.strictEqual(
+-        bytes.reduce((total, chunk) => total + chunk.byteLength, 0),
+-        14,
+-      );
+-      assert.deepStrictEqual(urlsOf(fake), [
+-        TAG(GOLDEN_VERSION),
+-        ASSET(assetOf(release, SERVER_FILE).id),
+-        objectUrl,
+-      ]);
+-      const hop = fake.requests[2] as RecordedRequest;
+-      assert.strictEqual(hop.method, "GET");
+-      assert.strictEqual(hop.headers.accept, "application/octet-stream");
+-      assert.strictEqual(hop.headers["user-agent"], "T3-Code-managed-release-source");
+-      assert.notProperty(hop.headers, "x-github-api-version");
+-      assert.notProperty(hop.headers, "authorization");
+-      assert.strictEqual(hop.redirect, "manual");
+-
+-      // A relative Location resolves against the hop it came from and keeps the version header on the API origin.
+-      fake.requests.length = 0;
+-      fake.assetResponse = () =>
+-        new Response(null, {
+-          status: 302,
+-          headers: { location: "/relocated/blob?sig=SECRET-SIGNATURE" },
++      for (const [label, select, file] of ARCHIVE_SELECTIONS) {
++        const objectUrl = "https://objects.example/blob/abc?X-Amz-Signature=SECRET-SIGNATURE";
++        const { fake, release, archive } = yield* select({
++          assetResponse: () =>
++            new Response(null, { status: 302, headers: { location: objectUrl } }),
++          intercept: (_request, url) =>
++            url.origin === "https://objects.example"
++              ? bytesResponse(assetOf(goldenRelease(), file).bytes)
++              : undefined,
+         });
+-      fake.intercept = (_request, url) =>
+-        url.pathname === "/relocated/blob"
+-          ? bytesResponse(assetOf(release, SERVER_FILE).bytes)
+-          : undefined;
+-      const relocated = yield* collectArchive;
+-      assert.strictEqual(relocated.length, 1);
+-      assert.strictEqual(
+-        fake.requests[2]?.url,
+-        `${API_ORIGIN}/relocated/blob?sig=SECRET-SIGNATURE`,
+-      );
+-      assert.strictEqual(fake.requests[2]?.headers["x-github-api-version"], "2026-03-10");
++        const collectArchive = Effect.scoped(Effect.flatMap(archive, Stream.runCollect));
++        const bytes = yield* collectArchive;
++        assert.strictEqual(
++          bytes.reduce((total, chunk) => total + chunk.byteLength, 0),
++          assetOf(release, file).size,
++          label,
++        );
++        assert.deepStrictEqual(
++          urlsOf(fake),
++          [TAG(GOLDEN_VERSION), ASSET(assetOf(release, file).id), objectUrl],
++          label,
++        );
++        const hop = fake.requests[2] as RecordedRequest;
++        assert.strictEqual(hop.method, "GET", label);
++        assert.strictEqual(hop.headers.accept, "application/octet-stream", label);
++        assert.strictEqual(hop.headers["user-agent"], "T3-Code-managed-release-source", label);
++        assert.notProperty(hop.headers, "x-github-api-version", label);
++        assert.notProperty(hop.headers, "authorization", label);
++        assert.strictEqual(hop.redirect, "manual", label);
++
++        // A relative Location resolves against the hop it came from and keeps the version header on the API origin.
++        fake.requests.length = 0;
++        fake.assetResponse = () =>
++          new Response(null, {
++            status: 302,
++            headers: { location: "/relocated/blob?sig=SECRET-SIGNATURE" },
++          });
++        fake.intercept = (_request, url) =>
++          url.pathname === "/relocated/blob"
++            ? bytesResponse(assetOf(release, file).bytes)
++            : undefined;
++        const relocated = yield* collectArchive;
++        assert.strictEqual(relocated.length, 1, label);
++        assert.strictEqual(
++          fake.requests[2]?.url,
++          `${API_ORIGIN}/relocated/blob?sig=SECRET-SIGNATURE`,
++          label,
++        );
++        assert.strictEqual(fake.requests[2]?.headers["x-github-api-version"], "2026-03-10", label);
++      }
+     }),
+   );
+ 
+@@ -1344,21 +1443,356 @@ describe("makeGitHubManagedReleaseFeed source", () => {
+           "HTTP 404 for asset",
+         ],
+       ];
+-      for (const [label, respond, expected] of cases) {
+-        let hop = 0;
+-        const { fake, selection, verified } = yield* selectGolden({
+-          assetResponse: () => respond(hop++),
+-          intercept: (_request, url) =>
+-            url.origin === "https://objects.example" ? respond(hop++) : undefined,
++      for (const [selectionLabel, select] of ARCHIVE_SELECTIONS) {
++        for (const [caseLabel, respond, expected] of cases) {
++          const label = `${selectionLabel}: ${caseLabel}`;
++          let hop = 0;
++          const { fake, archive } = yield* select({
++            assetResponse: () => respond(hop++),
++            intercept: (_request, url) =>
++              url.origin === "https://objects.example" ? respond(hop++) : undefined,
++          });
++          const reason = yield* reasonOf(Effect.scoped(archive));
++          assert.include(reason, expected, label);
++          assert.notInclude(reason, "SECRET-SIGNATURE", label);
++          assert.notInclude(reason, "objects.example", label);
++          assert.isTrue(fake.requests.length <= 5, label);
++        }
++      }
++    }),
++  );
++});
++
++// --- desktop selection -------------------------------------------------------------------
++
++describe("makeGitHubManagedReleaseFeed desktop selection", () => {
++  const resolveDesktopWith = (
++    presentationVariant: ManagedDesktopPresentationVariant,
++    mutate: (release: FakeRelease) => void,
++  ) => {
++    const release = goldenRelease();
++    mutate(release);
++    const { fake, feed } = makeFake({ releases: [release] });
++    return {
++      fake,
++      resolved: Effect.flatMap(feed, (feed) =>
++        feed.resolveDesktop(GOLDEN_VERSION, presentationVariant),
++      ),
++    };
++  };
++
++  it.effect("resolves the fixed desktop zip of each presentation through the exact tag alone", () =>
++    Effect.gen(function* () {
++      for (const presentationVariant of DESKTOP_VARIANTS) {
++        for (const hostTarget of [DARWIN, LINUX]) {
++          const label = `${presentationVariant} on ${hostTarget.platform}`;
++          const release = goldenRelease();
++          const { fake, feed: makeFeed } = makeFake({ releases: [release], hostTarget });
++          const feed = yield* makeFeed;
++          const selection = yield* feed.resolveDesktop(GOLDEN_VERSION, presentationVariant);
++          const verified = yield* verifiedGoldenDesktop(presentationVariant);
++          assert.deepStrictEqual(
++            { ...selection, source: undefined },
++            {
++              repository: "kgarg2468/harbor",
++              releaseId: 7,
++              tag: `t3-managed-v${GOLDEN_VERSION}`,
++              version: GOLDEN_VERSION,
++              publishedAt: TIME,
++              githubImmutable: true,
++              manifestSha256: verified.manifestSha256,
++              releaseInputSha256: verified.releaseInputSha256,
++              artifactId: `${verified.releaseArtifactId}@sha256:${verified.sha256}`,
++              presentationVariant,
++              source: undefined,
++            },
++            label,
++          );
++          assert.strictEqual(verified.platform, "darwin", label);
++          assert.strictEqual(verified.arch, "arm64", label);
++          assert.strictEqual(verified.file, DESKTOP_FILE[presentationVariant], label);
++          assert.deepStrictEqual(
++            urlsOf(fake),
++            [
++              TAG(GOLDEN_VERSION),
++              ASSET(assetOf(release, MANAGED_RELEASE_MANIFEST_FILE).id),
++              ASSET(assetOf(release, MANAGED_RELEASE_SUMS_FILE).id),
++              TAG(GOLDEN_VERSION),
++            ],
++            label,
++          );
++          for (const request of fake.requests) {
++            assert.notInclude(request.url, DECOY, label);
++            assert.notInclude(request.url, "/releases/latest", label);
++            assert.notInclude(request.url, "?per_page", label);
++          }
++          // The same feed still selects the host's server archive for the server path.
++          fake.requests.length = 0;
++          const server = yield* feed.resolve(GOLDEN_VERSION);
++          assert.strictEqual(
++            server.artifactId.split("@")[0],
++            hostTarget.platform === "linux"
++              ? "managed-server-linux-x64"
++              : "managed-server-darwin-arm64",
++            label,
++          );
++        }
++      }
++    }),
++  );
++
++  it.effect("makes no request for a presentation or version outside the closed inputs", () =>
++    Effect.gen(function* () {
++      const { fake, feed: makeFeed } = makeFake({ releases: [goldenRelease()] });
++      const feed = yield* makeFeed;
++      for (const forgedVariant of [
++        "common",
++        "__proto__",
++        "",
++        "Reasoning",
++        "managed-server-darwin-arm64",
++      ]) {
++        const reason = yield* reasonOf(
++          feed.resolveDesktop(
++            GOLDEN_VERSION,
++            forgedVariant as unknown as ManagedDesktopPresentationVariant,
++          ),
++        );
++        assert.include(reason, "not a managed desktop presentation variant", forgedVariant);
++        assert.notInclude(reason, "__proto__");
++      }
++      assert.include(
++        yield* reasonOf(feed.resolveDesktop("1.2.3", "reasoning")),
++        "not a managed release version",
++      );
++      assert.include(
++        yield* reasonOf(feed.resolveDesktop("../releases/latest", "managed-nightly")),
++        "not a managed release version",
++      );
++      assert.strictEqual(fake.requests.length, 0);
++
++      assert.include(yield* reasonOf(feed.resolveDesktop(V_LOWER, "reasoning")), "HTTP 404");
++      assert.deepStrictEqual(urlsOf(fake), [TAG(V_LOWER)]);
++    }),
++  );
++
++  it.effect("requires the same closure, provenance and inventory as the server selection", () =>
++    Effect.gen(function* () {
++      const refused: Array<
++        [string, ManagedDesktopPresentationVariant, (release: FakeRelease) => void, string]
++      > = [
++        [
++          "missing non-selected desktop archive",
++          "reasoning",
++          (r) =>
++            r.assets.splice(
++              r.assets.findIndex((a) => a.name === "nightly.zip"),
++              1,
++            ),
++          "asset nightly.zip is missing",
++        ],
++        [
++          "missing server archive",
++          "managed-nightly",
++          (r) =>
++            r.assets.splice(
++              r.assets.findIndex((a) => a.name === SERVER_FILE),
++              1,
++            ),
++          `asset ${SERVER_FILE} is missing`,
++        ],
++        [
++          "missing checksum file",
++          "reasoning",
++          (r) =>
++            r.assets.splice(
++              r.assets.findIndex((a) => a.name === MANAGED_RELEASE_SUMS_FILE),
++              1,
++            ),
++          `expected exactly one ${MANAGED_RELEASE_SUMS_FILE} asset, found 0`,
++        ],
++        [
++          "extra asset",
++          "managed-nightly",
++          (r) => r.assets.push({ ...assetOf(r, "nightly.zip"), id: 999, name: "notes.txt" }),
++          "asset notes.txt is outside the release closure",
++        ],
++        [
++          "selected size",
++          "reasoning",
++          (r) => (assetOf(r, "reasoning.zip").size = 15),
++          "asset reasoning.zip is 15 bytes on GitHub but 14 in the manifest",
++        ],
++        [
++          "selected size",
++          "managed-nightly",
++          (r) => (assetOf(r, "nightly.zip").size = 13),
++          "asset nightly.zip is 13 bytes on GitHub but 12 in the manifest",
++        ],
++        [
++          "non-selected digest",
++          "reasoning",
++          (r) => (assetOf(r, "server-linux-x64.tar.gz").digest = `sha256:${"0".repeat(64)}`),
++          "GitHub digest for server-linux-x64.tar.gz disagrees",
++        ],
++        [
++          "forged manifest bytes",
++          "managed-nightly",
++          (r) => {
++            const manifest = assetOf(r, MANAGED_RELEASE_MANIFEST_FILE);
++            manifest.bytes = encoder.encode(JSON.stringify(JSON.parse(GOLDEN_MANIFEST)));
++            manifest.size = manifest.bytes.byteLength;
++          },
++          "manifest hash",
++        ],
++        [
++          "re-signed identity",
++          "reasoning",
++          (r) => {
++            const manifest = JSON.parse(GOLDEN_MANIFEST) as Json;
++            manifest.artifacts[1].bundleId = "com.t3tools.t3code.evil";
++            const text = canonicalJson(manifest);
++            const manifestAsset = assetOf(r, MANAGED_RELEASE_MANIFEST_FILE);
++            const sumsAsset = assetOf(r, MANAGED_RELEASE_SUMS_FILE);
++            manifestAsset.bytes = encoder.encode(text);
++            manifestAsset.size = manifestAsset.bytes.byteLength;
++            sumsAsset.bytes = encoder.encode(signSums(text));
++            sumsAsset.size = sumsAsset.bytes.byteLength;
++          },
++          "artifact reasoning-darwin-arm64: bundleId must be",
++        ],
++        ["draft", "managed-nightly", (r) => (r.draft = true), "is a draft"],
++      ];
++      for (const [caseLabel, presentationVariant, mutate, expected] of refused) {
++        const label = `${presentationVariant}: ${caseLabel}`;
++        const { fake, resolved } = resolveDesktopWith(presentationVariant, mutate);
++        assert.include(yield* reasonOf(resolved), expected, label);
++        assert.isFalse(
++          urlsOf(fake).some((url) =>
++            url.includes(ASSET(assetOf(goldenRelease(), DESKTOP_FILE[presentationVariant]).id)),
++          ),
++          label,
++        );
++      }
++
++      // Movement between the document reads and the confirming tag read is refused.
++      const release = goldenRelease();
++      const { fake, feed } = makeFake({ releases: [release] });
++      let tagReads = 0;
++      fake.intercept = (_request, url) => {
++        if (url.pathname.includes("/tags/") && ++tagReads === 2) {
++          assetOf(release, "nightly.zip").id += 1000;
++        }
++        return undefined;
++      };
++      const reason = yield* reasonOf(
++        Effect.flatMap(feed, (feed) => feed.resolveDesktop(GOLDEN_VERSION, "managed-nightly")),
++      );
++      assert.include(reason, "after its documents");
++      assert.include(reason, "changed while it was being read");
++      assert.strictEqual(tagReads, 2);
++    }),
++  );
++
++  it.effect("refuses to open a desktop archive of a release that moved since selection", () =>
++    Effect.gen(function* () {
++      const moved: Array<[string, (asset: FakeAsset) => void]> = [
++        ["id", (asset) => (asset.id += 1000)],
++        ["name", (asset) => (asset.name = "renamed.zip")],
++        ["size", (asset) => (asset.size += 1)],
++        ["digest", (asset) => (asset.digest = `sha256:${"0".repeat(64)}`)],
++        ["updated_at", (asset) => (asset.updated_at = "2026-09-07T00:00:00Z")],
++      ];
++      for (const presentationVariant of DESKTOP_VARIANTS) {
++        for (const [caseLabel, mutate] of moved) {
++          const label = `${presentationVariant}: ${caseLabel}`;
++          const { fake, release, archive, file } = yield* selectGoldenDesktop(presentationVariant);
++          mutate(assetOf(release, file));
++          const reason = yield* reasonOf(Effect.scoped(archive));
++          assert.include(reason, "before its archive", label);
++          assert.include(reason, "changed while it was being read", label);
++          assert.deepStrictEqual(urlsOf(fake), [TAG(GOLDEN_VERSION)], label);
++        }
++      }
++    }),
++  );
++
++  it.effect("opens the desktop archive only for the identical verified descriptor", () =>
++    Effect.gen(function* () {
++      for (const presentationVariant of DESKTOP_VARIANTS) {
++        const { fake, selection, verified } = yield* selectGoldenDesktop(presentationVariant);
++        const keys = Object.keys(verified) as Array<keyof VerifiedManagedDesktopAsset>;
++        assert.strictEqual(keys.length, 14, presentationVariant);
++        const forgeries: Array<[string, VerifiedManagedDesktopAsset]> = keys.map((key) => {
++          const value = verified[key];
++          const altered =
++            typeof value === "number"
++              ? value + 1
++              : typeof value === "string"
++                ? `${value}x`
++                : [...value, "evil"];
++          return [key, { ...verified, [key]: altered }];
+         });
+-        const reason = yield* reasonOf(Effect.scoped(selection.source.openArchive(verified)));
+-        assert.include(reason, expected, label);
+-        assert.notInclude(reason, "SECRET-SIGNATURE", label);
+-        assert.notInclude(reason, "objects.example", label);
+-        assert.isTrue(fake.requests.length <= 5, label);
++        // A single-scheme list reads the same reversed; only multi-scheme variants can test order.
++        if (verified.urlSchemes.length > 1) {
++          forgeries.push([
++            "urlSchemes reordered",
++            { ...verified, urlSchemes: verified.urlSchemes.toReversed() },
++          ]);
++        }
++        // Array iteration methods skip holes, so a sparse list of the right length
++        // must not read as equal to the verified schemes.
++        const sparse: Array<string> = [];
++        sparse.length = verified.urlSchemes.length;
++        assert.isTrue(
++          sparse.every(() => false),
++          "sparse array must have no own elements",
++        );
++        forgeries.push(
++          ["urlSchemes sparse", { ...verified, urlSchemes: sparse }],
++          ["urlSchemes truncated", { ...verified, urlSchemes: verified.urlSchemes.slice(0, -1) }],
++          ["urlSchemes empty", { ...verified, urlSchemes: [] }],
++          [
++            "other presentation",
++            yield* verifiedGoldenDesktop(
++              presentationVariant === "reasoning" ? "managed-nightly" : "reasoning",
++            ),
++          ],
++          ["server asset", (yield* verifiedGolden) as unknown as VerifiedManagedDesktopAsset],
++        );
++        for (const [label, forged] of forgeries) {
++          const reason = yield* reasonOf(Effect.scoped(selection.source.openArchive(forged)));
++          assert.include(
++            reason,
++            "the requested asset is not the selected asset",
++            `${presentationVariant}: ${label}`,
++          );
++        }
++        // Equal content in a fresh object is the same descriptor.
++        const copy = { ...verified, urlSchemes: [...verified.urlSchemes] };
++        assert.strictEqual(fake.requests.length, 0, presentationVariant);
++        yield* Effect.scoped(Effect.flatMap(selection.source.openArchive(copy), Stream.runCollect));
++        assert.strictEqual(fake.requests.length, 2, presentationVariant);
+       }
+     }),
+   );
++
++  it.effect("binds desktop readDocuments to the selected version and hands out copies", () =>
++    Effect.gen(function* () {
++      const { fake, selection } = yield* selectGoldenDesktop("reasoning");
++      const first = yield* selection.source.readDocuments(GOLDEN_VERSION);
++      assert.deepStrictEqual(first.manifestBytes, GOLDEN.manifest);
++      assert.deepStrictEqual(first.sumsBytes, GOLDEN.sums);
++      first.manifestBytes.fill(0);
++      const second = yield* selection.source.readDocuments(GOLDEN_VERSION);
++      assert.deepStrictEqual(second.manifestBytes, GOLDEN.manifest);
++      assert.include(
++        yield* reasonOf(selection.source.readDocuments(COUNTER_2.version)),
++        `bound to ${GOLDEN_VERSION}, not`,
++      );
++      assert.strictEqual(fake.requests.length, 0);
++    }),
++  );
+ });
+ 
+ // --- cancellation ------------------------------------------------------------------------
+@@ -1430,17 +1864,20 @@ describe("makeGitHubManagedReleaseFeed cancellation", () => {
+     }),
+   );
+ 
+-  const stalledArchive = Effect.fn(function* (prefix: ReadonlyArray<Uint8Array>) {
++  const stalledArchive = Effect.fn(function* (
++    prefix: ReadonlyArray<Uint8Array>,
++    select: SelectArchive = selectGolden,
++  ) {
+     const pulled = Latch.makeUnsafe(false);
+     const cancels = { count: 0 };
+-    const { fake, selection, verified } = yield* selectGolden({
++    const { fake, archive } = yield* select({
+       assetResponse: (asset, request) =>
+         new Response(hangingBody({ signal: request.signal, pulled, cancels, prefix }), {
+           headers: { "content-length": String(asset.size) },
+         }),
+     });
+     const scope = yield* Scope.make();
+-    const stream = yield* selection.source.openArchive(verified).pipe(Scope.provide(scope));
++    const stream = yield* archive.pipe(Scope.provide(scope));
+     const archiveRequest = fake.requests[1] as RecordedRequest;
+     assert.strictEqual(archiveRequest.headers.accept, "application/octet-stream");
+     return { pulled, cancels, scope, stream, archiveRequest };
+@@ -1450,62 +1887,72 @@ describe("makeGitHubManagedReleaseFeed cancellation", () => {
+     "interrupting the archive consumer cancels the body; closing the scope aborts the request",
+     () =>
+       Effect.gen(function* () {
+-        const { pulled, cancels, scope, stream, archiveRequest } = yield* stalledArchive([]);
+-        const consumer = yield* Effect.forkScoped(Stream.runCollect(stream));
+-        yield* pulled.await;
+-        yield* Fiber.interrupt(consumer);
+-        assert.strictEqual(cancels.count, 1);
+-        assert.isFalse(archiveRequest.signal.aborted);
+-        yield* Scope.close(scope, Exit.void);
+-        assert.isTrue(archiveRequest.signal.aborted);
++        for (const [label, select] of ARCHIVE_SELECTIONS) {
++          const { pulled, cancels, scope, stream, archiveRequest } = yield* stalledArchive(
++            [],
++            select,
++          );
++          const consumer = yield* Effect.forkScoped(Stream.runCollect(stream));
++          yield* pulled.await;
++          yield* Fiber.interrupt(consumer);
++          assert.strictEqual(cancels.count, 1, label);
++          assert.isFalse(archiveRequest.signal.aborted, label);
++          yield* Scope.close(scope, Exit.void);
++          assert.isTrue(archiveRequest.signal.aborted, label);
++        }
+       }),
+   );
+ 
+   it.effect("an idle archive stream fails after the idle window instead of ending cleanly", () =>
+     Effect.gen(function* () {
+-      const { pulled, cancels, scope, stream, archiveRequest } = yield* stalledArchive([
+-        new Uint8Array(7),
+-      ]);
+-      const received: Array<number> = [];
+-      const consumer = yield* Effect.forkScoped(
+-        reasonOf(
+-          Stream.runForEach(stream, (chunk) => Effect.sync(() => received.push(chunk.byteLength))),
+-        ),
+-      );
+-      yield* pulled.await;
+-      // The first chunk was delivered while the body is still open: nothing here collects the archive.
+-      assert.deepStrictEqual(received, [7]);
+-      yield* Effect.yieldNow;
+-      yield* TestClock.adjust(Duration.seconds(60));
+-      const reason = yield* Fiber.join(consumer);
+-      assert.include(reason, "no archive bytes for");
+-      assert.deepStrictEqual(received, [7]);
+-      assert.strictEqual(cancels.count, 1);
+-      yield* Scope.close(scope, Exit.void);
+-      assert.isTrue(archiveRequest.signal.aborted);
++      for (const [label, select] of ARCHIVE_SELECTIONS) {
++        const { pulled, cancels, scope, stream, archiveRequest } = yield* stalledArchive(
++          [new Uint8Array(7)],
++          select,
++        );
++        const received: Array<number> = [];
++        const consumer = yield* Effect.forkScoped(
++          reasonOf(
++            Stream.runForEach(stream, (chunk) =>
++              Effect.sync(() => received.push(chunk.byteLength)),
++            ),
++          ),
++        );
++        yield* pulled.await;
++        // The first chunk was delivered while the body is still open: nothing here collects the archive.
++        assert.deepStrictEqual(received, [7], label);
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(Duration.seconds(60));
++        const reason = yield* Fiber.join(consumer);
++        assert.include(reason, "no archive bytes for", label);
++        assert.deepStrictEqual(received, [7], label);
++        assert.strictEqual(cancels.count, 1, label);
++        yield* Scope.close(scope, Exit.void);
++        assert.isTrue(archiveRequest.signal.aborted, label);
++      }
+     }),
+   );
+ 
+   it.effect("times out an archive response that never arrives and aborts the request", () =>
+     Effect.gen(function* () {
+-      const requested = Latch.makeUnsafe(false);
+-      const { fake, selection, verified } = yield* selectGolden();
+-      fake.pending = (url) => {
+-        if (!url.pathname.includes("/assets/")) return false;
+-        requested.openUnsafe();
+-        return true;
+-      };
+-      const fiber = yield* Effect.forkScoped(
+-        reasonOf(Effect.scoped(selection.source.openArchive(verified))),
+-      );
+-      yield* requested.await;
+-      yield* Effect.yieldNow;
+-      yield* TestClock.adjust(Duration.seconds(30));
+-      const reason = yield* Fiber.join(fiber);
+-      assert.include(reason, "opening the archive of release 7");
+-      assert.include(reason, "no complete response within");
+-      assert.strictEqual(fake.requests.length, 2);
+-      assert.isTrue(fake.requests[1]?.signal.aborted);
++      for (const [label, select] of ARCHIVE_SELECTIONS) {
++        const requested = Latch.makeUnsafe(false);
++        const { fake, archive } = yield* select();
++        fake.pending = (url) => {
++          if (!url.pathname.includes("/assets/")) return false;
++          requested.openUnsafe();
++          return true;
++        };
++        const fiber = yield* Effect.forkScoped(reasonOf(Effect.scoped(archive)));
++        yield* requested.await;
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(Duration.seconds(30));
++        const reason = yield* Fiber.join(fiber);
++        assert.include(reason, "opening the archive of release 7", label);
++        assert.include(reason, "no complete response within", label);
++        assert.strictEqual(fake.requests.length, 2, label);
++        assert.isTrue(fake.requests[1]?.signal.aborted, label);
++      }
+     }),
+   );
+ });
+diff --git a/apps/server/src/cloud/managedReleaseSource.ts b/apps/server/src/cloud/managedReleaseSource.ts
+index aa43a35e3e84f255c92826b8c2805e6b24db9b7d..1d486465841a60e2e77a35d971b90a38f82efc68 100644
+--- a/apps/server/src/cloud/managedReleaseSource.ts
++++ b/apps/server/src/cloud/managedReleaseSource.ts
+@@ -3,6 +3,7 @@ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
++import type * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ import {
+   FetchHttpClient,
+@@ -12,6 +13,7 @@ import {
+ } from "effect/unstable/http";
+ 
+ import {
++  isManagedDesktopPresentationVariant,
+   MANAGED_RELEASE_MANIFEST_FILE,
+   MANAGED_RELEASE_SUMS_FILE,
+   MAX_MANAGED_MANIFEST_BYTES,
+@@ -19,8 +21,14 @@ import {
+   managedArtifactContentId,
+   parseManagedReleaseVersion,
+   sha256Hex,
++  verifyManagedDesktopReleaseDocuments,
+   verifyManagedReleaseDocuments,
++  type ManagedDesktopPresentationVariant,
++  type ManagedDesktopReleaseArtifactId,
++  type ManagedReleaseError,
++  type ManagedServerReleaseArtifactId,
+   type ManagedServerTarget,
++  type VerifiedManagedDesktopAsset,
+   type VerifiedManagedServerAsset,
+ } from "./managedRelease.ts";
+ import {
+@@ -75,6 +83,12 @@ import { compareExactServiceVersions } from "./serviceProtocol.ts";
+  *   queue exactly `selection.version`, and require the stager's `artifactId`
+  *   to equal `selection.artifactId`. A later poll may yield a newer selection
+  *   but must not swap the source underneath an already queued target.
++ * - Desktop selection (`resolveDesktop`) is a presentation choice, not a host
++ *   choice: every managed release publishes exactly one darwin/arm64 zip per
++ *   closed presentation variant, so a feed built for a Linux server still
++ *   selects that zip. It shares every document, closure, inventory and
++ *   archive rule with the server path and differs only in which verified
++ *   artifact its source is bound to.
+  */
+ 
+ export const MANAGED_RELEASE_REPOSITORY = "kgarg2468/harbor" as const;
+@@ -147,6 +161,39 @@ export interface ManagedReleaseSelection {
+   readonly source: ManagedArtifactSource;
+ }
+ 
++/**
++ * The desktop counterpart of `ManagedArtifactSource`: the same bound document
++ * bytes, and an archive that opens only for the identical verified desktop
++ * descriptor, fixed bundle identity included.
++ */
++export interface ManagedDesktopArtifactSource {
++  readonly readDocuments: ManagedArtifactSource["readDocuments"];
++  readonly openArchive: (
++    asset: VerifiedManagedDesktopAsset,
++  ) => Effect.Effect<
++    Stream.Stream<Uint8Array, ManagedArtifactSourceError>,
++    ManagedArtifactSourceError,
++    Scope.Scope
++  >;
++}
++
++export interface ManagedDesktopReleaseSelection {
++  readonly repository: typeof MANAGED_RELEASE_REPOSITORY;
++  readonly releaseId: number;
++  readonly tag: string;
++  readonly version: string;
++  readonly publishedAt: string;
++  /** GitHub's observed release field; an observation under repository trust, not a trust root. */
++  readonly githubImmutable: boolean;
++  readonly manifestSha256: string;
++  readonly releaseInputSha256: string;
++  /** `<fixed desktop artifact id>@sha256:<archive hash>`; the staged file's content must equal it. */
++  readonly artifactId: string;
++  readonly presentationVariant: ManagedDesktopPresentationVariant;
++  /** Bound to this descriptor and these verified document bytes. */
++  readonly source: ManagedDesktopArtifactSource;
++}
++
+ export interface ManagedReleaseFeed {
+   /**
+    * Enumerates every bounded page and selects the highest published managed
+@@ -163,6 +210,17 @@ export interface ManagedReleaseFeed {
+   readonly resolve: (
+     exactVersion: string,
+   ) => Effect.Effect<ManagedReleaseSelection, ManagedArtifactSourceError>;
++  /**
++   * Resolves exactly the supplied managed version through its exact tag and
++   * binds a source to its fixed darwin/arm64 desktop zip for one closed
++   * presentation variant. Never consults "latest" and never derives the
++   * selection from the feed's host target. An input outside the closed set
++   * fails before any request is made.
++   */
++  readonly resolveDesktop: (
++    exactVersion: string,
++    presentationVariant: ManagedDesktopPresentationVariant,
++  ) => Effect.Effect<ManagedDesktopReleaseSelection, ManagedArtifactSourceError>;
+ }
+ 
+ // --- GitHub schema -----------------------------------------------------------------
+@@ -601,6 +659,70 @@ function sameVerifiedAsset(a: VerifiedManagedServerAsset, b: VerifiedManagedServ
+   return VERIFIED_ASSET_KEYS.every((key) => a[key] === b[key]);
+ }
+ 
++/** Every scalar field of the desktop descriptor; the ordered `urlSchemes` list is compared separately. */
++const VERIFIED_DESKTOP_ASSET_KEYS = [
++  "version",
++  "releaseArtifactId",
++  "file",
++  "bytes",
++  "sha256",
++  "manifestSha256",
++  "releaseInputSha256",
++  "platform",
++  "arch",
++  "format",
++  "presentationVariant",
++  "bundleId",
++  "productName",
++] as const satisfies ReadonlyArray<Exclude<keyof VerifiedManagedDesktopAsset, "urlSchemes">>;
++
++/**
++ * Identical content and identity, including the fixed bundle fields the
++ * desktop later verifies the extracted app against. The server key list is
++ * deliberately not reused: it cannot prove the desktop identity fields.
++ */
++function sameVerifiedDesktopAsset(
++  a: VerifiedManagedDesktopAsset,
++  b: VerifiedManagedDesktopAsset,
++): boolean {
++  if (!VERIFIED_DESKTOP_ASSET_KEYS.every((key) => a[key] === b[key])) return false;
++  if (!Array.isArray(a.urlSchemes) || a.urlSchemes.length !== b.urlSchemes.length) return false;
++  // Indexed reads, not `every`: iteration methods skip holes in a sparse
++  // caller-built array, which would let `new Array(n)` pass as a match.
++  for (let index = 0; index < b.urlSchemes.length; index += 1) {
++    if (a.urlSchemes[index] !== b.urlSchemes[index]) return false;
++  }
++  return true;
++}
++
++/** What every selection needs from its verified artifact; both verified asset types satisfy it. */
++interface VerifiedArchive {
++  readonly releaseArtifactId: ManagedServerReleaseArtifactId | ManagedDesktopReleaseArtifactId;
++  /** Bare basename; the inventory asset of this name must restate `bytes`. */
++  readonly file: string;
++  readonly bytes: number;
++  readonly sha256: string;
++  readonly manifestSha256: string;
++  readonly releaseInputSha256: string;
++}
++
++/** Verifies the two downloaded documents for one selection kind; the only point where server and desktop resolution differ. */
++type DocumentVerifier<A extends VerifiedArchive> = (input: {
++  readonly manifestBytes: Uint8Array;
++  readonly sumsBytes: Uint8Array;
++  readonly targetVersion: string;
++}) => Effect.Effect<A, ManagedReleaseError>;
++
++/** One resolved release: everything a bound source closes over. */
++interface ResolvedRelease<A extends VerifiedArchive> {
++  readonly descriptor: ReleaseDescriptor;
++  readonly verified: A;
++  /** The inventory asset carrying the verified file, pinned by numeric id. */
++  readonly archiveAsset: ReleaseAssetDescriptor;
++  readonly manifestBytes: Uint8Array;
++  readonly sumsBytes: Uint8Array;
++}
++
+ // --- feed -----------------------------------------------------------------------------
+ 
+ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_source.make")(
+@@ -780,13 +902,27 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+             ),
+           );
+ 
++    const verifyServer: DocumentVerifier<VerifiedManagedServerAsset> = (input) =>
++      verifyManagedReleaseDocuments({ ...input, hostTarget: options.hostTarget });
++
++    const verifyDesktop =
++      (
++        presentationVariant: ManagedDesktopPresentationVariant,
++      ): DocumentVerifier<VerifiedManagedDesktopAsset> =>
++      (input) =>
++        verifyManagedDesktopReleaseDocuments({ ...input, presentationVariant });
++
+     /**
+-     * Downloads and verifies the descriptor's two documents, proves the
+-     * release inventory is exactly the verified closure, re-reads the tag,
+-     * and binds the selection to the bytes it verified.
++     * Downloads and verifies the descriptor's two documents with the given
++     * verifier, proves the release inventory is exactly the verified closure,
++     * re-reads the tag, and returns everything a bound source closes over.
++     * A plain generic rather than `Effect.fn` so the verified type survives.
+      */
+-    const resolveDescriptor = Effect.fn("cloud.managed_release_source.resolve_descriptor")(
+-      function* (descriptor: ReleaseDescriptor) {
++    const resolveDescriptor = <A extends VerifiedArchive>(
++      descriptor: ReleaseDescriptor,
++      verify: DocumentVerifier<A>,
++    ): Effect.Effect<ResolvedRelease<A>, ManagedArtifactSourceError> =>
++      Effect.gen(function* () {
+         const { version, releaseId } = descriptor;
+         const label = `release ${releaseId} (${quote(descriptor.tag)})`;
+         const documentAsset = (file: string) =>
+@@ -814,18 +950,13 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+           `downloading ${MANAGED_RELEASE_SUMS_FILE} (asset ${sumsAsset.id}) of ${label}`,
+         );
+ 
+-        const verified = yield* verifyManagedReleaseDocuments({
+-          manifestBytes,
+-          sumsBytes,
+-          targetVersion: version,
+-          hostTarget: options.hostTarget,
+-        }).pipe(
++        const verified = yield* verify({ manifestBytes, sumsBytes, targetVersion: version }).pipe(
+           Effect.mapError((error) =>
+             sourceError(`verifying the documents of ${label}: ${error.message}`, error),
+           ),
+         );
+ 
+-        const serverAsset = yield* attempt(() => {
++        const archiveAsset = yield* attempt(() => {
+           // The verifier has proven the checksum closure; the GitHub inventory
+           // must be exactly that closure plus the checksum file itself.
+           const sums = sumsEntries(sumsBytes);
+@@ -844,11 +975,11 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+               `resolving ${label}: expected exactly ${expectedNames.size} assets, found ${descriptor.assets.length}`,
+             );
+           }
+-          const server = descriptor.assets.find((asset) => asset.name === verified.file);
+-          if (server === undefined) fail(`resolving ${label}: asset ${verified.file} is missing`);
+-          if (server.size !== verified.bytes) {
++          const archive = descriptor.assets.find((asset) => asset.name === verified.file);
++          if (archive === undefined) fail(`resolving ${label}: asset ${verified.file} is missing`);
++          if (archive.size !== verified.bytes) {
+             fail(
+-              `resolving ${label}: asset ${verified.file} is ${server.size} bytes on GitHub but ${verified.bytes} in the manifest`,
++              `resolving ${label}: asset ${verified.file} is ${archive.size} bytes on GitHub but ${verified.bytes} in the manifest`,
+             );
+           }
+           // GitHub digests are consistency fields under the same trust as the
+@@ -865,62 +996,63 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+               );
+             }
+           }
+-          return server;
++          return archive;
+         });
+ 
+         const again = yield* readExactRelease(version, `re-reading ${label} after its documents`);
+         yield* requireUnchanged(descriptor, again, `re-reading ${label} after its documents`);
+ 
+-        return makeSelection({
++        return {
+           descriptor,
+           verified,
+-          serverAsset,
++          archiveAsset,
+           manifestBytes: manifestBytes.slice(),
+           sumsBytes: sumsBytes.slice(),
+-        });
+-      },
+-    );
++        };
++      }).pipe(Effect.withSpan("cloud.managed_release_source.resolve_descriptor"));
+ 
+-    /** A selection and the source that is bound to exactly it. */
+-    const makeSelection = (input: {
+-      readonly descriptor: ReleaseDescriptor;
+-      readonly verified: VerifiedManagedServerAsset;
+-      readonly serverAsset: ReleaseAssetDescriptor;
+-      readonly manifestBytes: Uint8Array;
+-      readonly sumsBytes: Uint8Array;
+-    }): ManagedReleaseSelection => {
+-      const { descriptor, verified, serverAsset } = input;
++    /**
++     * The source bound to exactly one resolved release: cached copies of the
++     * verified document bytes, and an archive that opens only for a descriptor
++     * `same` as the verified one, after the tag has been re-read unchanged and
++     * the pinned asset id still carries the verified file name.
++     */
++    const bindSource = <A extends VerifiedArchive>(
++      resolved: ResolvedRelease<A>,
++      same: (requested: A, verified: A) => boolean,
++    ) => {
++      const { descriptor, verified, archiveAsset } = resolved;
+       const label = `release ${descriptor.releaseId} (${quote(descriptor.tag)})`;
+ 
+       const readDocuments: ManagedArtifactSource["readDocuments"] = (version) =>
+         version === descriptor.version
+           ? Effect.succeed<ManagedReleaseDocuments>({
+-              manifestBytes: input.manifestBytes.slice(),
+-              sumsBytes: input.sumsBytes.slice(),
++              manifestBytes: resolved.manifestBytes.slice(),
++              sumsBytes: resolved.sumsBytes.slice(),
+             })
+           : Effect.fail(
+               sourceError(`this source is bound to ${descriptor.version}, not ${quote(version)}`),
+             );
+ 
+-      const openArchive: ManagedArtifactSource["openArchive"] = Effect.fn(
+-        "cloud.managed_release_source.open_archive",
+-      )(function* (asset: VerifiedManagedServerAsset) {
++      const openArchive = Effect.fn("cloud.managed_release_source.open_archive")(function* (
++        asset: A,
++      ) {
+         const phase = `opening the archive of ${label}`;
+-        if (!sameVerifiedAsset(asset, verified)) {
++        if (!same(asset, verified)) {
+           return yield* sourceError(`${phase}: the requested asset is not the selected asset`);
+         }
+         const rereadPhase = `re-reading ${label} before its archive`;
+         const current = yield* readExactRelease(descriptor.version, rereadPhase);
+         yield* requireUnchanged(descriptor, current, rereadPhase);
+         const located = current.assets.find(
+-          (candidate) => candidate.id === serverAsset.id && candidate.name === verified.file,
++          (candidate) => candidate.id === archiveAsset.id && candidate.name === verified.file,
+         );
+         if (located === undefined) {
+           return yield* sourceError(
+-            `${phase}: asset ${serverAsset.id} (${verified.file}) is no longer in the release`,
++            `${phase}: asset ${archiveAsset.id} (${verified.file}) is no longer in the release`,
+           );
+         }
+-        const response = yield* openAsset(serverAsset.id, phase).pipe(
++        const response = yield* openAsset(archiveAsset.id, phase).pipe(
+           withTimeout(ARCHIVE_RESPONSE_TIMEOUT, phase),
+         );
+         const declared = declaredContentLength(response.headers);
+@@ -942,20 +1074,39 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+         );
+       });
+ 
+-      return {
+-        repository: MANAGED_RELEASE_REPOSITORY,
+-        releaseId: descriptor.releaseId,
+-        tag: descriptor.tag,
+-        version: descriptor.version,
+-        publishedAt: descriptor.publishedAt,
+-        githubImmutable: descriptor.githubImmutable,
+-        manifestSha256: verified.manifestSha256,
+-        releaseInputSha256: verified.releaseInputSha256,
+-        artifactId: managedArtifactContentId(verified),
+-        source: { readDocuments, openArchive },
+-      };
++      return { readDocuments, openArchive };
+     };
+ 
++    /** The release fields every selection reports, taken from the descriptor and the verified documents. */
++    const selectionOf = (resolved: ResolvedRelease<VerifiedArchive>) => ({
++      repository: MANAGED_RELEASE_REPOSITORY,
++      releaseId: resolved.descriptor.releaseId,
++      tag: resolved.descriptor.tag,
++      version: resolved.descriptor.version,
++      publishedAt: resolved.descriptor.publishedAt,
++      githubImmutable: resolved.descriptor.githubImmutable,
++      manifestSha256: resolved.verified.manifestSha256,
++      releaseInputSha256: resolved.verified.releaseInputSha256,
++      artifactId: managedArtifactContentId(resolved.verified),
++    });
++
++    /** A server selection and the source that is bound to exactly it. */
++    const makeSelection = (
++      resolved: ResolvedRelease<VerifiedManagedServerAsset>,
++    ): ManagedReleaseSelection => ({
++      ...selectionOf(resolved),
++      source: bindSource(resolved, sameVerifiedAsset),
++    });
++
++    /** A desktop selection and the source that is bound to exactly it, fixed bundle identity included. */
++    const makeDesktopSelection = (
++      resolved: ResolvedRelease<VerifiedManagedDesktopAsset>,
++    ): ManagedDesktopReleaseSelection => ({
++      ...selectionOf(resolved),
++      presentationVariant: resolved.verified.presentationVariant,
++      source: bindSource(resolved, sameVerifiedDesktopAsset),
++    });
++
+     /** Every bounded page of the fixed repository, reduced to its candidate releases. */
+     const listCandidates = Effect.fn("cloud.managed_release_source.list_candidates")(function* () {
+       const byVersion = new Map<string, GitHubRelease>();
+@@ -1015,7 +1166,7 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+       const listed = yield* attempt(() => normalizeRelease(chosen.raw));
+       const exact = yield* readExactRelease(listed.version, phase);
+       yield* requireUnchanged(listed, exact, phase);
+-      return yield* resolveDescriptor(exact);
++      return makeSelection(yield* resolveDescriptor(exact, verifyServer));
+     }).pipe(Effect.withSpan("cloud.managed_release_source.latest"));
+ 
+     const resolve: ManagedReleaseFeed["resolve"] = Effect.fn(
+@@ -1027,9 +1178,31 @@ export const makeGitHubManagedReleaseFeed = Effect.fn("cloud.managed_release_sou
+         );
+       }
+       const exact = yield* readExactRelease(exactVersion, `resolving ${exactVersion}`);
+-      return yield* resolveDescriptor(exact);
++      return makeSelection(yield* resolveDescriptor(exact, verifyServer));
++    });
++
++    const resolveDesktop: ManagedReleaseFeed["resolveDesktop"] = Effect.fn(
++      "cloud.managed_release_source.resolve_desktop",
++    )(function* (exactVersion: string, presentationVariant: ManagedDesktopPresentationVariant) {
++      // Both inputs are checked before any request: the presentation against
++      // the closed set (a runtime caller may hand over any string), the
++      // version against the managed grammar. Neither is echoed unvalidated.
++      if (!isManagedDesktopPresentationVariant(presentationVariant)) {
++        return yield* sourceError(
++          `resolving the desktop artifact of ${quote(exactVersion)}: not a managed desktop presentation variant`,
++        );
++      }
++      if (parseManagedReleaseVersion(exactVersion) === undefined) {
++        return yield* sourceError(
++          `resolving ${quote(exactVersion)}: not a managed release version`,
++        );
++      }
++      const exact = yield* readExactRelease(exactVersion, `resolving ${exactVersion}`);
++      return makeDesktopSelection(
++        yield* resolveDescriptor(exact, verifyDesktop(presentationVariant)),
++      );
+     });
+ 
+-    return { latest, resolve } satisfies ManagedReleaseFeed;
++    return { latest, resolve, resolveDesktop } satisfies ManagedReleaseFeed;
+   },
+ );
