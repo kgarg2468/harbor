@@ -38,7 +38,8 @@ final class TempHome {
     init() {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("insomnia-tests-\(UUID().uuidString)", isDirectory: true)
-        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
         setenv(Paths.environmentKey, root.path, 1)
         paths = Paths.fromEnvironment()
     }
@@ -54,14 +55,19 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
     private let lock = NSLock()
     private var _calls: [String] = []
     private var _sleepDisabled = false
+    private var _lowPower = false
+    var onSleepChange: (@Sendable (Bool) -> Void)?
+    var sleepGate: AsyncGate?
     private var _lowPowerGate: AsyncGate?
     var throwOn: Set<String> = []
+    var throwAfterApplying: Set<String> = []
 
     var calls: [String] { lock.withLock { _calls } }
     var sleepDisabled: Bool {
         get { lock.withLock { _sleepDisabled } }
         set { lock.withLock { _sleepDisabled = newValue } }
     }
+    var lowPower: Bool { lock.withLock { _lowPower } }
     var lowPowerGate: AsyncGate? {
         get { lock.withLock { _lowPowerGate } }
         set { lock.withLock { _lowPowerGate = newValue } }
@@ -76,7 +82,9 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
 
     func setSleepDisabled(_ disabled: Bool) async throws {
         try record("disablesleep \(disabled ? 1 : 0)")
+        if disabled, let gate = sleepGate { await gate.wait() }
         sleepDisabled = disabled
+        onSleepChange?(disabled)
     }
 
     func isSleepDisabled() async throws -> Bool {
@@ -84,9 +92,18 @@ final class FakeSleepGuard: SleepGuarding, @unchecked Sendable {
         return sleepDisabled
     }
 
+    func batteryLowPowerMode() async throws -> Bool {
+        try record("pmset -g custom")
+        return lowPower
+    }
+
     func setLowPowerMode(_ on: Bool) async throws {
         try record("lowpowermode \(on ? 1 : 0)")
         if on, let gate = lowPowerGate { await gate.wait() }
+        lock.withLock { _lowPower = on }
+        if throwAfterApplying.contains("lowpowermode \(on ? 1 : 0)") {
+            throw SleepGuardError(command: "lowpowermode", status: 1, stderr: "failure after applying")
+        }
     }
 }
 
@@ -99,10 +116,24 @@ final class FakeProcessControl: ProcessSignaling, @unchecked Sendable {
     /// Called synchronously inside `suspend`, so a test can inspect disk
     /// at the moment the side effect happens.
     var onSuspend: (@Sendable ([Int32]) -> Void)?
-    func resume(pids: [Int32]) { lock.withLock { _resumed.append(pids) } }
-    func suspend(pids: [Int32], expectedParents: [Int32: Int32]) {
+    var stoppedBeforePlanning: Set<Int32> = []
+    var failedResumes: Set<Int32> = []
+    var failedSuspends: Set<Int32> = []
+    static func identity(_ pid: Int32) -> ProcessIdentity {
+        ProcessIdentity(pid: pid, startTimeMicroseconds: UInt64(max(1, pid)) * 1_000_000, bootID: "test-boot")
+    }
+    func prepareSuspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        processes.filter { $0.isValid && !stoppedBeforePlanning.contains($0.pid) }
+    }
+    func resume(processes: [ProcessIdentity]) -> [ProcessIdentity] {
+        lock.withLock { _resumed.append(processes.map(\.pid)) }
+        return processes.filter { failedResumes.contains($0.pid) }
+    }
+    func suspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        let pids = processes.map(\.pid)
         lock.withLock { _suspended.append(pids) }
         onSuspend?(pids)
+        return processes.filter { !failedSuspends.contains($0.pid) }
     }
 }
 
@@ -127,12 +158,21 @@ final class FakeAudioControl: AudioControlling, @unchecked Sendable {
     var applied: [(volume: Float, muted: Bool)] { lock.withLock { _applied } }
     var mutes: Int { lock.withLock { _mutes } }
 
-    func read() throws -> (volume: Float, muted: Bool) {
+    var defaultDeviceUID = "test-output"
+    var missingDevices: Set<String> = []
+    private(set) var mutedDevices: [String] = []
+    private(set) var restoredDevices: [String] = []
+
+    func snapshotDefault() throws -> AudioSnapshot {
         if throwOnRead { throw AudioControlError(what: "read", status: -1) }
-        return lock.withLock { (_volume, _muted) }
+        return lock.withLock { AudioSnapshot(deviceUID: defaultDeviceUID, volume: _volume, muted: _muted) }
     }
 
-    func apply(volume: Float, muted: Bool) throws {
+    func restore(_ snapshot: AudioSnapshot) throws {
+        let volume = snapshot.volume
+        let muted = snapshot.muted
+        if missingDevices.contains(snapshot.deviceUID) { throw AudioControlError(what: "missing device", status: -1) }
+        restoredDevices.append(snapshot.deviceUID)
         if throwOnApply { throw AudioControlError(what: "apply", status: -1) }
         lock.withLock {
             _volume = volume
@@ -141,7 +181,9 @@ final class FakeAudioControl: AudioControlling, @unchecked Sendable {
         }
     }
 
-    func mute() throws {
+    func mute(deviceUID: String) throws {
+        if missingDevices.contains(deviceUID) { throw AudioControlError(what: "missing device", status: -1) }
+        mutedDevices.append(deviceUID)
         lock.withLock {
             _muted = true
             _mutes += 1
@@ -167,14 +209,21 @@ final class FakeFreezer: Freezing, @unchecked Sendable {
 
     func plan(bundleIds: [String], config: Config, applyDenylist: Bool) -> [FreezeGroup] {
         lock.withLock {
-            FreezePlanner.groups(bundleIds: bundleIds, apps: apps, processes: processes, config: config, selfBundleId: selfBundleId, applyDenylist: applyDenylist)
+            FreezePlanner.groups(bundleIds: bundleIds, apps: apps, processes: processes.map { process in
+                var entry = process
+                if entry.identity == nil { entry.identity = FakeProcessControl.identity(entry.pid) }
+                return entry
+            }, config: config, selfBundleId: selfBundleId, applyDenylist: applyDenylist)
         }
     }
 
-    func suspend(pids: [Int32], expectedParents: [Int32: Int32]) {
-        control.suspend(pids: pids, expectedParents: expectedParents)
+    func prepareSuspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        control.prepareSuspend(processes: processes, expectedParents: expectedParents)
     }
-    func resume(pids: [Int32]) { control.resume(pids: pids) }
+    func suspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        control.suspend(processes: processes, expectedParents: expectedParents)
+    }
+    func resume(processes: [ProcessIdentity]) -> [ProcessIdentity] { control.resume(processes: processes) }
 }
 
 /// Mutable clamshell reading for reconcile gating tests.
@@ -193,6 +242,8 @@ final class FakeBackstop: BackstopScheduling, @unchecked Sendable {
     private var _scheduled: [Date] = []
     private var _clears = 0
     private var _failSchedule = false
+    var scheduleGate: AsyncGate?
+    var onSchedule: (@Sendable () -> Void)?
     var scheduled: [Date] { lock.withLock { _scheduled } }
     var clears: Int { lock.withLock { _clears } }
     var failSchedule: Bool {
@@ -200,6 +251,8 @@ final class FakeBackstop: BackstopScheduling, @unchecked Sendable {
         set { lock.withLock { _failSchedule = newValue } }
     }
     func schedule(endsAt: Date) async throws {
+        if let gate = scheduleGate { await gate.wait() }
+        onSchedule?()
         if failSchedule { throw BackstopError(message: "fake launchd refused") }
         lock.withLock { _scheduled.append(endsAt) }
     }

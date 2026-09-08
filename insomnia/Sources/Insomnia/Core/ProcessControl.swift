@@ -1,83 +1,99 @@
 import Darwin
 import Foundation
 
-/// Sending signals to processes Insomnia froze. Tree discovery and the
-/// denylist live in `Freezer`; this is only the signal layer.
+/// A PID is reusable. Ownership includes its kernel birth time and boot UUID.
+struct ProcessIdentity: Codable, Sendable, Equatable, Hashable {
+    let pid: Int32
+    let startTimeMicroseconds: UInt64
+    let bootID: String
+
+    var isValid: Bool { pid > 0 && startTimeMicroseconds > 0 && !bootID.isEmpty }
+}
+
 protocol ProcessSignaling: Sendable {
-    /// SIGSTOP each pid. Missing or foreign pids are ignored.
-    func suspend(pids: [Int32], expectedParents: [Int32: Int32])
-    /// SIGCONT each pid. Missing or foreign pids are ignored.
-    func resume(pids: [Int32])
+    /// Validate before journaling, excluding processes already stopped by someone else.
+    func prepareSuspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity]
+    /// Revalidate immediately before each SIGSTOP. Returns only successfully stopped identities.
+    func suspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity]
+    /// Returns unresolved identities only. Exited, replaced, or already-running processes are resolved.
+    func resume(processes: [ProcessIdentity]) -> [ProcessIdentity]
 }
 
 struct ProcessSignalState: Sendable, Equatable {
+    let identity: ProcessIdentity
     let ppid: Int32
     let stopped: Bool
 }
 
+enum ProcessLookup: Sendable {
+    case found(ProcessSignalState)
+    case exited
+    case unavailable
+}
+
 struct SignalProcessControl: ProcessSignaling {
-    typealias StateLookup = @Sendable (Int32) -> ProcessSignalState?
-
+    typealias StateLookup = @Sendable (Int32) -> ProcessLookup
+    /// Zero on success, otherwise the captured errno (never inspect errno later).
+    typealias Signal = @Sendable (Int32, Int32) -> Int32
     private let stateLookup: StateLookup
+    private let send: Signal
 
-    init(stateLookup: @escaping StateLookup = SignalProcessControl.kernelState) {
+    init(stateLookup: @escaping StateLookup = SignalProcessControl.kernelState,
+         send: @escaping Signal = { kill($0, $1) == 0 ? 0 : errno }) {
         self.stateLookup = stateLookup
+        self.send = send
     }
 
-    func suspend(pids: [Int32], expectedParents: [Int32: Int32]) {
-        let eligible = Self.suspendable(pids: pids, expectedParents: expectedParents, stateLookup: stateLookup)
-        let eligibleSet = Set(eligible)
-        for pid in pids where pid > 0 && !eligibleSet.contains(pid) {
-            Log.info("SIGSTOP \(pid) skipped: parent changed or process exited")
-        }
-        signal(eligible, SIGSTOP, "SIGSTOP")
+    func prepareSuspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        processes.filter { canSuspend($0, expectedParents: expectedParents) }
     }
 
-    func resume(pids: [Int32]) {
-        let eligible = Self.resumable(pids: pids, stateLookup: stateLookup)
-        let eligibleSet = Set(eligible)
-        for pid in pids where pid > 0 && !eligibleSet.contains(pid) {
-            Log.info("SIGCONT \(pid) skipped: process is not stopped or exited")
-        }
-        signal(eligible, SIGCONT, "SIGCONT")
-    }
-
-    static func suspendable(
-        pids: [Int32],
-        expectedParents: [Int32: Int32],
-        stateLookup: StateLookup
-    ) -> [Int32] {
-        pids.filter { pid in
-            guard pid > 0, let expected = expectedParents[pid], let state = stateLookup(pid) else { return false }
-            return state.ppid == expected
+    func suspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        processes.filter { identity in
+            guard canSuspend(identity, expectedParents: expectedParents) else { return false }
+            return send(identity.pid, SIGSTOP) == 0
         }
     }
 
-    static func resumable(pids: [Int32], stateLookup: StateLookup) -> [Int32] {
-        pids.filter { pid in
-            guard pid > 0, let state = stateLookup(pid) else { return false }
-            return state.stopped
-        }
+    private func canSuspend(_ identity: ProcessIdentity, expectedParents: [Int32: Int32]) -> Bool {
+        guard identity.isValid, let expected = expectedParents[identity.pid],
+              case let .found(current) = stateLookup(identity.pid) else { return false }
+        return current.identity == identity && current.ppid == expected && !current.stopped
     }
 
-    private static func kernelState(pid: Int32) -> ProcessSignalState? {
-        var info = proc_bsdinfo()
-        let size = MemoryLayout<proc_bsdinfo>.size
-        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(size)) == size else { return nil }
-        return ProcessSignalState(
-            ppid: Int32(bitPattern: info.pbi_ppid),
-            stopped: info.pbi_status == UInt32(SSTOP)
-        )
-    }
-
-    private func signal(_ pids: [Int32], _ sig: Int32, _ name: String) {
-        for pid in pids where pid > 0 {
-            if kill(pid, sig) != 0 {
-                let err = errno
-                if err != ESRCH {
-                    Log.error("\(name) \(pid) failed: \(String(cString: strerror(err)))")
-                }
+    func resume(processes: [ProcessIdentity]) -> [ProcessIdentity] {
+        processes.filter { identity in
+            guard identity.isValid else { return true }
+            switch stateLookup(identity.pid) {
+            case .exited: return false
+            case .unavailable: return true
+            case let .found(current):
+                guard current.identity == identity, current.stopped else { return false }
+                let error = send(identity.pid, SIGCONT)
+                return error != 0 && error != ESRCH
             }
         }
+    }
+
+    static func bootIdentity() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1 else { return nil }
+        var bytes = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else { return nil }
+        return bytes.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    }
+
+    static func kernelState(pid: Int32) -> ProcessLookup {
+        guard pid > 0 else { return .unavailable }
+        var info = proc_bsdinfo()
+        let size = MemoryLayout<proc_bsdinfo>.size
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(size)) == size else {
+            return errno == ESRCH ? .exited : .unavailable
+        }
+        guard let boot = bootIdentity() else { return .unavailable }
+        return .found(ProcessSignalState(
+            identity: ProcessIdentity(pid: pid, startTimeMicroseconds: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec, bootID: boot),
+            ppid: Int32(bitPattern: info.pbi_ppid), stopped: info.pbi_status == UInt32(SSTOP)
+        ))
     }
 }

@@ -1,5 +1,17 @@
 # Contributing
 
+## Insomnia contributions
+
+For changes under `insomnia/`, start with [its README](insomnia/README.md) and
+[current specification](insomnia/docs/spec.md). Run Swift tests, release build,
+ShellCheck and isolated script tests listed there. Use fake power, process, audio
+and network adapters; never make routine CI manipulate the runner’s real power
+settings or existing applications. Record real-device checks separately.
+
+The fleet section-8 sequencing and Bash rules below apply to Harbor/fleet work,
+not Insomnia’s Swift features. Shared secret-scanning and focused PR conventions
+still apply. Keep recovery changes reviewable and explain larger migrations.
+
 ## Ground rules
 
 - Read `docs/superpowers/specs/2026-09-01-harbor-design.md` first. Pull requests follow the

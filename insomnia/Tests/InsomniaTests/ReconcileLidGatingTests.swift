@@ -17,8 +17,10 @@ final class ReconcileLidGatingTests: XCTestCase {
         var st = RuntimeState()
         st.sleepDisabledByUs = true
         st.frozenPids = [111, 222]
+        st.frozenProcesses = st.frozenPids.map(FakeProcessControl.identity)
         st.dockerFrozen = true
         st.savedOutputVolume = 0.4
+        st.savedOutputDeviceUID = "test-output"
         st.savedMuted = false
         try h.store.saveState(st)
         return s
@@ -38,7 +40,7 @@ final class ReconcileLidGatingTests: XCTestCase {
         XCTAssertTrue(after.dockerFrozen)
         XCTAssertEqual(after.savedOutputVolume, 0.4)
         XCTAssertEqual(m.state, after)
-        XCTAssertEqual(h.guardFake.calls, ["disablesleep 1"])
+        XCTAssertEqual(h.guardFake.calls, ["pmset -g", "disablesleep 1"])
     }
 
     func testLidOpenResumesFrozenPidsAndRestoresAudio() async throws {
@@ -75,6 +77,7 @@ final class ReconcileLidGatingTests: XCTestCase {
         var st = RuntimeState()
         st.sleepDisabledByUs = true
         st.frozenPids = [111]
+        st.frozenProcesses = st.frozenPids.map(FakeProcessControl.identity)
         try h.store.saveState(st)
         h.clamshell.closed = true
         let m = h.makeManager()

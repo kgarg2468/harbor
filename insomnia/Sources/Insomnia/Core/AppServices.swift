@@ -56,6 +56,8 @@ final class AppServices {
     private var lidTasks: [Task<Void, Never>] = []
     private var floorTasks: [Task<Void, Never>] = []
     private var browserTasks: [Task<Void, Never>] = []
+    private var browserRefreshGeneration = 0
+    private var refreshGeneration = 0
     private(set) var running = false
 
     init(
@@ -64,7 +66,8 @@ final class AppServices {
         audio: any AudioControlling,
         processControl: any ProcessSignaling,
         keychain: any KeychainStoring = KeychainStore(),
-        locationPermission: LocationPermission = LocationPermission()
+        locationPermission: LocationPermission = LocationPermission(),
+        browser: BrowserThrottle? = nil
     ) {
         self.paths = paths
         self.notifier = notifier
@@ -73,15 +76,13 @@ final class AppServices {
         self.docker = DockerRule(freezer: freezer)
         self.keychain = keychain
         self.locationPermission = locationPermission
-        self.browser = BrowserThrottle()
+        self.browser = browser ?? BrowserThrottle()
         status.refresher = { [weak self] in await self?.refreshOnDemand() }
     }
 
     /// Called by SessionManager once a session is active.
     func start(for manager: SessionManager) {
-        guard !running else { return }
-        running = true
-        self.manager = manager
+        guard beginSession(for: manager) else { return }
         let config = manager.config
         status.lastGap = nil
 
@@ -90,9 +91,9 @@ final class AppServices {
         }
 
         (notifier as? Notifier)?.requestAuthorizationIfNeeded()
-        AppNap.disable(for: config.agentList)
+        // Persistent App Nap edits are withheld until original preferences can be restored.
 
-        lidActions = LidActions(manager: manager, freezer: freezer, docker: docker, audio: audio)
+        let actions = LidActions(manager: manager, freezer: freezer, docker: docker, audio: audio)
         floors = FloorRuleDriver(manager: manager, notifier: notifier)
 
         lid.onChange = { [weak self] closed in self?.lidChanged(closed) }
@@ -120,9 +121,43 @@ final class AppServices {
 
         browserTasks.append(Task { await self.refreshBrowsers() })
         syncState()
+        startLidActions(actions, closed: status.lidClosed, after: floorTasks.last)
+    }
+
+    /// Establish session identity separately from starting hardware observers.
+    @discardableResult
+    func beginSession(for manager: SessionManager) -> Bool {
+        guard !running else { return false }
+        running = true
+        self.manager = manager
+        return true
+    }
+
+    /// Starting with the lid already closed must use the same journaled actions
+    /// as a later close event, without waiting for an IOKit change notification.
+    @discardableResult
+    func startLidActions(_ actions: LidActions, closed: Bool, after initialFloor: Task<Void, Never>? = nil) -> Task<Void, Never>? {
+        lidActions = actions
+        status.lidClosed = closed
+        guard closed else { return nil }
+        let requestedSession = manager?.session
+        let task = Task { @MainActor [weak self] in
+            // Initial Low Power Mode may hold the journal lease across an await.
+            // Run close actions only after that initial floor operation releases it.
+            await initialFloor?.value
+            guard let self, !Task.isCancelled, self.running, self.status.lidClosed,
+                  self.manager?.isActive == true, self.manager?.session == requestedSession else { return }
+            await actions.onClose()
+            guard !Task.isCancelled, self.running, self.manager?.session == requestedSession else { return }
+            self.syncState()
+        }
+        lidTasks.append(task)
+        return task
     }
 
     func stop() {
+        browserRefreshGeneration += 1
+        refreshGeneration += 1
         guard running else { return }
         running = false
         lid.stop()
@@ -179,8 +214,12 @@ final class AppServices {
     /// Battery + lid + SSID + browser flags. The menu kicks this off for the
     /// next opening, since the last two have to be awaited.
     func refreshOnDemand() async {
+        refreshGeneration += 1
+        let generation = refreshGeneration
         refreshInstant()
-        status.wifiSSID = await currentSSID()
+        let ssid = await currentSSID()
+        guard generation == refreshGeneration, !Task.isCancelled else { return }
+        status.wifiSSID = ssid
         await refreshBrowsers()
     }
 
@@ -191,6 +230,7 @@ final class AppServices {
 
     /// Quit and relaunch a Chromium browser with both anti-throttle flags.
     func relaunchUnthrottled(_ bundleId: String) async {
+        guard currentConfig.browserThrottleEnabled else { return }
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.browser.relaunchUnthrottled(bundleId: bundleId)
@@ -201,6 +241,28 @@ final class AppServices {
         }
         browserTasks.append(task)
         await task.value
+    }
+
+    /// Settings edits use the current power sample immediately; no new OS event is required.
+    func reevaluateFloors() {
+        guard running else { return }
+        powerChanged()
+    }
+
+    func refreshBrowserConfiguration() {
+        browserRefreshGeneration += 1
+        if !currentConfig.browserThrottleEnabled {
+            for task in browserTasks { task.cancel() }
+            browserTasks.removeAll()
+            status.browsers = []
+            status.throttledBrowsers = []
+        } else {
+            browserTasks.append(Task { await self.refreshBrowsers() })
+        }
+    }
+
+    private var currentConfig: Config {
+        manager?.config ?? (try? Store(paths: paths).loadConfig()) ?? Config()
     }
 
     // MARK: Private
@@ -248,9 +310,17 @@ final class AppServices {
         status.dockerPaused = s.dockerFrozen
     }
 
-    private func refreshBrowsers() async {
-        let config = manager?.config ?? Config()
-        let statuses = await browser.scan(config: config)
+    func refreshBrowsers() async {
+        browserRefreshGeneration += 1
+        let generation = browserRefreshGeneration
+        let config = currentConfig
+        guard config.browserThrottleEnabled else {
+            status.browsers = []
+            status.throttledBrowsers = []
+            return
+        }
+        guard let statuses = await browser.scan(config: config) else { return }
+        guard generation == browserRefreshGeneration, !Task.isCancelled else { return }
         status.browsers = statuses
         status.throttledBrowsers = browser.throttledBrowsers
     }

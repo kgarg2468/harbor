@@ -327,3 +327,22 @@ final class UIStatusTests: XCTestCase {
         XCTAssertFalse(NSApp.windows.contains { $0 is KeyCatcherPanel && $0.isVisible })
     }
 }
+
+final class PresetMenuTests: XCTestCase {
+    func testPresetsStartWhenIdleAndExtendWhenActive() {
+        for active in [false, true] {
+            let items = StatusMenu.items(sessionActive: active, sleepHeld: active, machine: nil, actions: nil,
+                                         throttledBrowsers: [], error: nil, presets: [1800, 7200])
+            let presets = items.filter { if case .preset = $0.kind { true } else { false } }
+            XCTAssertEqual(presets.map(\.title), active ? ["Extend by 30m", "Extend by 2h"] : ["Start 30m", "Start 2h"])
+            XCTAssertEqual(presets.map(\.kind), [.preset(1800), .preset(7200)])
+        }
+    }
+
+    func testPresetMenuOmitsInvalidAndDuplicateDurations() {
+        let items = StatusMenu.items(sessionActive: false, sleepHeld: false, machine: nil, actions: nil,
+                                     throttledBrowsers: [], error: nil, presets: [0, -1, .infinity, 60, 60, 120], maxDuration: 90)
+        let presets = items.filter { if case .preset = $0.kind { true } else { false } }
+        XCTAssertEqual(presets.map(\.kind), [.preset(60)])
+    }
+}

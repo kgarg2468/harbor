@@ -26,58 +26,29 @@ enum ChromiumFlags {
         return ids
     }
 
-    /// Splits a `ps -o args=` line into arguments, honouring single and
-    /// double quotes and backslash escapes, so a flag that only appears
-    /// inside another argument's quoted value is not counted.
-    static func tokenize(_ args: String) -> [String] {
-        var out: [String] = []
-        var current = ""
-        var inSingle = false, inDouble = false, escaped = false, hasToken = false
-        for ch in args {
-            if escaped {
-                current.append(ch)
-                escaped = false
-                hasToken = true
-                continue
-            }
-            switch ch {
-            case "\\" where !inSingle:
-                escaped = true
-            case "'" where !inDouble:
-                inSingle.toggle()
-                hasToken = true
-            case "\"" where !inSingle:
-                inDouble.toggle()
-                hasToken = true
-            case " ", "\t", "\n":
-                if inSingle || inDouble {
-                    current.append(ch)
-                } else if hasToken {
-                    out.append(current)
-                    current = ""
-                    hasToken = false
-                }
-            default:
-                current.append(ch)
-                hasToken = true
-            }
-        }
-        if hasToken { out.append(current) }
-        return out
-    }
-
-    /// True when both required flags are present as their own arguments.
-    static func hasBothFlags(args: String) -> Bool {
-        let tokens = Set(tokenize(args).map { $0.split(separator: "=", maxSplits: 1).first.map(String.init) ?? $0 })
+    static func hasBothFlags(args: [String]) -> Bool {
+        let tokens = Set(args.dropFirst().map { $0.split(separator: "=", maxSplits: 1).first.map(String.init) ?? $0 })
         return required.allSatisfy { tokens.contains($0) }
     }
 
-    /// Arguments worth carrying over on relaunch so the same profile opens.
-    static func preservedArgs(args: String) -> [String] {
-        tokenize(args).dropFirst().filter {
-            $0.hasPrefix("--user-data-dir=") || $0.hasPrefix("--profile-directory=")
+    /// Carry both Chromium profile-switch forms without splitting their values.
+    static func preservedArgs(args: [String]) -> [String] {
+        let switches = ["--user-data-dir", "--profile-directory"]
+        var preserved: [String] = []
+        var index = 1
+        while index < args.count {
+            let arg = args[index]
+            if switches.contains(where: { arg.hasPrefix($0 + "=") }) {
+                preserved.append(arg)
+            } else if switches.contains(arg), index + 1 < args.count {
+                preserved += [arg, args[index + 1]]
+                index += 1
+            }
+            index += 1
         }
+        return preserved
     }
+
 }
 
 struct BrowserStatus: Sendable, Equatable {
@@ -150,69 +121,98 @@ private final class ApplicationTerminationWaiter {
 
 @MainActor
 final class BrowserThrottle {
-    typealias ArgsReader = @Sendable (_ pid: Int32) async throws -> String
+    typealias ArgsReader = @Sendable (_ pid: Int32) async throws -> [String]
+    typealias RunningApps = @MainActor () -> [BrowserStatus]
+    typealias Terminator = @MainActor ([BrowserStatus]) async -> Bool
+    typealias Opener = @MainActor (String, [String]) async throws -> Bool
 
     private(set) var statuses: [BrowserStatus] = []
-    /// Display names of running Chromium browsers missing either flag.
     var throttledBrowsers: [String] { statuses.filter { !$0.unthrottled }.map(\.name) }
-
     private let readArgs: ArgsReader
+    private let runningApps: RunningApps
+    private let terminate: Terminator
+    private let open: Opener
+    private var scanGeneration = 0
+    private var relaunching: Set<String> = []
 
-    init(readArgs: ArgsReader? = nil) {
-        self.readArgs = readArgs ?? BrowserThrottle.psArgs
+    init(readArgs: ArgsReader? = nil, runningApps: RunningApps? = nil,
+         terminate: Terminator? = nil, open: Opener? = nil) {
+        self.readArgs = readArgs ?? { try ProcessArguments.read(pid: $0) }
+        self.runningApps = runningApps ?? {
+            NSWorkspace.shared.runningApplications.compactMap { app in
+                guard !app.isTerminated, let id = app.bundleIdentifier else { return nil }
+                return BrowserStatus(bundleId: id, name: app.localizedName ?? id,
+                                     pid: app.processIdentifier, unthrottled: false)
+            }
+        }
+        self.terminate = terminate ?? { snapshots in
+            let apps = snapshots.compactMap { NSRunningApplication(processIdentifier: $0.pid) }
+            guard apps.count == snapshots.count,
+                  zip(apps, snapshots).allSatisfy({ !$0.0.isTerminated && $0.0.bundleIdentifier == $0.1.bundleId }) else { return false }
+            return await ApplicationTerminationWaiter(applications: apps).terminateAndWait(timeout: 10)
+        }
+        self.open = open ?? { id, args in
+            let result = try await Shell.run("/usr/bin/open", ["-b", id, "--args"] + args, timeout: 15)
+            return result.succeeded
+        }
     }
 
-    /// Inspect every running Chromium browser's main process.
     @discardableResult
-    func scan(config: Config) async -> [BrowserStatus] {
+    func scan(config: Config) async -> [BrowserStatus]? {
+        scanGeneration += 1
+        let generation = scanGeneration
         let ids = ChromiumFlags.chromiumBundleIds(config: config)
         var out: [BrowserStatus] = []
-        for app in NSWorkspace.shared.runningApplications {
-            guard let id = app.bundleIdentifier, ids.contains(id) else { continue }
-            let pid = app.processIdentifier
-            let name = app.localizedName ?? id
+        for app in runningApps() where ids.contains(app.bundleId) {
+            var unthrottled = false
             do {
-                let args = try await readArgs(pid)
-                out.append(BrowserStatus(bundleId: id, name: name, pid: pid, unthrottled: ChromiumFlags.hasBothFlags(args: args)))
+                unthrottled = ChromiumFlags.hasBothFlags(args: try await readArgs(app.pid))
             } catch {
-                Log.error("browser throttle: could not read args of \(name): \(error.localizedDescription)")
+                Log.error("browser throttle: could not read args of \(app.name): \(error.localizedDescription)")
+            }
+            guard generation == scanGeneration, !Task.isCancelled else { return nil }
+            if runningApps().contains(where: { $0.pid == app.pid && $0.bundleId == app.bundleId }) {
+                out.append(BrowserStatus(bundleId: app.bundleId, name: app.name, pid: app.pid, unthrottled: unthrottled))
             }
         }
+        guard generation == scanGeneration, !Task.isCancelled else { return nil }
         statuses = out
-        if !throttledBrowsers.isEmpty {
-            Log.info("throttled browsers: \(throttledBrowsers.joined(separator: ", "))")
-        }
-        return out
+        return statuses
     }
 
-    /// Quit the browser, wait up to 10 s for it to exit, relaunch it with
-    /// both flags (and the same profile arguments it had).
-    func relaunchUnthrottled(bundleId: String) async {
-        let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleId }
-        var extra: [String] = []
-        if let main = running.first {
-            if let args = try? await readArgs(main.processIdentifier) {
-                extra = ChromiumFlags.preservedArgs(args: args)
-            }
-        }
-        let terminated = await ApplicationTerminationWaiter(applications: running).terminateAndWait(timeout: 10)
-        if !terminated {
-            Log.error("relaunch: \(bundleId) did not quit within 10 s; launching anyway")
-        }
+    /// Relaunch only the still-running process shown by the most recent scan.
+    /// A successful `open` is not proof that Chromium adopted the flags.
+    @discardableResult
+    func relaunchUnthrottled(bundleId: String) async -> Bool {
+        guard !Task.isCancelled, !relaunching.contains(bundleId),
+              runningApps().filter({ $0.bundleId == bundleId }).count == 1,
+              let expected = statuses.first(where: { $0.bundleId == bundleId }),
+              runningApps().contains(where: { $0.pid == expected.pid && $0.bundleId == bundleId }) else { return false }
+        relaunching.insert(bundleId)
+        defer { relaunching.remove(bundleId) }
         do {
-            let r = try await Shell.run("/usr/bin/open", ["-b", bundleId, "--args"] + ChromiumFlags.required + extra, timeout: 15)
-            if r.succeeded {
-                Log.info("relaunched \(bundleId) unthrottled")
-            } else {
-                Log.error("open -b \(bundleId) failed: \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let args = try await readArgs(expected.pid)
+            guard !Task.isCancelled,
+                  runningApps().contains(where: { $0.pid == expected.pid && $0.bundleId == bundleId }) else { return false }
+            let terminated = await terminate([expected])
+            guard terminated, !Task.isCancelled,
+                  !runningApps().contains(where: { $0.bundleId == bundleId }) else {
+                Log.error("relaunch: \(bundleId) did not quit; relaunch aborted")
+                return false
             }
+            guard try await open(bundleId, ChromiumFlags.required + ChromiumFlags.preservedArgs(args: args)),
+                  !Task.isCancelled else { return false }
+            var config = Config()
+            config.agentList.append(bundleId)
+            guard let verifiedScan = await scan(config: config), !Task.isCancelled else { return false }
+            let current = verifiedScan.filter { $0.bundleId == bundleId }
+            let verified = !current.isEmpty && current.allSatisfy(\.unthrottled)
+            if verified { Log.info("relaunched \(bundleId) unthrottled") }
+            else { Log.error("relaunch: \(bundleId) flags could not be verified") }
+            return verified
         } catch {
-            Log.error("open -b \(bundleId) failed: \(error.localizedDescription)")
+            Log.error("relaunch: \(bundleId) failed: \(error.localizedDescription)")
+            return false
         }
-    }
-
-    static let psArgs: ArgsReader = { pid in
-        let r = try await Shell.run("/bin/ps", ["-o", "args=", "-p", String(pid)], timeout: 5)
-        return r.stdout
     }
 }

@@ -18,15 +18,19 @@ struct TmuxNudge: Sendable {
     func nudge(targets: [String]) async -> Int {
         var count = 0
         for target in targets where !target.isEmpty {
+            guard !Task.isCancelled else { break }
             do {
-                if try await run(target) {
+                let accepted = try await run(target)
+                guard !Task.isCancelled else { break }
+                if accepted {
                     count += 1
-                    Log.info("tmux nudge sent to \(target)")
+                    Log.info("tmux.nudge-sent")
                 } else {
-                    Log.error("tmux nudge to \(target) rejected")
+                    Log.error("tmux.nudge-rejected")
                 }
             } catch {
-                Log.error("tmux nudge to \(target) failed: \(error.localizedDescription)")
+                guard !Task.isCancelled else { break }
+                Log.error("tmux.nudge-failed")
             }
         }
         return count
@@ -38,7 +42,7 @@ struct TmuxNudge: Sendable {
         }
         let r = try await Shell.run(tmux, ["send-keys", "-t", target, "continue", "Enter"], timeout: 5)
         if !r.succeeded {
-            Log.error("tmux send-keys -t \(target): \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            Log.error("tmux.command-failed")
         }
         return r.succeeded
     }

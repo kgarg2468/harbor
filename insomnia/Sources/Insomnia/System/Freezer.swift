@@ -6,6 +6,8 @@ import Foundation
 struct ProcessEntry: Sendable, Equatable, Hashable {
     let pid: Int32
     let ppid: Int32
+    var identity: ProcessIdentity? = nil
+    var stopped: Bool = false
 }
 
 /// One running GUI app as seen by NSWorkspace.
@@ -23,12 +25,14 @@ struct FreezeGroup: Sendable, Equatable {
     let pids: [Int32]
     /// Kernel parent captured with the process tree, checked again at SIGSTOP.
     let expectedParents: [Int32: Int32]
+    var identities: [ProcessIdentity]
 
-    init(bundleId: String, name: String, pids: [Int32], expectedParents: [Int32: Int32] = [:]) {
+    init(bundleId: String, name: String, pids: [Int32], expectedParents: [Int32: Int32] = [:], identities: [ProcessIdentity] = []) {
         self.bundleId = bundleId
         self.name = name
         self.pids = pids
         self.expectedParents = expectedParents
+        self.identities = identities
     }
 }
 
@@ -97,7 +101,8 @@ enum FreezePlanner {
             for process in processes where pids.contains(process.pid) {
                 expectedParents[process.pid] = process.ppid
             }
-            out.append(FreezeGroup(bundleId: id, name: instances[0].name, pids: pids, expectedParents: expectedParents))
+            let identities = processes.filter { pids.contains($0.pid) && !$0.stopped }.compactMap(\.identity)
+            out.append(FreezeGroup(bundleId: id, name: instances[0].name, pids: pids, expectedParents: expectedParents, identities: identities))
         }
         return out
     }
@@ -107,8 +112,9 @@ enum FreezePlanner {
 protocol Freezing: Sendable {
     /// Groups for the given bundle ids that are running right now.
     func plan(bundleIds: [String], config: Config, applyDenylist: Bool) -> [FreezeGroup]
-    func suspend(pids: [Int32], expectedParents: [Int32: Int32])
-    func resume(pids: [Int32])
+    func prepareSuspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity]
+    func suspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity]
+    func resume(processes: [ProcessIdentity]) -> [ProcessIdentity]
 }
 
 extension Freezing {
@@ -138,10 +144,13 @@ struct Freezer: Freezing {
         )
     }
 
-    func suspend(pids: [Int32], expectedParents: [Int32: Int32]) {
-        control.suspend(pids: pids, expectedParents: expectedParents)
+    func prepareSuspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        control.prepareSuspend(processes: processes, expectedParents: expectedParents)
     }
-    func resume(pids: [Int32]) { control.resume(pids: pids) }
+    func suspend(processes: [ProcessIdentity], expectedParents: [Int32: Int32]) -> [ProcessIdentity] {
+        control.suspend(processes: processes, expectedParents: expectedParents)
+    }
+    func resume(processes: [ProcessIdentity]) -> [ProcessIdentity] { control.resume(processes: processes) }
 
     static func runningApps() -> [RunningApp] {
         NSWorkspace.shared.runningApplications.map {
@@ -169,11 +178,16 @@ struct Freezer: Freezing {
             return []
         }
         let count = size / stride
+        guard let boot = SignalProcessControl.bootIdentity() else { return [] }
         var out: [ProcessEntry] = []
         out.reserveCapacity(count)
         for i in 0..<count {
             let p = buffer[i]
-            out.append(ProcessEntry(pid: p.kp_proc.p_pid, ppid: p.kp_eproc.e_ppid))
+            let start = p.kp_proc.p_un.__p_starttime
+            let identity = ProcessIdentity(pid: p.kp_proc.p_pid,
+                startTimeMicroseconds: UInt64(max(0, start.tv_sec)) * 1_000_000 + UInt64(max(0, start.tv_usec)), bootID: boot)
+            out.append(ProcessEntry(pid: p.kp_proc.p_pid, ppid: p.kp_eproc.e_ppid,
+                                    identity: identity, stopped: p.kp_proc.p_stat == SSTOP))
         }
         return out
     }

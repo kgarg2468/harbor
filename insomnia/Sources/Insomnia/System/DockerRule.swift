@@ -46,15 +46,33 @@ struct DockerRule: Sendable {
         }
     }
 
-    /// True when `docker ps -q` succeeds and prints nothing.
-    static let liveProbe: ContainerProbe = {
-        guard let docker = Shell.locate(dockerCandidates) else {
-            throw ShellError.launchFailed(exe: "docker", underlying: "not found in \(dockerCandidates.joined(separator: ", "))")
+    typealias Runner = @Sendable (String, [String]) async throws -> ShellResult
+
+    static func probeDesktop(docker: String, home: String,
+                             socketAvailable: @Sendable () -> Bool,
+                             run: Runner) async throws -> Bool {
+        guard socketAvailable() else {
+            throw ShellError.launchFailed(exe: docker, underlying: "local Docker Desktop socket unavailable")
         }
-        let r = try await Shell.run(docker, ["ps", "-q"], timeout: timeout)
+        // Ignore DOCKER_CONTEXT, DOCKER_HOST, TLS and config environment overrides.
+        // An explicit host also overrides the active context in ~/.docker/config.json.
+        let socket = "unix://" + home + "/.docker/run/docker.sock"
+        let r = try await run("/usr/bin/env", ["-i", "HOME=" + home, docker, "--host", socket, "ps", "-q"])
         guard r.succeeded else {
             throw SleepGuardError(command: "docker ps -q", status: r.status, stderr: r.stderr)
         }
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Only the per-user Docker Desktop socket is eligible; no context fallback.
+    static let liveProbe: ContainerProbe = {
+        guard let docker = Shell.locate(dockerCandidates) else {
+            throw ShellError.launchFailed(exe: "docker", underlying: "not found in \(dockerCandidates.joined(separator: ", "))")
+        }
+        let home = NSHomeDirectory()
+        return try await probeDesktop(docker: docker, home: home, socketAvailable: {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: home + "/.docker/run/docker.sock")
+            return attributes?[.type] as? FileAttributeType == .typeSocket
+        }, run: { try await Shell.run($0, $1, timeout: timeout) })
     }
 }
