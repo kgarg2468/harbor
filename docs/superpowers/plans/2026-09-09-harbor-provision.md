@@ -576,7 +576,8 @@ harbor_state_installed_lock_write PATH      -> writes that render to PATH 0600 v
 harbor_state_provision_record PATH TIMESTAMP ACCESS_MODE ACCESS_STATE SERVICE_STATE
                                 CLAUDE_AUTH CODEX_AUTH
     -> writes provision.json 0600, reading the installed versions from the same
-       observers harbor_state_installed_lock_render uses
+       observers harbor_state_installed_lock_render uses, plus tailscale_ownership
+       from bootstrap.json
 ```
 
 **Contract (spec sections 5.4 and 5.7).** `installed.lock` is a copy of the lock **as installed** — the versions actually on the node, not the file this run read — so a later `versions.lock` edit cannot retroactively change what the record says was installed. That makes the source of every key load-bearing, and none of them may be copied from the desired lock:
@@ -587,21 +588,27 @@ harbor_state_provision_record PATH TIMESTAMP ACCESS_MODE ACCESS_STATE SERVICE_ST
 | `t3_version` | `harbor_t3_installed_version` |
 | `t3_engines_node` | `harbor_t3_package_engines`, the **installed** package's own range (Task 9) |
 | `nodejs_version` | `sh -lc 'node --version'`, the Node the service launcher will resolve — the same reading Task 13 enforces against |
-| `tailscale_version` | `bootstrap.json`'s `tailscale_version`, which root recorded and only root can know |
+| `tailscale_version` | `harbor_apt_installed` on the pinned package, reading `HARBOR_APT_VERSION` — what dpkg says is on the node, **not** `bootstrap.json` (see below) |
 | `ubuntu_release` | `/etc/os-release` `VERSION_ID` |
 | `claude_code_install`, `codex_install`, `t3_install`, `nodejs_install`, `nodejs_sha256`, `tailscale_apt_channel` | copied from `versions.lock`, because a **method** is not observable after the fact; the installed *version* beside it is the observed check on whether the method did what it said |
 
-Node.js and Tailscale are in the record even though provision installs neither: PR 8's upgrade and PR 7's `versions.drift` row compare against this file, and a lock that omitted what root installed would make them compare a partial snapshot against a whole one. `bootstrap.json` carrying `tailscale_version` is what makes the Tailscale row possible at all — it was added by #81, closing issue #64.
+Node.js and Tailscale are in the record even though provision installs neither: PR 8's upgrade and PR 7's `versions.drift` row compare against this file, and a lock that omitted what root installed would make them compare a partial snapshot against a whole one.
+
+**Why Tailscale is read from dpkg and not from `bootstrap.json`.** The obvious source is the `tailscale_version` that #81 added to the bootstrap record. It is the wrong one, and the reason is a rule that PR deliberately put in `harbor_state_record_render` (`lib/state.sh:55`): when the ownership is `pre-existing`, the version is blanked, because Harbor will not have its record name the version of an installation it does not hold. That blank is correct there and fatal here — copying it would make provision either write an empty key into a schema that forbids empty keys, or exit 2 on a node that is perfectly supported. A pre-existing Tailscale is a supported configuration, not a defect.
+
+`installed.lock` asks a different question from `bootstrap.json`: not "what did Harbor install" but "what is on this node". dpkg answers that identically for all three ownerships, needs no privilege, and needs nothing from root's record. So the row reads the package.
+
+What `bootstrap.json` is still needed for is the ownership word itself, which dpkg cannot know. `provision.json` carries `tailscale_ownership` beside the version — not `installed.lock`, whose schema is the thirteen keys of section 2 and takes no fourteenth — so PR 7's drift row and PR 8's upgrade can tell whether the version they are looking at is Harbor's to change. A version with no ownership beside it would invite exactly the mistake `harbor_state_record_render` refuses to make.
 
 An observed value that disagrees with `versions.lock` is **not** an error here: recording the disagreement is the point, and Tasks 3 and 13 are where a disagreement that matters is refused. A key that cannot be observed at all is exit 2 naming the key and the reading that failed, never an empty value, because an empty key in this file would read to PR 7 and PR 8 as "nothing installed".
 
-`provision.json` carries the same installed versions, the service state, the access mode with its classification, the two agent auth words, and a `timestamp`.
+`provision.json` carries the same installed versions, `tailscale_ownership`, the service state, the access mode with its classification, the two agent auth words, and a `timestamp`.
 
 **The `timestamp` field ships from the start and is not optional.** Spec section 5.7's operator finalization "compares against it" by deciding between the newest `<state-root>.journal.<timestamp>.done` sibling and the record, so a record written without it in PR 4 would make PR 8's finalization undecidable on every node provisioned by this release. Reuse `harbor_state_record_timestamp`, which PR 3 already defined for `bootstrap.json`, so the two records are comparable by construction rather than by two independent spellings of "now".
 
 Both files are `0600` (they live in the `0700` operator state root and name no secret, but the operator record has no reason to be world-readable the way root's `0644` `bootstrap.json` does — root's is `0644` so operator `status` can read it without root, and nothing needs to read this one without being the operator).
 
-**Tests.** Both files are written with mode `0600`. `installed.lock` carries all thirteen keys with none empty; each observed key equals what its observer reports and **not** what `versions.lock` says, proven by a fixture whose installed versions deliberately differ from the lock's; an unobservable key exits 2 naming the key rather than writing an empty value; the six method keys are copied verbatim from `versions.lock`; the Tailscale row equals `bootstrap.json`'s `tailscale_version` and exits 2 when that record is absent. `provision.json` parses and carries every field; the `timestamp` is present, is the `harbor_state_record_timestamp` format, and a fixture asserts the exact key name PR 8 will read. The record is written **last**, after every row, asserted with `HARBOR_FAIL_AFTER` at the boundary before it. A rerun rewrites both and leaves no other difference. Both writes are temp-and-rename, so a record is either the previous one or the new one and never a half-written file.
+**Tests.** Both files are written with mode `0600`. `installed.lock` carries all thirteen keys with none empty; each observed key equals what its observer reports and **not** what `versions.lock` says, proven by a fixture whose installed versions deliberately differ from the lock's; an unobservable key exits 2 naming the key rather than writing an empty value; the six method keys are copied verbatim from `versions.lock`. The Tailscale row equals what dpkg reports and is non-empty **on a `pre-existing` node**, whose `bootstrap.json` blanks its own `tailscale_version` by design — the case that would otherwise write an empty key or exit 2 on a supported node; the same fixture asserts `provision.json` carries `tailscale_ownership: pre-existing` beside it, and a `harbor-installed` fixture asserts both rows again. An absent `bootstrap.json` exits 3 naming `sudo harbor bootstrap`, which is the existing precondition, not exit 2. `provision.json` parses and carries every field; the `timestamp` is present, is the `harbor_state_record_timestamp` format, and a fixture asserts the exact key name PR 8 will read. The record is written **last**, after every row, asserted with `HARBOR_FAIL_AFTER` at the boundary before it. A rerun rewrites both and leaves no other difference. Both writes are temp-and-rename, so a record is either the previous one or the new one and never a half-written file.
 
 **Commit:** `feat(provision): installed.lock and the provision record`
 
