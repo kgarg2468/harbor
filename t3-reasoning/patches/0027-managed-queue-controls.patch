@@ -1,0 +1,1390 @@
+diff --git a/apps/server/src/auth/RpcAuthorization.test.ts b/apps/server/src/auth/RpcAuthorization.test.ts
+index 7262239577b482f84309654431c16c15349af272..efd4acb0d802ae680e2939e6949aaac4642ce0e3 100644
+--- a/apps/server/src/auth/RpcAuthorization.test.ts
++++ b/apps/server/src/auth/RpcAuthorization.test.ts
+@@ -63,6 +63,19 @@ describe("RPC authorization scopes", () => {
+     );
+   });
+
++  it("lets readers watch the managed update queue but only operators drive it", () => {
++    expect(requiredScopeForRpcMethod(WS_METHODS.subscribeManagedServerUpdate)).toBe(
++      AuthOrchestrationReadScope,
++    );
++    for (const method of [
++      WS_METHODS.serverQueueManagedUpdate,
++      WS_METHODS.serverCancelManagedUpdate,
++      WS_METHODS.serverRetryManagedUpdate,
++    ]) {
++      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
++    }
++  });
++
+   it("rejects unknown RPC method names", () => {
+     for (const method of ["server.notRegistered", "toString", "constructor"]) {
+       expect(() => requiredScopeForRpcMethod(method)).toThrow(
+diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
+index a069322aa8bf9ba327a998e623ce823f779593d4..45ea8cb9a4ee36b098cf310f04acac19d2a8314a 100644
+--- a/apps/server/src/auth/RpcAuthorization.ts
++++ b/apps/server/src/auth/RpcAuthorization.ts
+@@ -46,6 +46,9 @@ export const RPC_REQUIRED_SCOPES = {
+   [WS_METHODS.serverUpdateServer]: AuthOrchestrationOperateScope,
+   [WS_METHODS.serverUpdateServerWithProgress]: AuthOrchestrationOperateScope,
+   [WS_METHODS.serverCommitDesktopUpdate]: AuthOrchestrationOperateScope,
++  [WS_METHODS.serverQueueManagedUpdate]: AuthOrchestrationOperateScope,
++  [WS_METHODS.serverCancelManagedUpdate]: AuthOrchestrationOperateScope,
++  [WS_METHODS.serverRetryManagedUpdate]: AuthOrchestrationOperateScope,
+   [WS_METHODS.serverUpsertKeybinding]: AuthOrchestrationOperateScope,
+   [WS_METHODS.serverRemoveKeybinding]: AuthOrchestrationOperateScope,
+   [WS_METHODS.serverGetSettings]: AuthOrchestrationReadScope,
+@@ -144,6 +147,7 @@ export const RPC_REQUIRED_SCOPES = {
+   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
+   [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
+   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
++  [WS_METHODS.subscribeManagedServerUpdate]: AuthOrchestrationReadScope,
+   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
+   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
+ } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
+diff --git a/apps/server/src/cloud/queuedUpdate.test.ts b/apps/server/src/cloud/queuedUpdate.test.ts
+index aed766968d0d47ef78898af707ebd529462141b5..b761b00fc01ca8778905bf00f5e6921031701886 100644
+--- a/apps/server/src/cloud/queuedUpdate.test.ts
++++ b/apps/server/src/cloud/queuedUpdate.test.ts
+@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
+ import * as PlatformError from "effect/PlatformError";
+ import * as Schema from "effect/Schema";
+ import * as Scope from "effect/Scope";
++import * as Stream from "effect/Stream";
+ import { TestClock } from "effect/testing";
+
+ import {
+@@ -1370,4 +1371,98 @@ describe("queuedUpdate", () => {
+       }),
+     ),
+   );
++
++  it.effect("changes begin with the durable snapshot and retain every later state", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        const activationStarted = yield* Deferred.make<void>();
++        fakes.activate = () =>
++          Deferred.succeed(activationStarted, undefined).pipe(Effect.andThen(Effect.never));
++        const snapshotTaken = yield* Deferred.make<void>();
++        const release = yield* Deferred.make<void>();
++        // The subscriber parks on its snapshot, so every transition below
++        // lands while it is not pulling.
++        let first = true;
++        const collected = yield* controller.changes.pipe(
++          Stream.mapEffect((state) => {
++            if (!first) return Effect.succeed(state);
++            first = false;
++            return Deferred.succeed(snapshotTaken, undefined).pipe(
++              Effect.andThen(Deferred.await(release)),
++              Effect.as(state),
++            );
++          }),
++          Stream.take(4),
++          Stream.runCollect,
++          Effect.forkScoped,
++        );
++        yield* Deferred.await(snapshotTaken);
++
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(activationStarted);
++        yield* Deferred.succeed(release, undefined);
++
++        const states = yield* Fiber.join(collected);
++        assert.deepStrictEqual(
++          states.map((state) => state.stage),
++          ["current", "downloading", "queued", "updating"],
++        );
++        assert.isTrue(states.every((state) => state.durable));
++        assert.deepStrictEqual(states[3]?.staged, artifactFor(TARGET));
++      }),
++    ),
++  );
++
++  it.effect("changes subscribed behind a failed barrier begin once the state is durable", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, disk } = yield* setup({ observed: true });
++        disk.fail("sync:directory", "until-cleared");
++        const bothFailed = disk.next("failure", 2);
++        assert.equal(
++          (yield* controller.queue(TARGET).pipe(Effect.flip))._tag,
++          "QueuedUpdateStateError",
++        );
++        yield* bothFailed;
++        assert.isFalse((yield* controller.getState).durable);
++
++        // The rename landed but its barrier did not: nothing is offered until
++        // the worker proves it on the next poll.
++        const firstDurable = yield* controller.changes.pipe(
++          Stream.take(1),
++          Stream.runCollect,
++          Effect.forkScoped,
++        );
++        disk.clear();
++        yield* Effect.yieldNow;
++        yield* TestClock.adjust(POLL);
++        const [state] = yield* Fiber.join(firstDurable);
++        assert.include(state, { stage: "downloading", targetVersion: TARGET, durable: true });
++      }),
++    ),
++  );
++
++  it.effect("an interrupted subscriber stops and later subscribers are unaffected", () =>
++    provide(
++      Effect.gen(function* () {
++        const { controller, fakes } = yield* setup();
++        const staging = yield* blockedStaging();
++        fakes.stage = staging.stage;
++        const snapshotSeen = yield* Deferred.make<void>();
++        const parked = yield* controller.changes.pipe(
++          Stream.tap(() => Deferred.succeed(snapshotSeen, undefined)),
++          Stream.runDrain,
++          Effect.forkScoped,
++        );
++        yield* Deferred.await(snapshotSeen);
++        yield* Fiber.interrupt(parked);
++
++        yield* controller.queue(TARGET);
++        yield* Deferred.await(staging.started);
++        const [state] = yield* controller.changes.pipe(Stream.take(1), Stream.runCollect);
++        assert.include(state, { stage: "downloading", targetVersion: TARGET, durable: true });
++      }),
++    ),
++  );
+ });
+diff --git a/apps/server/src/cloud/queuedUpdate.ts b/apps/server/src/cloud/queuedUpdate.ts
+index 301609c9cde734e518f91499f404cdf55d0e512c..74d3db213d3b7a05ee510a0d392e2a95e92d3601 100644
+--- a/apps/server/src/cloud/queuedUpdate.ts
++++ b/apps/server/src/cloud/queuedUpdate.ts
+@@ -5,9 +5,11 @@ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Option from "effect/Option";
+ import * as Path from "effect/Path";
++import * as Queue from "effect/Queue";
+ import * as Schedule from "effect/Schedule";
+ import * as Schema from "effect/Schema";
+ import * as Semaphore from "effect/Semaphore";
++import * as Stream from "effect/Stream";
+
+ import { isExactServiceVersion } from "./serviceProtocol.ts";
+
+@@ -181,6 +183,14 @@ export interface QueuedUpdateShape {
+   readonly awaitState: (
+     predicate: (state: QueuedUpdateState) => boolean,
+   ) => Effect.Effect<QueuedUpdateState>;
++  /**
++   * The durable state at subscription followed by every later durable state,
++   * in order. Taking the snapshot and starting to retain transitions is one
++   * synchronous step, and each transition is held until the subscriber pulls
++   * it, so a slow subscriber still sees every state rather than the latest.
++   * Ending the stream stops retention.
++   */
++  readonly changes: Stream.Stream<QueuedUpdateState>;
+ }
+
+ export class QueuedUpdate extends Context.Service<QueuedUpdate, QueuedUpdateShape>()(
+@@ -336,6 +346,7 @@ export const make = Effect.fn("queuedUpdate.make")(function* (deps: QueuedUpdate
+     readonly predicate: (state: QueuedUpdateState) => boolean;
+     readonly deferred: Deferred.Deferred<QueuedUpdateState>;
+   }>();
++  const subscribers = new Set<Queue.Queue<QueuedUpdateState>>();
+   const mutex = yield* Semaphore.make(1);
+
+   const snapshot = (): QueuedUpdateState => ({
+@@ -348,8 +359,12 @@ export const make = Effect.fn("queuedUpdate.make")(function* (deps: QueuedUpdate
+     durable,
+   });
+
++  // Only ever called with durable state; subscribers retain every call.
+   const notify = () => {
+     const state = snapshot();
++    for (const subscriber of subscribers) {
++      Queue.offerUnsafe(subscriber, state);
++    }
+     for (const waiter of waiters) {
+       if (waiter.predicate(state)) {
+         waiters.delete(waiter);
+@@ -616,5 +631,29 @@ export const make = Effect.fn("queuedUpdate.make")(function* (deps: QueuedUpdate
+       );
+     });
+
+-  return QueuedUpdate.of({ queue, cancel, retry, getState: Effect.sync(snapshot), awaitState });
++  const changes: QueuedUpdateShape["changes"] = Stream.unwrap(
++    Effect.gen(function* () {
++      const buffer = yield* Queue.unbounded<QueuedUpdateState>();
++      // Registering and snapshotting in one synchronous step means no
++      // `notify` can fall between them. An undurable snapshot is not offered:
++      // the barrier that proves it runs `notify`, which delivers it instead.
++      yield* Effect.acquireRelease(
++        Effect.sync(() => {
++          subscribers.add(buffer);
++          if (durable) Queue.offerUnsafe(buffer, snapshot());
++        }),
++        () => Effect.sync(() => subscribers.delete(buffer)),
++      );
++      return Stream.fromQueue(buffer);
++    }),
++  );
++
++  return QueuedUpdate.of({
++    queue,
++    cancel,
++    retry,
++    getState: Effect.sync(snapshot),
++    awaitState,
++    changes,
++  });
+ });
+diff --git a/apps/server/src/environment/ServerEnvironment.test.ts b/apps/server/src/environment/ServerEnvironment.test.ts
+index a674a25c1ec8593a1709b39a2a235134c6c9d691..c76a63087e0a1434df1ae1b0f3075349beeaab24 100644
+--- a/apps/server/src/environment/ServerEnvironment.test.ts
++++ b/apps/server/src/environment/ServerEnvironment.test.ts
+@@ -1,5 +1,6 @@
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { expect, it } from "@effect/vitest";
++import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+ import * as Crypto from "effect/Crypto";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+@@ -9,12 +10,18 @@ import * as Option from "effect/Option";
+ import * as PlatformError from "effect/PlatformError";
+ import * as Schema from "effect/Schema";
+
++import packageJson from "../../package.json" with { type: "json" };
+ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+ import {
+   PUBLISH_AGENT_ACTIVITY_SECRET,
+   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
+   RELAY_URL_SECRET,
+ } from "../cloud/config.ts";
++import * as ServiceLauncherClient from "../cloud/serviceLauncherClient.ts";
++import {
++  SERVICE_LAUNCHER_CONTEXT_ENV,
++  SERVICE_LAUNCHER_PROTOCOL,
++} from "../cloud/serviceProtocol.ts";
+ import * as ServerConfig from "../config.ts";
+ import * as ServerEnvironment from "./ServerEnvironment.ts";
+
+@@ -259,6 +266,66 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+     }),
+   );
+
++  it.effect("advertises the managed update queue only for a launcher-managed service", () =>
++    Effect.gen(function* () {
++      const fileSystem = yield* FileSystem.FileSystem;
++      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
++        prefix: "t3-server-environment-managed-queue-test-",
++      });
++      const serverConfig = yield* makeServerConfig(baseDir);
++      yield* fileSystem.makeDirectory(serverConfig.stateDir, { recursive: true });
++
++      // A boot service is a child whose launcher context names this version
++      // over a connected IPC channel; anything else is unmanaged.
++      const launcherContext = {
++        // @effect-diagnostics-next-line preferSchemaOverJson:off - mirrors the launcher's env encoding.
++        [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify({
++          protocol: SERVICE_LAUNCHER_PROTOCOL,
++          childVersion: packageJson.version,
++        }),
++      };
++      const connectedLauncher = {
++        connected: true,
++        send: () => true,
++        on: () => {},
++        off: () => {},
++      };
++      const describeWith = (input: {
++        readonly mode: ServerConfig.ServerConfig["Service"]["mode"];
++        readonly launcher: boolean;
++      }) =>
++        Effect.gen(function* () {
++          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
++          return yield* serverEnvironment.getDescriptor;
++        }).pipe(
++          Effect.provide(
++            ServerEnvironment.layer.pipe(
++              Layer.provide(ServerSecretStore.layer),
++              Layer.provide(ServerConfig.layer({ ...serverConfig, mode: input.mode })),
++              Layer.provide(
++                Layer.succeed(HostProcessEnvironment, input.launcher ? launcherContext : {}),
++              ),
++              Layer.provide(
++                Layer.succeed(ServiceLauncherClient.ServiceLauncherHostProcess, connectedLauncher),
++              ),
++            ),
++          ),
++        );
++
++      const bootService = yield* describeWith({ mode: "web", launcher: true });
++      expect(bootService.capabilities.serverSelfUpdate).toBe("boot-service");
++      expect(bootService.capabilities.managedUpdateQueue).toBe(true);
++
++      const desktopManaged = yield* describeWith({ mode: "desktop", launcher: true });
++      expect(desktopManaged.capabilities.serverSelfUpdate).toBe("desktop-managed");
++      expect(desktopManaged.capabilities.managedUpdateQueue).toBeUndefined();
++
++      const unmanaged = yield* describeWith({ mode: "web", launcher: false });
++      expect(unmanaged.capabilities.serverSelfUpdate).toBeUndefined();
++      expect(unmanaged.capabilities.managedUpdateQueue).toBeUndefined();
++    }),
++  );
++
+   it.effect("structures persisted environment id filesystem failures", () =>
+     Effect.gen(function* () {
+       const fileSystem = yield* FileSystem.FileSystem;
+diff --git a/apps/server/src/environment/ServerEnvironment.ts b/apps/server/src/environment/ServerEnvironment.ts
+index 0b7f1761cf767bd44d99d85219fab37bc6cc1b04..3d82dd5787fc9f8a2ed41259ec7110ef8bd318c5 100644
+--- a/apps/server/src/environment/ServerEnvironment.ts
++++ b/apps/server/src/environment/ServerEnvironment.ts
+@@ -237,6 +237,10 @@ export const make = Effect.gen(function* () {
+             serverUpdateThreadContinuation: true,
+           }
+         : {}),
++      // The queue protocol and managed activation lifecycle belong to the
++      // launcher-managed server alone. Whether a release exists for this host
++      // is the queue's business: an unsupported host fails the queued target.
++      ...(serverSelfUpdate === "boot-service" ? { managedUpdateQueue: true } : {}),
+       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
+     },
+   };
+diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
+index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8462641f9 100644
+--- a/apps/server/src/server.test.ts
++++ b/apps/server/src/server.test.ts
+@@ -24,6 +24,7 @@ import {
+   type OrchestrationThreadStreamItem,
+   type OrchestrationThreadActivity,
+   type OrchestrationThreadShell,
++  type ManagedServerUpdateState,
+   TerminalNotRunningError,
+   type OrchestrationCommand,
+   type OrchestrationEvent,
+@@ -66,6 +67,7 @@ import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Path from "effect/Path";
++import * as PlatformError from "effect/PlatformError";
+ import * as PubSub from "effect/PubSub";
+ import * as Ref from "effect/Ref";
+ import * as Queue from "effect/Queue";
+@@ -534,6 +536,8 @@ const buildAppUnderTest = (options?: {
+     providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
+     antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
+     updateAdmission?: UpdateAdmission.UpdateAdmission["Service"];
++    queuedUpdate?: QueuedUpdate.QueuedUpdate["Service"];
++    serviceLauncherClient?: ServiceLauncherClient.ServiceLauncherClient["Service"];
+     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
+     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
+     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
+@@ -759,9 +763,13 @@ const buildAppUnderTest = (options?: {
+         ),
+       ),
+     );
+-    const serviceLauncherClientLayer = ServiceLauncherClient.layer.pipe(
+-      Layer.provide(Layer.succeed(HostProcessEnvironment, {})),
+-    );
++    // Without launcher context the real client reports an unmanaged server.
++    const serviceLauncherClientLayer = options?.layers?.serviceLauncherClient
++      ? Layer.succeed(
++          ServiceLauncherClient.ServiceLauncherClient,
++          options.layers.serviceLauncherClient,
++        )
++      : ServiceLauncherClient.layer.pipe(Layer.provide(Layer.succeed(HostProcessEnvironment, {})));
+
+     const servedRoutesLayer = HttpRouter.serve(
+       makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
+@@ -1083,14 +1091,20 @@ const buildAppUnderTest = (options?: {
+         }),
+       ),
+       Layer.provide(
+-        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+-          awaitCommandReady: Effect.void,
+-          markHttpListening: Effect.void,
+-          markRunningProviderSessionsForContinuation: Effect.succeed([]),
+-          clearProviderSessionContinuationMarkers: () => Effect.void,
+-          enqueueCommand: (effect) => effect,
+-          ...options?.layers?.serverRuntimeStartup,
+-        }),
++        Layer.mergeAll(
++          Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
++            awaitCommandReady: Effect.void,
++            markHttpListening: Effect.void,
++            markRunningProviderSessionsForContinuation: Effect.succeed([]),
++            clearProviderSessionContinuationMarkers: () => Effect.void,
++            enqueueCommand: (effect) => effect,
++            ...options?.layers?.serverRuntimeStartup,
++          }),
++          // The WebSocket route commands and observes the one runtime-owned queue.
++          options?.layers?.queuedUpdate
++            ? Layer.succeed(QueuedUpdate.QueuedUpdate, options.layers.queuedUpdate)
++            : Layer.mock(QueuedUpdate.QueuedUpdate)({}),
++        ),
+       ),
+       Layer.provide(
+         Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+@@ -11819,6 +11833,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+   );
+ });
+
++// The WebSocket surface of the managed update queue: one durable subscription
++// and three commands over the runtime-owned singleton. The queue is real; only
++// its staging and activation steps are fixture-controlled.
++it.layer(NodeServices.layer)("managed update controls", (it) => {
++  const TARGET = "0.0.38-nightly.20260906.1.managed.1.p6d1933416d7a";
++  const OTHER = "0.0.38-nightly.20260906.1.managed.2.p6d1933416d7a";
++  const UNAVAILABLE_MESSAGE = "The server could not record the update request. Try again.";
++  const artifact = (version: string): QueuedUpdate.StagedArtifact => ({
++    version,
++    artifactId: `managed-server-darwin-arm64@sha256:${"c".repeat(64)}`,
++  });
++  const publicState = (
++    stage: ManagedServerUpdateState["stage"],
++    targetVersion: string,
++    reason: string | null = null,
++  ): ManagedServerUpdateState => ({
++    stage,
++    installedVersion: packageJson.version,
++    targetVersion,
++    reason,
++  });
++  const current = publicState("current", packageJson.version);
++  const UNSUPPORTED_MESSAGE = "This server does not support managed updates.";
++
++  /**
++   * The launcher client of a boot-service server. Queue controls never talk to
++   * the launcher themselves, so the client only needs to report ownership.
++   */
++  const launcherClient = (managed: boolean) =>
++    ServiceLauncherClient.ServiceLauncherClient.of({
++      managed,
++      requestUpdate: () => Effect.die("queue controls must not request a launcher update"),
++      prepareTrial: Effect.succeed(undefined),
++    });
++
++  /** The app as a launcher-managed boot service, the one class that owns the queue. */
++  const buildManagedApp = (queue: QueuedUpdate.QueuedUpdate["Service"]) =>
++    buildAppUnderTest({
++      config: { mode: "web" },
++      layers: { queuedUpdate: queue, serviceLauncherClient: launcherClient(true) },
++    });
++
++  /**
++   * One real queue in a scope the test owns, as `server.ts` owns the runtime's.
++   * `failPersist` refuses the next state-file write so a command hits the
++   * persistence error path without touching the real disk state.
++   */
++  const makeQueueFixture = Effect.fn("makeQueueFixture")(function* (input: {
++    readonly stage: QueuedUpdate.QueuedUpdateDependencies["stage"];
++    readonly tryActivate?: QueuedUpdate.QueuedUpdateDependencies["tryActivate"];
++  }) {
++    const fs = yield* FileSystem.FileSystem;
++    const path = yield* Path.Path;
++    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-controls-" });
++    const statePath = path.join(baseDir, "runtime", "queued-update.json");
++    let persistFailure: string | undefined;
++    const fileSystem = FileSystem.FileSystem.of({
++      ...fs,
++      open: (target, options) =>
++        persistFailure !== undefined && target === `${statePath}.tmp`
++          ? Effect.fail(
++              PlatformError.systemError({
++                _tag: "Unknown",
++                module: "FileSystem",
++                method: "open",
++                description: persistFailure,
++              }),
++            )
++          : fs.open(target, options),
++    });
++    const serverScope = yield* Scope.make();
++    yield* Effect.addFinalizer(() => Scope.close(serverScope, Exit.void));
++    const queue = yield* QueuedUpdate.make({
++      statePath,
++      installedVersion: packageJson.version,
++      pollInterval: Duration.seconds(30),
++      stage: input.stage,
++      tryActivate:
++        input.tryActivate ??
++        (() => Effect.succeed({ status: "busy", reason: "activation is not exercised here" })),
++    }).pipe(Scope.provide(serverScope), Effect.provideService(FileSystem.FileSystem, fileSystem));
++    return {
++      queue,
++      statePath,
++      failPersist: (description: string) => {
++        persistFailure = description;
++      },
++    };
++  });
++
++  /**
++   * A gate the fixture's stager or activator parks on. It is opened when the
++   * test's scope closes, however the test ended, so a failed assertion never
++   * leaves the real queue worker parked behind it.
++   */
++  const gate = Effect.gen(function* () {
++    const deferred = yield* Deferred.make<void>();
++    yield* Effect.addFinalizer(() => Deferred.succeed(deferred, undefined).pipe(Effect.asVoid));
++    return deferred;
++  });
++
++  /**
++   * Buffers a client's subscription so a test reads emissions in order without
++   * racing them. `expect` fails, naming the missing state, rather than parking
++   * forever when the subscription never emits it (tests run on the live clock).
++   */
++  const subscribeManagedUpdate = (client: WsRpcClient) =>
++    Effect.gen(function* () {
++      const events = yield* Queue.unbounded<ManagedServerUpdateState>();
++      yield* client[WS_METHODS.subscribeManagedServerUpdate]({}).pipe(
++        Stream.runForEach((state) => Queue.offer(events, state)),
++        Effect.forkScoped({ startImmediately: true }),
++      );
++      return {
++        expect: (expected: ManagedServerUpdateState) =>
++          Queue.take(events).pipe(
++            Effect.timeoutOrElse({
++              duration: "5 seconds",
++              orElse: () =>
++                Effect.sync(() =>
++                  assert.fail(
++                    `no managed update emission within 5s; expected ${expected.stage} for ${expected.targetVersion}`,
++                  ),
++                ),
++            }),
++            Effect.map((actual) => assert.deepStrictEqual(actual, expected)),
++          ),
++      };
++    });
++
++  it.effect("streams durable state to every subscriber and drives the same queue", () =>
++    Effect.gen(function* () {
++      const stageStarted = yield* Deferred.make<void>();
++      const stageRelease = yield* gate;
++      const activationStarted = yield* Deferred.make<void>();
++      const activationRelease = yield* gate;
++      let stages = 0;
++      const fixture = yield* makeQueueFixture({
++        stage: (targetVersion) =>
++          Effect.gen(function* () {
++            stages += 1;
++            yield* Deferred.succeed(stageStarted, undefined);
++            yield* Deferred.await(stageRelease);
++            return artifact(targetVersion);
++          }),
++        tryActivate: () =>
++          Deferred.succeed(activationStarted, undefined).pipe(
++            Effect.andThen(Deferred.await(activationRelease)),
++            Effect.as<QueuedUpdate.ActivationDeclined>({
++              status: "busy",
++              reason: "an agent turn is running",
++            }),
++          ),
++      });
++      yield* buildManagedApp(fixture.queue);
++      const wsUrl = yield* getWsServerUrl("/ws");
++
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl, (watcher) =>
++          withWsRpcClient(wsUrl, (operator) =>
++            Effect.gen(function* () {
++              // The first value is the durable snapshot, never a transient state.
++              const watched = yield* subscribeManagedUpdate(watcher);
++              yield* watched.expect(current);
++              const operated = yield* subscribeManagedUpdate(operator);
++              yield* operated.expect(current);
++
++              const nothingToRetry = yield* Effect.flip(
++                operator[WS_METHODS.serverRetryManagedUpdate]({}),
++              );
++              assert.include(nothingToRetry, {
++                _tag: "ManagedServerUpdateRejectedError",
++                reason: "nothing-to-retry",
++                message: "There is no failed update to retry.",
++              });
++
++              const downloading = publicState("downloading", TARGET);
++              assert.deepStrictEqual(
++                yield* operator[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: TARGET }),
++                downloading,
++              );
++              yield* watched.expect(downloading);
++              yield* operated.expect(downloading);
++              yield* Deferred.await(stageStarted);
++              // The same target again is idempotent and stages nothing new.
++              assert.deepStrictEqual(
++                yield* operator[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: TARGET }),
++                downloading,
++              );
++              assert.equal(stages, 1);
++
++              // Staging lands `queued` and the worker immediately reserves
++              // `updating`; both must reach every subscriber, in order, even
++              // though neither client was pulling when they landed.
++              yield* Deferred.succeed(stageRelease, undefined);
++              yield* Deferred.await(activationStarted);
++              const queued = publicState("queued", TARGET);
++              const updating = publicState("updating", TARGET);
++              yield* watched.expect(queued);
++              yield* watched.expect(updating);
++              yield* operated.expect(queued);
++              yield* operated.expect(updating);
++
++              // While the attempt runs every command is refused and the queue is untouched.
++              for (const command of [
++                operator[WS_METHODS.serverCancelManagedUpdate]({}),
++                operator[WS_METHODS.serverRetryManagedUpdate]({}),
++                operator[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: OTHER }),
++              ]) {
++                assert.include(yield* Effect.flip(command), {
++                  _tag: "ManagedServerUpdateRejectedError",
++                  reason: "activation-in-progress",
++                });
++              }
++              assert.include(yield* fixture.queue.getState, {
++                stage: "updating",
++                targetVersion: TARGET,
++                durable: true,
++              });
++
++              // A decline keeps the stage but changes the reason, which is
++              // itself an emission; it arriving next proves the refused
++              // commands emitted nothing.
++              yield* Deferred.succeed(activationRelease, undefined);
++              const declined = publicState("queued", TARGET, "busy: an agent turn is running");
++              yield* watched.expect(declined);
++              yield* operated.expect(declined);
++
++              assert.deepStrictEqual(
++                yield* operator[WS_METHODS.serverCancelManagedUpdate]({}),
++                current,
++              );
++              yield* watched.expect(current);
++              yield* operated.expect(current);
++            }),
++          ),
++        ),
++      );
++    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
++  );
++
++  it.effect("publishes a staging failure's reason and retries that exact target", () =>
++    Effect.gen(function* () {
++      const attempts: Array<string> = [];
++      const retryStarted = yield* Deferred.make<void>();
++      const retryRelease = yield* gate;
++      const fixture = yield* makeQueueFixture({
++        stage: (targetVersion) =>
++          Effect.suspend(() => {
++            attempts.push(targetVersion);
++            return attempts.length === 1
++              ? Effect.fail(
++                  new QueuedUpdate.QueuedUpdateStepError({
++                    step: "stage",
++                    reason: `no managed release for t3@${targetVersion}`,
++                  }),
++                )
++              : Deferred.succeed(retryStarted, undefined).pipe(
++                  Effect.andThen(Deferred.await(retryRelease)),
++                  Effect.as(artifact(targetVersion)),
++                );
++          }),
++      });
++      yield* buildManagedApp(fixture.queue);
++      const wsUrl = yield* getWsServerUrl("/ws");
++
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl, (client) =>
++          Effect.gen(function* () {
++            const watched = yield* subscribeManagedUpdate(client);
++            yield* watched.expect(current);
++
++            // The queue's own rules answer before anything is staged.
++            assert.include(
++              yield* Effect.flip(
++                client[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: "latest" }),
++              ),
++              { _tag: "ManagedServerUpdateRejectedError", reason: "invalid-version" },
++            );
++            assert.include(
++              yield* Effect.flip(
++                client[WS_METHODS.serverQueueManagedUpdate]({
++                  targetVersion: packageJson.version,
++                }),
++              ),
++              { _tag: "ManagedServerUpdateRejectedError", reason: "already-installed" },
++            );
++
++            const downloading = publicState("downloading", TARGET);
++            assert.deepStrictEqual(
++              yield* client[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: TARGET }),
++              downloading,
++            );
++            yield* watched.expect(downloading);
++            yield* watched.expect(
++              publicState("failed", TARGET, `no managed release for t3@${TARGET}`),
++            );
++
++            assert.deepStrictEqual(
++              yield* client[WS_METHODS.serverRetryManagedUpdate]({}),
++              downloading,
++            );
++            yield* watched.expect(downloading);
++            yield* Deferred.await(retryStarted);
++            assert.deepStrictEqual(attempts, [TARGET, TARGET]);
++          }),
++        ),
++      );
++    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
++  );
++
++  it.effect("answers a persistence failure with only the unavailable error", () =>
++    Effect.gen(function* () {
++      const fixture = yield* makeQueueFixture({
++        stage: () => Effect.die("nothing may stage after a refused persist"),
++      });
++      yield* buildManagedApp(fixture.queue);
++      const wsUrl = yield* getWsServerUrl("/ws");
++      const causeText = "injected ENOSPC while opening the temp state file";
++      fixture.failPersist(causeText);
++
++      const received: Array<string> = [];
++      const error = yield* Effect.scoped(
++        withWsRpcClient(
++          wsUrl,
++          (client) =>
++            Effect.flip(client[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: TARGET })),
++          (message) => {
++            received.push(message);
++          },
++        ),
++      );
++
++      assert.equal(error._tag, "ManagedServerUpdateUnavailableError");
++      assert.equal(error.message, UNAVAILABLE_MESSAGE);
++      assert.isNotEmpty(received);
++      for (const message of received) {
++        assert.notInclude(message, fixture.statePath);
++        assert.notInclude(message, causeText);
++        assert.notInclude(message, "QueuedUpdateStateError");
++      }
++      // The refused write left memory and disk alone.
++      assert.include(yield* fixture.queue.getState, { stage: "current", durable: true });
++    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
++  );
++
++  it.effect("closing a subscription ends its queue subscription", () =>
++    Effect.gen(function* () {
++      const subscribed = yield* Deferred.make<void>();
++      const released = yield* Deferred.make<void>();
++      const internalCurrent: QueuedUpdate.QueuedUpdateState = {
++        stage: "current",
++        installedVersion: packageJson.version,
++        targetVersion: packageJson.version,
++        staged: undefined,
++        reason: undefined,
++        handoffAccepted: false,
++        durable: true,
++      };
++      // A queue whose subscription reports its own release, so the test can
++      // prove the client closing its stream reaches the queue.
++      const queue = QueuedUpdate.QueuedUpdate.of({
++        queue: () => Effect.die("no command is sent here"),
++        cancel: Effect.die("no command is sent here"),
++        retry: Effect.die("no command is sent here"),
++        getState: Effect.succeed(internalCurrent),
++        awaitState: () => Effect.succeed(internalCurrent),
++        changes: Stream.unwrap(
++          Effect.acquireRelease(
++            Deferred.succeed(subscribed, undefined).pipe(
++              Effect.as(Stream.make(internalCurrent).pipe(Stream.concat(Stream.never))),
++            ),
++            () => Deferred.succeed(released, undefined).pipe(Effect.asVoid),
++          ),
++        ),
++      });
++      yield* buildManagedApp(queue);
++      const wsUrl = yield* getWsServerUrl("/ws");
++
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl, (client) =>
++          Effect.gen(function* () {
++            yield* Effect.scoped(
++              Effect.gen(function* () {
++                const watched = yield* subscribeManagedUpdate(client);
++                yield* watched.expect(current);
++                yield* Deferred.await(subscribed);
++                assert.isFalse(yield* Deferred.isDone(released));
++              }),
++            );
++            // The client is still connected: only the stream was closed.
++            yield* Deferred.await(released).pipe(
++              Effect.timeoutOrElse({
++                duration: "5 seconds",
++                orElse: () =>
++                  Effect.sync(() =>
++                    assert.fail("closing the client stream did not release the queue subscription"),
++                  ),
++              }),
++            );
++          }),
++        ),
++      );
++    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
++  );
++
++  it.effect("lets a read-only session watch the queue but not drive it", () =>
++    Effect.gen(function* () {
++      const fixture = yield* makeQueueFixture({
++        stage: () => Effect.die("a read-only session must not reach the stager"),
++      });
++      yield* buildManagedApp(fixture.queue);
++      const { body: tokenBody } = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
++        scope: "orchestration:read",
++      });
++      const wsTicketResponse = yield* fetchEffect(
++        yield* getHttpServerUrl("/api/auth/websocket-ticket"),
++        {
++          method: "POST",
++          headers: { authorization: `Bearer ${tokenBody.access_token ?? ""}` },
++        },
++      );
++      const wsTicketBody = yield* responseJsonEffect<{ readonly ticket: string }>(wsTicketResponse);
++      assert.equal(wsTicketResponse.status, 200);
++      const wsUrl = new URL(yield* getWsServerUrl("/ws", { authenticated: false }));
++      wsUrl.searchParams.set("wsTicket", wsTicketBody.ticket);
++
++      yield* Effect.scoped(
++        withWsRpcClient(wsUrl.toString(), (client) =>
++          Effect.gen(function* () {
++            const watched = yield* subscribeManagedUpdate(client);
++            yield* watched.expect(current);
++            for (const command of [
++              client[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: TARGET }),
++              client[WS_METHODS.serverCancelManagedUpdate]({}),
++              client[WS_METHODS.serverRetryManagedUpdate]({}),
++            ]) {
++              assert.include(yield* Effect.flip(command), {
++                _tag: "EnvironmentAuthorizationError",
++                requiredScope: "orchestration:operate",
++              });
++            }
++            assert.include(yield* fixture.queue.getState, { stage: "current" });
++          }),
++        ),
++      );
++    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
++  );
++
++  // Only a launcher-managed boot service advertises `managedUpdateQueue`. A
++  // desktop-managed server has a launcher too, but the desktop app owns its
++  // updates; an unmanaged server has nothing to hand off to. Neither may
++  // reach the queue, even though the RPCs are still declared for them.
++  for (const server of [
++    { label: "desktop-managed", mode: "desktop", managed: true },
++    { label: "unmanaged", mode: "web", managed: false },
++  ] as const) {
++    it.effect(`refuses to drive the queue on a ${server.label} server`, () =>
++      Effect.gen(function* () {
++        let stages = 0;
++        const fixture = yield* makeQueueFixture({
++          stage: () =>
++            Effect.sync(() => {
++              stages += 1;
++              return artifact(TARGET);
++            }),
++        });
++        yield* buildAppUnderTest({
++          config: { mode: server.mode },
++          layers: {
++            queuedUpdate: fixture.queue,
++            serviceLauncherClient: launcherClient(server.managed),
++          },
++        });
++        const wsUrl = yield* getWsServerUrl("/ws");
++        const fs = yield* FileSystem.FileSystem;
++        const readDurable = fs
++          .exists(fixture.statePath)
++          .pipe(
++            Effect.flatMap((exists) =>
++              exists ? fs.readFileString(fixture.statePath) : Effect.succeed(undefined),
++            ),
++          );
++        const durableBefore = yield* readDurable;
++
++        yield* Effect.scoped(
++          withWsRpcClient(wsUrl, (client) =>
++            Effect.gen(function* () {
++              // Watching stays available: the state is still worth showing.
++              const watched = yield* subscribeManagedUpdate(client);
++              yield* watched.expect(current);
++              for (const command of [
++                client[WS_METHODS.serverQueueManagedUpdate]({ targetVersion: TARGET }),
++                client[WS_METHODS.serverCancelManagedUpdate]({}),
++                client[WS_METHODS.serverRetryManagedUpdate]({}),
++              ]) {
++                const error = yield* Effect.flip(command);
++                assert.equal(error._tag, "ManagedServerUpdateUnavailableError");
++                assert.equal(error.message, UNSUPPORTED_MESSAGE);
++              }
++            }),
++          ),
++        );
++
++        // Nothing was staged, and the durable state on disk was not touched.
++        assert.equal(stages, 0);
++        assert.include(yield* fixture.queue.getState, { stage: "current", durable: true });
++        assert.equal(yield* readDurable, durableBefore);
++      }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
++    );
++  }
++});
++
+ it.live(
+   "reports thread HTTP and WebSocket transfer budgets",
+   () =>
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141ae1ae58a6 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -55,6 +55,9 @@ import {
+   ProviderSetupError,
+   RelayClientInstallFailedError,
+   type RelayClientInstallProgressEvent,
++  ManagedServerUpdateRejectedError,
++  type ManagedServerUpdateState,
++  ManagedServerUpdateUnavailableError,
+   ServerSelfUpdateError,
+   type ServerSelfUpdateProgressEvent,
+   type ServerLifecycleStreamEvent,
+@@ -106,7 +109,9 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
+ import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
+ import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
+ import { makeProviderInstallation } from "./provider/providerInstallation.ts";
++import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
+ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
++import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
+ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+ import * as ServerSettings from "./serverSettings.ts";
+@@ -157,6 +162,59 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http
+ import * as RelayClient from "@t3tools/shared/relayClient";
+ const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+
++/**
++ * The public view of the managed update queue: the four fields a client can
++ * render. Staged artifact identity, the handoff flag, and the durability bit
++ * stay server-side; commands and `awaitState` already report durable state
++ * only, so nothing here can name a state the disk may still forget.
++ */
++const toManagedServerUpdateState = (
++  state: QueuedUpdate.QueuedUpdateState,
++): ManagedServerUpdateState => ({
++  stage: state.stage,
++  installedVersion: state.installedVersion,
++  targetVersion: state.targetVersion,
++  reason: state.reason ?? null,
++});
++
++const sameManagedServerUpdateState = (
++  previous: ManagedServerUpdateState,
++  next: ManagedServerUpdateState,
++) =>
++  previous.stage === next.stage &&
++  previous.installedVersion === next.installedVersion &&
++  previous.targetVersion === next.targetVersion &&
++  previous.reason === next.reason;
++
++/**
++ * A persistence failure names the state file and its cause; neither belongs
++ * on the wire. The rejection already carries a user-facing message.
++ */
++const toManagedServerUpdateError = (error: QueuedUpdate.QueuedUpdateCommandError) =>
++  error._tag === "QueuedUpdateRejectedError"
++    ? new ManagedServerUpdateRejectedError({ reason: error.reason, message: error.message })
++    : new ManagedServerUpdateUnavailableError({
++        message: "The server could not record the update request. Try again.",
++      });
++
++const runManagedServerUpdateCommand = (
++  command: Effect.Effect<QueuedUpdate.QueuedUpdateState, QueuedUpdate.QueuedUpdateCommandError>,
++) =>
++  command.pipe(Effect.map(toManagedServerUpdateState), Effect.mapError(toManagedServerUpdateError));
++
++/**
++ * The queue's `changes` begin with the durable snapshot and retain every
++ * later durable state, so a slow client still sees each transition in order.
++ * Only changes to the public projection are forwarded, `reason` included: an
++ * attempt can stay `queued` while its decline changes. Closing the stream
++ * ends the queue subscription.
++ */
++const streamManagedServerUpdate = (queue: QueuedUpdate.QueuedUpdateShape) =>
++  queue.changes.pipe(
++    Stream.map(toManagedServerUpdateState),
++    Stream.changesWith(sameManagedServerUpdateState),
++  );
++
+ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+ const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
+
+@@ -527,7 +585,30 @@ const makeWsRpcLayer = (
+       const providerInstances = yield* ProviderInstanceRegistry;
+       const providerInstallation = yield* makeProviderInstallation();
+       const serverUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
++      const managedUpdateQueue = yield* QueuedUpdate.QueuedUpdate;
++      const serviceLauncher = yield* ServiceLauncherClient.ServiceLauncherClient;
+       const config = yield* ServerConfig.ServerConfig;
++      // Only the launcher-managed boot service advertises `managedUpdateQueue`.
++      // The RPCs are still declared elsewhere, so a desktop-managed or
++      // unmanaged server refuses commands before the queue can record anything.
++      const managedUpdateQueueSupported =
++        ServerSelfUpdate.resolveServerSelfUpdateCapability({
++          desktopManaged: config.mode === "desktop",
++          launcherManaged: serviceLauncher.managed,
++        }) === "boot-service";
++      const commandManagedUpdate = (
++        command: Effect.Effect<
++          QueuedUpdate.QueuedUpdateState,
++          QueuedUpdate.QueuedUpdateCommandError
++        >,
++      ) =>
++        managedUpdateQueueSupported
++          ? runManagedServerUpdateCommand(command)
++          : Effect.fail(
++              new ManagedServerUpdateUnavailableError({
++                message: "This server does not support managed updates.",
++              }),
++            );
+       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
+       const serverSettings = yield* ServerSettings.ServerSettingsService;
+       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+@@ -1962,6 +2043,26 @@ const makeWsRpcLayer = (
+             serverUpdate.commitDesktopUpdate(input.requestId),
+             { "rpc.aggregate": "server" },
+           ),
++        // Update controls call the queue directly: it owns version checks and
++        // every activation rejection, and these calls never wait on admission.
++        [WS_METHODS.serverQueueManagedUpdate]: (input) =>
++          observeRpcEffect(
++            WS_METHODS.serverQueueManagedUpdate,
++            commandManagedUpdate(managedUpdateQueue.queue(input.targetVersion)),
++            { "rpc.aggregate": "server" },
++          ),
++        [WS_METHODS.serverCancelManagedUpdate]: (_input) =>
++          observeRpcEffect(
++            WS_METHODS.serverCancelManagedUpdate,
++            commandManagedUpdate(managedUpdateQueue.cancel),
++            { "rpc.aggregate": "server" },
++          ),
++        [WS_METHODS.serverRetryManagedUpdate]: (_input) =>
++          observeRpcEffect(
++            WS_METHODS.serverRetryManagedUpdate,
++            commandManagedUpdate(managedUpdateQueue.retry),
++            { "rpc.aggregate": "server" },
++          ),
+         [WS_METHODS.serverUpsertKeybinding]: (rule) =>
+           observeRpcEffect(
+             WS_METHODS.serverUpsertKeybinding,
+@@ -2842,6 +2943,12 @@ const makeWsRpcLayer = (
+             }),
+             { "rpc.aggregate": "server" },
+           ),
++        [WS_METHODS.subscribeManagedServerUpdate]: (_input) =>
++          observeRpcStream(
++            WS_METHODS.subscribeManagedServerUpdate,
++            streamManagedServerUpdate(managedUpdateQueue),
++            { "rpc.aggregate": "server" },
++          ),
+         [WS_METHODS.subscribeAuthAccess]: (_input) =>
+           observeRpcStreamEffect(
+             WS_METHODS.subscribeAuthAccess,
+@@ -2928,6 +3035,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
+         ),
+     });
+     const pullRequests = yield* PullRequestService.PullRequestService;
++    // The runtime composes exactly one managed update queue; every connection
++    // must command and observe that instance.
++    const managedUpdateQueue = yield* QueuedUpdate.QueuedUpdate;
++    const serviceLauncher = yield* ServiceLauncherClient.ServiceLauncherClient;
+     return HttpRouter.add(
+       "GET",
+       "/ws",
+@@ -2965,6 +3076,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
+               Layer.provide(AgentSessionScanner.layer),
+               Layer.provide(ProviderMaintenanceRunner.layer),
+               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
++              Layer.provide(Layer.succeed(QueuedUpdate.QueuedUpdate, managedUpdateQueue)),
++              Layer.provide(
++                Layer.succeed(ServiceLauncherClient.ServiceLauncherClient, serviceLauncher),
++              ),
+               // One server-lifetime service means clients share the same PR caches, and a WS
+               // mutation invalidates the HTTP diff cache that every client reads from.
+               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+diff --git a/packages/contracts/src/environment.ts b/packages/contracts/src/environment.ts
+index 94d7c60812502b2e59b6739ea2e246400fde59f0..c5da3dc9c454ff45acc0d852c11b3bf2f86f91d8 100644
+--- a/packages/contracts/src/environment.ts
++++ b/packages/contracts/src/environment.ts
+@@ -133,6 +133,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
+   /** Server can durably mark running provider turns before a self-update and
+       continue them after the replacement process starts. */
+   serverUpdateThreadContinuation: Schema.optionalKey(Schema.Boolean),
++  /** Server owns a managed update queue: subscribeManagedServerUpdate and the
++      server.*ManagedUpdate commands. Says nothing about whether a release
++      exists for this host; an unsupported host fails the queued target.
++      Absent on desktop-managed, unmanaged, and older servers. */
++  managedUpdateQueue: Schema.optionalKey(Schema.Boolean),
+   /** Agent-activity publishes (push notifications and Live Activities)
+       currently leave this environment: the publish opt-in is enabled and the
+       relay link credentials exist. Clients skip seeding a Live Activity when
+diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
+index 56beabc7e11cd38f6c63261b6d8d4ceb4e42cd31..939c2defeffe4fefe56e0a899d3393165f67c4f7 100644
+--- a/packages/contracts/src/rpc.test.ts
++++ b/packages/contracts/src/rpc.test.ts
+@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
+ import * as Exit from "effect/Exit";
+ import * as Schema from "effect/Schema";
+
++import { ExecutionEnvironmentCapabilities } from "./environment.ts";
+ import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
++import { ManagedServerUpdateState } from "./server.ts";
+ import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
+
+ /**
+@@ -146,6 +148,9 @@ describe("update admission classification", () => {
+     "server.updateServer",
+     "server.updateServerWithProgress",
+     "server.commitDesktopUpdate",
++    "server.queueManagedUpdate",
++    "server.cancelManagedUpdate",
++    "server.retryManagedUpdate",
+     // Automation host channel: the host answers admitted tool calls through it.
+     "previewAutomation.connect",
+     "previewAutomation.respond",
+@@ -162,6 +167,7 @@ describe("update admission classification", () => {
+     "subscribeTerminalMetadata",
+     "subscribeServerConfig",
+     "subscribeServerLifecycle",
++    "subscribeManagedServerUpdate",
+     "subscribeAuthAccess",
+     "subscribeBackgroundPolicy",
+     "subscribeResourceTelemetry",
+@@ -182,3 +188,50 @@ describe("update admission classification", () => {
+     expect([...admitted, ...excluded].sort()).toEqual(all);
+   });
+ });
++
++describe("managed server update contract", () => {
++  const decodeState = Schema.decodeUnknownExit(ManagedServerUpdateState);
++  const decodeCapabilities = Schema.decodeUnknownSync(ExecutionEnvironmentCapabilities);
++
++  it("round-trips every public stage", () => {
++    for (const stage of ["current", "downloading", "queued", "updating", "failed"]) {
++      const state = {
++        stage,
++        installedVersion: "1.2.3",
++        targetVersion: "1.2.4",
++        reason: stage === "failed" ? "no release for 1.2.4" : null,
++      };
++      const decoded = decodeState(state);
++      expect(Exit.isSuccess(decoded)).toBe(true);
++      if (Exit.isSuccess(decoded)) expect(decoded.value).toEqual(state);
++    }
++  });
++
++  it("rejects an unknown stage and missing versions", () => {
++    const unknownStage = decodeState({
++      stage: "staged",
++      installedVersion: "1.2.3",
++      targetVersion: "1.2.4",
++      reason: null,
++    });
++    expect(Exit.isSuccess(unknownStage)).toBe(false);
++    const missingInstalled = decodeState({
++      stage: "current",
++      targetVersion: "1.2.3",
++      reason: null,
++    });
++    expect(Exit.isSuccess(missingInstalled)).toBe(false);
++    const missingTarget = decodeState({
++      stage: "current",
++      installedVersion: "1.2.3",
++      reason: null,
++    });
++    expect(Exit.isSuccess(missingTarget)).toBe(false);
++  });
++
++  it("reads a capability payload without managedUpdateQueue as unsupported", () => {
++    const older = decodeCapabilities({ serverSelfUpdate: "boot-service" });
++    expect(older.managedUpdateQueue).toBeUndefined();
++    expect(decodeCapabilities({ managedUpdateQueue: true }).managedUpdateQueue).toBe(true);
++  });
++});
+diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
+index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf58524f0f5c39 100644
+--- a/packages/contracts/src/rpc.ts
++++ b/packages/contracts/src/rpc.ts
+@@ -189,6 +189,10 @@ import {
+ import {
+   ServerConfigStreamEvent,
+   DesktopUpdateCommitInput,
++  ManagedServerUpdateQueueInput,
++  ManagedServerUpdateRejectedError,
++  ManagedServerUpdateState,
++  ManagedServerUpdateUnavailableError,
+   ServerConfig,
+   ServerProviderUpdateError,
+   ServerProviderUpdateInput,
+@@ -319,6 +323,9 @@ export const WS_METHODS = {
+   serverUpdateServer: "server.updateServer",
+   serverUpdateServerWithProgress: "server.updateServerWithProgress",
+   serverCommitDesktopUpdate: "server.commitDesktopUpdate",
++  serverQueueManagedUpdate: "server.queueManagedUpdate",
++  serverCancelManagedUpdate: "server.cancelManagedUpdate",
++  serverRetryManagedUpdate: "server.retryManagedUpdate",
+   serverUpsertKeybinding: "server.upsertKeybinding",
+   serverRemoveKeybinding: "server.removeKeybinding",
+   serverGetSettings: "server.getSettings",
+@@ -377,6 +384,7 @@ export const WS_METHODS = {
+   subscribeDiscoveredLocalServers: "subscribeDiscoveredLocalServers",
+   subscribeServerConfig: "subscribeServerConfig",
+   subscribeServerLifecycle: "subscribeServerLifecycle",
++  subscribeManagedServerUpdate: "subscribeManagedServerUpdate",
+   subscribeAuthAccess: "subscribeAuthAccess",
+   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
+   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+@@ -512,6 +520,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
+   error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
+ });
+
++// Update controls, like the self-update RPCs above: they drive maintenance
++// and never claim update admission, because the queue owns its own
++// activation rejection rules.
++const ManagedServerUpdateRpcError = Schema.Union([
++  ManagedServerUpdateRejectedError,
++  ManagedServerUpdateUnavailableError,
++  EnvironmentAuthorizationError,
++]);
++
++const WsServerQueueManagedUpdateRpc = Rpc.make(WS_METHODS.serverQueueManagedUpdate, {
++  payload: ManagedServerUpdateQueueInput,
++  success: ManagedServerUpdateState,
++  error: ManagedServerUpdateRpcError,
++});
++
++const WsServerCancelManagedUpdateRpc = Rpc.make(WS_METHODS.serverCancelManagedUpdate, {
++  payload: Schema.Struct({}),
++  success: ManagedServerUpdateState,
++  error: ManagedServerUpdateRpcError,
++});
++
++const WsServerRetryManagedUpdateRpc = Rpc.make(WS_METHODS.serverRetryManagedUpdate, {
++  payload: Schema.Struct({}),
++  success: ManagedServerUpdateState,
++  error: ManagedServerUpdateRpcError,
++});
++
+ const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
+   payload: Schema.Struct({}),
+   success: ServerSettings,
+@@ -1161,6 +1196,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
+   stream: true,
+ });
+
++/** Emits the durable queue state on subscribe, then every public change. */
++const WsSubscribeManagedServerUpdateRpc = Rpc.make(WS_METHODS.subscribeManagedServerUpdate, {
++  payload: Schema.Struct({}),
++  success: ManagedServerUpdateState,
++  error: Schema.Union([ManagedServerUpdateUnavailableError, EnvironmentAuthorizationError]),
++  stream: true,
++});
++
+ const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
+   payload: Schema.Struct({}),
+   success: AuthAccessStreamEvent,
+@@ -1200,6 +1243,9 @@ export const WsRpcGroup = RpcGroup.make(
+   WsServerUpdateServerRpc,
+   WsServerUpdateServerWithProgressRpc,
+   WsServerCommitDesktopUpdateRpc,
++  WsServerQueueManagedUpdateRpc,
++  WsServerCancelManagedUpdateRpc,
++  WsServerRetryManagedUpdateRpc,
+   WsServerUpsertKeybindingRpc,
+   WsServerRemoveKeybindingRpc,
+   WsServerGetSettingsRpc,
+@@ -1293,6 +1339,7 @@ export const WsRpcGroup = RpcGroup.make(
+   WsSubscribeDiscoveredLocalServersRpc,
+   WsSubscribeServerConfigRpc,
+   WsSubscribeServerLifecycleRpc,
++  WsSubscribeManagedServerUpdateRpc,
+   WsSubscribeAuthAccessRpc,
+   WsSubscribeBackgroundPolicyRpc,
+   WsSubscribeResourceTelemetryRpc,
+diff --git a/packages/contracts/src/server.ts b/packages/contracts/src/server.ts
+index 3ea7bed8f1c4b22e4725f234f51b1742a6d72db9..5515c27169a528a21c4b2621aa07e56b46309240 100644
+--- a/packages/contracts/src/server.ts
++++ b/packages/contracts/src/server.ts
+@@ -856,3 +856,62 @@ export class ServerSelfUpdateError extends Schema.TaggedErrorClass<ServerSelfUpd
+     return `Server update failed: ${this.reason}`;
+   }
+ }
++
++/**
++ * Public stages of the server-owned managed update queue. `updating` means an
++ * activation attempt is running: cancel, retry, and a different target are
++ * rejected until it answers. A declined attempt returns to `queued`.
++ */
++export const ManagedServerUpdateStage = Schema.Literals([
++  "current",
++  "downloading",
++  "queued",
++  "updating",
++  "failed",
++]);
++export type ManagedServerUpdateStage = typeof ManagedServerUpdateStage.Type;
++
++/** Durable queue state as clients see it. Staged artifact identity and
++    persistence details stay on the server; they are not client controls. */
++export const ManagedServerUpdateState = Schema.Struct({
++  stage: ManagedServerUpdateStage,
++  installedVersion: TrimmedNonEmptyString,
++  targetVersion: TrimmedNonEmptyString,
++  /** Why the queue is where it is: a staging failure, or the last decline
++      while `queued`. Null when nothing needs explaining. */
++  reason: Schema.NullOr(TrimmedNonEmptyString),
++});
++export type ManagedServerUpdateState = typeof ManagedServerUpdateState.Type;
++
++export const ManagedServerUpdateQueueInput = Schema.Struct({
++  /** Exact t3 version, never a dist-tag. The server rejects anything else. */
++  targetVersion: TrimmedNonEmptyString,
++});
++export type ManagedServerUpdateQueueInput = typeof ManagedServerUpdateQueueInput.Type;
++
++export const ManagedServerUpdateRejectedReason = Schema.Literals([
++  "invalid-version",
++  "handoff-accepted",
++  "activation-in-progress",
++  "already-installed",
++  "nothing-to-retry",
++]);
++export type ManagedServerUpdateRejectedReason = typeof ManagedServerUpdateRejectedReason.Type;
++
++/** The queue refused the command and left its state untouched. */
++export class ManagedServerUpdateRejectedError extends Schema.TaggedErrorClass<ManagedServerUpdateRejectedError>()(
++  "ManagedServerUpdateRejectedError",
++  {
++    reason: ManagedServerUpdateRejectedReason,
++    message: TrimmedNonEmptyString,
++  },
++) {}
++
++/** The queue's durable state could not be read or written. Carries only a
++    user-safe message: never a path, cause, or artifact detail. */
++export class ManagedServerUpdateUnavailableError extends Schema.TaggedErrorClass<ManagedServerUpdateUnavailableError>()(
++  "ManagedServerUpdateUnavailableError",
++  {
++    message: TrimmedNonEmptyString,
++  },
++) {}

@@ -1,0 +1,1822 @@
+diff --git a/apps/desktop/src/backend/DesktopBackendManager.test.ts b/apps/desktop/src/backend/DesktopBackendManager.test.ts
+index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff91692243e494 100644
+--- a/apps/desktop/src/backend/DesktopBackendManager.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendManager.test.ts
+@@ -2,11 +2,15 @@ import {
+   DesktopBackendBootstrap,
+   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
+   DesktopTelemetryControlMessage,
++  type DesktopTelemetryControlMessage as DesktopTelemetryControlMessageValue,
++  type DesktopUpdateReservationCommand,
+ } from "@t3tools/contracts";
+ import { assert, describe, it } from "@effect/vitest";
++import * as Cause from "effect/Cause";
+ import * as Deferred from "effect/Deferred";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+@@ -25,6 +29,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+ import * as DesktopBackendManager from "./DesktopBackendManager.ts";
+ import * as DesktopObservability from "../app/DesktopObservability.ts";
+ import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
++import type {
++  DesktopUpdateReservationExchange,
++  OwnedBackendRun,
++} from "../updates/desktopUpdateReservation.ts";
+ import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
+
+ const decodeDesktopBackendBootstrap = Schema.decodeEffect(
+@@ -115,6 +123,105 @@ function decodeBootstrap(raw: string) {
+   return decodeDesktopBackendBootstrap(raw);
+ }
+
++interface FakeRunChannel {
++  readonly run: OwnedBackendRun;
++  /** Every control message this generation's callback received. */
++  readonly handled: Array<{
++    readonly message: DesktopTelemetryControlMessageValue;
++    readonly closedBefore: boolean;
++  }>;
++  /** Resolved with the first close reason; later closes are no-ops. */
++  readonly closed: Deferred.Deferred<string>;
++  readonly closeCalls: Array<string>;
++  readonly pending: Array<Deferred.Deferred<DesktopUpdateReservationExchange>>;
++}
++
++interface FakeReservationTransport {
++  readonly transport: DesktopTelemetryPublisher.DesktopUpdateReservationTransport;
++  readonly opened: Array<FakeRunChannel>;
++  readonly channelFor: (run: OwnedBackendRun) => FakeRunChannel | undefined;
++}
++
++// Records what the manager does with the reservation transport without any
++// real correlation logic: each opened generation gets its own recording
++// channel, and a channel that closes settles whatever exchange was pending
++// on it as unanswered. Correlation itself is the publisher's job and is
++// tested there.
++function makeFakeReservationTransport(options?: {
++  readonly encoded?: Stream.Stream<Uint8Array>;
++  readonly onControl?: (message: DesktopTelemetryControlMessageValue) => Effect.Effect<void>;
++  /** Runs inside `openRun` once the channel is recorded, before it is returned. */
++  readonly onOpen?: (run: OwnedBackendRun) => Effect.Effect<void>;
++}): FakeReservationTransport {
++  const opened: Array<FakeRunChannel> = [];
++  const channelFor = (run: OwnedBackendRun) =>
++    opened.find(
++      (channel) => channel.run.instanceId === run.instanceId && channel.run.runId === run.runId,
++    );
++  const transport: DesktopTelemetryPublisher.DesktopUpdateReservationTransport = {
++    openRun: (run) =>
++      Effect.gen(function* () {
++        const channel: FakeRunChannel = {
++          run: { instanceId: run.instanceId, runId: run.runId },
++          handled: [],
++          closed: yield* Deferred.make<string>(),
++          closeCalls: [],
++          pending: [],
++        };
++        opened.push(channel);
++        yield* options?.onOpen?.(channel.run) ?? Effect.void;
++        return {
++          encoded: options?.encoded ?? Stream.empty,
++          handleControl: (message) =>
++            Effect.gen(function* () {
++              channel.handled.push({
++                message,
++                closedBefore: yield* Deferred.isDone(channel.closed),
++              });
++              yield* options?.onControl?.(message) ?? Effect.void;
++            }),
++          close: (reason) =>
++            Effect.gen(function* () {
++              channel.closeCalls.push(reason);
++              if (!(yield* Deferred.succeed(channel.closed, reason))) return;
++              const waiters = channel.pending.splice(0);
++              yield* Effect.forEach(
++                waiters,
++                (waiter) =>
++                  Deferred.succeed(waiter, {
++                    _tag: "unanswered",
++                    reason: `${run.instanceId} run ${run.runId} closed: ${reason}`,
++                  }),
++                { discard: true },
++              );
++            }),
++        } satisfies DesktopTelemetryPublisher.DesktopTelemetryRunChannel;
++      }),
++    exchange: (run, _command: DesktopUpdateReservationCommand) =>
++      Effect.gen(function* () {
++        const channel = channelFor(run);
++        if (channel === undefined || (yield* Deferred.isDone(channel.closed))) {
++          return {
++            _tag: "unanswered",
++            reason: `${run.instanceId} run ${run.runId} is not open`,
++          } satisfies DesktopUpdateReservationExchange;
++        }
++        const waiter = yield* Deferred.make<DesktopUpdateReservationExchange>();
++        channel.pending.push(waiter);
++        return yield* Deferred.await(waiter);
++      }),
++  };
++  return { transport, opened, channelFor };
++}
++
++const reserveCommand: DesktopUpdateReservationCommand = {
++  version: 1,
++  type: "desktopUpdateReservation",
++  attemptId: "attempt-1",
++  targetVersion: "9.9.9",
++  action: "reserve",
++};
++
+ interface MakeInstanceInput {
+   readonly spawnerLayer: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner>;
+   readonly httpClientLayer?: Layer.Layer<HttpClient.HttpClient>;
+@@ -133,6 +240,10 @@ interface MakeInstanceInput {
+   readonly desktopTelemetryPublisher?: Partial<
+     DesktopTelemetryPublisher.DesktopTelemetryPublisher["Service"]
+   >;
++  // Overrides the default fake transport, which feeds `desktopTelemetryStream`
++  // to every opened run and routes its control messages to
++  // `desktopTelemetryPublisher.handleControl`.
++  readonly reservationTransport?: DesktopTelemetryPublisher.DesktopUpdateReservationTransport;
+   readonly pruneRuntimes?: (distro: string | null, runtimeId: string) => Effect.Effect<void>;
+ }
+
+@@ -162,15 +273,24 @@ function makeTestInstance(input: MakeInstanceInput) {
+     Layer.succeed(DesktopTelemetryPublisher.DesktopTelemetryPublisher, {
+       latest: Effect.succeed(Option.none()),
+       changes: Stream.empty,
+-      encoded: input.desktopTelemetryStream ?? Stream.empty,
++      encoded: Stream.empty,
+       handleControl: () => Effect.void,
+-      handleControlForSource: (_sourceId, message) =>
+-        (input.desktopTelemetryPublisher?.handleControl ?? (() => Effect.void))(message),
++      handleControlForSource: () => Effect.void,
+       removeControlSource: () => Effect.void,
+       publishUpdateReport: () => Effect.void,
+       updateRequests: Stream.empty,
+       updateCommits: Stream.empty,
+       updateCancellations: Stream.empty,
++      reservationTransport:
++        input.reservationTransport ??
++        makeFakeReservationTransport({
++          ...(input.desktopTelemetryStream === undefined
++            ? {}
++            : { encoded: input.desktopTelemetryStream }),
++          ...(input.desktopTelemetryPublisher?.handleControl === undefined
++            ? {}
++            : { onControl: input.desktopTelemetryPublisher.handleControl }),
++        }).transport,
+       ...input.desktopTelemetryPublisher,
+     }),
+     DesktopWslEnvironment.layerTest(
+@@ -607,6 +727,378 @@ describe("DesktopBackendManager", () => {
+     ),
+   );
+
++  it.effect("binds fd4 and fd5 to the channel opened for the exact generation", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const replyHandled = yield* Deferred.make<void>();
++        const reservations = makeFakeReservationTransport({
++          encoded: Stream.encodeText(
++            Stream.make('{"version":1,"type":"desktopTelemetryHello","electronPid":123}\n'),
++          ),
++          onControl: (message) =>
++            message.type === "desktopUpdateReservationReply"
++              ? Deferred.succeed(replyHandled, void 0).pipe(Effect.asVoid)
++              : Effect.void,
++        });
++        const exited = yield* Queue.unbounded<void>();
++        let telemetryJson = "";
++        const controlLines = [
++          encodeDesktopTelemetryControl({
++            version: 1,
++            type: "setDiagnosticsDemand",
++            enabled: true,
++          }),
++          encodeDesktopTelemetryControl({
++            version: 1,
++            type: "desktopUpdateReservationReply",
++            attemptId: "attempt-1",
++            status: "ready",
++          }),
++        ];
++        const spawnerLayer = Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make((command) =>
++            Effect.gen(function* () {
++              if (command._tag === "StandardCommand") {
++                const fd4 = command.options.additionalFds?.fd4;
++                if (fd4?.type === "input" && fd4.stream) {
++                  telemetryJson = yield* fd4.stream.pipe(Stream.decodeText(), Stream.mkString);
++                }
++              }
++              return makeProcess({
++                getOutputFd: (fd) =>
++                  fd === 5
++                    ? Stream.encodeText(Stream.make(`${controlLines.join("\n")}\n`))
++                    : Stream.empty,
++                exitCode: Deferred.await(replyHandled).pipe(
++                  Effect.as(ChildProcessSpawner.ExitCode(0)),
++                ),
++              });
++            }),
++          ),
++        );
++        const instance = yield* makeTestInstance({
++          spawnerLayer,
++          reservationTransport: reservations.transport,
++          backendOutputLog: {
++            persistFailure: () => Queue.offer(exited, void 0).pipe(Effect.asVoid),
++          },
++        });
++
++        yield* instance.start;
++        // The reply reaches the channel's own callback, not a global handler.
++        yield* Deferred.await(replyHandled);
++        yield* Queue.take(exited);
++
++        assert.deepEqual(
++          reservations.opened.map((channel) => channel.run),
++          [{ instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 }],
++        );
++        assert.equal(
++          telemetryJson,
++          '{"version":1,"type":"desktopTelemetryHello","electronPid":123}\n',
++        );
++        const channel = reservations.opened[0]!;
++        assert.deepEqual(
++          channel.handled.slice(0, 2).map((entry) => [entry.message.type, entry.closedBefore]),
++          [
++            ["setDiagnosticsDemand", false],
++            ["desktopUpdateReservationReply", false],
++          ],
++        );
++        assert.equal(yield* Deferred.await(channel.closed), "backend process exited");
++      }).pipe(Effect.provide(TestClock.layer())),
++    ),
++  );
++
++  it.effect("opens a fresh generation on restart and closes only the old channel", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const reservations = makeFakeReservationTransport();
++        const starts = yield* Queue.unbounded<number>();
++        let startCount = 0;
++        const spawnerLayer = Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Effect.gen(function* () {
++              const scope = yield* Scope.Scope;
++              const closed = yield* Deferred.make<void>();
++              startCount += 1;
++              yield* Queue.offer(starts, startCount);
++              yield* Scope.addFinalizer(
++                scope,
++                Deferred.succeed(closed, void 0).pipe(Effect.asVoid),
++              );
++              return makeProcess({
++                exitCode: Deferred.await(closed).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
++              });
++            }),
++          ),
++        );
++        const instance = yield* makeTestInstance({
++          spawnerLayer,
++          httpClientLayer: httpClientLayer(() => Effect.never),
++          reservationTransport: reservations.transport,
++        });
++
++        yield* instance.start;
++        assert.equal(yield* Queue.take(starts), 1);
++        yield* instance.stop();
++        const first = reservations.opened[0]!;
++        assert.equal(yield* Deferred.await(first.closed), "backend process exited");
++
++        yield* instance.start;
++        assert.equal(yield* Queue.take(starts), 2);
++        assert.deepEqual(
++          reservations.opened.map((channel) => channel.run),
++          [
++            { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 },
++            { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 2 },
++          ],
++        );
++        const second = reservations.opened[1]!;
++        // The old generation's finalizers (observed exit plus the outer
++        // ensuring) ran against its own channel only; the replacement is
++        // still open until it exits itself.
++        assert.isAtLeast(first.closeCalls.length, 1);
++        assert.isTrue(first.closeCalls.every((reason) => reason.length > 0));
++        assert.isFalse(yield* Deferred.isDone(second.closed));
++
++        yield* instance.stop();
++        assert.equal(yield* Deferred.await(second.closed), "backend process exited");
++      }).pipe(Effect.provide(TestClock.layer())),
++    ),
++  );
++
++  it.effect("closes the run channel on exit before a trailing control line is handled", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const replyHandled = yield* Deferred.make<void>();
++        const reservations = makeFakeReservationTransport({
++          onControl: (message) =>
++            message.type === "desktopUpdateReservationReply"
++              ? Deferred.succeed(replyHandled, void 0).pipe(Effect.asVoid)
++              : Effect.void,
++        });
++        const exited = yield* Queue.unbounded<void>();
++        const trailingReply = encodeDesktopTelemetryControl({
++          version: 1,
++          type: "desktopUpdateReservationReply",
++          attemptId: "attempt-1",
++          status: "ready",
++        });
++        const spawnerLayer = Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Effect.succeed(
++              makeProcess({
++                // The child's control output is only flushed after the
++                // manager has observed its exit and closed the channel.
++                getOutputFd: (fd) =>
++                  fd === 5
++                    ? Stream.fromEffect(
++                        Deferred.await(reservations.opened[0]!.closed).pipe(
++                          Effect.as(new TextEncoder().encode(`${trailingReply}\n`)),
++                        ),
++                      )
++                    : Stream.empty,
++                // Trailing stdout keeps the run draining until the reply
++                // has been routed, so the control reader is not torn down
++                // before it reads the line.
++                stdout: Stream.fromEffect(
++                  Deferred.await(replyHandled).pipe(Effect.as(new TextEncoder().encode("bye\n"))),
++                ),
++                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
++              }),
++            ),
++          ),
++        );
++        const instance = yield* makeTestInstance({
++          spawnerLayer,
++          httpClientLayer: httpClientLayer(() => Effect.never),
++          reservationTransport: reservations.transport,
++          backendOutputLog: {
++            persistFailure: () => Queue.offer(exited, void 0).pipe(Effect.asVoid),
++          },
++        });
++
++        yield* instance.start;
++        yield* Queue.take(exited);
++
++        const channel = reservations.opened[0]!;
++        assert.equal(yield* Deferred.await(channel.closed), "backend process exited");
++        const reply = channel.handled.find(
++          (entry) => entry.message.type === "desktopUpdateReservationReply",
++        );
++        assert.isDefined(reply);
++        assert.isTrue(reply.closedBefore);
++      }).pipe(Effect.provide(TestClock.layer())),
++    ),
++  );
++
++  it.effect("closes the channel and settles its exchange when the spawn fails", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const reservations = makeFakeReservationTransport();
++        const spawnRequested = yield* Deferred.make<void>();
++        const failSpawn = yield* Deferred.make<void>();
++        const spawnerLayer = Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Deferred.succeed(spawnRequested, void 0).pipe(
++              Effect.andThen(Deferred.await(failSpawn)),
++              Effect.andThen(
++                Effect.fail(
++                  PlatformError.systemError({
++                    _tag: "NotFound",
++                    module: "ChildProcessSpawner",
++                    method: "spawn",
++                    description: "no such executable",
++                  }),
++                ),
++              ),
++            ),
++          ),
++        );
++        const instance = yield* makeTestInstance({
++          spawnerLayer,
++          reservationTransport: reservations.transport,
++        });
++
++        yield* instance.start;
++        yield* Deferred.await(spawnRequested);
++        const run = { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 };
++        const exchangeFiber = yield* reservations.transport
++          .exchange(run, reserveCommand)
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(exchangeFiber.pollUnsafe());
++
++        yield* Deferred.succeed(failSpawn, void 0);
++        const exchange = yield* Fiber.join(exchangeFiber);
++        assert.equal(exchange._tag, "unanswered");
++        assert.equal(
++          yield* Deferred.await(reservations.channelFor(run)!.closed),
++          "backend run ended",
++        );
++        // The failed run schedules a restart; nothing else was opened yet.
++        assert.equal(reservations.opened.length, 1);
++      }).pipe(Effect.provide(TestClock.layer())),
++    ),
++  );
++
++  it.effect("closes the channel when the instance scope closes before the child begins", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const reservations = makeFakeReservationTransport();
++        const spawnRequested = yield* Deferred.make<void>();
++        const spawnerLayer = Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Effect.gen(function* () {
++              const scope = yield* Scope.Scope;
++              const cancelled = yield* Deferred.make<never>();
++              // A real spawner abandons the spawn when its scope closes.
++              yield* Scope.addFinalizer(scope, Deferred.interrupt(cancelled).pipe(Effect.asVoid));
++              yield* Deferred.succeed(spawnRequested, void 0);
++              return yield* Deferred.await(cancelled);
++            }),
++          ),
++        );
++        const run = { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 };
++        const exchangeFiber = yield* Effect.scoped(
++          Effect.gen(function* () {
++            const instance = yield* makeTestInstance({
++              spawnerLayer,
++              reservationTransport: reservations.transport,
++            });
++            yield* instance.start;
++            yield* Deferred.await(spawnRequested);
++            const fiber = yield* reservations.transport
++              .exchange(run, reserveCommand)
++              .pipe(Effect.forkDetach);
++            yield* Effect.yieldNow;
++            assert.isUndefined(fiber.pollUnsafe());
++            return fiber;
++          }),
++        );
++
++        const exchange = yield* Fiber.join(exchangeFiber);
++        assert.equal(exchange._tag, "unanswered");
++        assert.equal(
++          yield* Deferred.await(reservations.channelFor(run)!.closed),
++          "backend run ended",
++        );
++      }).pipe(Effect.provide(TestClock.layer())),
++    ),
++  );
++
++  it.effect("closes a channel whose start is interrupted before the run program is forked", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const openStarted = yield* Deferred.make<void>();
++        const releaseOpen = yield* Deferred.make<void>();
++        const reservations = makeFakeReservationTransport({
++          // The real transport registers a generation in one synchronous
++          // step, so an interrupt requested while it opens lands right after
++          // it returns. The gate widens that instant enough to aim at it.
++          onOpen: () =>
++            Effect.uninterruptible(
++              Deferred.succeed(openStarted, void 0).pipe(
++                Effect.andThen(Deferred.await(releaseOpen)),
++              ),
++            ),
++        });
++        let spawnCount = 0;
++        const spawnerLayer = Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Effect.sync(() => {
++              spawnCount += 1;
++              return makeProcess();
++            }),
++          ),
++        );
++        const instance = yield* makeTestInstance({
++          spawnerLayer,
++          reservationTransport: reservations.transport,
++        });
++
++        const startFiber = yield* instance.start.pipe(Effect.forkChild);
++        yield* Deferred.await(openStarted);
++        const run = { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 };
++        const exchangeFiber = yield* reservations.transport
++          .exchange(run, reserveCommand)
++          .pipe(Effect.forkChild);
++        const interruptFiber = yield* Fiber.interrupt(startFiber).pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(exchangeFiber.pollUnsafe());
++        assert.isUndefined(startFiber.pollUnsafe());
++
++        // The open completes; the pending interrupt then ends the start
++        // before it can fork the run program, so no child is ever spawned.
++        yield* Deferred.succeed(releaseOpen, void 0);
++        yield* Fiber.join(interruptFiber);
++        const startExit = yield* Fiber.await(startFiber);
++        assert.isTrue(Exit.isFailure(startExit) && Cause.hasInterruptsOnly(startExit.cause));
++        assert.equal(spawnCount, 0);
++
++        // The generation was registered without a program to close it. Its
++        // run scope owns the channel from the moment it was opened, so
++        // stopping the instance retires it and settles the pending exchange.
++        yield* instance.stop();
++        const channel = reservations.channelFor(run)!;
++        assert.isTrue(yield* Deferred.isDone(channel.closed));
++        assert.equal(yield* Deferred.await(channel.closed), "backend run scope closed");
++        const exchangeExit = exchangeFiber.pollUnsafe();
++        assert.isDefined(exchangeExit);
++        assert.isTrue(Exit.isSuccess(exchangeExit) && exchangeExit.value._tag === "unanswered");
++        assert.equal(reservations.opened.length, 1);
++        assert.isTrue(Option.isNone((yield* instance.snapshot).activePid));
++      }).pipe(Effect.provide(TestClock.layer())),
++    ),
++  );
++
+   it.effect("drains trailing child output before persisting an unexpected exit", () =>
+     Effect.scoped(
+       Effect.gen(function* () {
+@@ -821,7 +1313,7 @@ describe("DesktopBackendManager", () => {
+         let shutdownCount = 0;
+         let persistedFailureCount = 0;
+         let discardedSessionCount = 0;
+-        let removedTelemetrySources = 0;
++        const reservations = makeFakeReservationTransport();
+
+         const spawnerLayer = Layer.succeed(
+           ChildProcessSpawner.ChildProcessSpawner,
+@@ -873,12 +1365,7 @@ describe("DesktopBackendManager", () => {
+               discardedSessionCount += 1;
+             }),
+           },
+-          desktopTelemetryPublisher: {
+-            removeControlSource: () =>
+-              Effect.sync(() => {
+-                removedTelemetrySources += 1;
+-              }),
+-          },
++          reservationTransport: reservations.transport,
+         });
+         assert.isTrue(Option.isNone(yield* instance.currentConfig));
+
+@@ -902,7 +1389,14 @@ describe("DesktopBackendManager", () => {
+         assert.equal(closedCount, 1);
+         assert.equal(persistedFailureCount, 0);
+         assert.equal(discardedSessionCount, 1);
+-        assert.equal(removedTelemetrySources, 1);
++        assert.deepEqual(
++          reservations.opened.map((channel) => channel.run),
++          [{ instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 }],
++        );
++        assert.equal(
++          yield* Deferred.await(reservations.opened[0]!.closed),
++          "backend process exited",
++        );
+
+         const stoppedSnapshot = yield* instance.snapshot;
+         assert.isFalse(yield* Ref.get(backendReadyFlag));
+diff --git a/apps/desktop/src/backend/DesktopBackendManager.ts b/apps/desktop/src/backend/DesktopBackendManager.ts
+index 436c0c08e4ed019380aedee137ff69d419fe8c93..67e176a237be6b74fae4c1c88af5b1be3613e111 100644
+--- a/apps/desktop/src/backend/DesktopBackendManager.ts
++++ b/apps/desktop/src/backend/DesktopBackendManager.ts
+@@ -825,6 +825,24 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+             nextRunId: latest.nextRunId + 1,
+           },
+         ]);
++        // This generation's telemetry endpoints. The manager is the only
++        // party that knows which child owns which fd pair, so the run's fd
++        // input and fd output callback are bound here, before the spawn, and
++        // a reply can only ever be attributed to the run whose callback
++        // received it. Opening the channel and handing its close to the run
++        // scope is one uninterruptible step: from the moment the generation
++        // is registered, closing the run scope retires it, even if this
++        // start is interrupted before the run program below is forked.
++        const telemetryChannel = yield* Effect.uninterruptible(
++          Effect.gen(function* () {
++            const channel = yield* desktopTelemetryPublisher.reservationTransport.openRun({
++              instanceId: spec.id,
++              runId,
++            });
++            yield* Scope.addFinalizer(runScope, channel.close("backend run scope closed"));
++            return channel;
++          }),
++        );
+
+         const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
+           reason: string,
+@@ -882,7 +900,6 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+                 );
+
+               if (isCurrentRun) {
+-                yield* desktopTelemetryPublisher.removeControlSource(spec.id);
+                 if (Option.isSome(pid)) {
+                   if (exitObserved && !stopRequested) {
+                     yield* backendOutputLog.persistFailure({
+@@ -906,9 +923,8 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+
+         const program = runBackendProcess({
+           ...config.value,
+-          desktopTelemetryStream: desktopTelemetryPublisher.encoded,
+-          onDesktopTelemetryControl: (message) =>
+-            desktopTelemetryPublisher.handleControlForSource(spec.id, message),
++          desktopTelemetryStream: telemetryChannel.encoded,
++          onDesktopTelemetryControl: telemetryChannel.handleControl,
+           onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid) {
+             yield* updateActiveRun(runId, (run) => ({
+               ...run,
+@@ -918,11 +934,18 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+               details: `pid=${pid} port=${config.value.bootstrap.port} cwd=${config.value.cwd}`,
+             });
+           }),
++          // The channel closes the moment the exit is observed, ahead of any
++          // manager bookkeeping: a control line still draining from the dead
++          // child must not be able to answer a reservation.
+           onExitObserved: () =>
+-            updateActiveRun(runId, (run) => ({
+-              ...run,
+-              exitObserved: true,
+-            })),
++            telemetryChannel.close("backend process exited").pipe(
++              Effect.andThen(
++                updateActiveRun(runId, (run) => ({
++                  ...run,
++                  exitObserved: true,
++                })),
++              ),
++            ),
+           onReady: Effect.fn("desktop.backendInstance.onReady")(function* () {
+             const isCurrentRun = yield* Ref.modify(state, (latest) => {
+               const activeRun = Option.getOrUndefined(latest.active);
+@@ -969,6 +992,11 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+           Effect.provideService(HttpClient.HttpClient, httpClient),
+           Scope.provide(runScope),
++          // Every other way out of the run (spawn failure, interruption
++          // before the child exists, an exit-status failure) closes this
++          // generation's channel too. Closing is idempotent, so the ordinary
++          // observed-exit path above costs nothing here.
++          Effect.ensuring(telemetryChannel.close("backend run ended")),
+           Effect.matchEffect({
+             onFailure: (error) => finalizeRun(error.message),
+             onSuccess: (exit) => finalizeRun(exit.reason),
+@@ -1127,7 +1155,6 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+             ),
+           );
+           if (cleanup.needsCleanup) {
+-            yield* desktopTelemetryPublisher.removeControlSource(spec.id);
+             yield* backendOutputLog.discardSession;
+           }
+           if (cleanup.shouldStart) {
+diff --git a/apps/desktop/src/backend/DesktopBackendPool.test.ts b/apps/desktop/src/backend/DesktopBackendPool.test.ts
+index 5fe02c8d17289410dfcf3d366027b5b815ea8999..956006610d62408ab2ab44f919728a651b6dfb25 100644
+--- a/apps/desktop/src/backend/DesktopBackendPool.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendPool.test.ts
+@@ -77,6 +77,20 @@ function makePoolLayer(
+           updateRequests: Stream.empty,
+           updateCommits: Stream.empty,
+           updateCancellations: Stream.empty,
++          // Pool tests use stub instances, so no run ever attaches here.
++          reservationTransport: {
++            openRun: () =>
++              Effect.succeed({
++                encoded: Stream.empty,
++                handleControl: () => Effect.void,
++                close: () => Effect.void,
++              }),
++            exchange: () =>
++              Effect.succeed({
++                _tag: "unanswered",
++                reason: "reservation transport unused by fixture",
++              }),
++          },
+         }),
+         Layer.succeed(DesktopBackendConfiguration.DesktopBackendConfiguration, {
+           resolvePrimary: Effect.die("unexpected primary config resolve"),
+diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
+index d705252ef588e20376d97b85981d545ebc68bc96..e746c33073d8bd26fa13bb5850797b3ecc6284c1 100644
+--- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
++++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
+@@ -1,5 +1,11 @@
+-import { DesktopHostTelemetryMessage } from "@t3tools/contracts";
++import {
++  DesktopHostTelemetryMessage,
++  type DesktopHostTelemetryMessage as DesktopHostTelemetryMessageValue,
++  type DesktopUpdateReservationCommand,
++  type DesktopUpdateReservationReply,
++} from "@t3tools/contracts";
+ import { assert, describe, it } from "@effect/vitest";
++import * as Cause from "effect/Cause";
+ import * as Deferred from "effect/Deferred";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+@@ -7,7 +13,9 @@ import * as Exit from "effect/Exit";
+ import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
++import * as Queue from "effect/Queue";
+ import * as Ref from "effect/Ref";
++import * as Scheduler from "effect/Scheduler";
+ import * as Schema from "effect/Schema";
+ import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+@@ -50,6 +58,118 @@ function makeElectronAppLayer(
+   } satisfies ElectronApp.ElectronApp["Service"]);
+ }
+
++// A publisher whose power monitor never changes, for tests that only care
++// about routing. The initial sample still lands, so every attached stream
++// replays exactly one snapshot after its hello. `onMetricsRead` fires on each
++// sample taken under diagnostics demand.
++function makeQuietPublisherLayer(onMetricsRead: () => void = () => undefined) {
++  const powerLayer = Layer.succeed(
++    ElectronPowerMonitor.ElectronPowerMonitor,
++    ElectronPowerMonitor.ElectronPowerMonitor.of({
++      isOnBatteryPower: Effect.succeed(false),
++      getSystemIdleTime: Effect.succeed(0),
++      getSystemIdleState: () => Effect.succeed("active"),
++      getCurrentThermalState: Effect.succeed("nominal"),
++      onSimpleEvent: () => Effect.void,
++      onThermalStateChange: () => Effect.void,
++      onSpeedLimitChange: () => Effect.void,
++    }),
++  );
++  return DesktopTelemetryPublisher.layer.pipe(
++    Layer.provide(Layer.mergeAll(makeElectronAppLayer([], onMetricsRead), powerLayer)),
++  );
++}
++
++const decodeHostMessage = Schema.decodeUnknownEffect(
++  Schema.fromJsonString(DesktopHostTelemetryMessage),
++);
++const textDecoder = new TextDecoder();
++const decodeEncoded = (
++  encoded: Stream.Stream<Uint8Array>,
++): Stream.Stream<DesktopHostTelemetryMessageValue, Schema.SchemaError> =>
++  encoded.pipe(Stream.mapEffect((bytes) => decodeHostMessage(textDecoder.decode(bytes).trim())));
++
++const reservationCommand = (
++  action: DesktopUpdateReservationCommand["action"],
++  attemptId = "attempt-1",
++): DesktopUpdateReservationCommand => ({
++  version: 1,
++  type: "desktopUpdateReservation",
++  attemptId,
++  targetVersion: "9.9.9",
++  action,
++});
++
++const reservationReply = (
++  status: DesktopUpdateReservationReply["status"],
++  attemptId = "attempt-1",
++): DesktopUpdateReservationReply => ({
++  version: 1,
++  type: "desktopUpdateReservationReply",
++  attemptId,
++  status,
++});
++
++const upToDateReport = {
++  version: 1,
++  type: "desktopUpdateStatus",
++  outcome: "up-to-date",
++  state: {
++    enabled: true,
++    status: "up-to-date",
++    channel: "latest",
++    currentVersion: "1.2.3",
++    hostArch: "arm64",
++    appArch: "arm64",
++    runningUnderArm64Translation: false,
++    availableVersion: null,
++    downloadedVersion: null,
++    releaseNotes: [],
++    downloadPercent: null,
++    checkedAt: null,
++    message: null,
++    errorContext: null,
++    canRetry: false,
++    omittedReleaseCount: 0,
++  },
++} as const;
++
++// Drains one encoded stream into a queue so a test can inspect its replay
++// and then prove that nothing further arrives. A run's fd input has exactly
++// one reader, so each stream is subscribed once.
++const collectEncoded = (encoded: Stream.Stream<Uint8Array>) =>
++  Effect.gen(function* () {
++    const messages = yield* Queue.unbounded<DesktopHostTelemetryMessageValue>();
++    yield* Stream.runForEach(decodeEncoded(encoded), (message) =>
++      Queue.offer(messages, message),
++    ).pipe(Effect.forkChild);
++    return messages;
++  });
++
++// Every attached backend replays the hello, then the current snapshot and
++// update report in either order.
++const assertReplay = (
++  messages: Queue.Dequeue<DesktopHostTelemetryMessageValue>,
++  label: string,
++): Effect.Effect<void> =>
++  Effect.gen(function* () {
++    const replay = yield* Effect.forEach([0, 1, 2], () => Queue.take(messages));
++    assert.equal(replay[0]?.type, "desktopTelemetryHello", label);
++    assert.deepEqual(
++      replay
++        .slice(1)
++        .map((message) => message.type)
++        .sort(),
++      ["desktopTelemetry", "desktopUpdateStatus"],
++      label,
++    );
++    const report = replay.find((message) => message.type === "desktopUpdateStatus");
++    if (report?.type !== "desktopUpdateStatus") {
++      return assert.fail(`${label}: expected the replayed update report.`);
++    }
++    assert.equal(report.state.currentVersion, "1.2.3", label);
++  });
++
+ describe("DesktopTelemetryPublisher", () => {
+   it.effect("stops when its scope closes during an Electron telemetry sample", () =>
+     Effect.gen(function* () {
+@@ -421,30 +541,7 @@ describe("DesktopTelemetryPublisher", () => {
+         const received = yield* Fiber.join(requestFiber);
+         assert.equal(Option.getOrThrow(received).requestId, "req-9");
+
+-        const report = {
+-          version: 1,
+-          type: "desktopUpdateStatus",
+-          outcome: "up-to-date",
+-          state: {
+-            enabled: true,
+-            status: "up-to-date",
+-            channel: "latest",
+-            currentVersion: "1.2.3",
+-            hostArch: "arm64",
+-            appArch: "arm64",
+-            runningUnderArm64Translation: false,
+-            availableVersion: null,
+-            downloadedVersion: null,
+-            releaseNotes: [],
+-            downloadPercent: null,
+-            checkedAt: null,
+-            message: null,
+-            errorContext: null,
+-            canRetry: false,
+-            omittedReleaseCount: 0,
+-          },
+-        } as const;
+-        yield* publisher.publishUpdateReport(report);
++        yield* publisher.publishUpdateReport(upToDateReport);
+
+         // A subscriber that attaches after the publish (the backend spawned
+         // by a relaunch) still sees the latest report replayed.
+@@ -466,4 +563,390 @@ describe("DesktopTelemetryPublisher", () => {
+       }).pipe(Effect.provide(layer));
+     }),
+   );
++
++  it.effect("writes a reservation command to the addressed generation only", () =>
++    Effect.gen(function* () {
++      const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const { reservationTransport } = publisher;
++      const primary = { instanceId: "primary", runId: 1 };
++      const wsl = { instanceId: "wsl:ubuntu", runId: 1 };
++      const primaryChannel = yield* reservationTransport.openRun(primary);
++      const wslChannel = yield* reservationTransport.openRun(wsl);
++      yield* publisher.publishUpdateReport(upToDateReport);
++
++      // Both generations and the global stream start with the same replay:
++      // hello, then the current snapshot and the report published before
++      // they attached.
++      const primaryMessages = yield* collectEncoded(primaryChannel.encoded);
++      const wslMessages = yield* collectEncoded(wslChannel.encoded);
++      const globalMessages = yield* collectEncoded(publisher.encoded);
++      yield* assertReplay(primaryMessages, "primary");
++      yield* assertReplay(wslMessages, "wsl");
++      yield* assertReplay(globalMessages, "global");
++
++      const exchangeFiber = yield* reservationTransport
++        .exchange(primary, reservationCommand("reserve"))
++        .pipe(Effect.forkChild);
++      const command = yield* Queue.take(primaryMessages);
++      if (command.type !== "desktopUpdateReservation") {
++        return assert.fail("Expected the addressed run to receive the command.");
++      }
++      assert.equal(command.attemptId, "attempt-1");
++      assert.equal(command.action, "reserve");
++
++      // A reply through the addressed run's own callback settles it, and the
++      // exchange names the run the manager registered, never a wire value.
++      assert.isUndefined(exchangeFiber.pollUnsafe());
++      yield* primaryChannel.handleControl({
++        ...reservationReply("ready"),
++        instanceId: "wsl:ubuntu",
++        runId: 7,
++      } as DesktopUpdateReservationReply);
++      const exchange = yield* Fiber.join(exchangeFiber);
++      assert.deepEqual(exchange, {
++        _tag: "reply",
++        run: primary,
++        reply: reservationReply("ready"),
++      });
++
++      // Beyond that replay, the other run and the global stream saw nothing:
++      // neither carries the command.
++      yield* Effect.yieldNow;
++      yield* Effect.yieldNow;
++      assert.isTrue(Option.isNone(yield* Queue.poll(wslMessages)));
++      assert.isTrue(Option.isNone(yield* Queue.poll(globalMessages)));
++      assert.isTrue(Option.isNone(yield* Queue.poll(primaryMessages)));
++      yield* primaryChannel.close("test done");
++      yield* wslChannel.close("test done");
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("only the addressed generation's callback can settle its exchange", () =>
++    Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const oldRun = { instanceId: "primary", runId: 1 };
++      const newRun = { instanceId: "primary", runId: 2 };
++      const oldChannel = yield* reservationTransport.openRun(oldRun);
++      const newChannel = yield* reservationTransport.openRun(newRun);
++
++      const exchangeFiber = yield* reservationTransport
++        .exchange(newRun, reservationCommand("reserve"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++
++      // Same attempt id, wrong generation: not evidence.
++      yield* oldChannel.handleControl(reservationReply("ready"));
++      yield* Effect.yieldNow;
++      assert.isUndefined(exchangeFiber.pollUnsafe());
++
++      yield* newChannel.handleControl(reservationReply("ready"));
++      const exchange = yield* Fiber.join(exchangeFiber);
++      assert.deepEqual(exchange, {
++        _tag: "reply",
++        run: newRun,
++        reply: reservationReply("ready"),
++      });
++
++      yield* oldChannel.close("test done");
++      yield* newChannel.close("test done");
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("closing a generation settles its exchange and ignores late replies", () =>
++    Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const oldRun = { instanceId: "primary", runId: 1 };
++      const oldChannel = yield* reservationTransport.openRun(oldRun);
++
++      const exchangeFiber = yield* reservationTransport
++        .exchange(oldRun, reservationCommand("commit"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isUndefined(exchangeFiber.pollUnsafe());
++
++      yield* oldChannel.close("backend process exited");
++      const exchange = yield* Fiber.join(exchangeFiber);
++      assert.equal(exchange._tag, "unanswered");
++      if (exchange._tag !== "unanswered") return;
++      assert.include(exchange.reason, "backend process exited");
++
++      // A reply after close changes nothing, and the closed run is gone.
++      yield* oldChannel.handleControl(reservationReply("committed"));
++      const afterClose = yield* reservationTransport.exchange(oldRun, reservationCommand("commit"));
++      assert.equal(afterClose._tag, "unanswered");
++      if (afterClose._tag !== "unanswered") return;
++      assert.include(afterClose.reason, "not open");
++
++      // The replacement generation is untouched by the old run's late
++      // reply or its repeated close.
++      const newRun = { instanceId: "primary", runId: 2 };
++      const newChannel = yield* reservationTransport.openRun(newRun);
++      const replacementFiber = yield* reservationTransport
++        .exchange(newRun, reservationCommand("commit"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* oldChannel.handleControl(reservationReply("committed"));
++      yield* oldChannel.close("again");
++      yield* Effect.yieldNow;
++      assert.isUndefined(replacementFiber.pollUnsafe());
++
++      yield* newChannel.handleControl(reservationReply("committed"));
++      const replacement = yield* Fiber.join(replacementFiber);
++      assert.deepEqual(replacement, {
++        _tag: "reply",
++        run: newRun,
++        reply: reservationReply("committed"),
++      });
++      yield* newChannel.close("test done");
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("reports missing, duplicate and silent runs as unanswered", () =>
++    Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const run = { instanceId: "primary", runId: 1 };
++
++      const missing = yield* reservationTransport.exchange(run, reservationCommand("reserve"));
++      assert.equal(missing._tag, "unanswered");
++      if (missing._tag !== "unanswered") return;
++      assert.include(missing.reason, "not open");
++
++      const channel = yield* reservationTransport.openRun(run);
++      const firstFiber = yield* reservationTransport
++        .exchange(run, reservationCommand("reserve"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++
++      // A concurrent exchange for the same attempt is refused outright
++      // instead of sharing or replacing the first waiter.
++      const duplicate = yield* reservationTransport.exchange(run, reservationCommand("reserve"));
++      assert.equal(duplicate._tag, "unanswered");
++      if (duplicate._tag !== "unanswered") return;
++      assert.include(duplicate.reason, "already has a pending exchange");
++      assert.isUndefined(firstFiber.pollUnsafe());
++
++      // Silence is bounded to 30 seconds on the Effect clock.
++      yield* TestClock.adjust(Duration.millis(29_999));
++      assert.isUndefined(firstFiber.pollUnsafe());
++      yield* TestClock.adjust(Duration.millis(1));
++      const timedOut = yield* Fiber.join(firstFiber);
++      assert.equal(timedOut._tag, "unanswered");
++      if (timedOut._tag !== "unanswered") return;
++      assert.include(timedOut.reason, "30 seconds");
++
++      // The timed-out waiter was removed, so the attempt can be retried and
++      // the run's callback settles the fresh exchange.
++      const retryFiber = yield* reservationTransport
++        .exchange(run, reservationCommand("reserve"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* channel.handleControl(reservationReply("busy"));
++      const retry = yield* Fiber.join(retryFiber);
++      assert.deepEqual(retry, { _tag: "reply", run, reply: reservationReply("busy") });
++      yield* channel.close("test done");
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("an interrupted exchange releases its waiter so the attempt can be retried", () =>
++    Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const run = { instanceId: "primary", runId: 1 };
++      const channel = yield* reservationTransport.openRun(run);
++
++      const abandoned = yield* reservationTransport
++        .exchange(run, reservationCommand("reserve"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* Fiber.interrupt(abandoned);
++
++      // The attempt is free again, the run stays open, and the retry is the
++      // exchange the run's callback settles.
++      const retryFiber = yield* reservationTransport
++        .exchange(run, reservationCommand("reserve"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isUndefined(retryFiber.pollUnsafe());
++      yield* channel.handleControl(reservationReply("ready"));
++      const retry = yield* Fiber.join(retryFiber);
++      assert.deepEqual(retry, { _tag: "reply", run, reply: reservationReply("ready") });
++      yield* channel.close("test done");
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("an exchange interrupted at any yield point before its await frees the attempt", () =>
++    Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const run = { instanceId: "primary", runId: 1 };
++      const channel = yield* reservationTransport.openRun(run);
++
++      // The scheduler may yield a fiber before any primitive, including the
++      // one that installs the waiter's cleanup. Sweeping the operation budget
++      // makes the exchange yield at every such point on the way to its await,
++      // and interrupting it while yielded unwinds only what it had already
++      // installed. The sweep ends once the exchange suspends on the await
++      // below its budget, so no later yield point exists.
++      let budgetYields = 0;
++      for (let budget = 2; ; budget++) {
++        const abandoned = yield* reservationTransport
++          .exchange(run, reservationCommand("reserve"))
++          .pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, budget), Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(abandoned.pollUnsafe(), `budget ${budget}`);
++        // A budget yield is charged one operation past the budget; a natural
++        // suspension on the await stops short of it.
++        const yieldedOnBudget = abandoned.currentOpCount > budget;
++        yield* Fiber.interrupt(abandoned);
++
++        // The same attempt id must enqueue again and be the exchange that
++        // the run's callback settles, whatever step the interrupt landed on.
++        const retryFiber = yield* reservationTransport
++          .exchange(run, reservationCommand("reserve"))
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(retryFiber.pollUnsafe(), `budget ${budget}`);
++        yield* channel.handleControl(reservationReply("ready"));
++        const retry = yield* Fiber.join(retryFiber);
++        assert.deepEqual(retry, { _tag: "reply", run, reply: reservationReply("ready") });
++
++        if (!yieldedOnBudget) break;
++        budgetYields += 1;
++      }
++      assert.isAtLeast(budgetYields, 1);
++      yield* channel.close("test done");
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("a retired generation can never re-add its diagnostics demand", () => {
++    let metricsReadCount = 0;
++    return Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const run = { instanceId: "primary", runId: 1 };
++      const channel = yield* reservationTransport.openRun(run);
++      const demand = (enabled: boolean) =>
++        channel.handleControl({ version: 1, type: "setDiagnosticsDemand", enabled });
++
++      yield* demand(true);
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.isAtLeast(metricsReadCount, 1);
++
++      // The manager drains a run's control output after observing its exit,
++      // so a demand built while the run was open may execute after close.
++      const lateDemand = demand(true);
++      yield* channel.close("backend process exited");
++      yield* lateDemand;
++      yield* demand(true);
++      yield* channel.close("again");
++      yield* Effect.yieldNow;
++      const reads = metricsReadCount;
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.equal(metricsReadCount, reads);
++    }).pipe(
++      Effect.provide(
++        makeQuietPublisherLayer(() => {
++          metricsReadCount += 1;
++        }),
++      ),
++    );
++  });
++
++  it.effect("retiring one generation keeps another open generation's demand", () => {
++    let metricsReadCount = 0;
++    return Effect.gen(function* () {
++      const { reservationTransport } = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const oldRun = { instanceId: "primary", runId: 1 };
++      const newRun = { instanceId: "primary", runId: 2 };
++      const oldChannel = yield* reservationTransport.openRun(oldRun);
++      const newChannel = yield* reservationTransport.openRun(newRun);
++
++      yield* oldChannel.handleControl({ version: 1, type: "setDiagnosticsDemand", enabled: true });
++      yield* newChannel.handleControl({ version: 1, type: "setDiagnosticsDemand", enabled: true });
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.isAtLeast(metricsReadCount, 1);
++
++      // The old run's close and its late control traffic withdraw only its
++      // own demand: the replacement keeps sampling at the demanded cadence.
++      yield* oldChannel.close("backend process exited");
++      yield* oldChannel.handleControl({ version: 1, type: "setDiagnosticsDemand", enabled: false });
++      yield* Effect.yieldNow;
++      const readsAfterOldClose = metricsReadCount;
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.isAbove(metricsReadCount, readsAfterOldClose);
++
++      yield* newChannel.close("test done");
++      yield* Effect.yieldNow;
++      const readsAfterNewClose = metricsReadCount;
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.equal(metricsReadCount, readsAfterNewClose);
++    }).pipe(
++      Effect.provide(
++        makeQuietPublisherLayer(() => {
++          metricsReadCount += 1;
++        }),
++      ),
++    );
++  });
++
++  it.effect("a close interrupted midway still retires the generation completely", () => {
++    let metricsReadCount = 0;
++    return Effect.gen(function* () {
++      const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const { reservationTransport } = publisher;
++      const run = { instanceId: "primary", runId: 1 };
++      const channel = yield* reservationTransport.openRun(run);
++
++      // This generation is the only diagnostics demand, so its retirement is
++      // visible as the sampler dropping back to the undemanded cadence.
++      yield* channel.handleControl({ version: 1, type: "setDiagnosticsDemand", enabled: true });
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.isAtLeast(metricsReadCount, 1);
++
++      // Waking a waiter runs its continuation synchronously, inside the
++      // closing fiber's own step. The first waiter uses that to interrupt
++      // the close while the second waiter is still unsettled: exactly the
++      // point where a partially interruptible close would strand it.
++      let closeFiber: Fiber.Fiber<void> | undefined;
++      const first = yield* reservationTransport
++        .exchange(run, reservationCommand("reserve", "attempt-1"))
++        .pipe(
++          Effect.tap(() => Effect.sync(() => closeFiber?.interruptUnsafe())),
++          Effect.forkChild,
++        );
++      const second = yield* reservationTransport
++        .exchange(run, reservationCommand("reserve", "attempt-2"))
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isUndefined(first.pollUnsafe());
++      assert.isUndefined(second.pollUnsafe());
++
++      closeFiber = yield* channel.close("interrupted mid-close").pipe(Effect.forkChild);
++      const closeExit = yield* Fiber.await(closeFiber);
++      // The interrupt was really delivered to the closing fiber...
++      assert.isTrue(Exit.isFailure(closeExit) && Cause.hasInterruptsOnly(closeExit.cause));
++      // ...and yet both waiters were settled before it could take effect.
++      const firstExchange = yield* Fiber.join(first);
++      assert.equal(firstExchange._tag, "unanswered");
++      const secondExit = second.pollUnsafe();
++      assert.isDefined(secondExit);
++      assert.isTrue(Exit.isSuccess(secondExit) && secondExit.value._tag === "unanswered");
++
++      // The generation is gone from the registry, its diagnostics demand is
++      // withdrawn, and a repeated close or late reply changes nothing.
++      const afterClose = yield* reservationTransport.exchange(run, reservationCommand("reserve"));
++      assert.equal(afterClose._tag, "unanswered");
++      if (afterClose._tag !== "unanswered") return;
++      assert.include(afterClose.reason, "not open");
++      yield* channel.close("again");
++      yield* channel.handleControl(reservationReply("ready", "attempt-2"));
++      yield* Effect.yieldNow;
++      const reads = metricsReadCount;
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.equal(metricsReadCount, reads);
++    }).pipe(
++      Effect.provide(
++        makeQuietPublisherLayer(() => {
++          metricsReadCount += 1;
++        }),
++      ),
++    );
++  });
+ });
+diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
+index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1445fe906 100644
+--- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
++++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
+@@ -1,16 +1,20 @@
+ import {
+   DesktopHostTelemetryMessage,
++  type DesktopHostTelemetryMessage as DesktopHostTelemetryMessageValue,
+   type DesktopHostTelemetrySnapshot,
+   type DesktopTelemetryControlMessage,
+   type DesktopTelemetryCancelDesktopUpdate,
+   type DesktopTelemetryCommitDesktopUpdate,
+   type DesktopTelemetryRequestDesktopUpdate,
++  type DesktopUpdateReservationCommand,
++  type DesktopUpdateReservationReply,
+   type DesktopUpdateStatusReport,
+   type HostPowerSnapshot,
+ } from "@t3tools/contracts";
+ import * as Cause from "effect/Cause";
+ import * as Context from "effect/Context";
+ import * as DateTime from "effect/DateTime";
++import * as Deferred from "effect/Deferred";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+@@ -23,6 +27,10 @@ import * as Stream from "effect/Stream";
+
+ import * as ElectronApp from "../electron/ElectronApp.ts";
+ import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
++import type {
++  DesktopUpdateReservationExchange,
++  OwnedBackendRun,
++} from "../updates/desktopUpdateReservation.ts";
+
+ const LIVE_SAMPLE_INTERVAL = Duration.seconds(1);
+ const BATTERY_SAMPLE_INTERVAL = Duration.seconds(5);
+@@ -30,6 +38,9 @@ const CONSTRAINED_SAMPLE_INTERVAL = Duration.seconds(15);
+ const DEFAULT_HOST_POWER_ACTIVE_INTERVAL = Duration.seconds(30);
+ const DEFAULT_HOST_POWER_IDLE_INTERVAL = Duration.minutes(2);
+ const IDLE_THRESHOLD_SECONDS = 60;
++// A reservation exchange that hears nothing from its run for this long is
++// reported as unanswered; the transaction treats silence as a refusal.
++const RESERVATION_REPLY_TIMEOUT = Duration.seconds(30);
+ const encodeMessage = Schema.encodeSync(Schema.fromJsonString(DesktopHostTelemetryMessage));
+ const textEncoder = new TextEncoder();
+
+@@ -57,6 +68,34 @@ interface HostPowerIntervals {
+   readonly idle: Duration.Duration;
+ }
+
++/**
++ * The telemetry endpoints of one backend process generation. `encoded` is
++ * that run's fd input: the hello, the global snapshot/report replay and live
++ * telemetry, plus only the reservation commands addressed to this run.
++ * `handleControl` is that run's fd output callback and the only authority
++ * that may settle this run's reservation exchanges.
++ */
++export interface DesktopTelemetryRunChannel {
++  readonly encoded: Stream.Stream<Uint8Array>;
++  readonly handleControl: (message: DesktopTelemetryControlMessage) => Effect.Effect<void>;
++  /** Idempotent. Settles every pending exchange as unanswered and ignores later replies. */
++  readonly close: (reason: string) => Effect.Effect<void>;
++}
++
++export interface DesktopUpdateReservationTransport {
++  /** Register one exact generation. The manager opens it before the child spawns. */
++  readonly openRun: (run: OwnedBackendRun) => Effect.Effect<DesktopTelemetryRunChannel>;
++  /**
++   * Write one command to exactly that run and await the correlated reply from
++   * that run's own callback. Never broadcasts; a missing, closed or silent run
++   * is `unanswered`.
++   */
++  readonly exchange: (
++    run: OwnedBackendRun,
++    command: DesktopUpdateReservationCommand,
++  ) => Effect.Effect<DesktopUpdateReservationExchange>;
++}
++
+ export class DesktopTelemetryPublisher extends Context.Service<
+   DesktopTelemetryPublisher,
+   {
+@@ -77,9 +116,31 @@ export class DesktopTelemetryPublisher extends Context.Service<
+     readonly updateRequests: Stream.Stream<DesktopTelemetryRequestDesktopUpdate>;
+     readonly updateCommits: Stream.Stream<DesktopTelemetryCommitDesktopUpdate>;
+     readonly updateCancellations: Stream.Stream<DesktopTelemetryCancelDesktopUpdate>;
++    readonly reservationTransport: DesktopUpdateReservationTransport;
+   }
+ >()("@t3tools/desktop/telemetry/DesktopTelemetryPublisher") {}
+
++interface ReservationRunEntry {
++  readonly run: OwnedBackendRun;
++  /** Diagnostics-demand source key for this exact generation. */
++  readonly sourceId: string;
++  readonly commands: Queue.Queue<DesktopUpdateReservationCommand, Cause.Done>;
++  /** At most one in-flight exchange per attempt id. */
++  readonly pending: Map<string, Deferred.Deferred<DesktopUpdateReservationExchange>>;
++  closed: boolean;
++}
++
++const unanswered = (reason: string): DesktopUpdateReservationExchange => ({
++  _tag: "unanswered",
++  reason,
++});
++
++const describeRun = (run: OwnedBackendRun) => `${run.instanceId} run ${run.runId}`;
++
++// The run id is numeric, so the fixed separator after it keeps the key
++// unambiguous whatever characters the instance id contains.
++const runSourceId = (run: OwnedBackendRun) => `run:${run.runId}:${run.instanceId}`;
++
+ function booleanState(value: boolean): HostPowerSnapshot["onBattery"] {
+   return value ? "true" : "false";
+ }
+@@ -314,28 +375,39 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+     }
+   }).pipe(Effect.forkScoped);
+
++  // `retired` is consulted inside the same synchronous step that mutates the
++  // set, so a source that was retired between constructing this effect and
++  // running it can neither re-add itself nor race the retirement's removal.
++  const setDiagnosticsDemand = (
++    sourceId: string,
++    enabled: boolean,
++    retired: () => boolean = () => false,
++  ): Effect.Effect<void> =>
++    Ref.modify(diagnosticsDemandSources, (sources) => {
++      const previous = sources.size > 0;
++      if (retired()) return [[previous, previous] as const, sources] as const;
++      const next = new Set(sources);
++      if (enabled) {
++        next.add(sourceId);
++      } else {
++        next.delete(sourceId);
++      }
++      return [[previous, next.size > 0] as const, next] as const;
++    }).pipe(
++      Effect.flatMap(([previous, enabled]) =>
++        previous === enabled
++          ? Effect.void
++          : Queue.offer(sampleTriggers, undefined).pipe(Effect.asVoid),
++      ),
++    );
++
+   const handleControlForSource: DesktopTelemetryPublisher["Service"]["handleControlForSource"] = (
+     sourceId,
+     message,
+   ) => {
+     switch (message.type) {
+       case "setDiagnosticsDemand":
+-        return Ref.modify(diagnosticsDemandSources, (sources) => {
+-          const previous = sources.size > 0;
+-          const next = new Set(sources);
+-          if (message.enabled) {
+-            next.add(sourceId);
+-          } else {
+-            next.delete(sourceId);
+-          }
+-          return [[previous, next.size > 0] as const, next] as const;
+-        }).pipe(
+-          Effect.flatMap(([previous, enabled]) =>
+-            previous === enabled
+-              ? Effect.void
+-              : Queue.offer(sampleTriggers, undefined).pipe(Effect.asVoid),
+-          ),
+-        );
++        return setDiagnosticsDemand(sourceId, message.enabled);
+       case "setHostPowerIntervals":
+         return Ref.set(hostPowerIntervals, {
+           active: Duration.millis(message.activeIntervalMs),
+@@ -347,6 +419,10 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+         return Queue.offer(updateCommitQueue, message).pipe(Effect.asVoid);
+       case "cancelDesktopUpdate":
+         return Queue.offer(updateCancellationQueue, message).pipe(Effect.asVoid);
++      case "desktopUpdateReservationReply":
++        // Only a run channel can correlate a reply with the generation that
++        // sent it. A reply on a string-keyed source has no trusted run.
++        return Effect.void;
+     }
+   };
+   const removeControlSource: DesktopTelemetryPublisher["Service"]["removeControlSource"] = (
+@@ -393,14 +469,22 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+       );
+     }),
+   );
+-  const encoded = Stream.concat(
+-    Stream.make({
+-      version: 1,
+-      type: "desktopTelemetryHello",
+-      electronPid: process.pid,
+-    } as const),
+-    Stream.merge(snapshots, updateReports),
+-  ).pipe(Stream.map((message) => textEncoder.encode(`${encodeMessage(message)}\n`)));
++  // Every attached backend sees the same body: the current snapshot and
++  // update report replayed first, then live changes. A run channel merges its
++  // own addressed commands into this; the global stream never carries one.
++  const globalBody = Stream.merge(snapshots, updateReports);
++  const encodeWithHello = (
++    body: Stream.Stream<DesktopHostTelemetryMessageValue>,
++  ): Stream.Stream<Uint8Array> =>
++    Stream.concat(
++      Stream.make({
++        version: 1,
++        type: "desktopTelemetryHello",
++        electronPid: process.pid,
++      } as const),
++      body,
++    ).pipe(Stream.map((message) => textEncoder.encode(`${encodeMessage(message)}\n`)));
++  const encoded = encodeWithHello(globalBody);
+
+   const publishUpdateReport: DesktopTelemetryPublisher["Service"]["publishUpdateReport"] = (
+     report,
+@@ -410,6 +494,174 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+       Effect.asVoid,
+     );
+
++  // Exact generations keyed by instance id, then run id. Every registry and
++  // pending-map mutation happens inside one synchronous step, so a close and
++  // an exchange can never interleave halfway.
++  const reservationRuns = new Map<string, Map<number, ReservationRunEntry>>();
++  const lookupRun = (run: OwnedBackendRun): ReservationRunEntry | undefined =>
++    reservationRuns.get(run.instanceId)?.get(run.runId);
++
++  // Retires one exact generation in a single synchronous step, so no
++  // interruption or interleaved exchange can observe it half-closed. The
++  // entry is marked closed and unregistered before anything else happens: a
++  // reply or exchange from here on finds it closed, and a replacement
++  // generation of the same instance is untouched because only this exact
++  // entry is removed. The queue ends before the waiters wake, so a waiter's
++  // continuation (which runs synchronously) cannot enqueue against it.
++  // Returns false when the entry was already retired.
++  const retireRun = (entry: ReservationRunEntry, reason: string): boolean => {
++    if (entry.closed) return false;
++    entry.closed = true;
++    const generations = reservationRuns.get(entry.run.instanceId);
++    if (generations?.get(entry.run.runId) === entry) {
++      generations.delete(entry.run.runId);
++      if (generations.size === 0) reservationRuns.delete(entry.run.instanceId);
++    }
++    Queue.endUnsafe(entry.commands);
++    const waiters = [...entry.pending.values()];
++    entry.pending.clear();
++    const result = Effect.succeed(unanswered(`${describeRun(entry.run)} closed: ${reason}`));
++    for (const waiter of waiters) Deferred.doneUnsafe(waiter, result);
++    return true;
++  };
++
++  // Uninterruptible so the diagnostics-demand removal that follows the
++  // synchronous retirement cannot be skipped: a caller interrupted while
++  // closing must still leave the generation fully retired.
++  const closeRun = (entry: ReservationRunEntry, reason: string): Effect.Effect<void> =>
++    Effect.uninterruptible(
++      Effect.suspend(() =>
++        retireRun(entry, reason) ? removeControlSource(entry.sourceId) : Effect.void,
++      ),
++    );
++
++  const settleReply = (
++    entry: ReservationRunEntry,
++    message: DesktopUpdateReservationReply,
++  ): Effect.Effect<void> =>
++    Effect.suspend(() => {
++      const waiter = entry.closed ? undefined : entry.pending.get(message.attemptId);
++      if (waiter === undefined) return Effect.void;
++      // The run identity comes from the registered generation, never from
++      // the wire; only the schema's own fields are carried across.
++      const reply: DesktopUpdateReservationReply = {
++        version: message.version,
++        type: message.type,
++        attemptId: message.attemptId,
++        status: message.status,
++        ...(message.reason === undefined ? {} : { reason: message.reason }),
++      };
++      return Deferred.succeed(waiter, { _tag: "reply", run: entry.run, reply }).pipe(Effect.asVoid);
++    });
++
++  // Uninterruptible: once the caller can see the channel, the registry holds
++  // exactly that entry and any generation it displaced is fully retired, even
++  // if the opener is interrupted on the way out.
++  const openRun: DesktopUpdateReservationTransport["openRun"] = (run) =>
++    Effect.uninterruptible(
++      Effect.gen(function* () {
++        const commands = yield* Queue.unbounded<DesktopUpdateReservationCommand, Cause.Done>();
++        const entry: ReservationRunEntry = {
++          run: { instanceId: run.instanceId, runId: run.runId },
++          sourceId: runSourceId(run),
++          commands,
++          pending: new Map(),
++          closed: false,
++        };
++        // Registration and the displaced entry's retirement are one
++        // synchronous step. The manager allocates run ids monotonically, so
++        // a displaced entry only means a caller re-opened the same
++        // generation; the earlier channel loses.
++        const displaced = yield* Effect.sync(() => {
++          const generations =
++            reservationRuns.get(run.instanceId) ?? new Map<number, ReservationRunEntry>();
++          const previous = generations.get(run.runId);
++          generations.set(run.runId, entry);
++          reservationRuns.set(run.instanceId, generations);
++          if (previous !== undefined) retireRun(previous, "generation re-opened");
++          return previous;
++        });
++        if (displaced !== undefined) {
++          yield* removeControlSource(displaced.sourceId);
++        }
++        return {
++          encoded: encodeWithHello(Stream.merge(globalBody, Stream.fromQueue(commands))),
++          handleControl: (message) => {
++            switch (message.type) {
++              case "desktopUpdateReservationReply":
++                return settleReply(entry, message);
++              case "setDiagnosticsDemand":
++                // Retirement is final: the manager drains a run's control
++                // output after its exit, and a demand from that drain (or
++                // one built while open and run after close) must not
++                // resurrect a source that close already withdrew.
++                return setDiagnosticsDemand(entry.sourceId, message.enabled, () => entry.closed);
++              default:
++                return handleControlForSource(entry.sourceId, message);
++            }
++          },
++          close: (reason) => closeRun(entry, reason),
++        } satisfies DesktopTelemetryRunChannel;
++      }),
++    );
++
++  // Masked from the waiter's installation until the finalizer that removes
++  // it is on the stack: the scheduler may yield between any two primitives,
++  // and an interrupt delivered in that gap would otherwise end the exchange
++  // with its waiter orphaned in the map and the command already queued. Only
++  // the bounded await is interruptible, and an interrupt that arrived during
++  // the mask takes effect there, after the finalizer owns the waiter.
++  const exchange: DesktopUpdateReservationTransport["exchange"] = (run, command) =>
++    Effect.uninterruptibleMask((restore) =>
++      Effect.gen(function* () {
++        const waiter = yield* Deferred.make<DesktopUpdateReservationExchange>();
++        // Lookup, waiter installation and delivery are one synchronous step:
++        // a close cannot slip between them, and a duplicate attempt is
++        // refused rather than sharing or overwriting the earlier waiter.
++        const installed = yield* Effect.sync(
++          (): ReservationRunEntry | DesktopUpdateReservationExchange => {
++            const entry = lookupRun(run);
++            if (entry === undefined || entry.closed) {
++              return unanswered(`${describeRun(run)} is not open`);
++            }
++            if (entry.pending.has(command.attemptId)) {
++              return unanswered(
++                `${describeRun(run)} already has a pending exchange for attempt ${command.attemptId}`,
++              );
++            }
++            entry.pending.set(command.attemptId, waiter);
++            if (!Queue.offerUnsafe(entry.commands, command)) {
++              entry.pending.delete(command.attemptId);
++              return unanswered(`${describeRun(run)} did not accept the command`);
++            }
++            return entry;
++          },
++        );
++        if (!("pending" in installed)) return installed;
++        const entry = installed;
++        // Every exit removes exactly the waiter this exchange installed, so
++        // a late finalizer can never erase a later exchange for the same
++        // attempt.
++        const release = Effect.sync(() => {
++          if (entry.pending.get(command.attemptId) === waiter) {
++            entry.pending.delete(command.attemptId);
++          }
++        });
++        return yield* restore(
++          Deferred.await(waiter).pipe(
++            Effect.timeoutOption(RESERVATION_REPLY_TIMEOUT),
++            Effect.map(
++              Option.getOrElse(() =>
++                unanswered(
++                  `${describeRun(run)} did not reply within ${Duration.toSeconds(RESERVATION_REPLY_TIMEOUT)} seconds`,
++                ),
++              ),
++            ),
++          ),
++        ).pipe(Effect.ensuring(release));
++      }),
++    );
++
+   return DesktopTelemetryPublisher.of({
+     latest: Ref.get(latest),
+     changes: Stream.fromPubSub(changes),
+@@ -421,6 +673,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+     updateRequests: Stream.fromQueue(updateRequestQueue),
+     updateCommits: Stream.fromQueue(updateCommitQueue),
+     updateCancellations: Stream.fromQueue(updateCancellationQueue),
++    reservationTransport: { openRun, exchange },
+   });
+ });
+
+diff --git a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
+index 0f4cb970da2c1a0fe0f29df786ea7f75431e65d5..62b27d43971fa195e9ec16aa7099a4f4208d469b 100644
+--- a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
++++ b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
+@@ -67,6 +67,20 @@ function runRemoteUpdatesTest(
+         updateRequests: Stream.fromQueue(requests),
+         updateCommits: Stream.fromQueue(commits),
+         updateCancellations: Stream.fromQueue(cancellations),
++        // The remote flow never spawns a run, so no exchange can be answered.
++        reservationTransport: {
++          openRun: () =>
++            Effect.succeed({
++              encoded: Stream.empty,
++              handleControl: () => Effect.void,
++              close: () => Effect.void,
++            }),
++          exchange: () =>
++            Effect.succeed({
++              _tag: "unanswered",
++              reason: "reservation transport unused by fixture",
++            }),
++        },
+       });
+
+       const updates = yield* DesktopUpdates.DesktopUpdates;
+diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
+index 26f2112fe6c4085a9103f687a70b6f0f0660cb59..3cc7302c23a35100a66229bbcd4c2f4728b40e81 100644
+--- a/packages/contracts/src/resourceTelemetry.test.ts
++++ b/packages/contracts/src/resourceTelemetry.test.ts
+@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
+
+ import {
+   DesktopHostTelemetryMessage,
++  DesktopTelemetryControlMessage,
+   DesktopUpdateReservationCommand,
+   DesktopUpdateReservationReply,
+   DesktopUpdateStatusReport,
+@@ -28,6 +29,8 @@ const updateState = {
+ };
+
+ const decodeHostMessage = Schema.decodeUnknownSync(DesktopHostTelemetryMessage);
++const decodeControlMessage = Schema.decodeUnknownSync(DesktopTelemetryControlMessage);
++const encodeControlMessage = Schema.encodeSync(DesktopTelemetryControlMessage);
+
+ describe("DesktopUpdateStatusReport", () => {
+   const decode = Schema.decodeUnknownSync(DesktopUpdateStatusReport);
+@@ -172,6 +175,31 @@ describe("DesktopUpdateReservationCommand", () => {
+       }),
+     ).toThrow();
+   });
++
++  it("travels desktop -> server on the host telemetry input", () => {
++    const encode = Schema.encodeSync(DesktopHostTelemetryMessage);
++    for (const action of ["reserve", "abort", "commit"] as const) {
++      const command = {
++        version: 1,
++        type: "desktopUpdateReservation",
++        attemptId: "attempt-7",
++        targetVersion: "1.2.4",
++        action,
++      } as const;
++      const decoded = decodeHostMessage(encode(command));
++      expect(decoded).toEqual(command);
++    }
++    // The command is not a control message: the server never sends one back.
++    expect(() =>
++      decodeControlMessage({
++        version: 1,
++        type: "desktopUpdateReservation",
++        attemptId: "attempt-7",
++        targetVersion: "1.2.4",
++        action: "reserve",
++      }),
++    ).toThrow();
++  });
+ });
+
+ describe("DesktopUpdateReservationReply", () => {
+@@ -213,4 +241,40 @@ describe("DesktopUpdateReservationReply", () => {
+     expect(reply).not.toHaveProperty("instanceId");
+     expect(reply).not.toHaveProperty("runId");
+   });
++
++  it("travels server -> desktop on the control output", () => {
++    for (const status of ["ready", "busy", "unknown", "aborted", "committed"] as const) {
++      const reply = {
++        version: 1,
++        type: "desktopUpdateReservationReply",
++        attemptId: "attempt-7",
++        status,
++        reason: "because",
++      } as const;
++      expect(decodeControlMessage(encodeControlMessage(reply))).toEqual(reply);
++    }
++    // The reply is not a host message: the desktop never emits one.
++    expect(() =>
++      decodeHostMessage({
++        version: 1,
++        type: "desktopUpdateReservationReply",
++        attemptId: "attempt-7",
++        status: "ready",
++      }),
++    ).toThrow();
++  });
++
++  it("drops a forged run identity when decoded through the control union", () => {
++    const decoded = decodeControlMessage({
++      version: 1,
++      type: "desktopUpdateReservationReply",
++      attemptId: "attempt-7",
++      status: "ready",
++      instanceId: "primary",
++      runId: 3,
++    });
++    expect(decoded.type).toBe("desktopUpdateReservationReply");
++    expect(decoded).not.toHaveProperty("instanceId");
++    expect(decoded).not.toHaveProperty("runId");
++  });
+ });
+diff --git a/packages/contracts/src/resourceTelemetry.ts b/packages/contracts/src/resourceTelemetry.ts
+index 6930641415a8c740f2303f114a553da922855687..f6a3c5567ae764dfe4aaeb43931cce5991817158 100644
+--- a/packages/contracts/src/resourceTelemetry.ts
++++ b/packages/contracts/src/resourceTelemetry.ts
+@@ -371,10 +371,16 @@ export const DesktopUpdateReservationReply = Schema.Struct({
+ });
+ export type DesktopUpdateReservationReply = typeof DesktopUpdateReservationReply.Type;
+
++/**
++ * Desktop main -> server, on the telemetry input. Hello, snapshots and update
++ * reports reach every attached backend; a reservation command is written to
++ * exactly one run's input and never broadcast.
++ */
+ export const DesktopHostTelemetryMessage = Schema.Union([
+   DesktopHostTelemetryHello,
+   DesktopHostTelemetrySnapshot,
+   DesktopUpdateStatusReport,
++  DesktopUpdateReservationCommand,
+ ]);
+ export type DesktopHostTelemetryMessage = typeof DesktopHostTelemetryMessage.Type;
+
+@@ -426,6 +432,7 @@ export const DesktopTelemetryControlMessage = Schema.Union([
+   DesktopTelemetryRequestDesktopUpdate,
+   DesktopTelemetryCommitDesktopUpdate,
+   DesktopTelemetryCancelDesktopUpdate,
++  DesktopUpdateReservationReply,
+ ]);
+ export type DesktopTelemetryControlMessage = typeof DesktopTelemetryControlMessage.Type;
+
