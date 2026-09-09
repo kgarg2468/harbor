@@ -167,6 +167,18 @@ export function requireHarborEndpoint(endpoint) {
 
 // The default runner: argv only, no shell; optional stdin text; raw
 // (Buffer) or text stdout. Rejections carry `stderr` and `code`.
+//
+// Lifecycle. The input is written and stdin closed as soon as the child is
+// spawned, so a child that exits, or closes its stdin without reading it,
+// before that completes makes this side's stdin socket fail (EPIPE, or a
+// destroyed stream). That failure is only a symptom of the child's own
+// outcome: it is recorded, never left as an unhandled stream error, and the
+// child's `close` stays authoritative. A nonzero exit is reported as the
+// child's failure; a zero exit is trusted when no input was owed or the
+// input was delivered, and is otherwise rejected, because a request body
+// that never reached the child is not a success. A spawn failure rejects
+// at once. Every path settles exactly once, and no rejection ever carries
+// the input or the child's environment.
 export function defaultRun(command, args, { input = "", raw = false, env = {}, cwd } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -174,20 +186,45 @@ export function defaultRun(command, args, { input = "", raw = false, env = {}, c
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    const label = `${command} ${args.slice(0, 3).join(" ")}`;
     const out = [];
     let stderr = "";
-    child.stdout.on("data", (chunk) => out.push(chunk));
-    child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      const stdout = raw ? Buffer.concat(out) : Buffer.concat(out).toString("utf8");
-      if (code === 0) return resolve({ stdout, stderr });
-      const error = new Error(`${command} ${args.slice(0, 3).join(" ")} exited ${code}`);
+    let stdinError = null;
+    let settled = false;
+    const settle = (outcome) => {
+      if (settled) return;
+      settled = true;
+      outcome();
+    };
+    const failure = (message, code) => {
+      const error = new Error(message);
       error.code = code;
       error.stderr = stderr;
-      reject(error);
-    });
-    child.stdin.end(input);
+      return error;
+    };
+    const recordStdinError = (error) => {
+      if (stdinError === null) stdinError = error;
+    };
+    child.stdout.on("data", (chunk) => out.push(chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.stdin.on("error", recordStdinError);
+    child.on("error", (error) => settle(() => reject(error)));
+    child.on("close", (code) =>
+      settle(() => {
+        if (code !== 0) return reject(failure(`${label} exited ${code}`, code));
+        if (stdinError !== null && input.length > 0) {
+          const reason = typeof stdinError.code === "string" ? stdinError.code : "stream failure";
+          return reject(failure(`${label} exited 0 but its stdin failed before the request body was delivered (${reason})`, reason));
+        }
+        resolve({ stdout: raw ? Buffer.concat(out) : Buffer.concat(out).toString("utf8"), stderr });
+      }),
+    );
+    try {
+      child.stdin.end(input);
+    } catch (error) {
+      recordStdinError(error);
+      child.stdin.destroy();
+    }
   });
 }
 

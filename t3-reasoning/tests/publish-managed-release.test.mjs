@@ -48,6 +48,7 @@ import {
   assembleBuilds,
   createHarborApi,
   createImmutableSettingsReader,
+  defaultRun,
   findPriorRelease,
   parseArgs,
   publishManagedRelease,
@@ -543,6 +544,78 @@ describe("publish-managed-release", () => {
       await rejects(() => requireImmutableReleasesEnabled(disabled), /immutable releases are not enabled/);
       const invalid = createImmutableSettingsReader({ token, run: async () => ({ stdout: "nope", stderr: "" }) });
       await rejects(() => requireImmutableReleasesEnabled(invalid), /invalid JSON/);
+    });
+  });
+
+  // The real runner against real child processes. Each child is a Node
+  // one-liner standing in for gh. The stdin race is forced, not timed: the
+  // input is far larger than any socket buffer, so the runner's write is
+  // still pending when the child closes its stdin without reading it, and
+  // the kernel fails that write with EPIPE at that moment. Whether the child
+  // is still running or has already exited by then, the runner must report
+  // the child's own result, never crash on the stream error, and never hang.
+  describe("default runner lifecycle", () => {
+    const unread = "x".repeat(8 * 1024 * 1024);
+    const secret = "ghp_RUNNERFIXTURESECRET";
+    const child = (source) => [process.execPath, ["-e", source]];
+    // Closes fd 0 while still running (the EPIPE arrives before exit), then exits.
+    const closeStdinThenExit = (code) => `require("node:fs").closeSync(0); setTimeout(() => { require("node:fs").writeSync(2, "gh: HTTP 403: refused\\n"); process.exit(${code}); }, 50);`;
+    // Exits at once without ever reading (the EPIPE and the exit race in the parent).
+    const exitAtOnce = (code) => `require("node:fs").writeSync(2, "gh: HTTP 403: refused\\n"); process.exit(${code});`;
+
+    function expectChildFailure(error, code) {
+      assert.equal(error.code, code, error.stack);
+      assert.match(error.message, new RegExp(`exited ${code}$`));
+      assert.match(error.stderr, /HTTP 403/);
+      assert.doesNotMatch(error.message + error.stderr, /EPIPE|RUNNERFIXTURESECRET|xxxx/);
+      return true;
+    }
+
+    it("reports the child's nonzero exit, not a stdin EPIPE, when the child closes stdin before or at exit", async () => {
+      for (const source of [closeStdinThenExit(3), exitAtOnce(3)]) {
+        await assert.rejects(() => defaultRun(...child(source), { input: unread, env: { GH_TOKEN: secret } }), (error) => expectChildFailure(error, 3));
+        await assert.rejects(() => defaultRun(...child(source), { env: { GH_TOKEN: secret } }), (error) => expectChildFailure(error, 3));
+      }
+    });
+
+    it("never turns a zero exit into success when the request body was not delivered, without echoing input or environment", async () => {
+      await assert.rejects(
+        () => defaultRun(...child(closeStdinThenExit(0)), { input: unread, env: { GH_TOKEN: secret } }),
+        (error) => {
+          assert.equal(error.code, "EPIPE", error.stack);
+          assert.match(error.message, /exited 0 but its stdin failed/);
+          assert.match(error.stderr, /HTTP 403/);
+          assert.doesNotMatch(error.message + error.stderr, /RUNNERFIXTURESECRET|xxxx/);
+          return true;
+        },
+      );
+    });
+
+    it("trusts a zero exit when no input was owed, and delivers input and collects output otherwise", async () => {
+      // No input to deliver: a child that closes stdin and succeeds is a success.
+      const ignored = await defaultRun(...child(`require("node:fs").closeSync(0); process.stdout.write("{\\"ok\\":true}"); process.exit(0);`));
+      assert.equal(ignored.stdout, "{\"ok\":true}");
+      // Input consumed to EOF and echoed back, as text and as raw bytes.
+      const echo = `process.stdin.pipe(process.stdout); process.stdin.on("end", () => require("node:fs").writeSync(2, "done\\n"));`;
+      const text = await defaultRun(...child(echo), { input: "{\"draft\":false}" });
+      assert.deepEqual(text, { stdout: "{\"draft\":false}", stderr: "done\n" });
+      const bytes = await defaultRun(...child(echo), { input: "raw-bytes", raw: true });
+      assert.ok(Buffer.isBuffer(bytes.stdout) && bytes.stdout.equals(Buffer.from("raw-bytes")));
+      assert.ok(!Buffer.isBuffer(text.stdout));
+    });
+
+    it("rejects once with the spawn error when the command does not exist, even with pending input", async () => {
+      const missing = path.join(root, "no-such-gh");
+      for (const input of ["", "{\"draft\":false}"]) {
+        await assert.rejects(
+          () => defaultRun(missing, ["api", "--method", "GET"], { input, env: { GH_TOKEN: secret } }),
+          (error) => {
+            assert.equal(error.code, "ENOENT", error.stack);
+            assert.doesNotMatch(error.message, /RUNNERFIXTURESECRET|draft/);
+            return true;
+          },
+        );
+      }
     });
   });
 
@@ -1295,6 +1368,9 @@ describe("publish-managed-release", () => {
       assert.notEqual(forbidden.code, 0);
       assert.match(forbidden.stderr, /immutable-releases/);
       assert.match(forbidden.stderr, /HTTP 403/);
+      // The stub exits before reading stdin; that must surface as the
+      // publisher's own refusal, never as a crash on the child's stdin.
+      assert.doesNotMatch(forbidden.stderr, /EPIPE|\n\s+at /, "no stream error or stack trace leaks from the gh child lifecycle");
       assert.ok(!(forbidden.stdout + forbidden.stderr).includes(adminToken), "the admin token is never printed");
       const logged = (await readFile(log, "utf8")).trim().split("\n");
       assert.deepEqual(logged, [`token=${adminToken} admin= args=api --method GET ${IMMUTABLE_SETTINGS_ENDPOINT}`], "one GET on the fixed endpoint, the token only as GH_TOKEN, and nothing after the refusal");
