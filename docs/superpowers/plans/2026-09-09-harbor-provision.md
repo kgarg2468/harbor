@@ -614,8 +614,13 @@ Follow the shape `tailscale_operator_probe.sh` established, and reuse its two ha
 
 ---
 
+## Decisions taken, 2026-09-09
+
+Both were put to the owner before any task was implemented, and both were settled the way this plan proposed. They are recorded here rather than left as questions, because 22 tasks are built on them.
+
+1. **`access_mode=tailnet` is refused with exit 3**, not accepted and reported unprovisioned. `harbor pair` ships in PR 5, and a config that says `tailnet` on a node whose access is unconfigured would read as provisioned to PR 7's `harbor status`. A loud refusal beats a silent wrong state. Task 16 holds this.
+2. **The npm prefix is `~/.local/harbor/npm`**, segregated from any prefix the operator already uses, rather than the conventional `~/.local`. Spec section 6.1 says Harbor never mutates what it did not create, and a shared prefix cannot guarantee that: a Harbor install could overwrite a package the operator installed themselves. The cost is that the prefix is not on a default `PATH`, so every Harbor invocation of these CLIs names the path explicitly rather than relying on resolution — which Tasks 5, 6, and 9 already do, since they take the home root as a parameter and never read `$HOME`.
+
 ## Open questions for the owner
 
-1. **`tailnet` refused rather than deferred.** PR 4 exits 3 on `access_mode=tailnet` because `harbor pair` is PR 5. The alternative is to accept the value, write it to the config, and report it unprovisioned. This plan chose the refusal: a node whose config says `tailnet` and whose access is unconfigured looks provisioned to `harbor status` in PR 7. Say if you would rather it be accepted-and-reported.
-2. **The npm prefix location.** `~/.local/harbor/npm` keeps Harbor's installs out of any prefix the operator may already use, at the cost of not being on a default `PATH`. The alternative is the conventional `~/.local`, which risks colliding with the operator's own npm globals — and spec section 6.1 says Harbor never mutates what it did not create. Confirm the segregated prefix.
-3. **Task 2's pinned values are a review point in their own right**, as PR 3's Task 1 was: they set the agent and T3 versions the node will run.
+1. **Task 2's pinned values are a review point in their own right**, as PR 3's Task 1 was: they set the agent and T3 versions the node will run. The commands that produce them are in Task 2 and their verbatim output goes in the handoff, so the review is against measured values, not asserted ones.
