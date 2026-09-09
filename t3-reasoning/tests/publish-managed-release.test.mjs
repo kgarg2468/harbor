@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1473,6 +1473,24 @@ function stepWithId(jobBlock, id) {
   return block;
 }
 
+// The dedented body of a step's `run: |` literal block scalar.
+function runScript(stepBlock) {
+  const runIndex = stepBlock.findIndex((line) => /^\s+run: \|$/.test(line));
+  assert.notEqual(runIndex, -1, "the step has a run: | block");
+  const base = indentOf(stepBlock[runIndex]);
+  const body = [];
+  for (const line of stepBlock.slice(runIndex + 1)) {
+    if (line.trim() === "") {
+      body.push("");
+      continue;
+    }
+    if (indentOf(line) <= base) break;
+    body.push(line);
+  }
+  const indent = Math.min(...body.filter((line) => line !== "").map(indentOf));
+  return `${body.map((line) => line.slice(indent)).join("\n")}\n`;
+}
+
 describe("t3-managed-release workflow", () => {
   let raw;
   let text;
@@ -1630,6 +1648,196 @@ describe("t3-managed-release workflow", () => {
     const uploadPaths = upload.filter((line) => indentOf(line) === 12).map((line) => line.trim());
     assert.deepEqual(uploadPaths, ["${{ runner.temp }}/built/*.${{ matrix.format }}", "${{ runner.temp }}/built/*.inventory.json"]);
     assert.doesNotMatch(build, /--signed|codesign|notar|CSC_|APPLE_|keychain|security /);
+  });
+
+  it("runs the shared smoke on both native server rows after the build and before upload, isolated and fail-closed", () => {
+    const build = jobs.build;
+    const buildIndex = build.findIndex((line) => /- name: Build the artifact with the existing builder$/.test(line));
+    const smokeIndex = build.findIndex((line) => /^\s+id: shared-smoke$/.test(line));
+    const uploadIndex = build.findIndex((line) => /uses: actions\/upload-artifact@/.test(line));
+    assert.ok(buildIndex !== -1 && smokeIndex !== -1 && uploadIndex !== -1);
+    assert.ok(buildIndex < smokeIndex && smokeIndex < uploadIndex, "the smoke gate sits between the builder and the upload");
+    const step = stepWithId(build, "shared-smoke");
+    const fields = mapping(step, 8);
+    assert.equal(fields.if, "matrix.builder == 'server'");
+    assert.equal(fields["timeout-minutes"], "10");
+    assert.equal(fields["continue-on-error"], undefined);
+    assert.ok(!step.some((line) => /always\(\)|continue-on-error|\|\| true|exit 0|set \+e|retry/.test(line)), "nothing lets the smoke be skipped or ignored");
+    // The fixed matrix restricts `builder: server` to exactly the two native server rows.
+    const rows = listOfMappings(blockAfter(blockAfter(build, /^    strategy:$/).block, /^        include:$/).block);
+    assert.deepEqual(rows.filter((row) => row.builder === "server").map((row) => row.id), ["managed-server-darwin-arm64", "managed-server-linux-x64"]);
+    assert.deepEqual(rows.filter((row) => row.builder === "server").map((row) => row["runs-on"]), ["macos-15", "ubuntu-24.04"]);
+    const env = mapping(blockAfter(step, /^        env:$/).block, 10);
+    assert.deepEqual(env, { RELEASE_VERSION: "${{ needs.resolve.outputs.release_version }}" }, "only the resolved version is added to the row's environment");
+    const script = runScript(step);
+    assert.match(script, /^set -euo pipefail$/m);
+    assert.match(script, /archive="\$\{RUNNER_TEMP\}\/built\/\$\{ARTIFACT_ID\}-\$\{RELEASE_VERSION\}\.tar\.gz"/);
+    assert.match(script, /\[ -L "\$\{archive\}" \] \|\| \[ ! -f "\$\{archive\}" \]/, "the archive must be a regular, non-symlink file");
+    assert.match(script, /mktemp -d "\$\{RUNNER_TEMP\}\/shared-smoke\.X+"/);
+    assert.match(script, /trap 'rm -rf "\$\{smoke_root\}"' EXIT/, "only the smoke root is cleaned up");
+    assert.match(script, /mkdir "\$\{smoke_root\}\/runtime" "\$\{smoke_root\}\/home" "\$\{smoke_root\}\/tmp"/);
+    assert.match(script, /tar -x -z -f "\$\{archive\}" -C "\$\{smoke_root\}\/runtime"/);
+    assert.match(script, /server_bin="\$\{smoke_root\}\/runtime\/node_modules\/t3\/dist\/bin\.mjs"/);
+    assert.match(script, /\[ -L "\$\{server_bin\}" \] \|\| \[ ! -f "\$\{server_bin\}" \]/, "the entry must be a regular, non-symlink file");
+    assert.match(script, /cd "\$\{smoke_root\}"/);
+    assert.match(script, /env -i \\\n\s+PATH="\$\{PATH\}" \\\n\s+HOME="\$\{smoke_root\}\/home" \\\n\s+TMPDIR="\$\{smoke_root\}\/tmp" \\\n\s+T3CODE_SKIP_LOGIN_SHELL=1 \\\n\s+"\$\{node_bin\}" "\$\{GITHUB_WORKSPACE\}\/t3-reasoning\/scripts\/smoke-shared\.mjs" \\\n\s+--server-bin "\$\{server_bin\}"/);
+    assert.equal((script.match(/smoke-shared\.mjs/g) ?? []).length, 1);
+    assert.doesNotMatch(script, /GH_TOKEN|GITHUB_TOKEN|ADMIN_READ|public-config|T3CODE_RELAY|T3CODE_CLERK|secrets\./);
+    assert.equal((build.join("\n").match(/smoke-shared\.mjs/g) ?? []).length, 1, "the smoke runs once per row, in the build job only");
+    assert.doesNotMatch(jobs.publish.join("\n"), /smoke-shared|tar -x|node_modules/, "the publish job never opens or executes an archive");
+  });
+
+  // The step's shell is executed for real against a fake archive and a fake
+  // helper standing in for smoke-shared.mjs. The helper records its argv,
+  // environment, and working directory beside itself, because the step must
+  // hand it nothing else.
+  describe("shared smoke step shell", () => {
+    const releaseVersion = `${UPSTREAM_VERSION}.managed.7.p${"d".repeat(12)}`;
+    const artifactId = "managed-server-linux-x64";
+    const binContent = "// fixture server entry\n";
+    let fixtureRoot;
+    let script;
+    before(async () => {
+      fixtureRoot = await realpath(await mkdtemp(path.join(tmpdir(), "t3-smoke-step-")));
+      script = runScript(stepWithId(jobs.build, "shared-smoke"));
+    });
+    after(() => rm(fixtureRoot, { recursive: true, force: true }));
+
+    // One fresh RUNNER_TEMP and GITHUB_WORKSPACE per case; the fake helper
+    // exits with the code written next to it.
+    async function scenario(name, { exitCode = 0, archive = "regular", bin = "regular" } = {}) {
+      const dir = path.join(fixtureRoot, name);
+      const runnerTemp = path.join(dir, "runner-temp");
+      const workspace = path.join(dir, "workspace");
+      const scripts = path.join(workspace, "t3-reasoning", "scripts");
+      const built = path.join(runnerTemp, "built");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(built, { recursive: true });
+      await writeFile(path.join(scripts, "control.json"), JSON.stringify({ exitCode }));
+      await writeFile(
+        path.join(scripts, "smoke-shared.mjs"),
+        [
+          'import { lstatSync, readFileSync, writeFileSync } from "node:fs";',
+          'import path from "node:path";',
+          'import { fileURLToPath } from "node:url";',
+          "const here = path.dirname(fileURLToPath(import.meta.url));",
+          'const control = JSON.parse(readFileSync(path.join(here, "control.json"), "utf8"));',
+          "const argv = process.argv.slice(2);",
+          'const serverBin = argv[argv.indexOf("--server-bin") + 1];',
+          "let entry = null;",
+          "try {",
+          "  const stat = lstatSync(serverBin);",
+          '  entry = { isFile: stat.isFile(), isSymbolicLink: stat.isSymbolicLink(), content: readFileSync(serverBin, "utf8") };',
+          "} catch (error) {",
+          "  entry = { error: error.code };",
+          "}",
+          'writeFileSync(path.join(here, "record.json"), JSON.stringify({ argv, env: process.env, cwd: process.cwd(), entry }));',
+          "process.exit(control.exitCode);",
+        ].join("\n"),
+      );
+      const archivePath = path.join(built, `${artifactId}-${releaseVersion}.tar.gz`);
+      if (archive !== "missing") {
+        const staging = path.join(dir, "staging");
+        const distDir = path.join(staging, "node_modules", "t3", "dist");
+        await mkdir(distDir, { recursive: true });
+        if (bin === "symlink") {
+          await writeFile(path.join(distDir, "real.mjs"), binContent);
+          await symlink("real.mjs", path.join(distDir, "bin.mjs"));
+        } else if (bin === "regular") {
+          await writeFile(path.join(distDir, "bin.mjs"), binContent);
+        }
+        if (archive === "corrupt") {
+          await writeFile(archivePath, "not a gzip stream\n".repeat(64));
+        } else {
+          const target = archive === "symlink" ? path.join(dir, "elsewhere.tar.gz") : archivePath;
+          await execFileAsync("tar", ["-c", "-z", "-f", target, "-C", staging, "node_modules"]);
+          if (archive === "symlink") await symlink(target, archivePath);
+        }
+      }
+      const ambientHome = path.join(dir, "ambient-home");
+      await mkdir(ambientHome);
+      const env = {
+        PATH: process.env.PATH,
+        HOME: ambientHome,
+        RUNNER_TEMP: runnerTemp,
+        GITHUB_WORKSPACE: workspace,
+        ARTIFACT_ID: artifactId,
+        RELEASE_VERSION: releaseVersion,
+        GH_TOKEN: "ghp_STEPFIXTURELEAK",
+        T3_MANAGED_RELEASE_ADMIN_READ_TOKEN: "ghp_ADMINFIXTURELEAK",
+        T3CODE_RELAY_URL: "https://relay.leak.invalid",
+        T3CODE_HOME: path.join(dir, "leaked-t3-home"),
+      };
+      const scriptPath = path.join(dir, "step.sh");
+      await writeFile(scriptPath, script);
+      let result;
+      try {
+        const { stdout, stderr } = await execFileAsync("bash", [scriptPath], { env, cwd: dir });
+        result = { code: 0, stdout, stderr };
+      } catch (error) {
+        result = { code: error.code, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+      }
+      let record = null;
+      try {
+        record = JSON.parse(await readFile(path.join(scripts, "record.json"), "utf8"));
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      const leftovers = (await readdir(runnerTemp)).filter((name) => name.startsWith("shared-smoke."));
+      const builtAfter = await readdir(built);
+      return { ...result, record, leftovers, builtAfter, runnerTemp, workspace, ambientHome, env };
+    }
+
+    it("extracts the exact archive into a private root, runs the helper there under a scrubbed environment, and removes the root", async () => {
+      const run = await scenario("success");
+      assert.equal(run.code, 0, run.stderr);
+      assert.ok(run.record !== null, "the helper ran");
+      const root = run.record.cwd;
+      assert.equal(path.dirname(root), run.runnerTemp, "the smoke root is created beneath RUNNER_TEMP");
+      assert.match(path.basename(root), /^shared-smoke\./);
+      assert.deepEqual(run.record.argv, ["--server-bin", path.join(root, "runtime", "node_modules", "t3", "dist", "bin.mjs")]);
+      assert.deepEqual(run.record.entry, { isFile: true, isSymbolicLink: false, content: binContent }, "the helper received the extracted entry");
+      // macOS CoreFoundation injects __CF_USER_TEXT_ENCODING into every process it
+      // did not inherit from; nothing else may be present.
+      const received = Object.keys(run.record.env).filter((key) => !key.startsWith("__CF_")).sort();
+      assert.deepEqual(received, ["HOME", "PATH", "T3CODE_SKIP_LOGIN_SHELL", "TMPDIR"], "nothing beyond the four allowed variables reaches the smoke");
+      assert.equal(run.record.env.PATH, run.env.PATH);
+      assert.equal(run.record.env.HOME, path.join(root, "home"));
+      assert.equal(run.record.env.TMPDIR, path.join(root, "tmp"));
+      assert.equal(run.record.env.T3CODE_SKIP_LOGIN_SHELL, "1");
+      assert.notEqual(run.record.env.HOME, run.ambientHome);
+      const serialized = JSON.stringify(run.record);
+      assert.doesNotMatch(serialized, /STEPFIXTURELEAK|ADMINFIXTURELEAK|relay\.leak|leaked-t3-home|ambient-home/);
+      assert.deepEqual(run.leftovers, [], "the smoke root is removed after success");
+      assert.deepEqual(run.builtAfter, [`${artifactId}-${releaseVersion}.tar.gz`], "the built archive is left untouched");
+      assert.doesNotMatch(run.stdout + run.stderr, /STEPFIXTURELEAK|ADMINFIXTURELEAK/);
+    });
+
+    it("fails the row when the smoke exits nonzero and still removes its root", async () => {
+      const run = await scenario("smoke-fails", { exitCode: 1 });
+      assert.equal(run.code, 1);
+      assert.ok(run.record !== null, "the helper ran");
+      assert.deepEqual(run.leftovers, []);
+      const setup = await scenario("smoke-cannot-start", { exitCode: 2 });
+      assert.equal(setup.code, 2);
+      assert.deepEqual(setup.leftovers, []);
+    });
+
+    it("fails closed before running anything on a missing, symlinked, or corrupt archive or a symlinked entry", async () => {
+      for (const [name, options, pattern] of [
+        ["missing-archive", { archive: "missing" }, /not a regular file/],
+        ["symlinked-archive", { archive: "symlink" }, /not a regular file/],
+        ["corrupt-archive", { archive: "corrupt" }, /tar|gzip|archive/i],
+        ["symlinked-entry", { bin: "symlink" }, /lacks a regular runtime\/node_modules\/t3\/dist\/bin\.mjs/],
+        ["missing-entry", { bin: "missing" }, /lacks a regular runtime\/node_modules\/t3\/dist\/bin\.mjs/],
+      ]) {
+        const run = await scenario(name, options);
+        assert.notEqual(run.code, 0, `${name}: the step must fail`);
+        assert.match(run.stdout + run.stderr, pattern, name);
+        assert.equal(run.record, null, `${name}: the smoke helper never runs`);
+        assert.deepEqual(run.leftovers, [], `${name}: no smoke root is left behind`);
+      }
+    });
   });
 
   it("assembles the six-file closure with the existing manifest writer and publishes once", () => {

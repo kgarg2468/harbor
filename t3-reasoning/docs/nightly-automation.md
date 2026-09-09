@@ -386,8 +386,33 @@ with its exact native target, downloads the shared inputs, requires the
 descriptor's `builderRevision` to equal `github.sha`, prepares a fresh source
 tree with the real preparer for its variant, and runs exactly one existing
 builder into a new destination. Nothing is cached, shared between rows,
-signed, or notarized. Only the row's canonical archive and its one inventory
-JSON are uploaded, under `t3-managed-build-<artifact id>`.
+signed, or notarized.
+
+Both native server artifacts must then start and pass the existing
+two-client shared smoke (`scripts/smoke-shared.mjs`, see
+[shared-smoke.md](shared-smoke.md)) on their own runner before they leave it
+and before anything is published. On each server row the `shared-smoke`
+step, with its own ten-minute timeout, selects exactly
+`built/<artifact id>-<version>.tar.gz`, requires it to be a regular
+non-symlink file, extracts it into a private root beneath the runner's temp
+directory that only this step creates and removes, and requires the
+extracted `runtime/node_modules/t3/dist/bin.mjs` to be a regular non-symlink
+file. It then runs the checked-in smoke from that root under a scrubbed
+environment (`env -i`) holding only the runner `PATH`, an isolated `HOME`
+and `TMPDIR` inside that root, and `T3CODE_SKIP_LOGIN_SHELL=1`: no GitHub
+token, admin-read secret, public config, provider credential, or ambient
+home reaches the built server. The smoke starts the archive's server on its
+own loopback port and private `T3CODE_HOME`, pairs two clients, creates a
+project and thread, renames the thread from the second client, observes the
+rename on the first including across a disconnect and reconnect, starts no
+provider turn, and prints pass/fail counts plus redacted failure details. A
+missing archive or
+entry, an extraction failure, a failed or timed-out smoke, or a cleanup
+setup error fails that row with no retry, fallback, or ignored exit, so its
+archive is never uploaded and the release is never published. The desktop
+rows and the `publish` job never open or execute an archive. Only the row's
+canonical archive and its one inventory JSON are uploaded, under
+`t3-managed-build-<artifact id>`.
 
 The `publish` job (Ubuntu, `contents: write`) repeats the trusted checkout
 and upstream checks, downloads the four rows into separate directories,

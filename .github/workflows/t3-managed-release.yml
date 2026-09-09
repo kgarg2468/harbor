@@ -332,6 +332,47 @@ jobs:
           esac
           ls -l "${RUNNER_TEMP}/built"
 
+      # Both native server archives must start and pass the checked-in
+      # two-client shared smoke on their own runner before they can leave it.
+      # The exact expected archive is opened only inside a private root under
+      # RUNNER_TEMP that this step alone removes, and the smoke runs from that
+      # root under a scrubbed environment: the runner PATH, an isolated HOME
+      # and TMPDIR, and T3CODE_SKIP_LOGIN_SHELL, nothing else. No token,
+      # public config, or ambient HOME reaches the built server. Any missing
+      # archive or entry, extraction failure, smoke failure, or timeout fails
+      # this row, so its archive is never uploaded or published.
+      - name: Start the built server archive and pass the shared smoke
+        id: shared-smoke
+        if: matrix.builder == 'server'
+        timeout-minutes: 10
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/built/${ARTIFACT_ID}-${RELEASE_VERSION}.tar.gz"
+          if [ -L "${archive}" ] || [ ! -f "${archive}" ]; then
+            echo "::error::built archive ${archive} is not a regular file"
+            exit 1
+          fi
+          node_bin="$(command -v node)"
+          smoke_root="$(mktemp -d "${RUNNER_TEMP}/shared-smoke.XXXXXXXX")"
+          trap 'rm -rf "${smoke_root}"' EXIT
+          mkdir "${smoke_root}/runtime" "${smoke_root}/home" "${smoke_root}/tmp"
+          tar -x -z -f "${archive}" -C "${smoke_root}/runtime"
+          server_bin="${smoke_root}/runtime/node_modules/t3/dist/bin.mjs"
+          if [ -L "${server_bin}" ] || [ ! -f "${server_bin}" ]; then
+            echo "::error::extracted archive lacks a regular runtime/node_modules/t3/dist/bin.mjs"
+            exit 1
+          fi
+          cd "${smoke_root}"
+          env -i \
+            PATH="${PATH}" \
+            HOME="${smoke_root}/home" \
+            TMPDIR="${smoke_root}/tmp" \
+            T3CODE_SKIP_LOGIN_SHELL=1 \
+            "${node_bin}" "${GITHUB_WORKSPACE}/t3-reasoning/scripts/smoke-shared.mjs" \
+              --server-bin "${server_bin}"
+
       # Only the canonical archive and its inventory leave the runner.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
