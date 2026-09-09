@@ -21,10 +21,16 @@ Spec section 8 splits the T3 Connect work across two PRs, and the split is not o
 | `harbor auth connect` link step, `t3-connect-link` entry | **5** | Row 5 names it explicitly: "`connect` reporting and `harbor auth connect` link step" |
 | `~/.config/harbor/config` with `access_mode`, mode 0600 | **4** | Section 5.4's "Journal and config" row is a provision step, and provision ships in PR 4 |
 | `harbor access` (switching modes, reverting the previous mode's entries) | **5** | Row 5: "`access_mode` config, `harbor access`" |
-| Provision's "Access mode" row: the mode-specific checks of section 5.5 | **5** | Row 5 owns every mode's reporting; PR 4's row reports the configured mode and names `harbor provision` on PR 5 as what completes it |
-| `harbor pair`, Serve inspection, the `t3.environment` descriptor check | **5** | Row 5 |
+| Provision's "Access mode" row for `connect`: section 5.5 steps 1 to 3 | **4** | See below — PR 4 owns every component this row needs, and deferring it makes PR 4's exit 0 unreachable |
+| Provision's "Access mode" row for `tailnet`, and `harbor pair`, Serve inspection, the `t3.environment` descriptor check | **5** | Row 5 |
 
-Consequence for PR 4's provision: the access-mode row writes and validates the config, reports the mode it read, and reports `access_mode_not_provisioned` as an **attended** note (exit 1, not a failure), naming that PR 5 completes it. `access_mode=tailnet` is refused at parse time with exit 3, because `harbor pair` does not exist yet and a `tailnet` node cannot be provisioned by this release. This is a deliberate, reviewable gap, not an oversight; it is stated in the PR body.
+**Why `connect` reporting is PR 4's and not PR 5's.** Row 5 says "`connect` reporting", and the first draft of this plan deferred the whole row, having PR 4 report `access_mode_not_provisioned` as an attended note. That was wrong in a way worth stating: with `tailnet` refused at parse time (decision 1 below), `connect` is the only reachable mode, so **every** PR 4 provision run would end attended and exit 1. A release in which success is always exit 1 is a release in which exit 1 has stopped distinguishing anything, and section 5.4's "exits 0 when every unattended step holds" would be dead text no test could reach.
+
+PR 4 already owns every component the row needs: the `t3 connect status --json` adapter (Task 14) and `harbor auth connect` (Task 15). And the reports themselves are section 3.6's own list, which names provision as the thing that emits them: "`harbor provision` never runs any of the above. It configures the selected mode and, when a vendor-observable precondition is unmet, reports … `needs_connect_login`, or `needs_connect_link` with the command to run."
+
+So PR 4's row does section 5.5's `connect` steps 1 to 3: healthy (`desired`, `authenticated`, and `linked` all true and `relayClient.status` is `available`) contributes exit 0; `authenticated` false reports `needs_connect_login` naming `harbor auth connect`, which PR 4 ships; `linked` false reports `needs_connect_link` naming PR 5's link step; `relayClient.status` of `missing` or `unsupported` is `degraded` with the vendor's own text; `unknown` anywhere is `unknown`, never a pass. All four non-healthy outcomes are attended, exit 1.
+
+`access_mode=tailnet` is refused at parse time with exit 3, because `harbor pair` does not exist yet and a `tailnet` node cannot be provisioned by this release. This is a deliberate, reviewable gap, not an oversight; it is stated in the PR body.
 
 ## Slices
 
@@ -513,14 +519,16 @@ Validation: `connect` is the default and is accepted. `tailnet` is **refused wit
 
 **Contract (spec section 5.4, Preflight row, in the table's order).** The order is the order in which nothing is touched before whatever would touch it is proved sound, and none of it is skipped or reordered:
 
-1. Create `~/.local/state/harbor/` at `0700` if absent — **before any journaling and before the lock**, since the lock lives in it.
-2. Not root. A root caller exits 3 naming the operator.
-3. Executing from the recorded release (spec section 5.2), through the existing `harbor_entrypoint_check`.
-4. `BackendState` is `Running`, through the existing `harbor_auth_backend_state`. Otherwise **exit 1**, not 3: `needs_tailscale_login` naming `harbor auth tailscale` on a Harbor-installed Tailscale, or the owner's own `tailscale up` on a pre-existing one, read from `bootstrap.json`'s `tailscale_ownership`.
-5. Lock parses; operator command lock held.
-6. `sh -lc 'node --version'` satisfies `t3_engines_node`.
-7. `Linger=yes`. If linger is off, print the exact root command and **exit 3** — the spec says so explicitly, and it is 3 rather than 1 because provision cannot proceed at all without a user manager.
+1. Not root. A root caller exits 3 naming the operator, **before anything is created**.
+2. Executing from the recorded release (spec section 5.2), through the existing `harbor_entrypoint_check`.
+3. `BackendState` is `Running`, through the existing `harbor_auth_backend_state`. Otherwise **exit 1**, not 3: `needs_tailscale_login` naming `harbor auth tailscale` on a Harbor-installed Tailscale, or the owner's own `tailscale up` on a pre-existing one, read from `bootstrap.json`'s `tailscale_ownership`.
+4. `Linger=yes`. If linger is off, print the exact root command and **exit 3** — the spec says so explicitly, and it is 3 rather than 1 because provision cannot proceed at all without a user manager.
+5. Create `~/.local/state/harbor/` at `0700` if absent — **immediately before acquiring the lock**, which is where section 3.7 puts it ("created by the first command of its principal that needs the lock, immediately before acquisition"), and therefore before any journaling, since the lock lives in it.
+6. Lock parses; operator command lock held.
+7. `sh -lc 'node --version'` satisfies `t3_engines_node`.
 8. Journal recovery clean.
+
+**Why the creation is step 5 and not step 1.** Section 5.4's table lists the creation first in its prose, but its constraint is "before any journaling", and section 3.7's is "immediately before acquisition" — neither says before every check. Putting it first would make a refused preflight mutate: root running `harbor provision` would create a state root under root's home and only then be told it is the wrong principal. Every cheap non-mutating refusal therefore runs first, which is also what the shipped `harbor auth tailscale` already does — `harbor_auth_refuse_root` runs before `harbor_state_root_create`, and `assert_auth.sh` proves the creation lands between the refusals and the lock. Provision is that command's twin and must not disagree with it.
 
 The dispatcher sources this file with the provision arguments rather than executing it, exactly as it does `node/bootstrap.sh`, because an installed release carries it `0644`.
 
@@ -544,12 +552,12 @@ The dispatcher sources this file with the provision arguments rather than execut
 | Runtime auth | `harbor_agents_auth_status` for each; report `needs_login` per CLI when logged out, `unknown` when the adapter says so | 1, attended |
 | T3 install | `harbor_t3_install`, then `harbor_t3_require_engines` | 2 or 3 |
 | Vendor service | `harbor_t3_service_install` | 2 on failure, 3 on an `unknown` pre-state |
-| Access mode | `harbor_config_access_mode`, then report `access_mode_not_provisioned` naming PR 5 | 1, attended |
+| Access mode | `harbor_config_access_mode`, then `harbor_t3_connect_status` and the four-way `connect` classification of the scope fence above | 0 when healthy; 1 attended on `needs_connect_login`, `needs_connect_link`, `degraded`, or `unknown` |
 | State record | Task 19 | 2 on failure |
 
 Provision exits 0 when every unattended step holds and 1 when an attended step is still needed, naming it — reuse `harbor_bootstrap_degraded`'s shape as `harbor_provision_attended`, collecting the notes and repeating them at the end where they are not buried under the rows that ran after.
 
-**Tests.** A healthy fixture runs every row and exits 0 with the access-mode note making it 1; a rerun makes zero mutating shim calls and writes no new `created` or `modified` entry; each row's failure exits with its stated code, leaves its entry `prepared`, and does not run the rows after it; the attended notes are repeated at the end; the row order matches the table, asserted from the log.
+**Tests.** A healthy fixture — both agents logged in, `t3` installed, the service active, and the `connect` status fixture healthy — runs every row and **exits 0**, which is the case that proves exit 0 is reachable at all; the same fixture with `authenticated` false exits 1 naming `harbor auth connect`; with `linked` false exits 1 naming the PR 5 link step; with `relayClient.status` of `missing` exits 1 carrying the vendor's own text; with an unparseable connect body exits 1 as `unknown` and never as a pass; an agent reporting `logged-out` exits 1 naming that CLI's `harbor auth`; a rerun makes zero mutating shim calls and writes no new `created` or `modified` entry; each row's failure exits with its stated code, leaves its entry `prepared`, and does not run the rows after it; the attended notes are repeated at the end; the row order matches the table, asserted from the log.
 
 **Commit:** `feat(provision): the section 5.4 rows in table order`
 
@@ -563,17 +571,37 @@ Provision exits 0 when every unattended step holds and 1 when an attended step i
 **Interfaces produced:**
 
 ```text
-harbor_state_provision_record HOME MODE CLAUDE CODEX T3 SERVICE ACCESS_MODE
-    -> writes <HOME>/.local/state/harbor/provision.json 0600 and installed.lock 0600
+harbor_state_installed_lock_render          -> the 13-key lock as observed, one key=value per line
+harbor_state_installed_lock_write PATH      -> writes that render to PATH 0600 via a temp-and-rename
+harbor_state_provision_record PATH TIMESTAMP ACCESS_MODE ACCESS_STATE SERVICE_STATE
+                                CLAUDE_AUTH CODEX_AUTH
+    -> writes provision.json 0600, reading the installed versions from the same
+       observers harbor_state_installed_lock_render uses
 ```
 
-**Contract (spec sections 5.4 and 5.7).** `installed.lock` is a copy of `versions.lock` **as installed** — the versions this run actually put on the node, not the file it read — so a later lock edit cannot retroactively change what the record says was installed. `provision.json` carries the installed versions, the service state, the access mode, and a `timestamp`.
+**Contract (spec sections 5.4 and 5.7).** `installed.lock` is a copy of the lock **as installed** — the versions actually on the node, not the file this run read — so a later `versions.lock` edit cannot retroactively change what the record says was installed. That makes the source of every key load-bearing, and none of them may be copied from the desired lock:
+
+| Key | Observed from |
+| --- | --- |
+| `claude_code_version`, `codex_version` | `harbor_agents_installed_version` for each |
+| `t3_version` | `harbor_t3_installed_version` |
+| `t3_engines_node` | `harbor_t3_package_engines`, the **installed** package's own range (Task 9) |
+| `nodejs_version` | `sh -lc 'node --version'`, the Node the service launcher will resolve — the same reading Task 13 enforces against |
+| `tailscale_version` | `bootstrap.json`'s `tailscale_version`, which root recorded and only root can know |
+| `ubuntu_release` | `/etc/os-release` `VERSION_ID` |
+| `claude_code_install`, `codex_install`, `t3_install`, `nodejs_install`, `nodejs_sha256`, `tailscale_apt_channel` | copied from `versions.lock`, because a **method** is not observable after the fact; the installed *version* beside it is the observed check on whether the method did what it said |
+
+Node.js and Tailscale are in the record even though provision installs neither: PR 8's upgrade and PR 7's `versions.drift` row compare against this file, and a lock that omitted what root installed would make them compare a partial snapshot against a whole one. `bootstrap.json` carrying `tailscale_version` is what makes the Tailscale row possible at all — it was added by #81, closing issue #64.
+
+An observed value that disagrees with `versions.lock` is **not** an error here: recording the disagreement is the point, and Tasks 3 and 13 are where a disagreement that matters is refused. A key that cannot be observed at all is exit 2 naming the key and the reading that failed, never an empty value, because an empty key in this file would read to PR 7 and PR 8 as "nothing installed".
+
+`provision.json` carries the same installed versions, the service state, the access mode with its classification, the two agent auth words, and a `timestamp`.
 
 **The `timestamp` field ships from the start and is not optional.** Spec section 5.7's operator finalization "compares against it" by deciding between the newest `<state-root>.journal.<timestamp>.done` sibling and the record, so a record written without it in PR 4 would make PR 8's finalization undecidable on every node provisioned by this release. Reuse `harbor_state_record_timestamp`, which PR 3 already defined for `bootstrap.json`, so the two records are comparable by construction rather than by two independent spellings of "now".
 
 Both files are `0600` (they live in the `0700` operator state root and name no secret, but the operator record has no reason to be world-readable the way root's `0644` `bootstrap.json` does — root's is `0644` so operator `status` can read it without root, and nothing needs to read this one without being the operator).
 
-**Tests.** Both files are written with mode `0600`; `installed.lock` is byte-identical to the versions actually installed and differs from a `versions.lock` mutated after the run; `provision.json` parses and carries every field; the `timestamp` is present, is the `harbor_state_record_timestamp` format, and a fixture asserts the exact key name PR 8 will read; the record is written **last**, after every row, asserted with `HARBOR_FAIL_AFTER` at the boundary before it; a rerun rewrites both and leaves no other difference.
+**Tests.** Both files are written with mode `0600`. `installed.lock` carries all thirteen keys with none empty; each observed key equals what its observer reports and **not** what `versions.lock` says, proven by a fixture whose installed versions deliberately differ from the lock's; an unobservable key exits 2 naming the key rather than writing an empty value; the six method keys are copied verbatim from `versions.lock`; the Tailscale row equals `bootstrap.json`'s `tailscale_version` and exits 2 when that record is absent. `provision.json` parses and carries every field; the `timestamp` is present, is the `harbor_state_record_timestamp` format, and a fixture asserts the exact key name PR 8 will read. The record is written **last**, after every row, asserted with `HARBOR_FAIL_AFTER` at the boundary before it. A rerun rewrites both and leaves no other difference. Both writes are temp-and-rename, so a record is either the previous one or the new one and never a half-written file.
 
 **Commit:** `feat(provision): installed.lock and the provision record`
 
