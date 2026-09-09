@@ -4,10 +4,11 @@ This document describes `scripts/discover-upstream-nightly.mjs`, the first
 bounded piece of managed Nightly automation: a helper that finds the newest
 published upstream Nightly, proves locally that Harbor's patch catalog still
 materializes on it for both variants, and writes a candidate report. It
-mutates nothing on GitHub and nothing in the checkout. The two trusted
-workflows that run it on a schedule, propose the candidate PR, and check the
-PR's exact head are described at the end, together with the stages that
-remain boundaries (merge policy and the four-artifact build).
+mutates nothing on GitHub and nothing in the checkout. The trusted workflows
+that run it on a schedule, propose the candidate PR, check the PR's exact
+head, and publish the four-artifact managed release once a candidate has
+merged are described at the end, together with the stages that remain
+boundaries (merge policy, signing, and installation).
 
 ## What the helper does
 
@@ -189,11 +190,13 @@ node --test t3-reasoning/tests/discover-upstream-nightly.test.mjs
 
 ## Workflows
 
-Two workflows consume the report contract above. Both run only checked-in
-code from the default branch, take their inputs as environment variables or
-API arguments (never shell interpolation), use pinned action revisions, and
-check out with persisted credentials disabled. Neither builds, signs,
-publishes, merges, installs, or changes a repository setting.
+Two workflows consume the report contract above, and a third publishes the
+managed release once a candidate has merged. All run only checked-in code
+from the default branch, take their inputs as environment variables or API
+arguments (never shell interpolation), use action revisions pinned by full
+commit SHA, and check out with persisted credentials disabled. None signs,
+merges, installs, or changes a repository setting; only the release workflow
+builds and publishes.
 
 ### Discovery: `.github/workflows/t3-managed-nightly-discovery.yml`
 
@@ -304,12 +307,160 @@ explicit dispatch from discovery, so ordinary Harbor and fleet PRs never
 receive it. It is the status the candidate merge path must require on the
 PR's exact head SHA, not a required status check on `main` (see below).
 
+### Managed release publication: `.github/workflows/t3-managed-release.yml`
+
+Triggers: a push to `main` that changes `t3-reasoning/source.lock.json` or
+`t3-reasoning/upstream-release.json` (a merged candidate), and
+`workflow_dispatch` with no inputs, for a new attempt after a build failure
+or a public-config or builder change. Every job is gated on
+`github.repository == 'kgarg2468/harbor'` and `github.ref ==
+'refs/heads/main'`; there is no pull-request trigger and no caller-supplied
+ref, repository, tag, or platform. The concurrency group is fixed and never
+cancels a run in progress. The top-level permission is `contents: read`;
+only the final `publish` job has `contents: write`.
+
+Every Node step comes from `scripts/publish-managed-release.mjs`, whose
+subcommands are closed to `kgarg2468/harbor` and the `t3-managed-v` tag
+prefix, reach GitHub only through `gh api` with argv, and accept only `GET`,
+`POST`, and `PATCH`: nothing in the workflow can delete, force, clobber, or
+edit an existing release, tag, or asset.
+
+Every release operation (upstream re-read, prior lookup, tag checks, draft
+creation, uploads, publication, and postchecks) runs on the workflow's own
+`GITHUB_TOKEN` with `contents: read` in `resolve` and `contents: write` in
+`publish`. The one exception is the repository's immutable-releases setting
+(`GET /repos/kgarg2468/harbor/immutable-releases`), which GitHub serves only
+to an identity with repository **Administration read**, a permission the
+workflow token cannot be granted. That single read runs through a separate,
+closed, GET-only client whose credential is the fine-grained secret
+`T3_MANAGED_RELEASE_ADMIN_READ_TOKEN`. The secret needs only repository
+Administration read on `kgarg2468/harbor` (no contents write, no other
+permission), is exported only to the `preflight` step of `resolve` and the
+final `publish` step, and is handed to that client's child `gh` solely as
+`GH_TOKEN`, never as an argument, output, summary, or log line. A missing
+secret or a refused read is fatal in `preflight` before any build row runs
+and again in `publish` before any release mutation. The workflow never
+requests `administration:` in its `permissions` map and never changes the
+setting.
+
+The `resolve` job (Ubuntu) checks out exactly `github.sha`, requires
+`git rev-parse HEAD` to equal it and a clean tree, and installs Node 24.13.1
+and pnpm 11.10.0. `verify-upstream` re-verifies the lock and every patch
+checksum, validates the tracked provenance record, requires lock/record
+commit agreement, re-reads the official release by id, and peels its tag;
+any moved, deleted, draft, non-prerelease, or retargeted upstream release
+fails closed. `public-config` builds the four-key public-config file from
+exactly the repository variables `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID`,
+`T3CODE_CLERK_JWT_TEMPLATE`, `T3CODE_CLERK_PUBLISHABLE_KEY`, and
+`T3CODE_RELAY_URL` through the resolver's validator, printing only the
+fingerprint. `prior` selects the highest published, immutable, non-draft
+prerelease whose tag is exactly `t3-managed-v<managed version>`. Only
+well-formed rows are deliberately ignored: drafts, stable releases, tags
+outside the grammar, and explicitly unpublished entries (`published_at:
+null`). A row that is not an object or has no string tag, a managed-tag row
+whose `draft` or `prerelease` is not a boolean or whose `published_at` is
+not a publication time, a mutable managed release, or the same managed
+version appearing twice anywhere in the paginated listing (regardless of
+order or page boundary) fails closed. The selected release is re-read by id
+and must still carry the listed tag, state, immutability, and publication
+time and exactly one well-formed `managed-release.json` asset with a
+positive size; that asset is downloaded by numeric id, its size and any
+reported digest must match the bytes, and the manifest must name the tag's
+version. The resolver then runs
+exactly once with the lock, the tracked upstream version, `github.run_number`
+as the counter, `github.sha` as the builder revision, the public config, and
+the prior manifest when one exists. `preflight` requires immutable releases
+to be enabled (read with the Administration-read secret described above)
+and the intended tag to be absent from Git refs and from releases of every
+state, including drafts; a collision is refused, never reused or removed,
+and a malformed ref or release row is not evidence of absence and fails.
+The job uploads one short-retention artifact holding only the descriptor
+and the public-config file.
+
+The `build` job is one static four-row matrix with `fail-fast: false`:
+`managed-server-darwin-arm64` and `managed-server-linux-x64` run the server
+builder on `macos-15` and `ubuntu-24.04`; `managed-nightly-darwin-arm64` and
+`reasoning-darwin-arm64` run the desktop builder on `macos-15`. Each row
+checks out the same SHA, installs the pinned Node, pnpm, and Rust 1.95.0
+with its exact native target, downloads the shared inputs, requires the
+descriptor's `builderRevision` to equal `github.sha`, prepares a fresh source
+tree with the real preparer for its variant, and runs exactly one existing
+builder into a new destination. Nothing is cached, shared between rows,
+signed, or notarized.
+
+Both native server artifacts must then start and pass the existing
+two-client shared smoke (`scripts/smoke-shared.mjs`, see
+[shared-smoke.md](shared-smoke.md)) on their own runner before they leave it
+and before anything is published. On each server row the `shared-smoke`
+step, with its own ten-minute timeout, selects exactly
+`built/<artifact id>-<version>.tar.gz`, requires it to be a regular
+non-symlink file, extracts it into a private root beneath the runner's temp
+directory that only this step creates and removes, and requires the
+extracted `runtime/node_modules/t3/dist/bin.mjs` to be a regular non-symlink
+file. It then runs the checked-in smoke from that root under a scrubbed
+environment (`env -i`) holding only the runner `PATH`, an isolated `HOME`
+and `TMPDIR` inside that root, and `T3CODE_SKIP_LOGIN_SHELL=1`: no GitHub
+token, admin-read secret, public config, provider credential, or ambient
+home reaches the built server. The smoke starts the archive's server on its
+own loopback port and private `T3CODE_HOME`, pairs two clients, creates a
+project and thread, renames the thread from the second client, observes the
+rename on the first including across a disconnect and reconnect, starts no
+provider turn, and prints pass/fail counts plus redacted failure details. A
+missing archive or
+entry, an extraction failure, a failed or timed-out smoke, or a cleanup
+setup error fails that row with no retry, fallback, or ignored exit, so its
+archive is never uploaded and the release is never published. The desktop
+rows and the `publish` job never open or execute an archive. Only the row's
+canonical archive and its one inventory JSON are uploaded, under
+`t3-managed-build-<artifact id>`.
+
+The `publish` job (Ubuntu, `contents: write`) repeats the trusted checkout
+and upstream checks, downloads the four rows into separate directories,
+and runs `assemble`, which requires exactly one inventory and one archive per
+row and copies the archives into one flat directory without opening them.
+The existing manifest writer then produces the release directory, and
+`publish` proves it holds exactly the six feed files (`managed-release.json`,
+`SHA256SUMS`, and the four archives) with every checksum and size matching
+local bytes, re-checks repository, ref, builder commit, upstream identity,
+the immutable setting, and tag absence, and only then mutates GitHub, in this
+order: create one draft prerelease tagged `t3-managed-v<version>` at
+`target_commitish` = `github.sha` with `make_latest: false`; upload the six
+files without clobber; re-read the draft and require its tag, target, state,
+and exact six asset names and sizes, comparing every API digest with local
+bytes (an asset without a digest is downloaded by id and hashed); publish by
+changing only `draft` to `false`; re-read by id and by exact tag, peel the
+tag to `github.sha`, and require `draft: false`, `prerelease: true`, a
+publication time, unchanged assets, and `immutable: true`.
+
+Failure handling is deliberately non-destructive, and what a red run leaves
+behind depends on where it failed. A failure before the publish call (an
+upload, the draft re-read, or a size/digest mismatch) leaves the draft in
+place for inspection; drafts are not visible to the public. Once the publish
+`PATCH` has been sent, the release may already be public: a lost or
+malformed `PATCH` response is reported as an uncertain publication naming
+the release id, and a failed post-publication proof (not immutable, a
+changed asset, a tag that does not resolve to `github.sha`) is reported
+against a release that is already visible. In every case the publisher sends
+the publish call at most once, retries nothing, and deletes, edits, or reuses
+nothing; a person inspects the release by its recorded id and exact tag and
+decides what follows. The next run consumes a new run number and therefore
+a new version and tag. The published release is the feed transaction:
+clients see the previous immutable release until every artifact is present
+and the draft is published.
+
+The publisher is unit-tested against a fake GitHub API and the structure of
+the workflow is asserted in `tests/publish-managed-release.test.mjs`:
+
+```sh
+node --test t3-reasoning/tests/publish-managed-release.test.mjs
+```
+
 ## What is still not configured
 
-- The repository setting that lets Actions create PRs is currently off, and
-  no automation identity exists. Until it is enabled (or a narrowly scoped
-  GitHub App token is used), the discovery run creates the branch and then
-  fails at PR creation; the next run recovers by creating the PR.
+- Actions may now create PRs: `can_approve_pull_request_reviews` is enabled
+  while `default_workflow_permissions` remains `read`, so the discovery run
+  opens its candidate PR with the workflow token. No separate automation
+  identity exists; candidate PRs carry the token's identity.
 - Review and merge policy for bot-authored candidate PRs, including whether
   Greptile reviews them. The merge path for these two-file PRs (a trusted
   merge identity or a later merge automation) must require a `success`
@@ -324,5 +475,15 @@ PR's exact head SHA, not a required status check on `main` (see below).
 - Porting the newer reviewed source changes into the patch catalog. The helper
   proves only the catalog that is checked in; a `conflict` result is the
   signal that a patch needs to be re-ported by hand.
-- The four-artifact managed release build, signing and notarization policy,
-  the public build configuration, and immutable release enforcement.
+- The release workflow's prerequisites: immutable releases are not yet
+  enabled for the repository (the `preflight` step fails closed until they
+  are); the repository secret `T3_MANAGED_RELEASE_ADMIN_READ_TOKEN` is not
+  yet installed (a fine-grained token for `kgarg2468/harbor` with repository
+  Administration read and nothing else, required because the workflow token
+  cannot read the immutable-releases setting; `preflight` and `publish` fail
+  closed without it); the four `T3CODE_*` repository variables are not yet
+  installed; and the pinned Rust 1.95.0 toolchain has not yet been proven to
+  build the current prepared source on both runner images. Managed releases
+  are unsigned personal builds; Apple signing and notarization policy, the
+  runtime feed poller, and desktop download and installation remain separate
+  work.
