@@ -1,0 +1,1548 @@
+diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
+index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d630571422881 100644
+--- a/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
++++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
+@@ -2,12 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { expect, it } from "@effect/vitest";
+ import type { DesktopUpdateState, DesktopUpdateStatusReport } from "@t3tools/contracts";
+ import * as Deferred from "effect/Deferred";
++import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Stream from "effect/Stream";
++import * as TestClock from "effect/testing/TestClock";
+ 
+ import * as ServerConfig from "../config.ts";
+ import * as DesktopTelemetryReceiver from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
+@@ -39,8 +41,10 @@ function report(
+   requestId: string,
+   state: DesktopUpdateState,
+   terminal?: {
+-    readonly outcome: DesktopUpdateStatusReport["outcome"];
++    readonly outcome?: DesktopUpdateStatusReport["outcome"];
+     readonly reason?: string;
++    readonly attemptId?: string;
++    readonly commitDisposition?: DesktopUpdateStatusReport["commitDisposition"];
+   },
+ ): DesktopUpdateStatusReport {
+   return {
+@@ -49,25 +53,44 @@ function report(
+     requestId,
+     ...(terminal?.outcome === undefined ? {} : { outcome: terminal.outcome }),
+     ...(terminal?.reason === undefined ? {} : { reason: terminal.reason }),
++    ...(terminal?.attemptId === undefined ? {} : { attemptId: terminal.attemptId }),
++    ...(terminal?.commitDisposition === undefined
++      ? {}
++      : { commitDisposition: terminal.commitDisposition }),
+     state,
+   };
+ }
+ 
++const downloaded = makeState({ status: "downloaded", downloadedVersion: "1.2.4" });
++
+ interface HarnessOptions {
+   readonly mode?: "web" | "desktop";
+   readonly controlFd?: number | undefined;
+-  /** Reports emitted for the run, given the requestId the service generated.
+-      The stream ends after the last one unless `keepOpen` is set. */
++  /** Reports emitted for the first run, given the requestId the service
++      generated. Later runs see an exhausted stream. The stream ends after the
++      last report unless `keepOpen` is set. */
+   readonly reports?: (requestId: string) => readonly DesktopUpdateStatusReport[];
++  /** Reports emitted after each commit dispatch, given the committed requestId. */
++  readonly commitReports?: (requestId: string) => readonly DesktopUpdateStatusReport[];
++  /** Retained report every subscriber sees before any command is sent. */
++  readonly latest?: DesktopUpdateStatusReport;
+   readonly keepOpen?: boolean;
++  /** Attempts this server answered `committed`. */
++  readonly committedAttempts?: readonly string[];
++  /** Refuses the commit control write as a transport failure. */
++  readonly commitWriteFails?: boolean;
+ }
+ 
++/**
++ * The receiver as the desktop sees it: every `desktopUpdates` subscription is
++ * answered by the next command sent, so a command dispatched without a prior
++ * subscription is a defect rather than a silently missed report.
++ */
+ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function* (
+   options: HarnessOptions = {},
+ ) {
+   const fs = yield* FileSystem.FileSystem;
+   const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-app-update-test-" });
+-  const requestIdDeferred = yield* Deferred.make<string>();
+   const baseConfig = yield* ServerConfig.ServerConfig.pipe(
+     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+   );
+@@ -78,34 +101,67 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function*
+       ? { desktopTelemetryControlFd: options.controlFd }
+       : { desktopTelemetryControlFd: 5 }),
+   };
+-  const reportsForRun = options.reports ?? (() => []);
+-  const changes = Stream.unwrap(
+-    Deferred.await(requestIdDeferred).pipe(
+-      Effect.map((requestId) => {
+-        const emitted = Stream.fromIterable(reportsForRun(requestId));
+-        return options.keepOpen ? Stream.concat(emitted, Stream.never) : emitted;
+-      }),
+-    ),
+-  );
++  const committed = new Set(options.committedAttempts ?? []);
++  const pending: Array<Deferred.Deferred<Stream.Stream<DesktopUpdateStatusReport>>> = [];
++  let runReportsDelivered = false;
++  const emit = (reports: readonly DesktopUpdateStatusReport[]) => {
++    const emitted = Stream.fromIterable(reports);
++    return options.keepOpen ? Stream.concat(emitted, Stream.never) : emitted;
++  };
++  const deliver = (reports: readonly DesktopUpdateStatusReport[]) =>
++    Effect.suspend(() => {
++      const subscription = pending.shift();
++      return subscription === undefined
++        ? Effect.die("a desktop update command was sent before subscribing to reports")
++        : Deferred.succeed(subscription, emit(reports)).pipe(Effect.asVoid);
++    });
++  const acceptances: string[] = [];
++  const onHandoffAccepted = (label = "accepted") =>
++    Effect.sync(() => {
++      acceptances.push(label);
++    });
+ 
+   const service = yield* DesktopAppUpdate.make().pipe(
+     Effect.provide(
+       Layer.mergeAll(
+         DesktopTelemetryReceiver.layerTest({
+           requestDesktopUpdate: (requestId) =>
+-            Deferred.succeed(requestIdDeferred, requestId).pipe(Effect.asVoid),
+-          desktopUpdates: Effect.succeed({
+-            latest: Option.none<DesktopUpdateStatusReport>(),
+-            changes,
++            Effect.suspend(() => {
++              const reports = runReportsDelivered ? [] : (options.reports?.(requestId) ?? []);
++              runReportsDelivered = true;
++              return deliver(reports);
++            }),
++          commitDesktopUpdate: (requestId) =>
++            options.commitWriteFails
++              ? Effect.fail(
++                  new DesktopTelemetryReceiver.DesktopTelemetryControlFailed({
++                    fd: 5,
++                    operation: "write",
++                    cause: new Error("EPIPE"),
++                  }),
++                )
++              : deliver(options.commitReports?.(requestId) ?? []),
++          desktopUpdates: Effect.sync(() => {
++            const subscription = Deferred.makeUnsafe<Stream.Stream<DesktopUpdateStatusReport>>();
++            pending.push(subscription);
++            return {
++              latest: Option.fromNullishOr(options.latest),
++              changes: Stream.unwrap(Deferred.await(subscription)),
++            };
+           }),
++          isDesktopUpdateReservationCommitted: (attemptId) =>
++            Effect.succeed(committed.has(attemptId)),
+         }),
+         ServerConfig.layer(config),
+       ),
+     ),
+   );
+-  return { service };
++  return { service, acceptances, onHandoffAccepted };
+ });
+ 
++const isSettled = (fiber: Fiber.Fiber<unknown, unknown>) =>
++  Effect.sync(() => fiber.pollUnsafe() !== undefined);
++
+ it.layer(NodeServices.layer)("desktop app update", (it) => {
+   it.effect("is unavailable without desktop mode or the control fd", () =>
+     Effect.gen(function* () {
+@@ -130,9 +186,7 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+           report(requestId, makeState({ status: "downloading", downloadPercent: 40 })),
+           // Reports from another run must be ignored.
+           report("other-run", makeState({ status: "error", message: "unrelated" })),
+-          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
+-            outcome: "ready-to-install",
+-          }),
++          report(requestId, downloaded, { outcome: "ready-to-install" }),
+         ],
+       });
+       const stages: string[] = [];
+@@ -179,33 +233,6 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+     }),
+   );
+ 
+-  it.effect("replays a retained commit failure for the preparation token", () =>
+-    Effect.gen(function* () {
+-      const { service } = yield* makeHarness({
+-        reports: (requestId) => [
+-          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
+-            outcome: "ready-to-install",
+-          }),
+-          report(
+-            requestId,
+-            makeState({
+-              status: "downloaded",
+-              downloadedVersion: "1.2.4",
+-              errorContext: "install",
+-              message: "installer refused",
+-            }),
+-            { outcome: "failed", reason: "installer refused" },
+-          ),
+-        ],
+-      });
+-      const prepared = yield* service.run(() => Effect.void);
+-
+-      expect(
+-        (yield* service.commit(prepared.desktopUpdateToken ?? "missing").pipe(Effect.flip)).reason,
+-      ).toBe("installer refused");
+-    }),
+-  );
+-
+   it.effect("fails when the desktop stops reporting before a terminal outcome", () =>
+     Effect.gen(function* () {
+       const { service } = yield* makeHarness({
+@@ -244,4 +271,277 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+       yield* Fiber.interrupt(retry);
+     }),
+   );
++
++  it.effect("a delivered commit write and ordinary progress reports never accept the handoff", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "downloading", downloadPercent: 90 })),
++          report(requestId, downloaded),
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" })),
++          // A bare failed outcome is not a decision either.
++          report(requestId, makeState({ status: "error", message: "gave up" }), {
++            outcome: "failed",
++          }),
++        ],
++      });
++
++      const error = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.flip);
++      expect(error.reason).toBe("The desktop app stopped reporting the install.");
++      expect(acceptances).toEqual([]);
++    }),
++  );
++
++  it.effect("does not treat a retained pre-commit disposition as the answer for a new commit", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        latest: report("req-1", makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++          attemptId: "att-1",
++          commitDisposition: "accepted",
++        }),
++      });
++
++      const error = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.flip);
++      expect(error.reason).toBe("The desktop app stopped reporting the install.");
++      expect(acceptances).toEqual([]);
++    }),
++  );
++
++  it.effect("accepts exactly once, only for this request and a locally committed attempt", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-2"],
++        keepOpen: true,
++        commitReports: (requestId) => [
++          report("other-request", makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-2",
++            commitDisposition: "accepted",
++          }),
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-1",
++            commitDisposition: "accepted",
++          }),
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-2",
++            commitDisposition: "accepted",
++          }),
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-2",
++            commitDisposition: "accepted",
++          }),
++        ],
++      });
++      const accepted = yield* Deferred.make<void>();
++      const commit = yield* service
++        .commit("req-1", () =>
++          onHandoffAccepted().pipe(Effect.andThen(Deferred.succeed(accepted, undefined))),
++        )
++        .pipe(Effect.forkChild);
++
++      yield* Deferred.await(accepted);
++      yield* Effect.yieldNow;
++      yield* Effect.yieldNow;
++      expect(acceptances).toEqual(["accepted"]);
++      // An accepted install stops this server; the commit stays parked.
++      expect(yield* isSettled(commit)).toBe(false);
++      yield* Fiber.interrupt(commit);
++      expect(acceptances).toEqual(["accepted"]);
++    }),
++  );
++
++  it.effect("reports only the accepted attempt's install failure after acceptance", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-a", "att-b"],
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-a",
++            commitDisposition: "accepted",
++          }),
++          // Another attempt can neither fail nor accept this commit again.
++          report(requestId, makeState({ status: "error", message: "b failed" }), {
++            outcome: "failed",
++            reason: "b failed",
++            attemptId: "att-b",
++            commitDisposition: "accepted",
++          }),
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-b",
++            commitDisposition: "accepted",
++          }),
++          report(
++            requestId,
++            makeState({
++              status: "downloaded",
++              errorContext: "install",
++              message: "installer refused",
++            }),
++            {
++              outcome: "failed",
++              reason: "installer refused",
++              attemptId: "att-a",
++              commitDisposition: "accepted",
++            },
++          ),
++        ],
++      });
++
++      const error = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.flip);
++      expect(error.reason).toBe("installer refused");
++      expect(acceptances).toEqual(["accepted"]);
++    }),
++  );
++
++  it.effect("an accepting report that also carries the install failure fails promptly", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        keepOpen: true,
++        commitReports: (requestId) => [
++          report(
++            requestId,
++            makeState({
++              status: "downloaded",
++              errorContext: "install",
++              message: "installer failed immediately",
++            }),
++            {
++              outcome: "failed",
++              reason: "installer failed immediately",
++              attemptId: "att-1",
++              commitDisposition: "accepted",
++            },
++          ),
++        ],
++      });
++      const commit = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* Effect.yieldNow;
++      // The open stream and the untouched deadline must not park the commit.
++      expect(yield* isSettled(commit)).toBe(true);
++      const error = yield* Fiber.join(commit).pipe(Effect.flip);
++      expect(error.reason).toBe("installer failed immediately");
++      expect(acceptances).toEqual(["accepted"]);
++    }),
++  );
++
++  it.effect("an explicit rejected disposition fails the commit without accepting", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        reports: (requestId) => [report(requestId, downloaded, { outcome: "ready-to-install" })],
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" })),
++          report(
++            requestId,
++            makeState({
++              status: "downloaded",
++              errorContext: "install",
++              message: "installer refused",
++            }),
++            {
++              outcome: "failed",
++              reason: "installer refused",
++              attemptId: "att-1",
++              commitDisposition: "rejected",
++            },
++          ),
++          // Nothing after a rejection can accept.
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
++            attemptId: "att-1",
++            commitDisposition: "accepted",
++          }),
++        ],
++      });
++      const prepared = yield* service.run(() => Effect.void);
++
++      const error = yield* service
++        .commit(prepared.desktopUpdateToken ?? "missing", onHandoffAccepted)
++        .pipe(Effect.flip);
++      expect(error.reason).toBe("installer refused");
++      expect(acceptances).toEqual([]);
++      // The preparation token stays usable for the caller's recovery path.
++      const again = yield* service
++        .commit(prepared.desktopUpdateToken ?? "missing", onHandoffAccepted)
++        .pipe(Effect.flip);
++      expect(again.reason).toBe("installer refused");
++      expect(acceptances).toEqual([]);
++    }),
++  );
++
++  it.effect("a rejected disposition falls back to the state message and then a default", () =>
++    Effect.gen(function* () {
++      const fromState = yield* makeHarness({
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "error", message: "gates busy" }), {
++            attemptId: "att-1",
++            commitDisposition: "rejected",
++          }),
++        ],
++      });
++      expect((yield* fromState.service.commit("req-1").pipe(Effect.flip)).reason).toBe(
++        "gates busy",
++      );
++      const fallback = yield* makeHarness({
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "error" }), {
++            attemptId: "att-1",
++            commitDisposition: "rejected",
++          }),
++        ],
++      });
++      expect((yield* fallback.service.commit("req-1").pipe(Effect.flip)).reason).toBe(
++        "The desktop app rejected the install.",
++      );
++    }),
++  );
++
++  it.effect("times out without accepting when no decision arrives", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        keepOpen: true,
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" })),
++        ],
++      });
++      const commit = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* TestClock.adjust(Duration.minutes(2));
++      const error = yield* Fiber.join(commit).pipe(Effect.flip);
++      expect(error.reason).toBe("The desktop app did not accept or reject the install in time.");
++      expect(acceptances).toEqual([]);
++    }),
++  );
++
++  it.effect("interruption before a decision never accepts", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        keepOpen: true,
++        commitReports: (requestId) => [
++          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" })),
++        ],
++      });
++      const commit = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      expect(yield* isSettled(commit)).toBe(false);
++      yield* Fiber.interrupt(commit);
++      expect(acceptances).toEqual([]);
++    }),
++  );
++
++  it.effect("a refused control write fails before any decision and never accepts", () =>
++    Effect.gen(function* () {
++      const { service, acceptances, onHandoffAccepted } = yield* makeHarness({
++        committedAttempts: ["att-1"],
++        commitWriteFails: true,
++      });
++      const error = yield* service.commit("req-1", onHandoffAccepted).pipe(Effect.flip);
++      expect(error.reason).toBe("Could not reach the T3 Code desktop app.");
++      expect(acceptances).toEqual([]);
++    }),
++  );
+ });
+diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
+index 1e7b54b2474b81c927e25540ec505ec804d8d416..b7dd7080dc28356935bf1f449cb43ab73caacf62 100644
+--- a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
++++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
+@@ -54,7 +54,10 @@ export class DesktopAppUpdate extends Context.Service<
+       ) => Effect.Effect<void, ServerSelfUpdateError>,
+     ) => Effect.Effect<ServerSelfUpdateResult, ServerSelfUpdateError>;
+     /** Starts the prepared install. Success stops this server, so this effect
+-        returns only when installation fails or times out. */
++        returns only when the desktop rejects the install, an accepted install
++        fails, or no decision arrives in time. `onHandoffAccepted` runs once,
++        only on an explicit `accepted` disposition for an attempt this server
++        answered `committed`; a delivered control write proves nothing. */
+     readonly commit: (
+       requestId: string,
+       onHandoffAccepted?: () => Effect.Effect<void>,
+@@ -191,38 +194,82 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
+     if (!available) {
+       return yield* failWith("This server cannot commit a desktop app update.");
+     }
+-    const terminal = yield* Effect.scoped(
++    return yield* Effect.scoped(
+       Effect.gen(function* () {
+-        const { latest, changes } = yield* receiver.desktopUpdates;
+-        const reports = Option.match(latest, {
+-          onNone: () => changes,
+-          onSome: (report) => Stream.concat(Stream.make(report), changes),
+-        });
++        // Subscribe before sending so the decision cannot be missed. Only
++        // reports after this dispatch count: a retained `latest` disposition
++        // belongs to an earlier attempt.
++        const { changes } = yield* receiver.desktopUpdates;
+         yield* Effect.uninterruptible(
+-          receiver.commitDesktopUpdate(requestId).pipe(
+-            Effect.mapError((error) => failWith("Could not reach the T3 Code desktop app.", error)),
+-            Effect.tap(() => onHandoffAccepted()),
+-          ),
++          receiver
++            .commitDesktopUpdate(requestId)
++            .pipe(
++              Effect.mapError((error) =>
++                failWith("Could not reach the T3 Code desktop app.", error),
++              ),
++            ),
+         );
+-        return yield* reports.pipe(
+-          Stream.filter((report) => report.requestId === requestId && report.outcome === "failed"),
+-          Stream.runHead,
+-          Effect.timeout(DESKTOP_INSTALL_TIMEOUT),
+-          Effect.catchTags({
+-            TimeoutError: () =>
+-              failWith("The desktop app did not report an install result in time."),
+-          }),
++
++        // Bound to the first accepted attempt; after that only its own
++        // install failure is reported and every other attempt is inert.
++        let acceptedAttemptId: string | undefined;
++        const deadline = Stream.fromEffect(
++          Effect.sleep(DESKTOP_INSTALL_TIMEOUT).pipe(Effect.as({ kind: "deadline" as const })),
++        );
++        const reports = changes.pipe(
++          Stream.filter((report) => report.requestId === requestId),
++          Stream.map((report) => ({ kind: "report" as const, report })),
++        );
++        // The report stream ending ends the wait; the deadline firing does not.
++        yield* Stream.merge(reports, deadline, { haltStrategy: "left" }).pipe(
++          Stream.runForEach((event) =>
++            Effect.gen(function* () {
++              if (event.kind === "deadline") {
++                if (acceptedAttemptId !== undefined) return;
++                return yield* failWith(
++                  "The desktop app did not accept or reject the install in time.",
++                );
++              }
++              const report = event.report;
++              if (acceptedAttemptId === undefined) {
++                if (report.attemptId === undefined || report.commitDisposition === undefined) {
++                  return;
++                }
++                if (report.commitDisposition === "rejected") {
++                  return yield* failWith(
++                    report.reason ??
++                      report.state.message ??
++                      "The desktop app rejected the install.",
++                  );
++                }
++                // Accepted counts only for an attempt whose reservation this
++                // server itself answered `committed`.
++                if (!(yield* receiver.isDesktopUpdateReservationCommitted(report.attemptId))) {
++                  return;
++                }
++                const attemptId = report.attemptId;
++                yield* Effect.uninterruptible(
++                  Effect.suspend(() => {
++                    acceptedAttemptId = attemptId;
++                    return onHandoffAccepted();
++                  }),
++                );
++              }
++              // The bound attempt's install failure ends the wait whether it
++              // arrives on the accepting report itself or on a later one.
++              if (report.attemptId === acceptedAttemptId && report.outcome === "failed") {
++                return yield* failWith(
++                  report.reason ??
++                    report.state.message ??
++                    "The desktop app failed to install the update.",
++                );
++              }
++            }),
++          ),
+         );
++        return yield* failWith("The desktop app stopped reporting the install.");
+       }),
+     );
+-    if (Option.isNone(terminal)) {
+-      return yield* failWith("The desktop app stopped reporting the install.");
+-    }
+-    return yield* failWith(
+-      terminal.value.reason ??
+-        terminal.value.state.message ??
+-        "The desktop app failed to install the update.",
+-    );
+   });
+ 
+   return DesktopAppUpdate.of({ available, run, commit });
+diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
+index 50c8ea2b76324a1d11cd7fb682263be698bebc73..4307c88cae5a277086ecd63037cff3492cfd9791 100644
+--- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
++++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
+@@ -1,20 +1,43 @@
+ // @effect-diagnostics nodeBuiltinImport:off
++import * as NodeChildProcess from "node:child_process";
+ import * as NodeFS from "node:fs";
+ import * as NodeOS from "node:os";
+ import * as NodePath from "node:path";
+ 
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import * as NodeStream from "@effect/platform-node/NodeStream";
+ import { it } from "@effect/vitest";
++import {
++  DesktopHostTelemetryMessage,
++  DesktopTelemetryControlMessage,
++  type DesktopUpdateReservationAction,
++  type DesktopUpdateReservationCommand,
++  type DesktopUpdateReservationReply,
++  type DesktopUpdateReservationStatus,
++} from "@t3tools/contracts";
+ import * as DateTime from "effect/DateTime";
++import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as PubSub from "effect/PubSub";
++import * as Queue from "effect/Queue";
+ import * as Ref from "effect/Ref";
++import * as Schema from "effect/Schema";
++import * as Scope from "effect/Scope";
++import * as Stream from "effect/Stream";
++import * as Ndjson from "effect/unstable/encoding/Ndjson";
+ import { assert, describe, expect } from "vite-plus/test";
+ 
++import * as ServerConfig from "../config.ts";
++import * as ServerSettings from "../serverSettings.ts";
+ import {
+   type DesktopTelemetryReceiverHealth,
+   initialDesktopTelemetryContactAt,
+   isDesktopTelemetryContactStale,
++  make,
+   recordDesktopTelemetrySampleHealth,
+   requireDesktopTelemetryWriteProgress,
+   resolveDesktopTelemetrySnapshotStaleAfterMs,
+@@ -103,3 +126,299 @@ describe("DesktopTelemetryReceiver", () => {
+     }),
+   );
+ });
++
++const TARGET = "1.2.3";
++
++const command = (
++  action: DesktopUpdateReservationAction,
++  attemptId: string,
++  targetVersion = TARGET,
++): DesktopUpdateReservationCommand => ({
++  version: 1,
++  type: "desktopUpdateReservation",
++  attemptId,
++  targetVersion,
++  action,
++});
++
++const answer = (
++  attemptId: string,
++  status: DesktopUpdateReservationStatus,
++  reason?: string,
++): DesktopUpdateReservationReply =>
++  reason === undefined
++    ? { version: 1, type: "desktopUpdateReservationReply", attemptId, status }
++    : { version: 1, type: "desktopUpdateReservationReply", attemptId, status, reason };
++
++const decodeControlMessage = Schema.decodeUnknownEffect(DesktopTelemetryControlMessage);
++const encodeHostMessage = Schema.encodeSync(Schema.fromJsonString(DesktopHostTelemetryMessage));
++
++interface ReceiverHarnessOptions {
++  /** `fifo` reads replies back from a control FIFO; `refused` hands the
++      receiver a read-only descriptor so every control write fails. */
++  readonly control?: "fifo" | "refused";
++}
++
++/**
++ * The production receiver over real descriptors: the telemetry input is a
++ * FIFO the test writes to, the control output is a FIFO the test reads back
++ * or a descriptor that refuses writes. The receiver lives in a server scope
++ * the test closes, as `server.ts` owns the runtime's.
++ */
++const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harness")(function* (
++  options: ReceiverHarnessOptions = {},
++) {
++  const fs = yield* FileSystem.FileSystem;
++  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-telemetry-receiver-" });
++  const inputPath = NodePath.join(baseDir, "telemetry.fifo");
++  const controlPath = NodePath.join(baseDir, "control");
++  NodeChildProcess.execFileSync("mkfifo", [inputPath]);
++
++  const serverScope = yield* Scope.make();
++  const closeServer = Scope.close(serverScope, Exit.void);
++  yield* Effect.addFinalizer(() => closeServer);
++
++  // The test's writer opens read-write so neither open blocks; closing it is
++  // the only way the reader sees EOF.
++  let inputWriter: number | undefined = NodeFS.openSync(inputPath, "r+");
++  const inputReader = NodeFS.openSync(inputPath, "r");
++  const closeInput = Effect.sync(() => {
++    if (inputWriter === undefined) return;
++    NodeFS.closeSync(inputWriter);
++    inputWriter = undefined;
++  });
++  yield* Effect.addFinalizer(() => closeInput);
++
++  const replies = yield* Queue.unbounded<DesktopUpdateReservationReply>();
++  let controlFd: number;
++  if (options.control === "refused") {
++    NodeFS.writeFileSync(controlPath, "");
++    controlFd = NodeFS.openSync(controlPath, "r");
++    yield* Effect.addFinalizer(() => Effect.sync(() => NodeFS.closeSync(controlFd)));
++  } else {
++    NodeChildProcess.execFileSync("mkfifo", [controlPath]);
++    controlFd = NodeFS.openSync(controlPath, "r+");
++    const controlReader = NodeFS.openSync(controlPath, "r");
++    yield* NodeStream.fromReadable<Uint8Array, Error>({
++      evaluate: () => NodeFS.createReadStream("", { fd: controlReader, autoClose: true }),
++      closeOnDone: true,
++      onError: (cause) => new Error(String(cause)),
++    }).pipe(
++      Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
++      Stream.mapEffect((value) => decodeControlMessage(value)),
++      // Startup writes such as `setHostPowerIntervals` are not under test.
++      Stream.filter((message) => message.type === "desktopUpdateReservationReply"),
++      Stream.runForEach((message) => Queue.offer(replies, message)),
++      Effect.forkScoped,
++    );
++    // Added after the reader fork so it runs first: closing the receiver's
++    // end is what lets the test reader see EOF and finish.
++    yield* Effect.addFinalizer(() => Effect.sync(() => NodeFS.closeSync(controlFd)));
++  }
++
++  const baseConfig = yield* ServerConfig.ServerConfig.pipe(
++    Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
++  );
++  const config: ServerConfig.ServerConfig["Service"] = {
++    ...baseConfig,
++    mode: "desktop",
++    desktopTelemetryFd: inputReader,
++    desktopTelemetryControlFd: controlFd,
++  };
++  const receiver = yield* make().pipe(
++    Effect.provide(Layer.mergeAll(ServerConfig.layer(config), ServerSettings.layerTest())),
++    Scope.provide(serverScope),
++  );
++
++  const healthEvents = yield* Queue.unbounded<DesktopTelemetryReceiverHealth>();
++  const health = yield* receiver.subscribeHealth;
++  yield* health.changes.pipe(
++    Stream.runForEach((next) => Queue.offer(healthEvents, next)),
++    Effect.forkScoped,
++  );
++
++  return {
++    receiver,
++    send: (message: DesktopUpdateReservationCommand) =>
++      Effect.sync(() => {
++        if (inputWriter === undefined) throw new Error("telemetry input is already closed");
++        NodeFS.writeSync(inputWriter, `${encodeHostMessage(message)}\n`);
++      }),
++    closeInput,
++    closeServer,
++    /** Next reservation reply written to the control descriptor. */
++    takeReply: Queue.take(replies),
++    pendingReplies: Queue.size(replies),
++    /** Next health publication; every failed control write produces one. */
++    takeHealth: Queue.take(healthEvents),
++  };
++});
++
++it.layer(NodeServices.layer)("DesktopTelemetryReceiver reservation commands", (it) => {
++  it.effect("answers an abort while the reserve it ends is still pending", () =>
++    Effect.gen(function* () {
++      const harness = yield* makeReceiverHarness();
++      const releaseReserve = yield* Deferred.make<void>();
++      const calls: DesktopUpdateReservationCommand[] = [];
++      yield* harness.receiver.registerDesktopUpdateReservationHandler((received) =>
++        Effect.suspend(() => {
++          calls.push(received);
++          return received.action === "reserve"
++            ? Deferred.await(releaseReserve).pipe(Effect.as(answer(received.attemptId, "ready")))
++            : Effect.succeed(answer(received.attemptId, "aborted"));
++        }),
++      );
++
++      yield* harness.send(command("reserve", "a1"));
++      yield* harness.send(command("abort", "a1"));
++      // The reader delivered the abort and its reply left while reserve is held.
++      assert.deepStrictEqual(yield* harness.takeReply, answer("a1", "aborted"));
++      assert.deepStrictEqual(calls, [command("reserve", "a1"), command("abort", "a1")]);
++
++      yield* Deferred.succeed(releaseReserve, undefined);
++      assert.deepStrictEqual(yield* harness.takeReply, answer("a1", "ready"));
++    }),
++  );
++
++  it.effect(
++    "hands every command to the registered handler verbatim, even ones that arrived first",
++    () =>
++      Effect.gen(function* () {
++        const harness = yield* makeReceiverHarness();
++        const sent = [
++          command("abort", "a1"),
++          command("reserve", "a1"),
++          command("reserve", "a1"),
++          command("commit", "a1"),
++          command("reserve", "a2", "1.2.4"),
++          command("abort", "a1"),
++        ];
++        for (const message of sent) yield* harness.send(message);
++
++        // Commands received before registration wait in their own tasks.
++        const calls: DesktopUpdateReservationCommand[] = [];
++        const statusFor: Record<DesktopUpdateReservationAction, DesktopUpdateReservationStatus> = {
++          reserve: "ready",
++          abort: "aborted",
++          commit: "unknown",
++        };
++        yield* harness.receiver.registerDesktopUpdateReservationHandler((received) =>
++          Effect.sync(() => {
++            calls.push(received);
++            return answer(received.attemptId, statusFor[received.action], received.targetVersion);
++          }),
++        );
++
++        const replies: DesktopUpdateReservationReply[] = [];
++        for (let index = 0; index < sent.length; index++) replies.push(yield* harness.takeReply);
++        assert.deepStrictEqual(calls, sent);
++        assert.deepStrictEqual(
++          replies,
++          sent.map((message) =>
++            answer(message.attemptId, statusFor[message.action], message.targetVersion),
++          ),
++        );
++        assert.isFalse(yield* harness.receiver.isDesktopUpdateReservationCommitted("a1"));
++      }),
++  );
++
++  it.effect(
++    "records a committed receipt before the reply, and a refused reply cannot erase it",
++    () =>
++      Effect.gen(function* () {
++        const harness = yield* makeReceiverHarness({ control: "refused" });
++        const calls: DesktopUpdateReservationCommand[] = [];
++        const statusFor = new Map<string, DesktopUpdateReservationStatus>([
++          ["reserve:a1", "ready"],
++          ["commit:a1", "committed"],
++          ["reserve:a2", "busy"],
++          ["reserve:a3", "unknown"],
++          ["abort:a4", "aborted"],
++        ]);
++        yield* harness.receiver.registerDesktopUpdateReservationHandler((received) =>
++          Effect.sync(() => {
++            calls.push(received);
++            const status = statusFor.get(`${received.action}:${received.attemptId}`);
++            if (status === undefined) throw new Error(`unexpected ${received.action}`);
++            return answer(received.attemptId, status);
++          }),
++        );
++
++        const expectCommitted = Effect.fn(function* (expected: ReadonlyArray<string>) {
++          for (const attemptId of ["a1", "a2", "a3", "a4"]) {
++            assert.equal(
++              yield* harness.receiver.isDesktopUpdateReservationCommitted(attemptId),
++              expected.includes(attemptId),
++              attemptId,
++            );
++          }
++        });
++
++        yield* harness.send(command("reserve", "a1"));
++        // Each refused write publishes degraded health after the receipt step ran.
++        const degraded = yield* harness.takeHealth;
++        assert.equal(degraded.status, "degraded");
++        assert.isTrue(Option.exists(degraded.lastError, (error) => error.includes("'write'")));
++        yield* expectCommitted([]);
++
++        yield* harness.send(command("commit", "a1"));
++        yield* harness.takeHealth;
++        yield* expectCommitted(["a1"]);
++
++        // Later commands are still read and handled after the refused writes.
++        for (const message of [
++          command("reserve", "a2"),
++          command("reserve", "a3"),
++          command("abort", "a4"),
++        ]) {
++          yield* harness.send(message);
++          yield* harness.takeHealth;
++        }
++        assert.deepStrictEqual(
++          calls.map((received) => `${received.action}:${received.attemptId}`),
++          ["reserve:a1", "commit:a1", "reserve:a2", "reserve:a3", "abort:a4"],
++        );
++        yield* expectCommitted(["a1"]);
++      }),
++  );
++
++  it.effect("keeps an in-flight handler owned after input EOF until the server scope closes", () =>
++    Effect.gen(function* () {
++      const harness = yield* makeReceiverHarness();
++      const started = yield* Deferred.make<void>();
++      let interrupted = false;
++      const calls: DesktopUpdateReservationCommand[] = [];
++      yield* harness.receiver.registerDesktopUpdateReservationHandler((received) =>
++        Effect.suspend(() => {
++          calls.push(received);
++          return Deferred.succeed(started, undefined).pipe(
++            Effect.andThen(Effect.never),
++            Effect.onInterrupt(() =>
++              Effect.sync(() => {
++                interrupted = true;
++              }),
++            ),
++          );
++        }),
++      );
++
++      yield* harness.send(command("reserve", "a1"));
++      yield* Deferred.await(started);
++
++      // EOF on the input stops the reader but decides nothing for the owner.
++      yield* harness.closeInput;
++      while ((yield* harness.takeHealth).status !== "stopped") {
++        // drain until the reader reports the closed stream
++      }
++      assert.isFalse(interrupted);
++      assert.deepStrictEqual(calls, [command("reserve", "a1")]);
++      assert.equal(yield* harness.pendingReplies, 0);
++      assert.isFalse(yield* harness.receiver.isDesktopUpdateReservationCommitted("a1"));
++
++      // Closing the server scope interrupts and joins the owned task.
++      yield* harness.closeServer;
++      assert.isTrue(interrupted);
++      assert.equal(yield* harness.pendingReplies, 0);
++    }),
++  );
++});
+diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
+index 1297b3bdf7655a78a7406dcc4a4f76c6af317952..c613172f066aec28bc3ef23eb6a35809c85178c2 100644
+--- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
++++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
+@@ -7,12 +7,16 @@ import {
+   type DesktopHostTelemetryMessage as DesktopHostTelemetryMessageValue,
+   type DesktopHostTelemetrySnapshot,
+   DesktopTelemetryControlMessage,
++  type DesktopUpdateReservationCommand,
++  type DesktopUpdateReservationReply,
+   type DesktopUpdateStatusReport,
+   type ResourceTelemetrySourceStatus,
+ } from "@t3tools/contracts";
+ import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
++import * as Cause from "effect/Cause";
+ import * as Context from "effect/Context";
+ import * as DateTime from "effect/DateTime";
++import * as Deferred from "effect/Deferred";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+@@ -147,6 +151,11 @@ export interface DesktopTelemetryReceiverHealth {
+   readonly lastError: Option.Option<string>;
+ }
+ 
++/** Answers one desktop reservation command; the server-scoped reservation owner. */
++export type DesktopUpdateReservationHandler = (
++  command: DesktopUpdateReservationCommand,
++) => Effect.Effect<DesktopUpdateReservationReply>;
++
+ export class DesktopTelemetryReceiver extends Context.Service<
+   DesktopTelemetryReceiver,
+   {
+@@ -195,6 +204,14 @@ export class DesktopTelemetryReceiver extends Context.Service<
+       never,
+       Scope.Scope
+     >;
++    /** Installs the one reservation owner. Commands that arrive earlier wait
++        in their own server-scoped task; the seam is registered once. */
++    readonly registerDesktopUpdateReservationHandler: (
++      handler: DesktopUpdateReservationHandler,
++    ) => Effect.Effect<void>;
++    /** Whether this server answered `committed` for the attempt: its gates
++        are retained, whatever became of the reply on the wire. */
++    readonly isDesktopUpdateReservationCommitted: (attemptId: string) => Effect.Effect<boolean>;
+   }
+ >()("t3/resourceTelemetry/DesktopTelemetryReceiver") {}
+ 
+@@ -330,7 +347,12 @@ export function requireDesktopTelemetryWriteProgress(
+ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")(function* () {
+   const config = yield* ServerConfig;
+   const serverSettings = yield* ServerSettingsService;
++  const scope = yield* Effect.scope;
+   const latest = yield* Ref.make(Option.none<DesktopHostTelemetrySnapshot>());
++  const reservationHandler = yield* Deferred.make<DesktopUpdateReservationHandler>();
++  // Attempts this server answered `committed`. Process-lifetime: the gates a
++  // committed attempt retained are never given back, so neither is the receipt.
++  const committedAttempts = new Set<string>();
+   const receiverStartedAt = yield* DateTime.now;
+   const lastContactAtMs = yield* Ref.make(
+     initialDesktopTelemetryContactAt(
+@@ -401,6 +423,32 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+         );
+       }),
+     );
++  // Runs in the server scope, never on the reader: a reserve may wait for
++  // idle preparation and the gates, and the abort or commit that ends it
++  // arrives on the same sequential input. The committed receipt is recorded
++  // before the reply is written, so a lost reply cannot erase the proof that
++  // the gates were retained. A failed reply is logged, never turned into a
++  // decision: the reservation owner keeps whatever it holds.
++  const handleReservationCommand = (command: DesktopUpdateReservationCommand) =>
++    Deferred.await(reservationHandler).pipe(
++      Effect.flatMap((handler) => handler(command)),
++      Effect.tap((reply) =>
++        Effect.sync(() => {
++          if (reply.status === "committed") committedAttempts.add(reply.attemptId);
++        }),
++      ),
++      Effect.flatMap((reply) => sendControlMessage(reply)),
++      Effect.catchCause((cause) =>
++        Cause.hasInterruptsOnly(cause)
++          ? Effect.failCause(cause)
++          : Effect.logWarning("Desktop update reservation command was not answered", {
++              attemptId: command.attemptId,
++              action: command.action,
++              cause: String(cause),
++            }),
++      ),
++    );
++
+   const setDiagnosticsDemand: DesktopTelemetryReceiver["Service"]["setDiagnosticsDemand"] = (
+     enabled,
+   ) =>
+@@ -527,6 +575,15 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+           );
+         }
+ 
++        // Forked, not awaited: the reader must stay free to deliver the
++        // abort or commit that settles this very command.
++        if (message.type === "desktopUpdateReservation") {
++          return recordContact.pipe(
++            Effect.andThen(Effect.forkIn(handleReservationCommand(message), scope)),
++            Effect.asVoid,
++          );
++        }
++
+         // Not a resource sample: do not touch `latest` or sample health.
+         if (message.type === "desktopUpdateStatus") {
+           return recordContact.pipe(
+@@ -663,6 +720,10 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+         changes: Stream.fromSubscription(subscription),
+       };
+     }),
++    registerDesktopUpdateReservationHandler: (handler) =>
++      Deferred.succeed(reservationHandler, handler).pipe(Effect.asVoid),
++    isDesktopUpdateReservationCommitted: (attemptId) =>
++      Effect.sync(() => committedAttempts.has(attemptId)),
+   });
+ });
+ 
+@@ -712,6 +773,8 @@ export const layerTest = (
+           latest: Option.none<DesktopUpdateStatusReport>(),
+           changes: Stream.empty,
+         }),
++      registerDesktopUpdateReservationHandler: () => Effect.void,
++      isDesktopUpdateReservationCommitted: () => Effect.succeed(false),
+       ...overrides,
+     }),
+   );
+diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
+index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb12109fc15 100644
+--- a/apps/server/src/server.test.ts
++++ b/apps/server/src/server.test.ts
+@@ -11,6 +11,10 @@ import {
+   AuthTokenExchangeGrantType,
+   CommandId,
+   DEFAULT_SERVER_SETTINGS,
++  type DesktopUpdateReservationAction,
++  type DesktopUpdateReservationCommand,
++  type DesktopUpdateReservationReply,
++  type DesktopUpdateReservationStatus,
+   type DpopFailureReason,
+   EnvironmentId,
+   EventId,
+@@ -104,6 +108,7 @@ import packageJson from "../package.json" with { type: "json" };
+ import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+ import * as ServerConfig from "./config.ts";
+ import {
++  DesktopUpdateReservationLayerLive,
+   HTTP_ROUTER_CONFIG,
+   makeManagedUpdateRuntimeLayer,
+   makeRoutesLayer,
+@@ -119,6 +124,7 @@ import {
+ } from "./cloud/managedReleaseSource.ts";
+ import { ManagedArtifactSourceError, type ManagedRuntimeStager } from "./cloud/managedRuntime.ts";
+ import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
++import * as DesktopUpdateReservation from "./desktopUpdate/DesktopUpdateReservation.ts";
+ import type { ProviderIdleRetirementResult } from "./provider/Services/ProviderAdapter.ts";
+ import {
+   type ProviderIdlePreparationResult,
+@@ -11426,6 +11432,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+   const MANAGED_UNKNOWN = "0.0.38-nightly.20260906.1.managed.3.p6d1933416d7a";
+   const NOT_PREPARED = "busy: idle providers are not prepared";
+   const ADMISSION_BUSY = "client commands or another maintenance own update admission";
++  const AGENT_BUSY = "1 agent operation(s) in flight";
++
++  const reservationCommand = (
++    action: DesktopUpdateReservationAction,
++    attemptId: string,
++    targetVersion = MANAGED_TARGET,
++  ): DesktopUpdateReservationCommand => ({
++    version: 1,
++    type: "desktopUpdateReservation",
++    attemptId,
++    targetVersion,
++    action,
++  });
++
++  const reservationReply = (
++    attemptId: string,
++    status: DesktopUpdateReservationStatus,
++    reason?: string,
++  ): DesktopUpdateReservationReply =>
++    reason === undefined
++      ? { version: 1, type: "desktopUpdateReservationReply", attemptId, status }
++      : { version: 1, type: "desktopUpdateReservationReply", attemptId, status, reason };
+ 
+   /** A distinguishable selection whose source and archive are never meant to be touched. */
+   const makeSelection = (version: string, cut: number): ManagedReleaseSelection => ({
+@@ -11457,7 +11485,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+    * Builds `makeManagedUpdateRuntimeLayer` the way production does, over a
+    * temp base directory, a fake exact resolver, fake launcher, fake provider
+    * hooks, and the real gates, in a manually owned server scope. `hold`
+-   * gates each fake staging attempt so tests can observe it in flight.
++   * gates each fake staging attempt so tests can observe it in flight. The
++   * desktop reservation layer is composed beside it as in `server.ts`, over a
++   * test receiver that only captures the registered handler.
+    */
+   const makeManagedFixture = Effect.fn("makeManagedFixture")(function* (input: {
+     readonly hold: (targetVersion: string) => Effect.Effect<void>;
+@@ -11532,16 +11562,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+         }),
+     });
+ 
++    const registered: Array<DesktopTelemetryReceiver.DesktopUpdateReservationHandler> = [];
++    const receiverLayer = DesktopTelemetryReceiver.layerTest({
++      registerDesktopUpdateReservationHandler: (handler) =>
++        Effect.sync(() => {
++          registered.push(handler);
++        }),
++    });
++
+     const serverScope = yield* Scope.make();
+     yield* Effect.addFinalizer(() => Scope.close(serverScope, Exit.void));
+     const context = yield* Layer.buildWithScope(
+-      makeManagedUpdateRuntimeLayer({
+-        statePath,
+-        installedVersion: packageJson.version,
+-        pollInterval: Duration.seconds(30),
+-        dbPath,
+-        resolve,
+-      }).pipe(
++      DesktopUpdateReservationLayerLive.pipe(
++        Layer.provide(receiverLayer),
++        Layer.provideMerge(
++          makeManagedUpdateRuntimeLayer({
++            statePath,
++            installedVersion: packageJson.version,
++            pollInterval: Duration.seconds(30),
++            dbPath,
++            resolve,
++          }),
++        ),
+         Layer.provideMerge(Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer)),
+         Layer.provide(Layer.mergeAll(providerLayer, launcherLayer)),
+       ),
+@@ -11557,10 +11599,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+       coordinator: Context.get(context, IdleUpdateCoordinator.IdleUpdateCoordinator),
+       activity: Context.get(context, UpdateActivity),
+       admission: Context.get(context, UpdateAdmission.UpdateAdmission),
++      reservation: Context.get(context, DesktopUpdateReservation.DesktopUpdateReservation),
++      registered,
++      /** The handler exactly as the receiver would invoke it for an fd4 command. */
++      handle: (command: DesktopUpdateReservationCommand) =>
++        Effect.suspend(() => {
++          const handler = registered[0];
++          if (handler === undefined || registered.length !== 1) {
++            return Effect.die(`expected one registered handler, found ${registered.length}`);
++          }
++          return handler(command);
++        }),
+       closeServer: Scope.close(serverScope, Exit.void),
+     };
+   });
+ 
++  /** Both gates open and the coordinator idle. */
++  const assertGatesOpen = Effect.fn("assertGatesOpen")(function* (fixture: {
++    readonly activity: UpdateActivity["Service"];
++    readonly admission: UpdateAdmission.UpdateAdmission["Service"];
++    readonly coordinator: IdleUpdateCoordinator.IdleUpdateCoordinator["Service"];
++  }) {
++    assert.include(yield* fixture.activity.state, {
++      phase: "open",
++      outstanding: 0,
++      idleShutdownAuthorized: false,
++    });
++    assert.deepStrictEqual(yield* fixture.admission.state, { phase: "open", inFlight: 0 });
++    assert.deepStrictEqual(yield* fixture.coordinator.state, { phase: "ready" });
++  });
++
++  /** Both gates held by a reservation: activity sealed, admission in maintenance. */
++  const assertGatesHeld = Effect.fn("assertGatesHeld")(function* (
++    fixture: {
++      readonly activity: UpdateActivity["Service"];
++      readonly admission: UpdateAdmission.UpdateAdmission["Service"];
++      readonly coordinator: IdleUpdateCoordinator.IdleUpdateCoordinator["Service"];
++    },
++    coordinatorPhase: "attempting" | "accepted",
++  ) {
++    assert.include(yield* fixture.activity.state, {
++      phase: "sealed",
++      outstanding: 0,
++      idleShutdownAuthorized: true,
++    });
++    assert.deepStrictEqual(yield* fixture.admission.state, { phase: "maintenance", inFlight: 0 });
++    assert.deepStrictEqual(yield* fixture.coordinator.state, { phase: coordinatorPhase });
++  });
++
+   const untouched: ManagedCalls = {
+     resolve: [],
+     stage: 0,
+@@ -11667,6 +11753,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+           yield* Effect.yieldNow;
+ 
+           assert.deepStrictEqual(fixture.calls, untouched);
++          // Exactly one reservation owner registered once on the shared receiver.
++          assert.strictEqual(fixture.registered.length, 1);
+           assert.include(yield* fixture.queue.getState, {
+             stage: "current",
+             installedVersion: packageJson.version,
+@@ -11831,6 +11919,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+       }),
+     ),
+   );
++
++  it.effect("the desktop reservation handler reserves against the runtime's own gates", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* makeManagedFixture({ hold: () => Effect.void });
++        assert.strictEqual(fixture.registered.length, 1);
++
++        // An agent lease from the shared registry declines promptly and
++        // never starts idle preparation.
++        const lease = yield* fixture.activity.acquire("agent turn");
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("reserve", "a1")),
++          reservationReply("a1", "busy", AGENT_BUSY),
++        );
++        assert.strictEqual(fixture.calls.prepare, 0);
++        assert.deepStrictEqual(yield* fixture.preparation.state, {
++          phase: "busy",
++          reason: AGENT_BUSY,
++        });
++        lease.release();
++        yield* assertGatesOpen(fixture);
++
++        // A declined attempt is a tombstone for this process generation.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("reserve", "a1")),
++          reservationReply("a1", "busy", AGENT_BUSY),
++        );
++
++        // Idle: reserve prepares through the provider, waits for the proof,
++        // then the reservation seals on it. The exact runtime gates close.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("reserve", "a2")),
++          reservationReply("a2", "ready"),
++        );
++        assert.deepStrictEqual(yield* fixture.preparation.state, { phase: "prepared" });
++        assert.strictEqual(fixture.calls.prepare, 1);
++        assert.strictEqual(fixture.calls.check, 1);
++        yield* assertGatesHeld(fixture, "attempting");
++        // The runtime's queue worker is a bystander: nothing staged or launched.
++        assert.deepStrictEqual(fixture.calls.resolve, []);
++        assert.strictEqual(fixture.calls.stage, 0);
++        assert.strictEqual(fixture.calls.launcher, 0);
++
++        // Abort reopens both gates and the coordinator.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("abort", "a2")),
++          reservationReply("a2", "aborted"),
++        );
++        yield* assertGatesOpen(fixture);
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("abort", "a2")),
++          reservationReply("a2", "aborted"),
++        );
++      }),
++    ),
++  );
++
++  it.effect("abort-before-reserve and duplicate decisions are idempotent through the handler", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* makeManagedFixture({ hold: () => Effect.void });
++
++        // Abort never requests preparation and leaves a tombstone.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("abort", "b1")),
++          reservationReply("b1", "aborted"),
++        );
++        assert.strictEqual(fixture.calls.prepare, 0);
++        assert.deepStrictEqual(yield* fixture.preparation.state, { phase: "idle" });
++        yield* assertGatesOpen(fixture);
++
++        // A late reserve for that attempt prepares but acquires nothing.
++        for (let index = 0; index < 2; index++) {
++          assert.deepStrictEqual(
++            yield* fixture.handle(reservationCommand("reserve", "b1")),
++            reservationReply("b1", "aborted"),
++          );
++        }
++        assert.strictEqual(fixture.calls.prepare, 1);
++        assert.deepStrictEqual(yield* fixture.preparation.state, { phase: "prepared" });
++        yield* assertGatesOpen(fixture);
++
++        // A commit without a held reservation is refused without touching gates.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("commit", "b2")),
++          reservationReply("b2", "unknown", "commit without a held reservation"),
++        );
++        // A different target for a known attempt is refused, same id stays bound.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("reserve", "b1", MANAGED_NEWER)),
++          reservationReply(
++            "b1",
++            "unknown",
++            `attempt is bound to target ${MANAGED_TARGET}, not ${MANAGED_NEWER}`,
++          ),
++        );
++        yield* assertGatesOpen(fixture);
++        assert.strictEqual(fixture.calls.prepare, 1);
++        assert.strictEqual(fixture.calls.check, 0);
++        assert.deepStrictEqual(fixture.calls.resolve, []);
++      }),
++    ),
++  );
++
++  it.effect(
++    "commit latches the runtime's gates until the server scope closes without hanging",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const fixture = yield* makeManagedFixture({ hold: () => Effect.void });
++
++          assert.deepStrictEqual(
++            yield* fixture.handle(reservationCommand("reserve", "c1")),
++            reservationReply("c1", "ready"),
++          );
++          yield* assertGatesHeld(fixture, "attempting");
++
++          // Committed only once the coordinator has accepted and retained both gates.
++          assert.deepStrictEqual(
++            yield* fixture.handle(reservationCommand("commit", "c1")),
++            reservationReply("c1", "committed"),
++          );
++          yield* assertGatesHeld(fixture, "accepted");
++          const refused = yield* fixture.admission.withAdmission(Effect.void).pipe(Effect.flip);
++          assert.strictEqual(refused._tag, "UpdateAdmissionClosedError");
++
++          // A lost reply is replayed, never re-decided; a late abort or another
++          // attempt cannot reopen what the desktop committed to.
++          for (const action of ["commit", "reserve", "abort"] as const) {
++            assert.deepStrictEqual(
++              yield* fixture.handle(reservationCommand(action, "c1")),
++              reservationReply("c1", "committed"),
++            );
++          }
++          assert.deepStrictEqual(
++            yield* fixture.handle(reservationCommand("reserve", "c2")),
++            reservationReply("c2", "unknown", "another reservation attempt owns this server"),
++          );
++          yield* assertGatesHeld(fixture, "accepted");
++          assert.strictEqual(fixture.calls.launcher, 0);
++          assert.deepStrictEqual(fixture.calls.resolve, []);
++
++          // The parked owner lives in the server scope: closing it joins the
++          // owner without hanging and keeps the latch for the rest of the process.
++          yield* fixture.closeServer;
++          assert.deepStrictEqual(yield* fixture.admission.state, {
++            phase: "maintenance",
++            inFlight: 0,
++          });
++          assert.include(yield* fixture.activity.state, {
++            phase: "closed",
++            idleShutdownAuthorized: true,
++          });
++          assert.deepStrictEqual(yield* fixture.coordinator.state, { phase: "accepted" });
++          assert.deepStrictEqual(
++            yield* fixture.handle(reservationCommand("commit", "c1")),
++            reservationReply("c1", "committed"),
++          );
++        }),
++      ),
++  );
++
++  it.effect("one reservation owner shares the runtime's single gates and coordinator", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fixture = yield* makeManagedFixture({ hold: () => Effect.void });
++        assert.strictEqual(fixture.registered.length, 1);
++
++        // The service the layer exports is the same owner the receiver hands
++        // commands to: a reservation made through one is visible to the other.
++        assert.deepStrictEqual(
++          yield* fixture.reservation.handle(reservationCommand("abort", "d1")),
++          reservationReply("d1", "aborted"),
++        );
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("reserve", "d1")),
++          reservationReply("d1", "aborted"),
++        );
++
++        // Holding a reservation blocks the queue's own activation through the
++        // same coordinator, so there cannot be a second one.
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("reserve", "d2")),
++          reservationReply("d2", "ready"),
++        );
++        let handoffs = 0;
++        assert.deepStrictEqual(
++          yield* fixture.coordinator.tryActivate(
++            () =>
++              Effect.sync((): QueuedUpdate.ActivationDeclined => {
++                handoffs += 1;
++                return { status: "busy", reason: "test handoff declined" };
++              }),
++            Effect.void,
++          ),
++          { status: "busy", reason: "an update handoff attempt is already in progress" },
++        );
++        assert.strictEqual(handoffs, 0);
++        assert.deepStrictEqual(
++          yield* fixture.handle(reservationCommand("abort", "d2")),
++          reservationReply("d2", "aborted"),
++        );
++        yield* assertGatesOpen(fixture);
++      }),
++    ),
++  );
+ });
+ 
+ // The WebSocket surface of the managed update queue: one durable subscription
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 2f9ceb27f3f9339e5c9353f7ddba3014f851fa08..a412c53bc2a233e15eaf2e9d3e5435c599e94119 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -134,6 +134,7 @@ import {
+ import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
+ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+ import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
++import * as DesktopUpdateReservation from "./desktopUpdate/DesktopUpdateReservation.ts";
+ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
+ import * as HostResources from "./resourceTelemetry/HostResources.ts";
+@@ -517,6 +518,36 @@ export const makeManagedUpdateRuntimeLayer = (input: {
+     ),
+   );
+ 
++/**
++ * The desktop's reserve/abort/commit commands, answered by one server-scoped
++ * reservation owner over the coordinator and preparation owner the managed
++ * runtime already shares. Registered once on the shared telemetry receiver,
++ * whose reader forks each command into the server scope. A reserve first asks
++ * for the idle preparation proof the coordinator verifies under its own claim;
++ * abort and commit never start preparation. Exported only so the server test
++ * can build this exact boundary over fakes.
++ */
++export const DesktopUpdateReservationLayerLive = Layer.effect(
++  DesktopUpdateReservation.DesktopUpdateReservation,
++  Effect.gen(function* () {
++    const coordinator = yield* IdleUpdateCoordinator.IdleUpdateCoordinator;
++    const preparation = yield* IdleUpdatePreparation.IdleUpdatePreparation;
++    const receiver = yield* DesktopTelemetryReceiver.DesktopTelemetryReceiver;
++    const reservation = yield* DesktopUpdateReservation.make({ coordinator });
++    yield* receiver.registerDesktopUpdateReservationHandler((command) =>
++      command.action === "reserve"
++        ? preparation.request.pipe(
++            Effect.flatMap((state) =>
++              state.phase === "preparing" ? preparation.settled : Effect.succeed(state),
++            ),
++            Effect.andThen(reservation.handle(command)),
++          )
++        : reservation.handle(command),
++    );
++    return reservation;
++  }),
++);
++
+ // One activity registry and one admission gate for the provider runtime, the
+ // idle preparation owner, the coordinator, and the queue. Provided once inside
+ // the runtime dependencies so every consumer sees the same pair.
+@@ -578,14 +609,19 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+       dbPath: config.dbPath,
+       resolve,
+     });
+-    // Same queue and preparation owner as the runtime layer; the launcher
+-    // client comes from the shared `launcherLayer` below.
+-    return ManagedNightlyUpdate.layer({
+-      installedVersion: packageJson.version,
+-      discoveryInterval: Duration.hours(4),
+-      preparationRetryInterval: Duration.seconds(30),
+-      discoverLatest,
+-    }).pipe(Layer.provideMerge(managedUpdateRuntimeLayer));
++    // Same queue, coordinator and preparation owner as the runtime layer for
++    // both the nightly scheduler and the desktop reservation owner; the
++    // launcher client comes from the shared `launcherLayer` below and the
++    // receiver from the runtime dependencies' one `DesktopTelemetryReceiverLayerLive`.
++    return Layer.mergeAll(
++      ManagedNightlyUpdate.layer({
++        installedVersion: packageJson.version,
++        discoveryInterval: Duration.hours(4),
++        preparationRetryInterval: Duration.seconds(30),
++        discoverLatest,
++      }),
++      DesktopUpdateReservationLayerLive,
++    ).pipe(Layer.provideMerge(managedUpdateRuntimeLayer));
+   }),
+ );
+ 

@@ -139,6 +139,11 @@
       "sha256": "b9e6f53db1473e4433091d1b7757334fa4446f93b66febf1b2147c0323857865"
     },
     {
+      "id": "server-desktop-reservation-receiver",
+      "path": "patches/0030-server-desktop-reservation-receiver.patch",
+      "sha256": "c1f39a144bfa1613349b4139b400a2527683ad8be4d799f20949f484fd907518"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "ec810bc93f35c387f64f02a384006d9865a6f86e9217feb40aab99d31c921ab3"
@@ -171,7 +176,8 @@
       "managed-nightly-trigger",
       "managed-queue-controls",
       "desktop-reservation-transport",
-      "managed-desktop-feed"
+      "managed-desktop-feed",
+      "server-desktop-reservation-receiver"
     ],
     "reasoning": [
       "reasoning-full",
@@ -200,6 +206,7 @@
       "managed-queue-controls",
       "desktop-reservation-transport",
       "managed-desktop-feed",
+      "server-desktop-reservation-receiver",
       "reasoning-identity"
     ]
   }
