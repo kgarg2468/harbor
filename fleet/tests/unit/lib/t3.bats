@@ -737,3 +737,66 @@ service_protected_snapshot() {
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-mutations")" 'service install'
   harbor_lock_release "${FIX_ROOT}"
 }
+
+fake_service_passthrough() {
+  local bin
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  export SERVICE_TEST_DIR="${BATS_TEST_TMPDIR}"
+  export SERVICE_STATE_ROOT="${FIX_ROOT}"
+  export SERVICE_T3_VERSION="${T3_VERSION}"
+  export SERVICE_RC="${1}"
+  cat >"${bin}" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  printf 't3 v%s\n' "${SERVICE_T3_VERSION}"
+  exit 0
+fi
+printf '<%s>\n' "$@" >>"${SERVICE_TEST_DIR}/vendor.log"
+[ ! -e "${SERVICE_STATE_ROOT}/lock.d" ] || exit 96
+printf 'vendor stdout\n'
+printf 'vendor stderr\n' >&2
+exit "${SERVICE_RC}"
+SH
+  chmod 0755 "${bin}"
+}
+
+@test "service dispatch labels exact argv and preserves both vendor streams and exits for all five verbs" {
+  local verb rc label before
+  # Exercise shell quoting in the label and argument preservation at the real seam.
+  FIX_HOME="${BATS_TEST_TMPDIR}/operator home"
+  FIX_ROOT="${FIX_HOME}/.local/state/harbor"
+  mkdir -p "${FIX_ROOT}/journal"
+  printf 'sentinel\n' >"${FIX_ROOT}/journal/sentinel"
+  before="$(cat "${FIX_ROOT}/journal/sentinel")"
+  for verb in start stop restart status logs; do
+    for rc in 0 1 3; do
+      fake_service_passthrough "${rc}"
+      rm -f "${BATS_TEST_TMPDIR}/vendor.log"
+      label="$(printf 'harbor: running %q service %q' "$(harbor_t3_bin "${FIX_HOME}")" "${verb}")"
+      run --separate-stderr env HOME="${FIX_HOME}" "${HARBOR}" service "${verb}"
+      assert_equal "${status}" "${rc}"
+      assert_equal "${output}" 'vendor stdout'
+      assert_equal "${stderr}" "$(printf '%s\nvendor stderr' "${label}")"
+      assert_equal "$(cat "${BATS_TEST_TMPDIR}/vendor.log")" "$(printf '<service>\n<%s>' "${verb}")"
+      assert_equal "$(ls -A "${FIX_ROOT}/journal")" sentinel
+      assert_equal "$(cat "${FIX_ROOT}/journal/sentinel")" "${before}"
+      assert [ ! -e "${FIX_ROOT}/lock.d" ]
+      assert [ ! -e "${FIX_ROOT}/harbor.log" ]
+    done
+  done
+}
+
+@test "service rejects unknown or missing verbs with usage and no vendor call" {
+  local verb
+  fake_service_passthrough 0
+  for verb in install unknown START ''; do
+    run --separate-stderr env HOME="${FIX_HOME}" "${HARBOR}" service ${verb:+"${verb}"}
+    assert_failure 3
+    assert_equal "${output}" ''
+    assert_equal "${stderr}" 'harbor: usage: harbor service <start|stop|restart|status|logs>'
+    assert [ ! -e "${BATS_TEST_TMPDIR}/vendor.log" ]
+    assert_equal "$(journal_names)" ''
+    assert [ ! -e "${FIX_ROOT}/lock.d" ]
+  done
+}

@@ -145,6 +145,26 @@ harbor_t3_run() {
   harbor_log_vendor "${bin}" ${1+"$@"}
   "${bin}" ${1+"$@"}
 }
+# harbor_service_cmd: labelled pass-through; no lock is needed because this command
+# holds no Harbor state and writes no journal (none of these verbs has an inverse).
+harbor_service_cmd() {
+  local verb="${1:-}" bin
+  case "${verb}" in
+    start | stop | restart | status | logs) ;;
+    *) harbor_die 3 usage 'harbor service <start|stop|restart|status|logs>' ;;
+  esac
+  [ "$#" -eq 1 ] || harbor_die 3 usage 'harbor service <start|stop|restart|status|logs>'
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  bin="$(harbor_t3_bin "${HOME}")"
+  # Shell quoting keeps the displayed argv exact even when HOME contains spaces.
+  # The label precedes harbor_t3_run's version guard, so a mismatched install prints
+  # this line and then the refusal naming harbor provision. That ordering is kept on
+  # purpose: the label cannot move inside the seam, because harbor_t3_service_status
+  # and harbor_t3_service_install capture that seam's output and classify on the body,
+  # and duplicating the guard here to print later would give it two places to drift.
+  printf 'harbor: running %q service %q\n' "${bin}" "${verb}" >&2
+  harbor_t3_run "${HOME}" service "${verb}"
+}
 # harbor_t3_service_status HOME: the pinned formatter has no JSON mode and exits
 # zero in every state. Only its whole status lines decide the answer; an empty or
 # unfamiliar body is unknown, never evidence that a service is installed.
