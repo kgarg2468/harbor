@@ -154,6 +154,11 @@
       "sha256": "5b6e18aa0a7421b1d26589c4075195f16ce7724e82709d6430cdec63afb501e9"
     },
     {
+      "id": "desktop-ssh-ownership",
+      "path": "patches/0033-desktop-ssh-ownership.patch",
+      "sha256": "0a824e326688cd48a1d055300ceeb05540bb82f1165236946dd64b624279caaa"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "7743f69e213a60a86641ec1206dc83546956a58db16a18dfe0dcbd643320065e"
@@ -189,7 +194,8 @@
       "managed-desktop-feed",
       "server-desktop-reservation-receiver",
       "managed-presentation-identity",
-      "desktop-update-lifecycle"
+      "desktop-update-lifecycle",
+      "desktop-ssh-ownership"
     ],
     "reasoning": [
       "reasoning-full",
@@ -221,6 +227,7 @@
       "server-desktop-reservation-receiver",
       "managed-presentation-identity",
       "desktop-update-lifecycle",
+      "desktop-ssh-ownership",
       "reasoning-identity"
     ]
   }

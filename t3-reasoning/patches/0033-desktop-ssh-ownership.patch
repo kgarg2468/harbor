@@ -1,0 +1,601 @@
+diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
+index 1fe2b86a..5329dc0b 100644
+--- a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
++++ b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
+@@ -1,8 +1,23 @@
+ import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { assert, describe, it } from "@effect/vitest";
++import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@t3tools/contracts";
++import * as Option from "effect/Option";
++import * as DesktopConfig from "../app/DesktopConfig.ts";
++import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
++import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
++import * as SavedEnvironments from "../settings/DesktopSavedEnvironments.ts";
+ import * as NetService from "@t3tools/shared/Net";
+ import { SshPasswordPromptError } from "@t3tools/ssh/errors";
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Exit from "effect/Exit";
++import * as Fiber from "effect/Fiber";
++import * as Scope from "effect/Scope";
++import * as Scheduler from "effect/Scheduler";
++import * as SshTunnel from "@t3tools/ssh/tunnel";
++import { vi } from "vite-plus/test";
++import * as Lifecycle from "../backend/desktopUpdateLifecycle.ts";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Layer from "effect/Layer";
+@@ -121,6 +136,7 @@ describe("sshEnvironment", () => {
+               resolve: () => Effect.die("unexpected password prompt resolution"),
+             }),
+           ),
++          Layer.provideMerge(Lifecycle.layer),
+           Layer.provideMerge(NodeServices.layer),
+           Layer.provideMerge(NodeHttpClient.layerUndici),
+           Layer.provideMerge(NetService.layer),
+@@ -130,3 +146,365 @@ describe("sshEnvironment", () => {
+     ),
+   );
+ });
++
++const target = { alias: "devbox", hostname: "devbox.example.com", username: null, port: null };
++const bootstrap = {
++  target,
++  httpBaseUrl: "http://127.0.0.1:1234/",
++  wsBaseUrl: "ws://127.0.0.1:1234/",
++  remotePort: 4567,
++  pairingToken: null,
++};
++
++const withSshFixture = <A, E, R>(
++  test: (fixture: {
++    readonly environment: DesktopSshEnvironment.DesktopSshEnvironment["Service"];
++    readonly lifecycle: Lifecycle.DesktopUpdateLifecycle["Service"];
++    readonly scope: Scope.Closeable;
++    readonly ensureEntered: Deferred.Deferred<void>;
++    readonly ensureRelease: Deferred.Deferred<void>;
++    readonly disconnectEntered: Deferred.Deferred<void>;
++    readonly disconnectRelease: Deferred.Deferred<void>;
++    readonly cleanupEntered: Deferred.Deferred<void>;
++    readonly cleanupRelease: Deferred.Deferred<void>;
++    readonly ownerPresent: () => boolean;
++  }) => Effect.Effect<A, E, R>,
++) =>
++  Effect.gen(function* () {
++    const lifecycle = yield* Lifecycle.make;
++    let ownerPresent = false;
++    const trackedLifecycle = Lifecycle.DesktopUpdateLifecycle.of({
++      ...lifecycle,
++      addOwner: (snapshot) =>
++        lifecycle.addOwner(snapshot).pipe(
++          Effect.map((remove) => {
++            ownerPresent = true;
++            return remove.pipe(
++              Effect.map(() => {
++                ownerPresent = false;
++              }),
++            );
++          }),
++        ),
++    });
++    const ensureEntered = yield* Deferred.make<void>();
++    const ensureRelease = yield* Deferred.make<void>();
++    const disconnectEntered = yield* Deferred.make<void>();
++    const disconnectRelease = yield* Deferred.make<void>();
++    const cleanupEntered = yield* Deferred.make<void>();
++    const cleanupRelease = yield* Deferred.make<void>();
++    const managerLayer = Layer.effect(
++      SshTunnel.SshEnvironmentManager,
++      Effect.gen(function* () {
++        yield* Effect.addFinalizer(() =>
++          Deferred.succeed(cleanupEntered, undefined).pipe(
++            Effect.andThen(Deferred.await(cleanupRelease)),
++          ),
++        );
++        return SshTunnel.SshEnvironmentManager.of({
++          ensureEnvironment: () =>
++            Effect.gen(function* () {
++              assert.isTrue(ownerPresent, "owner must exist before tunnel creation starts");
++              yield* Deferred.succeed(ensureEntered, undefined);
++              yield* Deferred.await(ensureRelease);
++              return bootstrap;
++            }),
++          disconnectEnvironment: () =>
++            Deferred.succeed(disconnectEntered, undefined).pipe(
++              Effect.andThen(Deferred.await(disconnectRelease)),
++            ),
++        });
++      }),
++    );
++    const spy = vi.spyOn(SshTunnel.SshEnvironmentManager, "layer").mockReturnValue(managerLayer);
++    const scope = yield* Scope.make("sequential");
++    return yield* Effect.gen(function* () {
++      const context = yield* Layer.buildWithScope(
++        DesktopSshEnvironment.layer().pipe(
++          Layer.provide(Layer.succeed(Lifecycle.DesktopUpdateLifecycle, trackedLifecycle)),
++          Layer.provide(
++            Layer.succeed(DesktopSshPasswordPrompts.DesktopSshPasswordPrompts, {
++              request: () => Effect.die("unexpected prompt"),
++              resolve: () => Effect.die("unexpected prompt resolution"),
++            }),
++          ),
++          Layer.provide(NodeServices.layer),
++          Layer.provide(NodeHttpClient.layerUndici),
++          Layer.provide(NetService.layer),
++        ),
++        scope,
++      );
++      return yield* test({
++        environment: Context.get(context, DesktopSshEnvironment.DesktopSshEnvironment),
++        lifecycle,
++        scope,
++        ensureEntered,
++        ensureRelease,
++        disconnectEntered,
++        disconnectRelease,
++        cleanupEntered,
++        cleanupRelease,
++        ownerPresent: () => ownerPresent,
++      });
++    }).pipe(
++      Effect.ensuring(
++        Effect.gen(function* () {
++          yield* Deferred.succeed(ensureRelease, undefined);
++          yield* Deferred.succeed(disconnectRelease, undefined);
++          yield* Deferred.succeed(cleanupRelease, undefined);
++          yield* Scope.close(scope, Exit.void);
++          spy.mockRestore();
++        }),
++      ),
++    );
++  });
++
++describe("SSH update ownership", () => {
++  it.effect(
++    "ensure enters the mutation before tunnel creation and promptly makes freeze busy",
++    () =>
++      withSshFixture((f) =>
++        Effect.gen(function* () {
++          const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++          yield* Deferred.await(f.ensureEntered);
++          assert.equal((yield* f.lifecycle.tryFreeze)._tag, "busy");
++          yield* Deferred.succeed(f.ensureRelease, undefined);
++          assert.deepEqual(yield* Fiber.join(ensuring), bootstrap);
++          const result = yield* f.lifecycle.tryFreeze;
++          assert.equal(result._tag, "unsupported");
++          if (result._tag === "unsupported") assert.include(result.reason, "restart T3 Code");
++        }),
++      ),
++  );
++
++  it.effect("a provisional freeze excludes ensure until release", () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        const frozen = yield* f.lifecycle.tryFreeze;
++        if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++        const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isFalse(f.ownerPresent());
++        assert.isUndefined(ensuring.pollUnsafe());
++        yield* frozen.backends.release;
++        yield* Deferred.await(f.ensureEntered);
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* Fiber.join(ensuring);
++      }),
++    ),
++  );
++
++  it.effect("disconnect and scope closing keep ownership until scoped cleanup finishes", () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* f.environment.ensureEnvironment(target);
++        const disconnect = yield* f.environment
++          .disconnectEnvironment(target)
++          .pipe(Effect.forkChild);
++        yield* Deferred.await(f.disconnectEntered);
++        assert.isTrue(f.ownerPresent());
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "busy");
++        yield* Deferred.succeed(f.disconnectRelease, undefined);
++        yield* Fiber.join(disconnect);
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
++        yield* Deferred.await(f.cleanupEntered);
++        assert.isTrue(f.ownerPresent());
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "busy");
++        yield* Deferred.succeed(f.cleanupRelease, undefined);
++        yield* Fiber.join(closing);
++        assert.isFalse(f.ownerPresent());
++        const frozen = yield* f.lifecycle.tryFreeze;
++        assert.equal(frozen._tag, "frozen");
++        if (frozen._tag === "frozen") yield* frozen.backends.release;
++      }),
++    ),
++  );
++
++  it.effect("retention lets waiting SSH teardown settle while new ensure stays excluded", () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        const frozen = yield* f.lifecycle.tryFreeze;
++        if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++        const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++        const disconnect = yield* f.environment
++          .disconnectEnvironment(target)
++          .pipe(Effect.forkChild);
++        const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(disconnect.pollUnsafe());
++        assert.isUndefined(closing.pollUnsafe());
++        frozen.backends.retainUntilProcessExit();
++        yield* Deferred.await(f.disconnectEntered);
++        yield* Deferred.succeed(f.disconnectRelease, undefined);
++        yield* Fiber.join(disconnect);
++        yield* Deferred.await(f.cleanupEntered);
++        yield* Deferred.succeed(f.cleanupRelease, undefined);
++        yield* Fiber.join(closing);
++        assert.isFalse(f.ownerPresent());
++        assert.isUndefined(ensuring.pollUnsafe());
++        yield* Fiber.interrupt(ensuring);
++      }),
++    ),
++  );
++});
++
++const withSavedRecords = <A, E, R>(
++  effect: Effect.Effect<A, E, R | SavedEnvironments.DesktopSavedEnvironments>,
++) =>
++  Effect.gen(function* () {
++    const fs = yield* FileSystem.FileSystem;
++    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-ownership-" });
++    const environment = DesktopEnvironment.layer({
++      dirname: "/repo/apps/desktop/src",
++      homeDirectory: baseDir,
++      platform: "darwin",
++      processArch: "arm64",
++      appVersion: "1.2.3",
++      appPath: "/repo",
++      isPackaged: true,
++      resourcesPath: "/missing/resources",
++      runningUnderArm64Translation: false,
++    }).pipe(
++      Layer.provide(NodeServices.layer),
++      Layer.provide(DesktopConfig.layerTest({ T3CODE_HOME: baseDir })),
++    );
++    return yield* effect.pipe(
++      Effect.provide(
++        SavedEnvironments.layer.pipe(
++          Layer.provide(environment),
++          Layer.provide(NodeServices.layer),
++          Layer.provide(
++            Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, {
++              isEncryptionAvailable: Effect.succeed(false),
++              encryptString: () => Effect.die("unexpected secret encryption"),
++              decryptString: () => Effect.die("unexpected secret decryption"),
++              selectedStorageBackend: Effect.succeed(Option.none()),
++            }),
++          ),
++        ),
++      ),
++    );
++  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
++
++const savedRecord: PersistedSavedEnvironmentRecord = {
++  environmentId: EnvironmentId.make("ssh-environment"),
++  label: "SSH",
++  httpBaseUrl: bootstrap.httpBaseUrl,
++  wsBaseUrl: bootstrap.wsBaseUrl,
++  createdAt: "2026-09-10T00:00:00.000Z",
++  lastConnectedAt: null,
++  desktopSsh: target,
++};
++
++it.effect("deleting a real saved SSH record does not hide live ownership", () =>
++  withSavedRecords(
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        const saved = yield* SavedEnvironments.DesktopSavedEnvironments;
++        yield* saved.setRegistry([savedRecord]);
++        const initial = yield* f.lifecycle.tryFreeze;
++        assert.equal(initial._tag, "frozen", "a saved SSH record alone is not a live owner");
++        if (initial._tag === "frozen") yield* initial.backends.release;
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* f.environment.ensureEnvironment(target);
++        yield* saved.removeEnvironment(savedRecord.environmentId);
++        assert.deepEqual(yield* saved.getRegistry, []);
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        assert.isTrue(f.ownerPresent());
++      }),
++    ),
++  ),
++);
++
++it.effect("direct and T3 Connect records stay outside the ownership inventory", () =>
++  withSavedRecords(
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        const saved = yield* SavedEnvironments.DesktopSavedEnvironments;
++        const { desktopSsh: _ssh, ...direct } = savedRecord;
++        yield* saved.setRegistry([
++          { ...direct, environmentId: EnvironmentId.make("direct"), label: "Direct" },
++          {
++            ...direct,
++            environmentId: EnvironmentId.make("relay"),
++            label: "T3 Connect",
++            relayManaged: { relayUrl: "https://relay.example.com" },
++          },
++        ]);
++        const frozen = yield* f.lifecycle.tryFreeze;
++        assert.equal(frozen._tag, "frozen");
++        if (frozen._tag === "frozen") {
++          assert.deepEqual(frozen.backends.runs, []);
++          yield* frozen.backends.release;
++        }
++        assert.isFalse(f.ownerPresent());
++      }),
++    ),
++  ),
++);
++
++it.effect(
++  "scope shutdown drains an in-flight ensure before taking the tunnel cleanup snapshot",
++  () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++        yield* Deferred.await(f.ensureEntered);
++        const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isFalse(yield* Deferred.isDone(f.cleanupEntered));
++        assert.isTrue(f.ownerPresent());
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "busy");
++        const lateEnsure = yield* f.environment.ensureEnvironment(target).pipe(Effect.exit);
++        assert.isTrue(Exit.isFailure(lateEnsure));
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* Fiber.join(ensuring);
++        yield* Deferred.await(f.cleanupEntered);
++        assert.isTrue(f.ownerPresent());
++        yield* Deferred.succeed(f.cleanupRelease, undefined);
++        yield* Fiber.join(closing);
++        assert.isFalse(f.ownerPresent());
++      }),
++    ),
++);
++
++it.effect(
++  "interrupted ensure keeps the conservative owner and releases its operation for cleanup",
++  () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++        yield* Deferred.await(f.ensureEntered);
++        yield* Fiber.interrupt(ensuring);
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
++        yield* Deferred.await(f.cleanupEntered);
++        assert.isTrue(f.ownerPresent());
++        yield* Deferred.succeed(f.cleanupRelease, undefined);
++        yield* Fiber.join(closing);
++        assert.isFalse(f.ownerPresent());
++      }),
++    ),
++);
++
++for (const maxOps of [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
++  it.effect(`concurrent first ensures leave no owner after shutdown (yield budget ${maxOps})`, () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* Effect.all(
++          Array.from({ length: 10 }, () => f.environment.ensureEnvironment(target)),
++          { concurrency: "unbounded" },
++        );
++        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        yield* Deferred.succeed(f.cleanupRelease, undefined);
++        yield* Scope.close(f.scope, Exit.void);
++        const frozen = yield* f.lifecycle.tryFreeze;
++        assert.equal(frozen._tag, "frozen", "shutdown must remove every registered owner");
++        if (frozen._tag === "frozen") yield* frozen.backends.release;
++      }),
++    ).pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, maxOps)),
++  );
++}
+diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
+index 2c9ab0c0..c1b9974f 100644
+--- a/apps/desktop/src/ssh/DesktopSshEnvironment.ts
++++ b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
+@@ -18,13 +18,19 @@ import {
+ } from "@t3tools/ssh/errors";
+ import * as SshTunnel from "@t3tools/ssh/tunnel";
+ import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Layer from "effect/Layer";
+ import * as Path from "effect/Path";
++import * as Scope from "effect/Scope";
++import * as Semaphore from "effect/Semaphore";
+ import * as HttpClient from "effect/unstable/http/HttpClient";
+ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+ 
++import * as DesktopUpdateLifecycle from "../backend/desktopUpdateLifecycle.ts";
++
+ import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
+ 
+ export type DesktopSshEnvironmentRuntimeServices =
+@@ -128,45 +134,126 @@ const makePasswordPrompt = (
+     prompts.request(request).pipe(Effect.mapError(toSshPasswordPromptError)),
+ });
+ 
+-export const make = Effect.gen(function* () {
+-  const manager = yield* SshTunnel.SshEnvironmentManager;
+-  const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
+-  const runtimeContext = yield* Effect.context<DesktopSshEnvironmentRuntimeServices>();
+-  const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
+-
+-  return DesktopSshEnvironment.of({
+-    discoverHosts: (input) =>
+-      discoverDesktopSshHostsEffect(input).pipe(
+-        Effect.provide(runtimeContext),
+-        Effect.withSpan("desktop.ssh.discoverHosts"),
+-      ),
+-    resolveHost: (alias) =>
+-      resolveSshTarget(alias.trim()).pipe(
+-        Effect.provide(runtimeContext),
+-        Effect.withSpan("desktop.ssh.resolveHost"),
+-      ),
+-    ensureEnvironment: (target, ensureOptions) =>
+-      manager
+-        .ensureEnvironment(target, ensureOptions)
+-        .pipe(
+-          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
++interface DesktopSshOwnership {
++  readonly mark: Effect.Effect<void>;
++  readonly withOperation: <A, E, R>(
++    effect: Effect.Effect<A, E, R>,
++  ) => Effect.Effect<A, E | SshLaunchError, R>;
++}
++
++const makeEnvironment = (ownership: DesktopSshOwnership) =>
++  Effect.gen(function* () {
++    const lifecycle = yield* DesktopUpdateLifecycle.DesktopUpdateLifecycle;
++    const manager = yield* SshTunnel.SshEnvironmentManager;
++    const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
++    const runtimeContext = yield* Effect.context<DesktopSshEnvironmentRuntimeServices>();
++    const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
++
++    return DesktopSshEnvironment.of({
++      discoverHosts: (input) =>
++        discoverDesktopSshHostsEffect(input).pipe(
+           Effect.provide(runtimeContext),
+-          Effect.withSpan("desktop.ssh.ensureEnvironment"),
++          Effect.withSpan("desktop.ssh.discoverHosts"),
+         ),
+-    disconnectEnvironment: (target) =>
+-      manager
+-        .disconnectEnvironment(target)
+-        .pipe(
+-          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
++      resolveHost: (alias) =>
++        resolveSshTarget(alias.trim()).pipe(
+           Effect.provide(runtimeContext),
+-          Effect.withSpan("desktop.ssh.disconnectEnvironment"),
++          Effect.withSpan("desktop.ssh.resolveHost"),
++        ),
++      ensureEnvironment: (target, ensureOptions) =>
++        lifecycle.withMutation(
++          ownership.withOperation(
++            ownership.mark.pipe(
++              Effect.andThen(() => manager.ensureEnvironment(target, ensureOptions)),
++              Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
++              Effect.provide(runtimeContext),
++              Effect.withSpan("desktop.ssh.ensureEnvironment"),
++            ),
++          ),
+         ),
++      disconnectEnvironment: (target) =>
++        lifecycle.withTeardown(
++          ownership.withOperation(
++            manager
++              .disconnectEnvironment(target)
++              .pipe(
++                Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
++                Effect.provide(runtimeContext),
++                Effect.withSpan("desktop.ssh.disconnectEnvironment"),
++              ),
++          ),
++        ),
++    });
+   });
+-});
+ 
+-export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
+-  Layer.effect(DesktopSshEnvironment, make).pipe(
+-    Layer.provide(
++const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
++  Effect.gen(function* () {
++    const lifecycle = yield* DesktopUpdateLifecycle.DesktopUpdateLifecycle;
++    let removeOwner = Effect.void;
++    let marked = false;
++    // Uninterruptible effects still yield; serialize the check and registration.
++    const ownerRegistration = Semaphore.makeUnsafe(1);
++    let closing = false;
++    let activeOperations = 0;
++    let drained = Deferred.makeUnsafe<void>();
++    Deferred.doneUnsafe(drained, Effect.void);
++    const withOperation: DesktopSshOwnership["withOperation"] = (effect) =>
++      Effect.acquireUseRelease(
++        Effect.gen(function* () {
++          if (closing)
++            return yield* new SshLaunchError({
++              message: "Desktop SSH is shutting down.",
++              stdout: "",
++            });
++          if (activeOperations++ === 0) drained = Deferred.makeUnsafe<void>();
++        }),
++        () => effect,
++        () =>
++          Effect.sync(() => {
++            if (--activeOperations === 0) Deferred.doneUnsafe(drained, Effect.void);
++          }),
++      );
++    // The SSH package owns alias resolution, reconnects, and tunnel scopes. Keep
++    // a conservative owner for its entire scope once ensure may create a process;
++    // a disconnect or a deleted saved record cannot prove that scope is empty.
++    const managerScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
++      lifecycle.withTeardown(
++        Effect.gen(function* () {
++          // Join ensures/disconnects before the manager snapshots its tunnel map.
++          closing = true;
++          yield* Deferred.await(drained);
++          yield* Scope.close(scope, Exit.void);
++          yield* removeOwner;
++        }),
++      ),
++    );
++    const ownership: DesktopSshOwnership = {
++      withOperation,
++      mark: Effect.uninterruptible(
++        ownerRegistration.withPermits(1)(
++          Effect.suspend(() =>
++            marked
++              ? Effect.void
++              : lifecycle
++                  .addOwner(
++                    Effect.succeed({
++                      _tag: "unsupported",
++                      reason:
++                        "Desktop SSH ownership cannot reserve idle work for an update. Finish SSH work and restart T3 Code before retrying the update.",
++                    }),
++                  )
++                  .pipe(
++                    Effect.map((remove) => {
++                      removeOwner = remove;
++                      marked = true;
++                    }),
++                    Effect.asVoid,
++                  ),
++          ),
++        ),
++      ),
++    };
++    const managerContext = yield* Layer.buildWithScope(
+       SshTunnel.SshEnvironmentManager.layer({
+         ...(options.resolveCliPackageSpec === undefined
+           ? {}
+@@ -175,5 +262,12 @@ export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
+           ? {}
+           : { resolveCliRunner: options.resolveCliRunner }),
+       }),
+-    ),
+-  );
++      managerScope,
++    );
++    return yield* makeEnvironment(ownership).pipe(Effect.provide(managerContext));
++  });
++
++export const make = makeWithOptions();
++
++export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
++  Layer.effect(DesktopSshEnvironment, makeWithOptions(options));
