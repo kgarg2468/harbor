@@ -11,17 +11,9 @@ setup() {
   . "${HARBOR_ROOT}/lib/journal.sh"
   # shellcheck source=lib/runtime.sh
   . "${HARBOR_ROOT}/lib/runtime.sh"
-  BIN="${BATS_TEST_TMPDIR}/bin"
-  mkdir -p "${BIN}"
   # A reader that records every call, so a test can prove a refused target was
   # refused before any lookup rather than after one that happened to miss.
   WITNESS="${BATS_TEST_TMPDIR}/witness"
-}
-
-fake_cli() {
-  # fake_cli PATH BODY: an executable whose --version answer is BODY
-  printf '#!/bin/sh\n%s\n' "${2}" >"${1}"
-  chmod 0755 "${1}"
 }
 
 reader_witness() {
@@ -90,42 +82,6 @@ reader_unreadable() {
   run --separate-stderr harbor_journal_observe runtime-install /opt/harbor/node
   assert_equal "${status}" 2
   assert_equal "${output}" ""
-}
-
-@test "cli_version reports absent without an executable, the bare version with one, and dies 2 on a CLI that cannot answer" {
-  assert_equal "$(harbor_runtime_cli_version "${BIN}/claude")" absent
-  mkdir "${BIN}/dir"
-  assert_equal "$(harbor_runtime_cli_version "${BIN}/dir")" absent
-  printf 'not executable\n' >"${BIN}/claude"
-  assert_equal "$(harbor_runtime_cli_version "${BIN}/claude")" absent
-  fake_cli "${BIN}/claude" 'echo 1.2.3'
-  assert_equal "$(harbor_runtime_cli_version "${BIN}/claude")" 1.2.3
-  fake_cli "${BIN}/claude" 'echo v1.2.3'
-  assert_equal "$(harbor_runtime_cli_version "${BIN}/claude")" 1.2.3
-  fake_cli "${BIN}/claude" 'exit 1'
-  run harbor_runtime_cli_version "${BIN}/claude"
-  assert_equal "${status}" 2
-  assert_output --partial 'runtime.unreadable'
-  assert_output --partial "${BIN}/claude"
-  fake_cli "${BIN}/claude" 'echo hello'
-  run harbor_runtime_cli_version "${BIN}/claude"
-  assert_equal "${status}" 2
-  assert_output --partial 'runtime.unreadable'
-  assert_output --partial "'hello'"
-}
-
-@test "cli_version refuses a version carrying anything but digits and dots rather than taking a prefix on faith" {
-  fake_cli "${BIN}/claude" 'echo "1.2.3 (Claude Code)"'
-  run harbor_runtime_cli_version "${BIN}/claude"
-  assert_equal "${status}" 2
-  assert_output --partial 'runtime.unreadable'
-  assert_output --partial '1.2.3 (Claude Code)'
-  fake_cli "${BIN}/claude" 'echo 1.2'
-  run harbor_runtime_cli_version "${BIN}/claude"
-  assert_equal "${status}" 2
-  fake_cli "${BIN}/claude" 'echo ""'
-  run harbor_runtime_cli_version "${BIN}/claude"
-  assert_equal "${status}" 2
 }
 
 @test "exactly one library defines the runtime-install observer, and a claude target reads the agent reader beside the node one" {

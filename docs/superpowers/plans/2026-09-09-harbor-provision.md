@@ -105,10 +105,21 @@ Modified: `lib/node.sh` (observer moved out), `lib/versions.sh` (installed-packa
 **Interfaces produced:**
 
 ```text
-harbor_runtime_cli_version CMD          -> "absent" | bare version | exit 2
 harbor_runtime_reader_register NAME FN  -> registers FN as the version reader for target NAME
+harbor_runtime_reader_for NAME          -> the registered function, or return 1
 harbor_observe_op_runtime_install TARGET-> JSON string, the pre_state/post_state form
 ```
+
+**Amended during 4a — there is no generic version reader.** This task originally also produced `harbor_runtime_cli_version CMD -> "absent" | bare version | exit 2`, a shared "ask a CLI its version" helper for the vendor libraries. Measured against the pinned releases, every one of the four runtimes decorates its answer differently:
+
+| runtime | `--version` prints |
+| --- | --- |
+| `claude` 2.1.267 | `2.1.267 (Claude Code)` |
+| `codex` 0.154.0 | `codex-cli 0.154.0` |
+| `t3` 0.0.38 | `t3 v0.0.38` |
+| `node` 24.20.0 | `v24.20.0` |
+
+A shared reader would have to accept all four shapes, which is the same as accepting a decorated string from the wrong vendor as a version — and reading one runtime's answer as another's is precisely the failure this task exists to prevent, one level down. Node already has `harbor_node_installed_version`; Tasks 5, 7 and 9 each anchor their own vendor's spelling in their own `case` against a fixture captured from the pinned release, as those tasks already require. The helper was cut rather than merged unused.
 
 **Contract.** `lib/runtime.sh` owns the op. `harbor_observe_op_runtime_install` dispatches on the shape of its target: an absolute path is a prefix and is read by the reader registered for `prefix`; a bare `[a-z0-9-]+` name is a runtime and is read by the reader registered for that name. A target with no registered reader renders `"unobservable:runtime-install:<target>"` rather than guessing, which is the same fail-closed shape `harbor_journal_observe` already uses for an op with no observer. Registration is a flat `NAME=FN` list in one string variable, because `lib/` is bash 3.2 and has no associative arrays.
 

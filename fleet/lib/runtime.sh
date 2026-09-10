@@ -1,8 +1,7 @@
 #!/bin/bash
 # The runtime-install op (design sections 2 and 3.7): the observer
-# harbor_journal_observe dispatches every runtime-install entry to, the registry that
-# says which library can read which target, and the generic "ask a CLI its version"
-# reader the vendor libraries inspect with. Section 3.7 gives the op four targets —
+# harbor_journal_observe dispatches every runtime-install entry to, and the registry
+# that says which library can read which target. Section 3.7 gives the op four targets —
 # Node.js, Claude Code, Codex, and t3 — owned by three libraries, and an op has exactly
 # one observer per process: two libraries defining harbor_observe_op_runtime_install
 # means whichever is sourced last silently wins, and recovery would read one runtime's
@@ -10,6 +9,14 @@
 # answer. So the op lives here, knows nothing about any runtime, and asks whoever
 # registered for the target. Depends on lib/log.sh only; every library that owns a
 # target registers its reader at the bottom of its own file.
+#
+# There is deliberately no generic "ask a CLI its version" reader here. At the pinned
+# releases all three vendor CLIs decorate their answer — claude prints
+# "2.1.267 (Claude Code)", codex prints "codex-cli 0.154.0", t3 prints "t3 v0.0.38" —
+# and node prints "v24.20.0", which lib/node.sh already reads. A shared reader would
+# have to accept every one of those shapes, which is to say it would accept a decorated
+# string from the wrong vendor as a version. Each library anchors its own vendor's
+# spelling in its own case instead (design section 7, vendor status honesty).
 # HARBOR_RUNTIME_READERS: "name:function" pairs, space separated. bash 3.2 has no
 # associative arrays, so the registry is one string and lookup is a scan over it.
 HARBOR_RUNTIME_READERS=""
@@ -75,31 +82,4 @@ harbor_observe_op_runtime_install() {
     return 0
   fi
   printf '"unobservable:runtime-install:%s"' "$(harbor_json_escape "${target}")"
-}
-# harbor_runtime_cli_version CMD: what CMD --version reports, in the three-way shape
-# every runtime inspection in Harbor uses. "absent" when CMD is not an executable
-# file, so a runtime that was never installed is a state and not a failure; the bare
-# version when CMD answers with one, with a leading v stripped the way
-# harbor_node_installed_version strips it, since versions.lock spells every version
-# bare; exit 2 when CMD is there and cannot answer, because a runtime that is present
-# and unreadable is a node the operator has to look at. An answer carrying anything
-# but digits and dots is exit 2 with the raw text rather than the leading version
-# taken on faith: this reader is generic across four vendors and has no vendor's shape
-# to anchor a substring against, so a decorated answer is one its own library parses
-# with its own anchored case (design section 7, vendor status honesty).
-harbor_runtime_cli_version() {
-  local cmd="${1}" out version
-  if [ ! -f "${cmd}" ] || [ ! -x "${cmd}" ]; then
-    printf 'absent'
-    return 0
-  fi
-  out="$("${cmd}" --version 2>/dev/null)" || harbor_die 2 runtime.unreadable "${cmd} --version failed; reinstall it with harbor provision"
-  version="${out#v}"
-  case "${version}" in
-    *[!0-9.]*) harbor_die 2 runtime.unreadable "${cmd} --version printed '${out}', which is not a bare version; reinstall it with harbor provision" ;;
-  esac
-  case "${version}" in
-    [0-9]*.[0-9]*.[0-9]*) printf '%s' "${version}" ;;
-    *) harbor_die 2 runtime.unreadable "${cmd} --version printed '${out}', not a version; reinstall it with harbor provision" ;;
-  esac
 }
