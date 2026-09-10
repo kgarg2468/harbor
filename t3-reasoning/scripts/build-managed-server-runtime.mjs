@@ -410,7 +410,7 @@ async function gitDirectory(git, source) {
 // separately. The tree must be prepared as `expectedVariant` (managed-nightly
 // unless the caller names the other closed variant), and that one value
 // selects the provenance check, the lock's patch sequence, and the descriptor
-// entry. Returns the lock directory and ordered patches.
+// entry. Returns the lock directory, ordered patches, and verified tree entries.
 export async function verifyPreparedSource({ source, descriptor, run, env, indexDir, expectedVariant = MANAGED_NIGHTLY_VARIANT }) {
   const variant = expectVariant(expectedVariant);
   const git = (args, options = {}) =>
@@ -475,7 +475,16 @@ export async function verifyPreparedSource({ source, descriptor, run, env, index
         `(${changes.length} path(s)): ${changes.slice(0, 20).join("; ")}`,
     );
   }
-  return { gitDir, lockDir, patches: expected };
+  const { stdout: listing } = await git(["ls-tree", "-r", "-t", "-z", expectedTree]);
+  const trackedDependencyEntries = new Map();
+  for (const entry of listing.split("\0").filter(Boolean)) {
+    const separator = entry.indexOf("\t");
+    const relative = entry.slice(separator + 1);
+    if (relative.split("/").includes("node_modules")) {
+      trackedDependencyEntries.set(relative, entry.slice(0, 6));
+    }
+  }
+  return { gitDir, lockDir, patches: expected, trackedDependencyEntries };
 }
 
 // Refuses any dotenv file the tree already carries where the build would read
@@ -491,21 +500,26 @@ export async function refuseExistingEnvFiles(source) {
   }
 }
 
-// Refuses a tree that already carries installed dependencies (any
-// node_modules entry, root or nested workspace, of any type including a
-// dangling symlink) or the monitor's Cargo target. Git ignores both, so the
-// content comparison cannot see them, yet the frozen install and Cargo
-// reuse what is there. Symlinks are never followed and nothing is removed:
-// the operator prepares a fresh tree instead. Git metadata is skipped.
-export async function refusePriorBuildState(source) {
+// Refuses installed dependencies and the monitor's Cargo target. Exact tracked
+// fixture entries may be supplied only after prepared-source verification;
+// their bytes already match the expected tree. Walk every fixture descendant
+// so ignored additions (including empty directories) cannot hide in it.
+// Symlinks are never allowed inside these subtrees or followed, and nothing
+// is removed. Git metadata outside dependency subtrees is skipped.
+export async function refusePriorBuildState(source, trackedDependencyEntries = new Map()) {
   const pending = ["."];
   while (pending.length > 0) {
     const dir = pending.pop();
     const entries = await readdir(path.join(source, dir), { withFileTypes: true }).catch((error) => fail(`cannot read ${dir} in source: ${error.message}`));
     for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      if (entry.name === ".git") continue;
+      if (entry.name === ".git" && !dir.split("/").includes("node_modules")) continue;
       const relative = dir === "." ? entry.name : `${dir}/${entry.name}`;
-      if (entry.name === "node_modules" || relative === MONITOR_TARGET_DIRECTORY) {
+      const inDependencies = relative.split("/").includes("node_modules");
+      const expectedMode = trackedDependencyEntries.get(relative);
+      const trackedFixtureEntry = entry.isDirectory()
+        ? expectedMode === "040000"
+        : entry.isFile() && ["100644", "100755"].includes(expectedMode);
+      if ((inDependencies && !trackedFixtureEntry) || relative === MONITOR_TARGET_DIRECTORY) {
         fail(`source already contains ${relative}; a fresh prepared source tree without installed dependencies or native build output is required`);
       }
       if (entry.isDirectory()) pending.push(relative);
@@ -874,7 +888,6 @@ export async function buildManagedServerRuntime({
   checkServerManifest(serverManifest, `${SERVER_IMPORTER}/package.json`);
   await checkLinkerSettings(sourceDir);
   await refuseExistingEnvFiles(sourceDir);
-  await refusePriorBuildState(sourceDir);
   if (await exists(destination)) fail(`destination ${destination} already exists; an artifact directory is never rewritten`);
   const childEnv = buildChildEnvironment(env, publicConfig, MANAGED_NIGHTLY_VARIANT);
   const pnpmVersion = (
@@ -898,7 +911,7 @@ export async function buildManagedServerRuntime({
     const indexDir = path.join(work, "index");
     await mkdir(indexDir);
     log(`verifying prepared source ${sourceDir} against ${descriptor.upstreamCommit}`);
-    const { lockDir } = await verifyPreparedSource({
+    const { lockDir, trackedDependencyEntries } = await verifyPreparedSource({
       source: sourceDir,
       descriptor,
       run,
@@ -906,6 +919,7 @@ export async function buildManagedServerRuntime({
       indexDir,
       expectedVariant: MANAGED_NIGHTLY_VARIANT,
     });
+    await refusePriorBuildState(sourceDir, trackedDependencyEntries);
     await assertDisjoint([
       ["lock directory", lockDir, "destination", destination],
       ["lock directory", lockDir, "work directory", work],
