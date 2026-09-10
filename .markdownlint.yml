@@ -1,5 +1,9 @@
 # markdownlint configuration (design section 7): line length disabled.
 default: true
 MD013: false
+# The README's centered masthead (title, tagline, badges, nav) is HTML because
+# Markdown cannot center. Only those presentational elements are allowed.
+MD033:
+  allowed_elements: [h1, p, strong, br, a, img]
 MD024:
   siblings_only: true
