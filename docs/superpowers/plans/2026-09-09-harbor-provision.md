@@ -382,6 +382,22 @@ harbor_t3_run HOME ARGS...        -> runs the locked t3 with ARGS, logging the v
 
 `harbor_t3_package_engines` reads `engines.node` out of the installed package's own `package.json` with the same `jq`-free parsing the rest of `lib/` uses (bootstrap installs `jq`, but `lib/` cannot depend on it because the macOS unit jobs may not have it). A `package.json` that is absent, unreadable, or carries no `engines.node` is exit 2 naming the path — never an empty range, which Task 3 already refuses.
 
+**Correction 8 — the package parser must be depth-anchored, symlink-refusing, and locale-independent.** Three defects were reproduced against the first implementation, all of them the same mistake in different clothing: trusting a pattern to stand in for structure.
+
+- *Depth.* Anchoring `"engines"` to a line start alone matches a **nested** `engines` object, so a package.json whose only `engines.node` sits under some other key supplies the runtime requirement. The installed pin is 2-space pretty-printed, measured as:
+
+  ```json
+    "engines": {
+      "node": "^22.16 || ^23.11 || >=24.10"
+    },
+  ```
+
+  so the parser anchors those exact depths (two spaces before `"engines"`, four before `"node"`). If npm ever reformats, the parser reports no range and exits 2, which is the fail-closed direction.
+- *Symlinks.* `[ -f ]`, `[ -r ]`, and `sed` all follow symlinks, so an operator can point `package.json` at a credential store and have Harbor open and parse it. The operator owns that prefix, so this is not an escalation, but "Harbor never reads, copies, prints, or inspects a vendor credential store" is stated without exception. A symlinked `package.json` is refused before it is opened.
+- *Locale.* `[[:space:]]` is locale-dependent: under `en_US.UTF-8` BSD `sed` accepts U+00A0 as whitespace, so bytes that are not JSON whitespace parse as though they were. This is the bracket-range rule of the Global Constraints in another guise, and the fence enumerates the ASCII space and tab the pinned formatting actually uses. (The pre-existing `[[:space:]]` uses elsewhere in `lib/` are the same exposure and are tracked separately, not widened into this slice.)
+
+**Correction 9 — every captured vendor body needs the xtrace envelope.** `SHELLOPTS=xtrace` is honored from the environment and bash traces assignments with their expanded values, so `out="$(npm install … 2>&1)"` and `out="$(harbor_t3_run … service install 2>&1)"` put whatever the vendor printed onto the trace FD. `harbor_t3_service_status` already suppresses xtrace across its capture; every other site that holds a vendor body in a variable does the same, and unsets the variable before restoring.
+
 **Tests.** The four version states; the entry shapes and the `HARBOR_FAIL_AFTER` boundary as in Task 6; `harbor_t3_run` refuses when the installed version differs from the lock and makes no vendor call; `harbor_t3_package_engines` returns the fixture's range, and exits 2 on absent, unreadable, and engines-less package files; nothing is written under `~/.config/systemd/user/` or a T3 home fixture.
 
 **Commit:** `feat(t3): journaled install at the locked version and the pinned invocation`
@@ -403,7 +419,7 @@ harbor_t3_service_healthy HOME -> 0 when the adapter says installed-current and
                                   systemctl --user is-active t3code.service is "active"
 ```
 
-#### Measurement at the pin (t3@0.0.38), and three corrections it forces
+#### Measurement at the pin (t3@0.0.38), and five corrections it forces
 
 Taken from the installed package's own `formatServiceStatus` in `dist/bin.mjs`, which is the sole producer of this output, rather than from a running service — the installed states need systemd or launchd and cannot be staged on the development machine without installing a real background service on it.
 
@@ -429,6 +445,18 @@ function formatServiceStatus(status, cliVersion) {
 
 **Correction 3 — `installed-current` must also match the locked version.** The formatter interpolates `t3@${cliVersion}`, the version of the CLI *doing the asking*, not the service's. Because `harbor_t3_run` already refuses unless the CLI equals the lock, the string can only ever read `installed · t3@<locked version>`, and anchoring the locked version into the phrase makes that agreement checked rather than assumed. Note the separator is a **middle dot, U+00B7**, not an ASCII hyphen or period.
 
+**Correction 4 — the adapter must classify only bytes the status invocation itself produced.** Capturing `harbor_t3_run … 2>&1` captures Harbor's own stderr too, and `harbor_t3_run` can fail *before* it execs the vendor — `harbor_t3_installed_version` exits 2 with a diagnostic that quotes the unparseable `--version` output verbatim. A `t3` whose `--version` prints
+
+```text
+garbage
+  Status: installed · t3@0.0.38
+trailing
+```
+
+makes that quoted text land in the captured body as a whole line, and the adapter answers `installed-current` although `t3 service status` was never invoked at all. Reproduced against this branch. The pin assertion must therefore be completed *before* the capture opens, so that the only bytes classified are the vendor's. This is the sharpest form of the "vendor status honesty" rule in spec section 7: Harbor must never be able to read its own words as the vendor's answer.
+
+**Correction 5 — an ambiguous body is `unknown`, not the first phrase that matches.** A `case` matches its arms in order, so a body carrying two recognized `Status:` lines classifies as whichever arm is written first. Reproduced: a body containing both `installed · t3@0.0.38` and `needs an update or repair` answers `installed-current`. Two contradictory state declarations are not evidence of the first one; recognizing more than one state must collapse to `unknown`, for the same reason unrecognized text does.
+
 **Contract (spec section 3.2).** The `t3 service` CLI has no JSON mode, so this is a version-pinned text adapter, classifying on the **body** with the minimum set of stable phrases needed to distinguish the four real states, backed by fixtures recorded from the formatter above. Each phrase must match a whole line, anchored at both ends, for the reason the Task 7 adapters are anchored: a path or version the vendor interpolates into a neighbouring line must never be able to supply a phrase. Unrecognized output classifies as `unknown`, never a guess. The phrase set is minimal on purpose — every extra phrase is another thing a vendor patch release can break — and each one is a comment naming the fixture it came from. A healthy service means the adapter says `installed-current` **and** `systemctl --user is-active t3code.service` prints `active`; the vendor log file need not exist.
 
 **Tests (spec section 7, "Vendor status honesty").** Each fixture classifies to its recorded state; unrecognized text and empty output both classify `unknown`; a **zero** exit with unrecognized text is `unknown` and a **non-zero** exit carrying a recognized body still classifies by that body, with a test recording that the body wins; an `installed ·` line naming a version other than the lock is **not** `installed-current`; `harbor_t3_service_healthy` is false when the adapter is `installed-current` but `is-active` prints `inactive`, false when the adapter is `unknown` and `is-active` prints `active`, and true only when both hold; no invocation writes under `~/.config/systemd/user/`.
@@ -449,7 +477,13 @@ harbor_observe_op_t3_service TARGET -> the adapter's word, rendered as a JSON st
 harbor_t3_service_install STATE_ROOT HOME -> 0; journals one t3-service entry
 ```
 
-**Contract (spec sections 3.2 and 5.4).** Inspect first: when the adapter already reports `installed-current` and the unit is `active`, write nothing and make no vendor call. Otherwise one `t3-service` entry, target `t3code.service`, `pre_state` the adapter's word before, `post_state` `installed-current`, `prepared` before `t3 service install` and `applied` only after the adapter reports `installed-current` and `is-active` prints `active`. `ownership` is `created` when the pre-state was `not-installed`, `modified` otherwise. An `unknown` pre-state exits 3 without mutating: Harbor does not install over a service whose state it could not read, because the entry it would write would vouch for a transition it never saw.
+**Contract (spec sections 3.2 and 5.4).** Inspect first: when the adapter already reports `installed-current` and the unit is `active`, write nothing and make no vendor call. Otherwise one `t3-service` entry, target `t3code.service`, `prepared` before `t3 service install` and `applied` only after the adapter reports `installed-current` and `is-active` prints `active`. `ownership` is `created` when the pre-state was `not-installed`, `modified` otherwise. An `unknown` pre-state exits 3 without mutating: Harbor does not install over a service whose state it could not read, because the entry it would write would vouch for a transition it never saw.
+
+**Correction 6 — the journaled state must be the pair, not the adapter's word alone.** Recording `pre_state` as the adapter's word and `post_state` as `"installed-current"` is unsound, and `lib/journal.sh` shows why: recovery compares the observed state to `pre_state` **first**, and marks the entry `reverted` on a match. The op proceeds precisely when the service is *not* healthy, which includes the case where the adapter already says `installed-current` but the unit is inactive — the repair case. There `pre_state` and `post_state` are both `"installed-current"`, so a crash after a *successful* install is recovered as `reverted`: the journal permanently records a completed operation as undone. Note the applied condition was already the pair (adapter **and** `is-active`); only the recorded state was half of it.
+
+So the op's state vocabulary is the pair `<adapter word>/<activity>`, where activity is what `systemctl --user is-active t3code.service` printed. `post_state` is `"installed-current/active"`, and `harbor_observe_op_t3_service` reports the same pair. This yields the invariant the protocol needs: the op returns early when the pair is already `installed-current/active`, so whenever an entry is written, `pre_state` differs from `post_state` by construction.
+
+**Correction 7 — refuse `unsupported`, and refuse an unreadable activity.** The guard refuses only `unknown`. An `unsupported` pre-state means the vendor has determined this machine cannot run the service, so the entry would record a transition *into* a state that cannot exist here; that is the same defect as recording a transition out of a state never read, and it must be refused with a message naming the platform limitation rather than a failed install. Likewise, `is-active` failing to answer must not be folded into `inactive`: conflating "not running" with "could not ask" would re-open Correction 6 by letting an unreadable activity match a recorded one. An activity that cannot be read is refused before anything is journaled.
 
 Harbor runs `t3 service install` and nothing else. It writes no unit, enables no unit, sets no bind address, port, or environment, and adds no `network-online.target` gate. The unit lane asserts this by failing if any shim invocation writes under `~/.config/systemd/user/`.
 
