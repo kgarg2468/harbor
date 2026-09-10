@@ -391,20 +391,47 @@ harbor_t3_run HOME ARGS...        -> runs the locked t3 with ARGS, logging the v
 **Files:**
 
 - Modify: `lib/t3.sh`
-- Create: `tests/fixtures/t3/service-status/installed-current`, `update-pending`, `not-installed`, `unrecognized-text`, `empty`
+- Create: `tests/fixtures/t3/service-status/installed-current`, `update-pending`, `not-installed`, `unsupported`, `installed-other-version`, `unrecognized-text`, `empty`
 - Test: `tests/unit/lib/t3.bats`
 
 **Interfaces produced:**
 
 ```text
-harbor_t3_service_status HOME -> "installed-current" | "update-pending" | "not-installed" | "unknown"
+harbor_t3_service_status HOME -> "installed-current" | "update-pending" | "not-installed"
+                                 | "unsupported" | "unknown"
 harbor_t3_service_healthy HOME -> 0 when the adapter says installed-current and
                                   systemctl --user is-active t3code.service is "active"
 ```
 
-**Contract (spec section 3.2).** The `t3 service` CLI has no JSON mode, so this is a version-pinned text adapter: **exit code first**, then the minimum set of stable phrases needed to distinguish the three real states, backed by fixtures captured from the pinned release. Unrecognized output classifies as `unknown`, never a guess. The phrase set is minimal on purpose — every extra phrase is another thing a vendor patch release can break — and each one is a comment naming the fixture it came from. A healthy service means the adapter says `installed-current` **and** `systemctl --user is-active t3code.service` prints `active`; the vendor log file need not exist.
+#### Measurement at the pin (t3@0.0.38), and three corrections it forces
 
-**Tests (spec section 7, "Vendor status honesty").** Each fixture classifies to its recorded state; unrecognized text and empty output both classify `unknown`; a non-zero exit with recognizable text still classifies by exit code first and the test records which wins; `harbor_t3_service_healthy` is false when the adapter is `installed-current` but `is-active` prints `inactive`, false when the adapter is `unknown` and `is-active` prints `active`, and true only when both hold; no invocation writes under `~/.config/systemd/user/`.
+Taken from the installed package's own `formatServiceStatus` in `dist/bin.mjs`, which is the sole producer of this output, rather than from a running service — the installed states need systemd or launchd and cannot be staged on the development machine without installing a real background service on it.
+
+```js
+function formatServiceStatus(status, cliVersion) {
+  if (!status.supported) return "T3 Code service\n  Status: unavailable on this machine\n  Supported on: Linux with systemd, macOS with launchd";
+  if (!status.installed) return "T3 Code service\n  Status: not installed\n  Next: Run `t3 service install`.";
+  return [
+    "T3 Code service",
+    `  Status: ${status.current ? `installed · t3@${cliVersion}` : "needs an update or repair"}`,
+    `  Unit: ${status.unitPath}`,
+    `  Logs: ${status.logPath}`,
+    ...status.current ? [] : ["  Next: Run `npx t3@latest service update`."]
+  ].join("\n");
+}
+```
+
+`serviceStatusCommand` does nothing but `log(formatServiceStatus(...))`.
+
+**Correction 1 — "exit code first" is wrong and is replaced by "phrases only."** The status command exits **0 in every one of the four states**; measured directly, `t3 service status` with nothing installed prints the not-installed block and exits 0. There is no exit code that distinguishes any state from any other, so a rule that consults the exit status first would classify every state identically. The exit status carries information only when it is non-zero *and* the body is unrecognized, which is the ordinary `unknown` case — a failure before the formatter is ever reached. This is the same shape as the Task 7 correction: classify on the body, and let the exit status corroborate rather than decide.
+
+**Correction 2 — there is a fifth state, `unsupported`.** `unavailable on this machine` is a state the vendor names explicitly and Harbor can recognize exactly. Folding it into `unknown` would report a machine that *cannot* run the service as one whose status could not be read, which spec section 7 forbids. It takes the same word `harbor_agents_auth_status` already uses for the same meaning, so the vocabulary stays consistent across adapters. It should not occur on Ubuntu 24.04 with systemd; if it does, the operator needs to be told which of the two problems they have.
+
+**Correction 3 — `installed-current` must also match the locked version.** The formatter interpolates `t3@${cliVersion}`, the version of the CLI *doing the asking*, not the service's. Because `harbor_t3_run` already refuses unless the CLI equals the lock, the string can only ever read `installed · t3@<locked version>`, and anchoring the locked version into the phrase makes that agreement checked rather than assumed. Note the separator is a **middle dot, U+00B7**, not an ASCII hyphen or period.
+
+**Contract (spec section 3.2).** The `t3 service` CLI has no JSON mode, so this is a version-pinned text adapter, classifying on the **body** with the minimum set of stable phrases needed to distinguish the four real states, backed by fixtures recorded from the formatter above. Each phrase must match a whole line, anchored at both ends, for the reason the Task 7 adapters are anchored: a path or version the vendor interpolates into a neighbouring line must never be able to supply a phrase. Unrecognized output classifies as `unknown`, never a guess. The phrase set is minimal on purpose — every extra phrase is another thing a vendor patch release can break — and each one is a comment naming the fixture it came from. A healthy service means the adapter says `installed-current` **and** `systemctl --user is-active t3code.service` prints `active`; the vendor log file need not exist.
+
+**Tests (spec section 7, "Vendor status honesty").** Each fixture classifies to its recorded state; unrecognized text and empty output both classify `unknown`; a **zero** exit with unrecognized text is `unknown` and a **non-zero** exit carrying a recognized body still classifies by that body, with a test recording that the body wins; an `installed ·` line naming a version other than the lock is **not** `installed-current`; `harbor_t3_service_healthy` is false when the adapter is `installed-current` but `is-active` prints `inactive`, false when the adapter is `unknown` and `is-active` prints `active`, and true only when both hold; no invocation writes under `~/.config/systemd/user/`.
 
 **Commit:** `feat(t3): version-pinned service status adapter`
 
