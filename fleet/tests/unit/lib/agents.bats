@@ -93,6 +93,23 @@ assert_unreadable() {
   assert_output --partial "$(harbor_agents_bin "${1}" "${FIX_HOME}")"
 }
 
+@test "installed versions require exactly three non-empty numeric fields" {
+  local version agent
+  for version in 1..2.3 1.2..3 1.2.3.4 1.2.3.; do
+    assert_unreadable claude "${version} (Claude Code)"
+    assert_unreadable codex "codex-cli ${version}"
+  done
+  for agent in ${HARBOR_AGENTS}; do
+    case "${agent}" in
+      claude) fake_agent "${FIX_HOME}" "${agent}" '1.2.3 (Claude Code)' ;;
+      codex) fake_agent "${FIX_HOME}" "${agent}" 'codex-cli 1.2.3' ;;
+    esac
+    run harbor_agents_installed_version "${agent}" "${FIX_HOME}"
+    assert_success
+    assert_output 1.2.3
+  done
+}
+
 tree_snapshot() {
   # Every path under the two fixture homes with its mode, owner, size, and mtime, so
   # a function that created, removed, or rewrote anything shows up as a difference
@@ -728,6 +745,10 @@ assert_status_unknown() {
   "authMethod": "none"
 }'
   assert_status_unknown codex ''
+  assert_status_unknown claude '  "loggedIn": true trailing-garbage'
+  assert_status_unknown claude '  "loggedIn": false, trailing-garbage'
+  assert_status_unknown codex 'Logged in using ChatGPT but credentials could not be verified'
+  assert_status_unknown codex 'Not logged in trailing-garbage'
   assert_status_unknown codex 'hello'
   assert_status_unknown codex 'error: could not check whether you are Logged in using ChatGPT'
   assert_status_unknown codex 'the account is Not logged in to anything, it says here'
@@ -788,6 +809,30 @@ assert_status_unknown() {
   assert grep -q 'claude auth status is logged-in' "${BATS_TEST_TMPDIR}/harbor.log"
 }
 
+@test "inherited xtrace cannot leak the status body and the caller trace setting is restored" {
+  local fd field
+  fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-in)"
+  for fd in 1 3; do
+    run env SHELLOPTS=xtrace BASH_XTRACEFD="${fd}" bash -c '
+      . "${HARBOR_ROOT}/lib/log.sh"
+      . "${HARBOR_ROOT}/lib/runtime.sh"
+      . "${HARBOR_ROOT}/lib/agents.sh"
+      harbor_log_open "${2}" 0600
+      harbor_agents_auth_status claude "${1}"
+      case "$-" in *x*) ;; *) exit 91 ;; esac
+      set +x
+      harbor_agents_auth_status claude "${1}"
+      case "$-" in *x*) exit 92 ;; esac
+    ' _ "${FIX_HOME}" "${BATS_TEST_TMPDIR}/harbor.log" 3>>"${BATS_TEST_TMPDIR}/harbor.log"
+    assert_success
+    assert_output --partial logged-in
+    for field in operator@example.com 00000000-0000-0000-0000-000000000000 'OPERATOR org' SUBSCRIPTION loggedIn authMethod; do
+      refute_output --partial "${field}"
+      refute grep -qF -- "${field}" "${BATS_TEST_TMPDIR}/harbor.log"
+    done
+  done
+}
+
 @test "the adapter reads only what the tool prints: no credential store is named or disturbed" {
   # Harbor never reads, copies, prints, or inspects a vendor credential store (design
   # section 3.6). Both stores are seeded here with a decoy secret, and the adapter is run
@@ -796,7 +841,7 @@ assert_status_unknown() {
   mkdir -p "${FIX_HOME}/.claude" "${FIX_HOME}/.codex"
   printf '{"accessToken":"%s"}\n' "${secret}" >"${FIX_HOME}/.claude/.credentials.json"
   printf '{"tokens":{"access_token":"%s"}}\n' "${secret}" >"${FIX_HOME}/.codex/auth.json"
-  chmod 0600 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
+  chmod 000 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
   fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-in)"
   fake_status_agent "${FIX_HOME}" codex "$(status_fixture codex logged-out)"
   before="$(tree_snapshot)"
@@ -804,6 +849,7 @@ assert_status_unknown() {
   assert_equal "${out}" logged-inlogged-out
   # Nothing under either store was created, removed, or rewritten.
   assert_equal "$(tree_snapshot)" "${before}"
+  chmod 0600 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
   # No path under either store was ever passed to the vendor, and no secret reached the
   # answer.
   refute grep -qE -- '\.claude|\.codex|credential|auth\.json' "$(status_log)"
@@ -921,6 +967,22 @@ command_log() {
   # The conversation with each vendor: the reading, the login, the reading again, and no
   # --help probe, because both bodies were recognized.
   assert_equal "$(status_calls)" 'auth status --json|auth login|auth status --json|login status|login|login status|'
+}
+
+@test "auth: losing the transition after login is the accepted cost of the applied-only write" {
+  fake_login_agent claude logged-out logged-in
+  run env HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=auth-claude-login \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; . "${HARBOR_ROOT}/lib/versions.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; . "${HARBOR_ROOT}/lib/agents.sh"; . "${HARBOR_ROOT}/lib/auth.sh"; HARBOR_PID=$$; harbor_agents_auth "${1}" "${2}" claude' \
+    _ "${FIX_ROOT}" "${FIX_HOME}"
+  assert_equal "${status}" 137
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-in
+  assert_equal "$(journal_names)" ""
+  # As in the install crash test, remove the killed child's lock before the rerun.
+  rm -rf "${FIX_ROOT}/lock.d"
+  agent_auth claude
+  assert_success
+  assert_output --partial 'already logged in'
+  assert_equal "$(journal_names)" ""
 }
 
 @test "auth: an agent that is already logged in is exit 0 with no login call and no entry" {
@@ -1082,7 +1144,7 @@ command_log() {
   mkdir -p "${FIX_HOME}/.claude" "${FIX_HOME}/.codex"
   printf '{"accessToken":"%s"}\n' "${secret}" >"${FIX_HOME}/.claude/.credentials.json"
   printf '{"tokens":{"access_token":"%s"}}\n' "${secret}" >"${FIX_HOME}/.codex/auth.json"
-  chmod 0600 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
+  chmod 000 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
   before="$(find "${FIX_HOME}/.claude" "${FIX_HOME}/.codex" -exec ls -ldn {} + | sort)"
   fake_login_agent claude logged-out logged-in
   fake_login_agent codex logged-out logged-in
@@ -1095,6 +1157,7 @@ command_log() {
   # Neither store was created, removed, or rewritten by Harbor: only the vendors own
   # them, and here the vendors are stand-ins that never touched them either.
   assert_equal "$(find "${FIX_HOME}/.claude" "${FIX_HOME}/.codex" -exec ls -ldn {} + | sort)" "${before}"
+  chmod 0600 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
   # No path under either store was ever passed to a vendor, and no secret reached the
   # log or a journal entry.
   refute grep -qE -- '\.claude|\.codex|credential|auth\.json' "$(status_log)"

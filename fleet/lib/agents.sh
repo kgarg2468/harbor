@@ -47,7 +47,7 @@ harbor_agents_bin() {
 # numeric version on its own; anything else is exit 2 quoting what was printed,
 # never the substring that happens to sit where a version used to.
 harbor_agents_installed_version() {
-  local agent="${1}" bin out version=""
+  local agent="${1}" bin out version="" rest field shaped
   bin="$(harbor_agents_bin "${agent}" "${2}")" || exit "$?"
   if [ ! -f "${bin}" ] || [ ! -x "${bin}" ]; then
     printf 'absent'
@@ -66,15 +66,20 @@ harbor_agents_installed_version() {
       esac
       ;;
   esac
-  # The digits are enumerated rather than written [0-9], because a range in a bracket
-  # expression is resolved by the locale's collating order, and this is the test that
-  # decides whether a string a vendor printed becomes a version a journal entry
-  # vouches for.
+  # Split the three numeric fields: a glob alone also accepts empty or extra fields.
+  # Enumerate digits so the fence does not depend on locale collation.
+  rest="${version#*.}"
   case "${version}" in
-    *[!0123456789.]*) version="" ;;
-    [0123456789]*.[0123456789]*.[0123456789]*) ;;
-    *) version="" ;;
+    *.*.*.*) shaped=no ;;
+    *.*.*) shaped=three ;;
+    *) shaped=no ;;
   esac
+  for field in "${version%%.*}" "${rest%%.*}" "${rest#*.}"; do
+    case "${field}" in
+      "" | *[!0123456789]*) shaped=no ;;
+    esac
+  done
+  [ "${shaped}" = three ] || version=""
   [ -n "${version}" ] || harbor_die 2 agents.unreadable "${bin} --version printed '${out}', not a ${agent} version; remove ${bin} by hand and rerun harbor provision so ${agent} is reinstalled"
   printf '%s' "${version}"
 }
@@ -231,7 +236,7 @@ harbor_agents_install() {
 # body carries the operator's email, organization, and subscription, and a caller
 # capturing this function must never capture those.
 harbor_agents_auth_status() {
-  local agent="${1}" home="${2}" bin body value rc=0 word=unknown newline
+  local agent="${1}" home="${2}" bin body value rc=0 word=unknown newline xt=0
   newline='
 '
   bin="$(harbor_agents_bin "${agent}" "${home}")" || exit "$?"
@@ -239,14 +244,18 @@ harbor_agents_auth_status() {
     printf 'unknown'
     return 0
   fi
+  # Inherited xtrace can send expanded assignments to stdout or the Harbor log.
+  # Suppress it while the private vendor body is held or expanded, then restore it.
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
   case "${agent}" in
     claude)
       harbor_log_vendor "${bin}" auth status --json
       body="$("${bin}" auth status --json 2>&1)" || rc="$?"
-      # The value is taken as the run of characters up to the field separator, so a
-      # trailing comma is not part of it and only the two literals below are answers.
+      # Only a whole field line, with optional whitespace and one trailing comma,
+      # is recognized; extra text must remain unknown.
       value="$(printf '%s\n' "${body}" \
-        | sed -n 's/^[[:space:]]*"loggedIn"[[:space:]]*:[[:space:]]*\([^,[:space:]]*\).*$/\1/p' | sed -n 1p)"
+        | sed -n 's/^[[:space:]]*"loggedIn"[[:space:]]*:[[:space:]]*\([^,[:space:]]*\)[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' | sed -n 1p)"
       case "${value}" in
         true) word=logged-in ;;
         false) word=logged-out ;;
@@ -259,11 +268,10 @@ harbor_agents_auth_status() {
     codex)
       harbor_log_vendor "${bin}" login status
       body="$("${bin}" login status 2>&1)" || rc="$?"
-      # A newline is prepended so that the first line of the body is anchored by the
-      # same pattern as every other line, rather than needing a second case arm.
-      case "${newline}${body}" in
-        *"${newline}Logged in using ChatGPT"*) word=logged-in ;;
-        *"${newline}Not logged in"*) word=logged-out ;;
+      # Surround the body with newlines so both ends of every line are anchored.
+      case "${newline}${body}${newline}" in
+        *"${newline}Logged in using ChatGPT${newline}"*) word=logged-in ;;
+        *"${newline}Not logged in${newline}"*) word=logged-out ;;
         *)
           harbor_log_vendor "${bin}" login status --help
           "${bin}" login status --help >/dev/null 2>&1 || word=unsupported
@@ -271,6 +279,8 @@ harbor_agents_auth_status() {
       esac
       ;;
   esac
+  unset body value
+  [ "${xt}" = 0 ] || set -x
   harbor_log agents "${agent} auth status is ${word}; ${bin} exited ${rc}"
   printf '%s' "${word}"
 }
