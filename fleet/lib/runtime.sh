@@ -29,6 +29,27 @@
 # prepared runtime-install entry for those three would read as unobservable and land on
 # the operator as a manual journal resolution. Re-registering an unchanged pair is
 # already a no-op, so keeping the registry across a re-source changes nothing else.
+#
+# What is not kept is a registry that arrived from the environment, and the two cases
+# are told apart by whether the variable is exported: a re-source inside one process
+# sees the plain shell variable lib/ set, while anything an outside caller could
+# arrange is exported into us. Harbor runs the agents as the operator and treats that
+# account as untrusted, so an exported registry is that account's input, not Harbor's
+# state — and honouring it would let it decide what a runtime-install entry records a
+# version as, and would let a single conflicting prefix pair turn lib/node.sh's
+# source-time registration into a runtime.reader_conflict that aborts harbor bootstrap
+# before preflight. Dropped here, both are simply not reachable from outside.
+# declare -p prints "declare -FLAGS NAME=VALUE", and only the flags field answers the
+# question; the value is registered function names, which are as free to contain an x
+# as "prefix" is, so the flags are cut out before they are looked at.
+# The || true is load-bearing: declare -p returns 1 for a variable that is not set,
+# which is the ordinary first-source case, and callers run this file under set -e.
+harbor_runtime_readers_flags="$(declare -p HARBOR_RUNTIME_READERS 2>/dev/null || true)"
+harbor_runtime_readers_flags="${harbor_runtime_readers_flags#declare -}"
+case "${harbor_runtime_readers_flags%% *}" in
+  *x*) unset HARBOR_RUNTIME_READERS ;;
+esac
+unset harbor_runtime_readers_flags
 HARBOR_RUNTIME_READERS="${HARBOR_RUNTIME_READERS:-}"
 # harbor_runtime_reader_register NAME FN: FN is the version reader for the target key
 # NAME. Called at source time by the library that owns NAME, so the dispatch below can
@@ -85,9 +106,15 @@ harbor_runtime_reader_for() {
 # Inspection only; a reader that cannot read its runtime keeps its own exit.
 harbor_observe_op_runtime_install() {
   local target="${1}" key fn version
+  # The vocabulary class is spelled out rather than written [a-z0-9-], because a range
+  # in a bracket expression is resolved by the locale's collating order: under
+  # en_US.UTF-8, which is what the macOS runners set, a-z covers the uppercase letters
+  # too and "Claude" passes a fence that is documented to reject it. Enumerating the
+  # characters is the only spelling that means the same thing in every locale, and this
+  # fence stands between a journal file's contents and a function call.
   case "${target}" in
     /*) key=prefix ;;
-    "" | *[!a-z0-9-]*) key="" ;;
+    "" | *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) key="" ;;
     *) key="${target}" ;;
   esac
   if [ -n "${key}" ] && fn="$(harbor_runtime_reader_for "${key}")" \

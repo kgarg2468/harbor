@@ -156,13 +156,32 @@ reader_unreadable() {
   assert_output '"unobservable:runtime-install:onpath"'
 }
 
-@test "a reader inherited from the environment cannot decide what a journal entry says" {
-  # The registry is kept across a re-source, so it is also inheritable. An operator who
-  # exports one has not thereby gained a say in what a runtime-install entry records.
+@test "a registry from the environment is dropped, so it decides nothing and blocks nothing" {
+  # The registry is kept across a re-source inside one process, which also makes it
+  # inheritable, and the account that would export one is the operator the agents run
+  # as. Two things must not follow from that. It must not get to say what a
+  # runtime-install entry records. And a conflicting pair in it must not turn a
+  # library's source-time registration into a runtime.reader_conflict, which for
+  # lib/node.sh would abort harbor bootstrap before preflight.
   HARBOR_RUNTIME_READERS=" claude:printf" \
     run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; harbor_journal_observe runtime-install claude'
   assert_success
   assert_output '"unobservable:runtime-install:claude"'
+  HARBOR_RUNTIME_READERS=" prefix:some_other_reader" \
+    run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/versions.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; . "${HARBOR_ROOT}/lib/node.sh"; harbor_runtime_reader_for prefix'
+  assert_success
+  assert_output harbor_node_prefix_version
+}
+
+@test "the target vocabulary means the same thing in a locale whose collation folds case" {
+  # A bracket range is resolved by the locale's collating order, so [a-z] covers the
+  # uppercase letters under en_US.UTF-8 — the locale the macOS runners set. This fence
+  # stands between a journal file's contents and a function call, so it has to be the
+  # same fence everywhere.
+  harbor_runtime_reader_register prefix reader_witness
+  local out
+  out="$(LC_ALL=en_US.UTF-8 bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; harbor_observe_op_runtime_install Claude')"
+  assert_equal "${out}" '"unobservable:runtime-install:Claude"'
 }
 
 @test "re-sourcing lib/runtime.sh keeps the registry, so readers registered above it survive" {
