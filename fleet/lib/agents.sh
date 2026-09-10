@@ -274,6 +274,130 @@ harbor_agents_auth_status() {
   harbor_log agents "${agent} auth status is ${word}; ${bin} exited ${rc}"
   printf '%s' "${word}"
 }
+# harbor_agents_auth_login AGENT HOME: run AGENT's own login and return what it
+# returned. The login is attended and interactive (design section 3.6), so the vendor's
+# output is neither captured nor reprinted: whatever the CLI writes — a URL, a code, a
+# prompt — reaches the operator's terminal where the vendor put it, and Harbor never
+# pre-answers a prompt and never puts a secret on a command line (section 3.8). Nothing
+# here logs the tool out: the login subcommand is the only thing either CLI is asked
+# for, and neither vendor's logout appears anywhere in this file.
+#
+# The two argv are the siblings of the status subcommands the Task 7 measurement pinned,
+# and were read from the same CLIs' own --help: claude auth --help lists
+# "login  Sign in to your Anthropic account" beside the "status" this file already
+# reads, so the login is claude auth login; codex login --help shows status as a
+# subcommand of login, so the bare codex login is the login and codex login status is
+# the reading. Each is spelled once, in its own anchored case arm, for the reason
+# harbor_agents_installed_version gives: one vendor's spelling must never be reachable
+# through the other's name.
+#
+# A non-zero exit is returned rather than fatal, because it is the second status reading
+# and not the CLI's exit code that decides what this run may claim. A login that was
+# declined, abandoned, or interrupted says so by leaving the tool logged out, the vendor
+# has already printed why on the terminal, and harbor_agents_auth reports that pair.
+harbor_agents_auth_login() {
+  local agent="${1}" home="${2}" bin rc=0
+  bin="$(harbor_agents_bin "${agent}" "${home}")" || exit "$?"
+  case "${agent}" in
+    claude)
+      harbor_log_vendor "${bin}" auth login
+      "${bin}" auth login || rc="$?"
+      ;;
+    codex)
+      harbor_log_vendor "${bin}" login
+      "${bin}" login || rc="$?"
+      ;;
+  esac
+  harbor_log agents "${agent} login exited ${rc}"
+  return "${rc}"
+}
+# harbor_agents_auth STATE_ROOT HOME AGENT: harbor auth <claude|codex>, the attended
+# agent login of design section 3.6. The order is harbor_auth_tailscale's, and for its
+# reasons: root is refused before anything is read or created, because the login binds
+# this node to whoever completes it and the state root is the operator's own; then the
+# operator state root with its section 3.7 modes, the log, the operator lock, and the
+# recovery scan every command owes under its lock. Then the reading, the login, and the
+# reading again.
+#
+# Only a logged-out to logged-in pair is journaled, and every other pair writes nothing
+# at all:
+#   already logged-in    -> exit 0, no login call and no entry: there is nothing to do
+#                           and running a login over a live session would be a mutation
+#                           the operator did not ask for;
+#   logged-out           -> exit 1 naming the rerun, because the tool is still logged
+#                           out and no transition happened to record;
+#   unknown either side  -> exit 1: the adapter had the command and did not recognize
+#                           the answer, so Harbor cannot say a transition occurred and
+#                           never journals one it did not see;
+#   unsupported          -> exit 1: the login still runs, because it is the operator's
+#                           to complete either way, and the refusal says no entry was
+#                           written and that the pinned build documents no status
+#                           command to verify it with.
+#
+# The entry is written applied rather than prepared-then-applied, and that is the
+# section 3.7 protocol rather than a shortcut around it. The prepared phase exists so a
+# crash between the write and the mutation leaves recovery something to decide; here the
+# mutation is the vendor's own login, Harbor has no inverse for it and never logs the
+# tool out, and the entry is written only once both readings are in hand — the
+# transition is over before the first byte of the entry exists. A prepared auth entry
+# would also be undecidable forever, since the op has no observer, so a crash mid-login
+# would block every later operator command on an entry recording a login that in fact
+# succeeded. One applied write is the only shape under which "every other pair writes
+# nothing" stays literally true.
+#
+# Harbor never reads, copies, prints, or inspects the credential store: the whole of
+# what this function knows about the login is the word its own status adapter returned,
+# and that adapter never lets the vendor's body reach stdout or the log.
+harbor_agents_auth() {
+  local root="${1}" home="${2}" agent="${3}" bin pre post entry rc=0
+  harbor_auth_refuse_root
+  bin="$(harbor_agents_bin "${agent}" "${home}")" || exit "$?"
+  # An executable that is not there is not a login Harbor can run: the adapter would
+  # read the absent tool as "unknown", which is one of the pairs below, but getting
+  # there would mean invoking a path that does not exist and reporting an unverifiable
+  # transition for a tool that was never installed. The install is a different command
+  # and this names it.
+  [ -f "${bin}" ] && [ -x "${bin}" ] \
+    || harbor_die 3 agents.not_installed "${bin} is not an installed executable, so there is no ${agent} on this node to log in; install the pinned agents first, as the operator, with: harbor provision; nothing was changed"
+  harbor_state_root_create "${root}" operator
+  harbor_log_open "${root}/harbor.log" 0600
+  harbor_log command "auth ${agent}"
+  harbor_lock_acquire "${root}" operator
+  harbor_journal_init "${root}"
+  # The home the readers answer out of, set before recovery runs: a crashed provision
+  # can leave a claude or codex runtime-install entry prepared in this same operator
+  # journal, and the registered readers can only decide it in a process that has been
+  # told which home holds the agents (see harbor_agents_home).
+  HARBOR_AGENTS_HOME="${home}"
+  harbor_journal_recover "${root}"
+  harbor_step recovery-scan
+  pre="$(harbor_agents_auth_status "${agent}" "${home}")" || exit "$?"
+  if [ "${pre}" = logged-in ]; then
+    harbor_msg "auth.${agent}: ${agent} is already logged in on this node (its own status command says so); nothing to do, and Harbor ran no login"
+    return 0
+  fi
+  harbor_msg "auth.${agent}: ${agent} reports ${pre}; running its own login below — follow what it prints, on your Mac if it asks for a browser"
+  harbor_agents_auth_login "${agent}" "${home}" || rc="$?"
+  harbor_step "auth-${agent}-login"
+  post="$(harbor_agents_auth_status "${agent}" "${home}")" || exit "$?"
+  harbor_log agents "${agent} auth ${pre} to ${post} (login exited ${rc})"
+  case "${pre}:${post}" in
+    logged-out:logged-in) ;;
+    logged-out:logged-out)
+      harbor_die 1 agents.auth_incomplete "${agent} still reports logged-out after its own login exited ${rc}, so the login was not completed and there is no transition to record; the vendor's output above says what it asked for, and rerunning is safe: harbor auth ${agent}; nothing was journaled"
+      ;;
+    *unsupported*)
+      harbor_die 1 agents.auth_unsupported "${agent}'s login ran and exited ${rc}, but this pinned build documents no machine-readable status command, so Harbor cannot verify whether the login took and wrote no journal entry (design section 3.6 journals only a logged-out to logged-in transition it observed); ask ${agent} itself whether it is signed in"
+      ;;
+    *)
+      harbor_die 1 agents.auth_unverified "${agent} reported ${pre} before its login and ${post} after it (the login exited ${rc}), and Harbor journals a transition only when it read both ends of it, so nothing was written; rerun harbor auth ${agent} once ${agent} answers its own status command"
+      ;;
+  esac
+  harbor_journal_create "${root}" auth "${agent}" created applied "\"${pre}\"" "\"${post}\""
+  entry="${HARBOR_JOURNAL_ENTRY}"
+  harbor_step "auth-${agent}-recorded"
+  harbor_msg "${agent} is logged in on this node; recorded the ${pre} to ${post} transition as $(basename "${entry}")"
+}
 # The readers are registered at source time, beside the definitions above, so any
 # process that sourced this library can observe a claude or codex runtime-install
 # entry — including harbor journal resolve, which reaches recovery through bin/harbor

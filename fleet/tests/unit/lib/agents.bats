@@ -20,6 +20,11 @@ setup() {
   . "${HARBOR_ROOT}/lib/runtime.sh"
   # shellcheck source=lib/agents.sh
   . "${HARBOR_ROOT}/lib/agents.sh"
+  # lib/auth.sh for harbor_auth_refuse_root alone: harbor_agents_auth refuses root
+  # through the same function harbor auth tailscale does, so there is one answer to
+  # "which principal owns an attended login" and not two.
+  # shellcheck source=lib/auth.sh
+  . "${HARBOR_ROOT}/lib/auth.sh"
   fixture_state_root
   HARBOR_PID="$$"
   # The ambient HOME is a decoy for this whole file: it exists, it is not FIX_HOME,
@@ -38,6 +43,7 @@ setup() {
   NPM_LOG="${BATS_TEST_TMPDIR}/npm.log"
   refusing_npm
   PATH="${FAKE_BIN}:${PATH}"
+  refusing_agent_clis
   # The real lock, so the strings the parser is measured against are the pinned
   # releases' own and a version bump moves the fixtures with it.
   harbor_versions_load "${HARBOR_ROOT}/versions.lock"
@@ -111,6 +117,27 @@ refusing_npm() {
     printf 'exit 97\n'
   } >"${FAKE_BIN}/npm"
   chmod 0755 "${FAKE_BIN}/npm"
+}
+
+refusing_agent_clis() {
+  # The same refusal for the two agent CLIs themselves, and for the same reason one
+  # level up. Nothing in lib/agents.sh looks either name up on PATH — every call goes
+  # through harbor_agents_bin, which builds an absolute path under the HOME it was
+  # passed — so these are never what the code under test runs. They are here for the
+  # helper that gets it wrong: a test that invokes a bare "claude" or "codex" by
+  # mistake would otherwise reach whatever the developer has installed on the machine
+  # and run a real vendor CLI against a real credential store. That is a thing this
+  # file must make impossible rather than merely improbable, so both names resolve to
+  # a refusal before PATH is ever consulted.
+  local agent
+  for agent in ${HARBOR_AGENTS}; do
+    {
+      printf '#!/bin/sh\n'
+      printf 'echo "%s: a test invoked the real CLI by name; lib/agents.sh never does" >&2\n' "${agent}"
+      printf 'exit 97\n'
+    } >"${FAKE_BIN}/${agent}"
+    chmod 0755 "${FAKE_BIN}/${agent}"
+  done
 }
 
 fake_npm() {
@@ -782,4 +809,295 @@ assert_status_unknown() {
   refute grep -qE -- '\.claude|\.codex|credential|auth\.json' "$(status_log)"
   refute grep -qF -- "${secret}" "$(status_log)"
   assert_equal "$(status_calls)" 'auth status --json|login status|'
+}
+
+# ---- harbor auth claude and harbor auth codex ---------------------------------------
+
+auth_state() {
+  # auth_state AGENT: the file the fake CLI below keeps its own login state in. The
+  # login writes it and the status command reads it, so the second reading of a run is
+  # the effect of that run's own login rather than something this test rewrote behind
+  # the command's back.
+  printf '%s/auth-state.%s' "${BATS_TEST_TMPDIR}" "${1}"
+}
+
+login_body() {
+  # login_body AGENT: what the fake CLI prints for its login, the attended out-of-band
+  # flow both vendors use over SSH. The URL is a fixture and the only place it may ever
+  # appear is the terminal the vendor printed it to.
+  printf '%s/login-body.%s' "${BATS_TEST_TMPDIR}" "${1}"
+}
+
+LOGIN_URL='https://vendor.example.com/activate/FIXTURE0000'
+
+fake_login_agent() {
+  # fake_login_agent AGENT PRE POST [LOGIN_EXIT]: an executable at AGENT's path under
+  # FIX_HOME standing in for the vendor CLI through a whole attended login. It records
+  # every argv it is called with, answers its status command out of the state file
+  # (which starts at PRE), and answers its login command by printing an attended login's
+  # output and writing POST into that state file. The two recognized states answer from
+  # the bodies captured from the pinned releases, so the transition below is driven by
+  # the same fixtures the adapter was measured against.
+  local agent="${1}" pre="${2}" post="${3}" code="${4:-0}" bin login
+  case "${agent}" in
+    claude) login='auth login' ;;
+    codex) login='login' ;;
+  esac
+  bin="$(harbor_agents_bin "${agent}" "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  printf '%s' "${pre}" >"$(auth_state "${agent}")"
+  {
+    printf 'To sign in, open this URL in a browser on your Mac:\n\n'
+    printf '    %s\n\n' "${LOGIN_URL}"
+    printf 'Waiting for the browser.\n'
+  } >"$(login_body "${agent}")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >>"%s"\n' "$(status_log)"
+    printf 'state="$(cat "%s")"\n' "$(auth_state "${agent}")"
+    printf 'case "$*" in\n'
+    printf '  *--help*)\n'
+    printf '    [ "${state}" != unsupported ] || exit 1\n'
+    printf '    exit 0\n'
+    printf '    ;;\n'
+    printf '  "%s")\n' "${login}"
+    printf '    cat "%s"\n' "$(login_body "${agent}")"
+    printf '    printf "%%s" "%s" >"%s"\n' "${post}" "$(auth_state "${agent}")"
+    printf '    exit %s\n' "${code}"
+    printf '    ;;\n'
+    printf 'esac\n'
+    printf 'case "${state}" in\n'
+    printf '  logged-in) cat "%s.out" ;;\n' "$(status_fixture "${agent}" logged-in)"
+    printf '  logged-out)\n'
+    printf '    cat "%s.out"\n' "$(status_fixture "${agent}" logged-out)"
+    printf '    exit 1\n'
+    printf '    ;;\n'
+    printf '  unknown)\n'
+    printf '    echo "a sentence this pinned adapter does not know"\n'
+    printf '    exit 1\n'
+    printf '    ;;\n'
+    printf '  *)\n'
+    printf '    echo "error: unknown command" >&2\n'
+    printf '    exit 1\n'
+    printf '    ;;\n'
+    printf 'esac\n'
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+agent_auth() {
+  # agent_auth AGENT: the command in this process, then the lock released for the next.
+  # The command takes the operator lock itself and a run subshell never reaches the EXIT
+  # trap that would release it, which is the shape tests/unit/lib/auth.bats already uses
+  # for harbor_auth_tailscale.
+  run harbor_agents_auth "${FIX_ROOT}" "${FIX_HOME}" "${1}"
+  harbor_lock_release "${FIX_ROOT}" 2>/dev/null || true
+}
+
+command_log() {
+  cat "${FIX_ROOT}/harbor.log"
+}
+
+@test "auth: a logged-out agent that logs in journals one applied auth entry and exits 0" {
+  local agent seq=0
+  for agent in ${HARBOR_AGENTS}; do
+    seq=$((seq + 1))
+    fake_login_agent "${agent}" logged-out logged-in
+    agent_auth "${agent}"
+    assert_success
+    assert_output --partial "${agent} reports logged-out; running its own login below"
+    assert_output --partial "${agent} is logged in on this node"
+    # The entry: op auth, target the bare agent name the way runtime-install targets it,
+    # ownership created, and the two status words as the states it vouches for.
+    assert_equal "$(entry_phase "${FIX_ROOT}" "000${seq}")" applied
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" target)" "\"${agent}\""
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" ownership)" '"created"'
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" pre_state)" '"logged-out"'
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" post_state)" '"logged-in"'
+    harbor_journal_validate "${FIX_ROOT}/journal/000${seq}-auth.json"
+  done
+  # One entry per agent and nothing else, each named for the op recovery reads it as.
+  assert_equal "$(journal_names | tr '\n' ' ')" '0001-auth.json 0002-auth.json '
+  # The conversation with each vendor: the reading, the login, the reading again, and no
+  # --help probe, because both bodies were recognized.
+  assert_equal "$(status_calls)" 'auth status --json|auth login|auth status --json|login status|login|login status|'
+}
+
+@test "auth: an agent that is already logged in is exit 0 with no login call and no entry" {
+  local agent
+  for agent in ${HARBOR_AGENTS}; do
+    fake_login_agent "${agent}" logged-in logged-in
+    agent_auth "${agent}"
+    assert_success
+    assert_output --partial "${agent} is already logged in on this node"
+    assert_output --partial "Harbor ran no login"
+    refute_output --partial "${LOGIN_URL}"
+  done
+  # Nothing was journaled, and the only thing either vendor was asked is its status.
+  assert_equal "$(journal_names)" ""
+  assert_equal "$(status_calls)" 'auth status --json|login status|'
+}
+
+@test "auth: a login that leaves the tool logged out writes nothing and exits 1 naming the rerun" {
+  # The declined or abandoned login: the vendor printed its URL, the operator never
+  # approved it, and the tool says so itself. There is no transition, so there is no
+  # entry, and the exit is the attended 1 rather than a failure of Harbor's.
+  fake_login_agent claude logged-out logged-out 1
+  agent_auth claude
+  assert_failure 1
+  assert_output --partial 'agents.auth_incomplete'
+  assert_output --partial 'claude still reports logged-out after its own login exited 1'
+  assert_output --partial 'harbor auth claude'
+  assert_output --partial 'nothing was journaled'
+  assert_equal "$(journal_names)" ""
+  # A login that exits 0 and still leaves the tool logged out is the same answer: the
+  # second reading decides, not the vendor's exit code.
+  fake_login_agent codex logged-out logged-out 0
+  agent_auth codex
+  assert_failure 1
+  assert_output --partial 'codex still reports logged-out after its own login exited 0'
+  assert_equal "$(journal_names)" ""
+}
+
+@test "auth: unknown on either side is exit 1 and never journals a transition" {
+  # Unknown before: the tool has the command and its answer is not one this pinned
+  # adapter recognizes, so even a logged-in reading afterwards is not a transition
+  # Harbor watched both ends of.
+  fake_login_agent claude unknown logged-in
+  agent_auth claude
+  assert_failure 1
+  assert_output --partial 'agents.auth_unverified'
+  assert_output --partial 'claude reported unknown before its login and logged-in after it'
+  assert_output --partial 'harbor auth claude'
+  assert_equal "$(journal_names)" ""
+  # Unknown after: the login ran, the tool answered something new, and Harbor will not
+  # record a login it cannot read the result of.
+  fake_login_agent codex logged-out unknown
+  agent_auth codex
+  assert_failure 1
+  assert_output --partial 'agents.auth_unverified'
+  assert_output --partial 'codex reported logged-out before its login and unknown after it'
+  assert_equal "$(journal_names)" ""
+  # The login did run in both cases: it is the operator's to complete either way.
+  assert_equal "$(status_calls)" 'auth status --json|auth status --help|auth login|auth status --json|login status|login|login status|login status --help|'
+}
+
+@test "auth: an unsupported build still runs the login and exits 1 saying no entry was written" {
+  # A build with no documented machine-readable status command at all. The login is
+  # still the operator's to run; what Harbor cannot do is claim it saw a transition.
+  local agent
+  for agent in ${HARBOR_AGENTS}; do
+    fake_login_agent "${agent}" unsupported unsupported
+    agent_auth "${agent}"
+    assert_failure 1
+    assert_output --partial 'agents.auth_unsupported'
+    assert_output --partial "${agent}'s login ran and exited 0"
+    assert_output --partial 'documents no machine-readable status command'
+    assert_output --partial 'wrote no journal entry'
+    # The vendor's own login output still reached the terminal.
+    assert_output --partial "${LOGIN_URL}"
+    assert_equal "$(journal_names)" ""
+  done
+  assert_equal "$(status_calls)" 'auth status --json|auth status --help|auth login|auth status --json|auth status --help|login status|login status --help|login|login status|login status --help|'
+}
+
+@test "auth: an agent that is not installed is exit 3 naming harbor provision, before the lock" {
+  local agent
+  for agent in ${HARBOR_AGENTS}; do
+    agent_auth "${agent}"
+    assert_failure 3
+    assert_output --partial 'agents.not_installed'
+    assert_output --partial "$(harbor_agents_bin "${agent}" "${FIX_HOME}")"
+    assert_output --partial 'harbor provision'
+  done
+  # Nothing was asked of any vendor, no lock was taken, and no log was opened.
+  assert [ ! -e "$(status_log)" ]
+  assert [ ! -e "${FIX_ROOT}/lock.d" ]
+  assert [ ! -e "${FIX_ROOT}/harbor.log" ]
+  assert_equal "$(journal_names)" ""
+}
+
+@test "auth: root is refused before the state root, the lock, or any vendor call" {
+  local root="${BATS_TEST_TMPDIR}/root-state"
+  fake_login_agent claude logged-out logged-in
+  id() {
+    if [ "${1:-}" = -u ]; then
+      printf '0\n'
+    else
+      command id ${1+"$@"}
+    fi
+  }
+  run harbor_agents_auth "${root}" "${FIX_HOME}" claude
+  assert_failure 3
+  assert_output --partial 'auth.root:'
+  assert_output --partial 'without sudo'
+  # The state root this run would have used was never created, so nothing was locked,
+  # logged, or journaled, and the vendor was never called.
+  assert [ ! -e "${root}" ]
+  assert [ ! -e "$(status_log)" ]
+  assert_equal "$(journal_names)" ""
+  unset -f id
+}
+
+@test "auth: the vendor's login output reaches the terminal, and the status body reaches nothing" {
+  local field
+  fake_login_agent claude logged-out logged-in
+  agent_auth claude
+  assert_success
+  # The vendor's login output is passed straight through: the whole body it printed
+  # appears in the command's own output byte for byte, blank lines and indentation
+  # included, in the order the vendor wrote it and with nothing of Harbor's inside it.
+  assert_output --partial "$(cat "$(login_body claude)")"
+  assert_line --index 1 'To sign in, open this URL in a browser on your Mac:'
+  assert_line --index 2 "    ${LOGIN_URL}"
+  assert_line --index 3 'Waiting for the browser.'
+  # The URL reached the terminal and nowhere else: not the command log, not the journal,
+  # and not a vendor argument.
+  refute grep -qF -- "${LOGIN_URL}" "${FIX_ROOT}/harbor.log"
+  refute grep -qF -- "${LOGIN_URL}" "$(status_log)"
+  refute grep -rqF -- "${LOGIN_URL}" "${FIX_ROOT}/journal"
+  # The status body is the one that carries an email, an org, and a subscription, and no
+  # part of it reaches the terminal or the log at any point in the command.
+  for field in 'operator@example.com' 'OPERATOR org' SUBSCRIPTION loggedIn authMethod; do
+    refute_output --partial "${field}"
+    refute grep -qF -- "${field}" "${FIX_ROOT}/harbor.log"
+  done
+  # What the log does hold is the argv, the steps, and the transition in words.
+  run command_log
+  assert_output --partial 'command auth claude'
+  assert_output --partial 'step lock-acquired'
+  assert_output --partial 'step recovery-scan'
+  assert_output --partial 'step auth-claude-login'
+  assert_output --partial 'step auth-claude-recorded'
+  assert_output --partial 'vendor '"$(harbor_agents_bin claude "${FIX_HOME}")"' auth login'
+  assert_output --partial 'claude auth status is logged-out'
+  assert_output --partial 'claude auth logged-out to logged-in'
+  assert_output --partial 'created 0001-auth.json created applied'
+}
+
+@test "auth: no credential store is read, named, or disturbed by the reading or the login" {
+  # Harbor never reads, copies, prints, or inspects a vendor credential store (design
+  # section 3.6), and the whole attended command is run here with both stores seeded.
+  local secret='DECOY-NOT-A-REAL-CREDENTIAL' before
+  mkdir -p "${FIX_HOME}/.claude" "${FIX_HOME}/.codex"
+  printf '{"accessToken":"%s"}\n' "${secret}" >"${FIX_HOME}/.claude/.credentials.json"
+  printf '{"tokens":{"access_token":"%s"}}\n' "${secret}" >"${FIX_HOME}/.codex/auth.json"
+  chmod 0600 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
+  before="$(find "${FIX_HOME}/.claude" "${FIX_HOME}/.codex" -exec ls -ldn {} + | sort)"
+  fake_login_agent claude logged-out logged-in
+  fake_login_agent codex logged-out logged-in
+  agent_auth claude
+  assert_success
+  refute_output --partial "${secret}"
+  agent_auth codex
+  assert_success
+  refute_output --partial "${secret}"
+  # Neither store was created, removed, or rewritten by Harbor: only the vendors own
+  # them, and here the vendors are stand-ins that never touched them either.
+  assert_equal "$(find "${FIX_HOME}/.claude" "${FIX_HOME}/.codex" -exec ls -ldn {} + | sort)" "${before}"
+  # No path under either store was ever passed to a vendor, and no secret reached the
+  # log or a journal entry.
+  refute grep -qE -- '\.claude|\.codex|credential|auth\.json' "$(status_log)"
+  refute grep -qF -- "${secret}" "${FIX_ROOT}/harbor.log"
+  refute grep -rqF -- "${secret}" "${FIX_ROOT}/journal"
 }
