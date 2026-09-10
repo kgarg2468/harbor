@@ -1,8 +1,41 @@
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index 89cc5928..555673df 100644
+index 18d8d73d15d17e5ccde397dc6da952c90e16f7b7..a3777eca1faad36b8c230c4fb54c8476fd18b3e8 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
-@@ -131,7 +131,56 @@ describe("DesktopEnvironment", () => {
+@@ -40,21 +40,26 @@ const makeEnvironment = (
+   DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
+ 
+ describe("DesktopEnvironment", () => {
+-  it.effect("exposes a frozen managed identity independent of overridable settings", () =>
++  it.effect("exposes a frozen Reasoning managed identity independent of overridable settings", () =>
+     Effect.gen(function* () {
+       const environment = yield* makeEnvironment(
+         { isPackaged: true, appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef" },
+         {
+           T3CODE_DESKTOP_APP_USER_MODEL_ID: "com.attacker.override",
+-          T3CODE_MANAGED_DESKTOP_PRESENTATION_VARIANT: "reasoning",
++          T3CODE_MANAGED_DESKTOP_PRESENTATION_VARIANT: "managed-nightly",
+         },
+       );
+       assert.equal(environment.appUserModelId, "com.attacker.override");
++      Object.assign(environment.branding, {
++        baseName: "Overridden branding",
++        displayName: "Overridden branding (Nightly)",
++      });
++      assert.equal(environment.branding.displayName, "Overridden branding (Nightly)");
+       assert.deepEqual(environment.managedPresentationIdentity, {
+-        presentationVariant: "managed-nightly",
+-        bundleId: "com.t3tools.t3code",
+-        productName: "T3 Code (Nightly)",
+-        urlSchemes: ["t3code", "t3code-dev"],
++        presentationVariant: "reasoning",
++        bundleId: "com.t3tools.t3code.reasoning",
++        productName: "T3 Code (Reasoning)",
++        urlSchemes: ["t3code-reasoning"],
+       });
+       assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity));
+       assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity?.urlSchemes));
+@@ -184,7 +189,56 @@ describe("DesktopEnvironment", () => {
        const production = yield* makeEnvironment();
  
        assert.equal(development.stateDir, "/Users/alice/.t3/dev");
@@ -61,10 +94,29 @@ index 89cc5928..555673df 100644
    );
  
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index 4583e512..1b0331f1 100644
+index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b0e1cf20f 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
-@@ -86,6 +86,9 @@ export class DesktopEnvironment extends Context.Service<
+@@ -38,13 +38,13 @@ export interface ManagedDesktopPresentationIdentity {
+   readonly urlSchemes: ReadonlyArray<string>;
+ }
+ 
+-// Build-owned identity: the Reasoning overlay replaces these fixed values.
++// Build-owned identity for the Reasoning overlay.
+ // Never derive this from overridable branding or appUserModelId settings.
+ const MANAGED_PRESENTATION_IDENTITY: ManagedDesktopPresentationIdentity = Object.freeze({
+-  presentationVariant: "managed-nightly",
+-  bundleId: "com.t3tools.t3code",
+-  productName: "T3 Code (Nightly)",
+-  urlSchemes: Object.freeze(["t3code", "t3code-dev"]),
++  presentationVariant: "reasoning",
++  bundleId: "com.t3tools.t3code.reasoning",
++  productName: "T3 Code (Reasoning)",
++  urlSchemes: Object.freeze(["t3code-reasoning"]),
+ });
+ 
+ // Keep this exact managed grammar in sync with updates/updateChannels.ts.
+@@ -120,6 +120,9 @@ export class DesktopEnvironment extends Context.Service<
  >()("@t3tools/desktop/app/DesktopEnvironment") {}
  
  const APP_BASE_NAME = "T3 Code";
@@ -74,7 +126,7 @@ index 4583e512..1b0331f1 100644
  
  function resolveDesktopAppStageLabel(input: {
    readonly isDevelopment: boolean;
-@@ -103,10 +106,21 @@ function resolveDesktopAppBranding(input: {
+@@ -137,10 +140,21 @@ function resolveDesktopAppBranding(input: {
    readonly appVersion: string;
  }): DesktopAppBranding {
    const stageLabel = resolveDesktopAppStageLabel(input);
@@ -98,7 +150,7 @@ index 4583e512..1b0331f1 100644
    };
  }
  
-@@ -156,11 +170,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -190,11 +204,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
        : input.platform === "darwin"
          ? path.join(homeDirectory, "Library", "Application Support")
          : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
@@ -124,7 +176,7 @@ index 4583e512..1b0331f1 100644
    const rootDir = path.resolve(input.dirname, "../../..");
    const appRoot = input.isPackaged ? input.appPath : rootDir;
    const serverRoot =
-@@ -178,8 +202,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -212,8 +236,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
      joinPath: path.join,
      t3Home: config.t3Home,
    });
@@ -138,7 +190,7 @@ index 4583e512..1b0331f1 100644
    const linuxApplicationsDir = path.join(
      Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
      "applications",
-@@ -224,10 +251,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -261,10 +288,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
      branding,
      displayName,
      appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
@@ -152,8 +204,21 @@ index 4583e512..1b0331f1 100644
      linuxApplicationsDir,
      appImagePath: config.appImagePath,
      userDataDirName,
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+index 87b0d5e7b136137a44272b88f65fbc00b376c276..bbfabb125659d4a850ff40ba78e1ce0811536ef5 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+@@ -225,7 +225,7 @@ describe("DesktopBackendConfiguration", () => {
+         const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+         const primary = yield* configuration.resolvePrimary;
+         const wsl = yield* configuration.resolveWsl({ port: 4999, distro: null });
+-        assert.equal(primary.bootstrap.managedDesktopPresentationVariant, "managed-nightly");
++        assert.equal(primary.bootstrap.managedDesktopPresentationVariant, "reasoning");
+         assert.notProperty(primary.bootstrap, "managedPresentationIdentity");
+         assert.notProperty(primary.bootstrap, "bundleId");
+         assert.notProperty(wsl.bootstrap, "managedDesktopPresentationVariant");
 diff --git a/apps/desktop/src/electron/ElectronProtocol.test.ts b/apps/desktop/src/electron/ElectronProtocol.test.ts
-index a5c03e0b..5d527e6e 100644
+index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b77bdb80b6 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.test.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.test.ts
 @@ -23,6 +23,15 @@ describe("ElectronProtocol", () => {
@@ -243,7 +308,7 @@ index a5c03e0b..5d527e6e 100644
    });
  });
 diff --git a/apps/desktop/src/electron/ElectronProtocol.ts b/apps/desktop/src/electron/ElectronProtocol.ts
-index fabd598d..91b92048 100644
+index fabd598d7ffab125afd5e73c70d71996564d0646..91b9204888dfa8704d836c63d6b3e56c40c63e31 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.ts
 @@ -9,7 +9,9 @@ import * as Scope from "effect/Scope";
@@ -258,7 +323,7 @@ index fabd598d..91b92048 100644
  
  export function getDesktopScheme(isDevelopment: boolean): string {
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index 9c763407..f5e5d580 100644
+index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d155c553e8 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
 @@ -55,7 +55,6 @@ import {
@@ -541,7 +606,7 @@ index 9c763407..f5e5d580 100644
      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
    );
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index cfa6bfdf..15e3b206 100644
+index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f36ee3825 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
 @@ -52,7 +52,9 @@ import { Command, Flag } from "effect/unstable/cli";
@@ -711,7 +776,7 @@ index cfa6bfdf..15e3b206 100644
      build: yield* createBuildConfig(
 diff --git a/scripts/update-reasoning-mac-app.sh b/scripts/update-reasoning-mac-app.sh
 new file mode 100755
-index 00000000..ea583477
+index 0000000000000000000000000000000000000000..ea583477ba333d0bfa528a446f4807d66bfdc73c
 --- /dev/null
 +++ b/scripts/update-reasoning-mac-app.sh
 @@ -0,0 +1,449 @@

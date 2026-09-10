@@ -1,0 +1,341 @@
+diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
+index 89cc592831a7bc67626cc964267239210cec504f..18d8d73d15d17e5ccde397dc6da952c90e16f7b7 100644
+--- a/apps/desktop/src/app/DesktopEnvironment.test.ts
++++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
+@@ -40,6 +40,59 @@ const makeEnvironment = (
+   DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
+ 
+ describe("DesktopEnvironment", () => {
++  it.effect("exposes a frozen managed identity independent of overridable settings", () =>
++    Effect.gen(function* () {
++      const environment = yield* makeEnvironment(
++        { isPackaged: true, appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef" },
++        {
++          T3CODE_DESKTOP_APP_USER_MODEL_ID: "com.attacker.override",
++          T3CODE_MANAGED_DESKTOP_PRESENTATION_VARIANT: "reasoning",
++        },
++      );
++      assert.equal(environment.appUserModelId, "com.attacker.override");
++      assert.deepEqual(environment.managedPresentationIdentity, {
++        presentationVariant: "managed-nightly",
++        bundleId: "com.t3tools.t3code",
++        productName: "T3 Code (Nightly)",
++        urlSchemes: ["t3code", "t3code-dev"],
++      });
++      assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity));
++      assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity?.urlSchemes));
++    }),
++  );
++
++  it.effect("omits managed identity for unpackaged, development, and inexact versions", () =>
++    Effect.gen(function* () {
++      const appVersion = "0.0.39-nightly.20260909.0.managed.1.p012345abcdef";
++      assert.notProperty(yield* makeEnvironment({ appVersion }), "managedPresentationIdentity");
++      assert.notProperty(
++        yield* makeEnvironment(
++          { isPackaged: true, appVersion },
++          { VITE_DEV_SERVER_URL: "http://localhost:5173" },
++        ),
++        "managedPresentationIdentity",
++      );
++      for (const version of [
++        "0.0.39",
++        "0.0.39-nightly.20260909.0",
++        `prefix-${appVersion}`,
++        `${appVersion}+metadata`,
++        appVersion.replace("managed.1", "managed.0"),
++        appVersion.replace("managed.1", "managed.01"),
++        appVersion.replace("managed.1", "managed.9007199254740992"),
++        appVersion.replace("20260909", "00260909"),
++        appVersion.replace("0.0.39", "00.0.39"),
++        appVersion.replace("abcdef", "ABCDEF"),
++        `${appVersion}0`,
++        `${appVersion}\n`,
++        `${appVersion}\r`,
++      ]) {
++        const environment = yield* makeEnvironment({ isPackaged: true, appVersion: version });
++        assert.notProperty(environment, "managedPresentationIdentity", version);
++      }
++    }),
++  );
++
+   it.effect("derives state paths and development identity inside Effect", () =>
+     Effect.gen(function* () {
+       const environment = yield* makeEnvironment(
+diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
+index 4583e51240918d0440040f30dadde203de80573d..ebb3d14aa958635f0cd07f50ad9d1566c05f5810 100644
+--- a/apps/desktop/src/app/DesktopEnvironment.ts
++++ b/apps/desktop/src/app/DesktopEnvironment.ts
+@@ -1,4 +1,5 @@
+ import type {
++  DesktopBackendBootstrap,
+   DesktopAppBranding,
+   DesktopAppStageLabel,
+   DesktopRuntimeArch,
+@@ -28,6 +29,38 @@ export interface MakeDesktopEnvironmentInput {
+   readonly runningUnderArm64Translation: boolean;
+ }
+ 
++export interface ManagedDesktopPresentationIdentity {
++  readonly presentationVariant: NonNullable<
++    DesktopBackendBootstrap["managedDesktopPresentationVariant"]
++  >;
++  readonly bundleId: string;
++  readonly productName: string;
++  readonly urlSchemes: ReadonlyArray<string>;
++}
++
++// Build-owned identity: the Reasoning overlay replaces these fixed values.
++// Never derive this from overridable branding or appUserModelId settings.
++const MANAGED_PRESENTATION_IDENTITY: ManagedDesktopPresentationIdentity = Object.freeze({
++  presentationVariant: "managed-nightly",
++  bundleId: "com.t3tools.t3code",
++  productName: "T3 Code (Nightly)",
++  urlSchemes: Object.freeze(["t3code", "t3code-dev"]),
++});
++
++// Keep this exact managed grammar in sync with updates/updateChannels.ts.
++const SEMVER_NUMERIC = "(?:0|[1-9]\\d*)";
++const MANAGED_VERSION_PATTERN = new RegExp(
++  `^${SEMVER_NUMERIC}\\.${SEMVER_NUMERIC}\\.${SEMVER_NUMERIC}-nightly\\.[1-9]\\d{7}\\.${SEMVER_NUMERIC}` +
++    `\\.managed\\.(${SEMVER_NUMERIC})\\.p[0-9a-f]{12}$`,
++);
++
++function isExactManagedVersion(version: string): boolean {
++  const match = MANAGED_VERSION_PATTERN.exec(version);
++  if (match === null || match[0] !== version) return false;
++  const counter = Number(match[1]);
++  return Number.isSafeInteger(counter) && counter >= 1;
++}
++
+ export class DesktopEnvironment extends Context.Service<
+   DesktopEnvironment,
+   {
+@@ -69,6 +102,7 @@ export class DesktopEnvironment extends Context.Service<
+     readonly commitHashOverride: Option.Option<string>;
+     readonly otlpTracesUrl: Option.Option<string>;
+     readonly otlpExportIntervalMs: number;
++    readonly managedPresentationIdentity?: ManagedDesktopPresentationIdentity;
+     readonly branding: DesktopAppBranding;
+     readonly displayName: string;
+     readonly appUserModelId: string;
+@@ -221,6 +255,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
+     commitHashOverride: config.commitHashOverride,
+     otlpTracesUrl: config.otlpTracesUrl,
+     otlpExportIntervalMs: config.otlpExportIntervalMs,
++    ...(input.isPackaged && !isDevelopment && isExactManagedVersion(input.appVersion)
++      ? { managedPresentationIdentity: MANAGED_PRESENTATION_IDENTITY }
++      : {}),
+     branding,
+     displayName,
+     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+index c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447..87b0d5e7b136137a44272b88f65fbc00b376c276 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+@@ -105,6 +105,7 @@ const withHarness = <A, E, R>(
+     | FileSystem.FileSystem
+     | DesktopBackendConfiguration.DesktopBackendConfiguration
+   >,
++  environmentOptions?: Parameters<typeof makeEnvironmentLayer>[1],
+ ) =>
+   Effect.gen(function* () {
+     const fileSystem = yield* FileSystem.FileSystem;
+@@ -119,7 +120,7 @@ const withHarness = <A, E, R>(
+           Layer.provideMerge(DesktopAppSettings.layerTest()),
+           Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+           Layer.provideMerge(DesktopWslServerTree.layerTest()),
+-          Layer.provideMerge(makeEnvironmentLayer(baseDir)),
++          Layer.provideMerge(makeEnvironmentLayer(baseDir, environmentOptions)),
+         ),
+       ),
+     );
+@@ -218,6 +219,21 @@ const withPackagedWslHarness = <A, E, R>(
+   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+ 
+ describe("DesktopBackendConfiguration", () => {
++  it.effect("passes only the immutable managed variant to the primary, never WSL", () =>
++    withHarness(
++      Effect.gen(function* () {
++        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
++        const primary = yield* configuration.resolvePrimary;
++        const wsl = yield* configuration.resolveWsl({ port: 4999, distro: null });
++        assert.equal(primary.bootstrap.managedDesktopPresentationVariant, "managed-nightly");
++        assert.notProperty(primary.bootstrap, "managedPresentationIdentity");
++        assert.notProperty(primary.bootstrap, "bundleId");
++        assert.notProperty(wsl.bootstrap, "managedDesktopPresentationVariant");
++      }),
++      { appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef" },
++    ),
++  );
++
+   it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
+     withHarness(
+       Effect.gen(function* () {
+@@ -237,6 +253,7 @@ describe("DesktopBackendConfiguration", () => {
+         assert.isUndefined(first.env.T3CODE_DESKTOP_LAN_HOST);
+ 
+         assert.equal(first.bootstrap.mode, "desktop");
++        assert.notProperty(first.bootstrap, "managedDesktopPresentationVariant");
+         assert.equal(first.bootstrap.noBrowser, true);
+         assert.equal(first.bootstrap.port, 4888);
+         assert.equal(first.bootstrap.host, "0.0.0.0");
+@@ -929,6 +946,7 @@ describe("DesktopBackendConfiguration", () => {
+           assert.equal(config.bootstrap.host, "0.0.0.0");
+           assert.equal(config.bootstrap.tailscaleServeEnabled, false);
+           assert.notProperty(config.bootstrap, "desktopTelemetryFd");
++          assert.notProperty(config.bootstrap, "managedDesktopPresentationVariant");
+           assert.notProperty(config.bootstrap, "resourceMonitorPath");
+           // httpBaseUrl uses the resolved distro IP from the test stub,
+           // not localhost — the renderer reaches the backend directly to
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 54f595785338ac9d1ebf73c3bb47904fa14ba6cd..5da131052cac70680d3082c862d8617c51086f9a 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -491,6 +491,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+       desktopBootstrapToken: input.bootstrapToken,
+       tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
+       tailscaleServePort: backendExposure.tailscaleServePort,
++      ...(environment.managedPresentationIdentity === undefined
++        ? {}
++        : {
++            managedDesktopPresentationVariant:
++              environment.managedPresentationIdentity.presentationVariant,
++          }),
+       desktopTelemetryFd: 4,
+       desktopTelemetryControlFd: 5,
+       ...Option.match(input.resourceMonitorPath, {
+diff --git a/apps/server/src/cli/config.test.ts b/apps/server/src/cli/config.test.ts
+index 2267a5cb1cc9e7f7460fec521f93ca6aa9ac6cd2..70d09a24f18c22c56e6b6cc1f2e57091642bbd7f 100644
+--- a/apps/server/src/cli/config.test.ts
++++ b/apps/server/src/cli/config.test.ts
+@@ -18,11 +18,13 @@ import {
+ import * as NetService from "@t3tools/shared/Net";
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { deriveServerPaths } from "../config.ts";
+-import { resolveServerConfig } from "./config.ts";
++import { resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
+ 
+ const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
+   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
+ 
++const isDesktopBootstrap = Schema.is(DesktopBackendBootstrap);
++
+ const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
+ 
+ const makeDesktopBootstrap = (
+@@ -73,6 +75,64 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+     );
+   });
+ 
++  it.effect(
++    "accepts only closed bootstrap variants and ignores environment or flag injection",
++    () =>
++      Effect.gen(function* () {
++        assert.notProperty(sharedServerCommandFlags, "managedDesktopPresentationVariant");
++        for (const invalid of ["other", "", " managed-nightly", "reasoning ", null]) {
++          assert.isFalse(
++            isDesktopBootstrap({
++              ...makeDesktopBootstrap(),
++              managedDesktopPresentationVariant: invalid,
++            }),
++          );
++        }
++        for (const variant of [undefined, "managed-nightly", "reasoning"] as const) {
++          const fd = yield* openBootstrapFd(
++            makeDesktopBootstrap(
++              variant === undefined ? {} : { managedDesktopPresentationVariant: variant },
++            ),
++          );
++          const resolved = yield* resolveServerConfig(
++            {
++              mode: Option.none(),
++              port: Option.none(),
++              host: Option.none(),
++              baseDir: Option.none(),
++              cwd: Option.none(),
++              devUrl: Option.none(),
++              noBrowser: Option.none(),
++              bootstrapFd: Option.some(fd),
++              autoBootstrapProjectFromCwd: Option.none(),
++              logWebSocketEvents: Option.none(),
++              tailscaleServeEnabled: Option.none(),
++              tailscaleServePort: Option.none(),
++            },
++            Option.none(),
++          ).pipe(
++            Effect.provide(
++              Layer.mergeAll(
++                ConfigProvider.layer(
++                  ConfigProvider.fromEnv({
++                    env: {
++                      T3CODE_MANAGED_DESKTOP_PRESENTATION_VARIANT: "reasoning",
++                      T3CODE_DESKTOP_PRESENTATION_VARIANT: "reasoning",
++                      T3CODE_DESKTOP_APP_USER_MODEL_ID: "com.t3tools.t3code.reasoning",
++                    },
++                  }),
++                ),
++                NetService.layer,
++              ),
++            ),
++          );
++          assert.equal(resolved.managedDesktopPresentationVariant, variant);
++          if (variant === undefined)
++            assert.notProperty(resolved, "managedDesktopPresentationVariant");
++        }
++      }),
++  );
++
+   it.effect("falls back to effect/config values when flags are omitted", () =>
+     Effect.gen(function* () {
+       const { join } = yield* Path.Path;
+diff --git a/apps/server/src/cli/config.ts b/apps/server/src/cli/config.ts
+index f739a4e2f22c694a238a177a223c44e81e2efae0..75b31805f4e66c98d73678191d0b90f6db9bd033 100644
+--- a/apps/server/src/cli/config.ts
++++ b/apps/server/src/cli/config.ts
+@@ -377,6 +377,9 @@ export const resolveServerConfig = (
+       noBrowser,
+       startupPresentation,
+       desktopBootstrapToken,
++      ...(bootstrap?.managedDesktopPresentationVariant === undefined
++        ? {}
++        : { managedDesktopPresentationVariant: bootstrap.managedDesktopPresentationVariant }),
+       desktopTelemetryFd,
+       desktopTelemetryControlFd,
+       resourceMonitorPath,
+diff --git a/apps/server/src/config.ts b/apps/server/src/config.ts
+index 42df3814b070a302f92ae72d30cc16d979481b4c..dfccbf1be4cece09d2ec471695adec3679234d5b 100644
+--- a/apps/server/src/config.ts
++++ b/apps/server/src/config.ts
+@@ -6,6 +6,8 @@
+  *
+  * @module ServerConfig
+  */
++import type { DesktopBackendBootstrap } from "@t3tools/contracts";
++
+ import * as Context from "effect/Context";
+ import * as Clock from "effect/Clock";
+ import * as Effect from "effect/Effect";
+@@ -81,6 +83,7 @@ export class ServerConfig extends Context.Service<
+     readonly noBrowser: boolean;
+     readonly startupPresentation: StartupPresentation;
+     readonly desktopBootstrapToken: string | undefined;
++    readonly managedDesktopPresentationVariant?: DesktopBackendBootstrap["managedDesktopPresentationVariant"];
+     readonly desktopTelemetryFd?: number | undefined;
+     readonly desktopTelemetryControlFd?: number | undefined;
+     readonly resourceMonitorPath?: string | undefined;
+diff --git a/packages/contracts/src/desktopBootstrap.ts b/packages/contracts/src/desktopBootstrap.ts
+index f4d1a09278611019a77f4c949003cff029eb9b36..9ccf557365cb24c7d1af6ec5e4f28175f96e6fd9 100644
+--- a/packages/contracts/src/desktopBootstrap.ts
++++ b/packages/contracts/src/desktopBootstrap.ts
+@@ -16,6 +16,10 @@ export const DesktopBackendBootstrap = Schema.Struct({
+   tailscaleServePort: PortSchema,
+   otlpTracesUrl: Schema.optional(Schema.String),
+   otlpMetricsUrl: Schema.optional(Schema.String),
++  // Only the primary packaged managed desktop supplies this immutable identity.
++  managedDesktopPresentationVariant: Schema.optionalKey(
++    Schema.Literals(["managed-nightly", "reasoning"]),
++  ),
+   desktopTelemetryFd: Schema.optionalKey(PositiveInt),
+   desktopTelemetryControlFd: Schema.optionalKey(PositiveInt),
+   resourceMonitorPath: Schema.optionalKey(TrimmedNonEmptyString),

@@ -144,9 +144,19 @@
       "sha256": "c1f39a144bfa1613349b4139b400a2527683ad8be4d799f20949f484fd907518"
     },
     {
+      "id": "managed-presentation-identity",
+      "path": "patches/0031-managed-presentation-identity.patch",
+      "sha256": "7ab78663dfc1070ac2fb91bf28a6388ffb8a9cf30a3d7f1b6e47ac54e727bd14"
+    },
+    {
+      "id": "desktop-update-lifecycle",
+      "path": "patches/0032-desktop-update-lifecycle.patch",
+      "sha256": "5b6e18aa0a7421b1d26589c4075195f16ce7724e82709d6430cdec63afb501e9"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "ec810bc93f35c387f64f02a384006d9865a6f86e9217feb40aab99d31c921ab3"
+      "sha256": "7743f69e213a60a86641ec1206dc83546956a58db16a18dfe0dcbd643320065e"
     }
   ],
   "variants": {
@@ -177,7 +187,9 @@
       "managed-queue-controls",
       "desktop-reservation-transport",
       "managed-desktop-feed",
-      "server-desktop-reservation-receiver"
+      "server-desktop-reservation-receiver",
+      "managed-presentation-identity",
+      "desktop-update-lifecycle"
     ],
     "reasoning": [
       "reasoning-full",
@@ -207,6 +219,8 @@
       "desktop-reservation-transport",
       "managed-desktop-feed",
       "server-desktop-reservation-receiver",
+      "managed-presentation-identity",
+      "desktop-update-lifecycle",
       "reasoning-identity"
     ]
   }
