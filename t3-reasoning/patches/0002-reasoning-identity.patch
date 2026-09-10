@@ -1,3 +1,73 @@
+diff --git a/apps/desktop/src/app/DesktopAppIdentity.test.ts b/apps/desktop/src/app/DesktopAppIdentity.test.ts
+index 71bcf5f7aef1c4b5753d2882e325180b9fdfd797..d4ddddf4a2809c2b1551ba62f60747800f604d3b 100644
+--- a/apps/desktop/src/app/DesktopAppIdentity.test.ts
++++ b/apps/desktop/src/app/DesktopAppIdentity.test.ts
+@@ -21,9 +21,9 @@ const defaultEnvironmentInput = {
+   platform: "darwin",
+   processArch: "arm64",
+   appVersion: "1.2.3",
+-  appPath: "/Applications/T3 Code.app/Contents/Resources/app.asar",
++  appPath: "/Applications/T3 Code (Reasoning).app/Contents/Resources/app.asar",
+   isPackaged: true,
+-  resourcesPath: "/Applications/T3 Code.app/Contents/Resources",
++  resourcesPath: "/Applications/T3 Code (Reasoning).app/Contents/Resources",
+   runningUnderArm64Translation: false,
+ } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
+
+@@ -40,7 +40,7 @@ interface ElectronAppCalls {
+ const makeElectronAppLayer = (calls: ElectronAppCalls) =>
+   Layer.succeed(ElectronApp.ElectronApp, {
+     metadata: Effect.die("unexpected metadata read"),
+-    name: Effect.succeed("T3 Code"),
++    name: Effect.succeed("T3 Code (Reasoning)"),
+     systemLocale: Effect.succeed("en-US"),
+     whenReady: Effect.void,
+     quit: Effect.void,
+@@ -131,7 +131,8 @@ const withIdentity = <A, E, R>(
+               input.legacyPathProbeError
+                 ? Effect.fail(input.legacyPathProbeError)
+                 : Effect.succeed(
+-                    input.legacyPathExists === true && path.includes("T3 Code (Alpha)"),
++                    input.legacyPathExists === true &&
++                    path === "/Users/alice/Library/Application Support/t3code-reasoning",
+                   ),
+             readFileString: () =>
+               Effect.succeed(input.packageJson ?? '{"t3codeCommitHash":"abcdef1234567890"}'),
+@@ -146,20 +147,20 @@ const withIdentity = <A, E, R>(
+ };
+
+ describe("DesktopAppIdentity", () => {
+-  it.effect("keeps using the legacy userData path when it already exists", () =>
++  it.effect("keeps packaged userData isolated in the existing Reasoning directory", () =>
+     withIdentity(
+       Effect.gen(function* () {
+         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+         const userDataPath = yield* identity.resolveUserDataPath;
+
+-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/T3 Code (Alpha)");
++        assert.equal(userDataPath, "/Users/alice/Library/Application Support/t3code-reasoning");
+       }),
+       { legacyPathExists: true },
+     ),
+   );
+
+   it.effect("preserves failures while inspecting the legacy userData path", () => {
+-    const legacyPath = "/Users/alice/Library/Application Support/T3 Code (Alpha)";
++    const legacyPath = "/Users/alice/Library/Application Support/t3code-reasoning";
+     const cause = PlatformError.systemError({
+       _tag: "PermissionDenied",
+       module: "FileSystem",
+@@ -197,8 +198,8 @@ describe("DesktopAppIdentity", () => {
+         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+         yield* identity.configure;
+
+-        assert.deepEqual(calls.setName, ["T3 Code (Alpha)"]);
+-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "T3 Code (Alpha)");
++        assert.deepEqual(calls.setName, ["T3 Code (Reasoning)"]);
++        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "T3 Code (Reasoning)");
+         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
+         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
+         // Packaged: the bundle's own icon stands, so a custom one the user
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
 index 18d8d73d15d17e5ccde397dc6da952c90e16f7b7..a3777eca1faad36b8c230c4fb54c8476fd18b3e8 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
@@ -204,8 +274,26 @@ index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b
      linuxApplicationsDir,
      appImagePath: config.appImagePath,
      userDataDirName,
+diff --git a/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts b/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts
+index 30183808a15216d63a137bd9163d8cbd3adcf389..9e357ecf8629171ad891174cc943f93da16e36a8 100644
+--- a/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts
++++ b/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts
+@@ -167,11 +167,11 @@ describe("DesktopLinuxUrlHandler", () => {
+         recorded.files[0]?.content,
+         'Exec="/home/alice/Applications/T3-Code.AppImage" %U',
+       );
+-      assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code;");
++      assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code-reasoning;");
+       assert.deepEqual(recorded.commands, [
+         {
+           command: "xdg-mime",
+-          args: ["default", "t3code-url-handler.desktop", "x-scheme-handler/t3code"],
++          args: ["default", "t3code-url-handler.desktop", "x-scheme-handler/t3code-reasoning"],
+         },
+       ]);
+     });
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index 87b0d5e7b136137a44272b88f65fbc00b376c276..bbfabb125659d4a850ff40ba78e1ce0811536ef5 100644
+index 4a42abd63bc638b1014388e2125ec0c544165795..5466dedf1dc8dd7094d9df2f569d0918ceb76a8d 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 @@ -225,7 +225,7 @@ describe("DesktopBackendConfiguration", () => {
@@ -217,6 +305,15 @@ index 87b0d5e7b136137a44272b88f65fbc00b376c276..bbfabb125659d4a850ff40ba78e1ce08
          assert.notProperty(primary.bootstrap, "managedPresentationIdentity");
          assert.notProperty(primary.bootstrap, "bundleId");
          assert.notProperty(wsl.bootstrap, "managedDesktopPresentationVariant");
+@@ -303,7 +303,7 @@ describe("DesktopBackendConfiguration", () => {
+               primary.bootstrap.managedDesktopArtifactHelperPath,
+               "/packaged resources/desktop-artifact/t3-desktop-artifact",
+             );
+-            assert.equal(primary.bootstrap.managedDesktopPresentationVariant, "managed-nightly");
++            assert.equal(primary.bootstrap.managedDesktopPresentationVariant, "reasoning");
+           } else {
+             assert.notProperty(primary.bootstrap, "managedDesktopArtifactHelperPath");
+           }
 diff --git a/apps/desktop/src/electron/ElectronProtocol.test.ts b/apps/desktop/src/electron/ElectronProtocol.test.ts
 index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b77bdb80b6 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.test.ts
@@ -323,10 +420,10 @@ index fabd598d7ffab125afd5e73c70d71996564d0646..91b9204888dfa8704d836c63d6b3e56c
  
  export function getDesktopScheme(isDevelopment: boolean): string {
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d155c553e8 100644
+index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f733c7b06 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -55,7 +55,6 @@ import {
+@@ -56,7 +56,6 @@ import {
    resolveResourceMonitorRustTargets,
    resolveWindowsServerAsarIgnoreGlobs,
    resourceMonitorExecutableName,
@@ -334,7 +431,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
    resolveMockUpdateServerPort,
    resolveMockUpdateServerUrl,
    resolvePackageManagerUserAgent,
-@@ -324,10 +323,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -326,10 +325,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      }
    });
  
@@ -349,7 +446,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
    });
  
    it("keeps nightly icons and web branding for managed nightly versions", () => {
-@@ -358,86 +357,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -360,86 +359,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
    });
  
@@ -482,7 +579,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
    it.effect("packages managed nightly versions with nightly presentation and no update feed", () =>
      Effect.gen(function* () {
        const build = (version: string, mockUpdates = false) =>
-@@ -457,32 +446,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -459,32 +448,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          const stable = yield* build("0.0.40").pipe(withEnv);
          const preview = yield* build("0.0.40-pr.8182.1").pipe(withEnv);
  
@@ -524,7 +621,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
          assert.notProperty(preview, "publish");
        }
  
-@@ -818,7 +794,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -824,7 +800,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          "**/node_modules/.bin/**",
        ]);
        assert.deepStrictEqual(mac.dmg, {
@@ -533,7 +630,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
          background: "dmg/dmg-background-latest.png",
          window: { width: 540, height: 412 },
          contents: [
-@@ -828,11 +804,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -834,11 +810,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          iconSize: 80,
          iconTextSize: 12,
        });
@@ -563,7 +660,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
        assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
        assert.notProperty(mac.mac as Record<string, unknown>, "sign");
        for (const config of [linux, win]) {
-@@ -1747,7 +1738,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1753,7 +1744,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      });
  
      assert.deepStrictEqual(configuration, {
@@ -572,7 +669,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
        teamId: "ABC1234567",
        rpDomains: ["example.clerk.accounts.dev"],
        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-@@ -1767,7 +1758,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1773,7 +1764,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        "clerk.example.com",
        "example.clerk.accounts.dev",
      ]);
@@ -581,7 +678,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
      assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
      assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
      assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
-@@ -1854,7 +1845,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1860,7 +1851,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.notInclude(error.message, secret);
    });
  
@@ -590,7 +687,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
      Effect.gen(function* () {
        const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
          entitlementsPath: "/tmp/entitlements.mac.plist",
-@@ -1862,12 +1853,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1868,12 +1859,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        });
  
        const mac = config.mac as Record<string, unknown>;
@@ -606,7 +703,7 @@ index 9c7634074a4973ed8216443db75af10151805e4e..f5e5d5801c1965c6d4ac36fd6ee6f1d1
      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
    );
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f36ee3825 100644
+index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd72e310da0 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
 @@ -52,7 +52,9 @@ import { Command, Flag } from "effect/unstable/cli";
@@ -620,7 +717,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
  const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
  
  const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
-@@ -2485,32 +2487,6 @@ export function resolveDesktopRuntimeDependencies(
+@@ -2525,32 +2527,6 @@ export function resolveDesktopRuntimeDependencies(
    return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
  }
  
@@ -653,7 +750,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
  // Ordinary upstream nightlies keep their historical suffix-only classification.
  const ORDINARY_NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
  
-@@ -2580,10 +2556,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
+@@ -2620,10 +2596,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
    return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
  }
  
@@ -669,7 +766,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
  }
  
  export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
-@@ -2608,7 +2585,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2648,7 +2625,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    const buildConfig: Record<string, unknown> = {
      appId: DESKTOP_APP_ID,
      productName: resolveDesktopProductName(version),
@@ -678,7 +775,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
      electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
      files: [
        ...DESKTOP_FILE_EXCLUSIONS,
-@@ -2629,24 +2606,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2672,24 +2649,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      ],
    };
    const updateChannel = resolveDesktopUpdateChannel(version);
@@ -715,7 +812,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
    }
  
    if (platform === "mac") {
-@@ -2656,10 +2627,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2699,10 +2670,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
        target: target === "dmg" ? [target, "zip"] : [target],
        icon: "icon.icns",
        category: "public.app-category.developer-tools",
@@ -730,7 +827,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
          },
        ],
        ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-@@ -2698,21 +2671,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2741,21 +2714,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    if (platform === "linux") {
      buildConfig.linux = {
        target: [target],
@@ -758,7 +855,7 @@ index cfa6bfdfce1a899820e5c9189f97ef4b1522c056..15e3b20654bff1f9913506fee16d257f
          },
        },
      };
-@@ -3687,13 +3661,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+@@ -3738,13 +3712,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
        ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
        : undefined;
    const stagePackageJson: StagePackageJson = {

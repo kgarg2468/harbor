@@ -1,0 +1,277 @@
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+index 87b0d5e7..4a42abd6 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
+@@ -229,11 +229,92 @@ describe("DesktopBackendConfiguration", () => {
+         assert.notProperty(primary.bootstrap, "managedPresentationIdentity");
+         assert.notProperty(primary.bootstrap, "bundleId");
+         assert.notProperty(wsl.bootstrap, "managedDesktopPresentationVariant");
++        assert.notProperty(wsl.bootstrap, "managedDesktopArtifactHelperPath");
+       }),
+       { appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef" },
+     ),
+   );
+ 
++  for (const scenario of [
++    {
++      name: "managed mac arm64",
++      appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef",
++      platform: "darwin",
++      processArch: "arm64",
++      isPackaged: true,
++      expected: true,
++    },
++    {
++      name: "managed mac x64",
++      appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef",
++      platform: "darwin",
++      processArch: "x64",
++      isPackaged: true,
++      expected: false,
++    },
++    {
++      name: "managed Linux",
++      appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef",
++      platform: "linux",
++      processArch: "arm64",
++      isPackaged: true,
++      expected: false,
++    },
++    {
++      name: "managed Windows",
++      appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef",
++      platform: "win32",
++      processArch: "arm64",
++      isPackaged: true,
++      expected: false,
++    },
++    {
++      name: "unpackaged managed",
++      appVersion: "0.0.39-nightly.20260909.0.managed.1.p012345abcdef",
++      platform: "darwin",
++      processArch: "arm64",
++      isPackaged: false,
++      expected: false,
++    },
++    {
++      name: "ordinary version",
++      appVersion: "1.2.3",
++      platform: "darwin",
++      processArch: "arm64",
++      isPackaged: true,
++      expected: false,
++    },
++    {
++      name: "ordinary nightly",
++      appVersion: "0.0.39-nightly.20260909.0",
++      platform: "darwin",
++      processArch: "arm64",
++      isPackaged: true,
++      expected: false,
++    },
++  ] as const) {
++    it.effect(`native artifact capability: ${scenario.name}`, () =>
++      withHarness(
++        Effect.gen(function* () {
++          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
++          const primary = yield* configuration.resolvePrimary;
++          if (scenario.expected) {
++            assert.equal(
++              primary.bootstrap.managedDesktopArtifactHelperPath,
++              "/packaged resources/desktop-artifact/t3-desktop-artifact",
++            );
++            assert.equal(primary.bootstrap.managedDesktopPresentationVariant, "managed-nightly");
++          } else {
++            assert.notProperty(primary.bootstrap, "managedDesktopArtifactHelperPath");
++          }
++          const wsl = yield* configuration.resolveWsl({ port: 4999, distro: null });
++          assert.notProperty(wsl.bootstrap, "managedDesktopArtifactHelperPath");
++        }),
++        { ...scenario, resourcesPath: "/packaged resources" },
++      ),
++    );
++  }
++
+   it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
+     withHarness(
+       Effect.gen(function* () {
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 5da13105..716357fa 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -497,6 +497,18 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+             managedDesktopPresentationVariant:
+               environment.managedPresentationIdentity.presentationVariant,
+           }),
++      ...(environment.managedPresentationIdentity !== undefined &&
++      environment.platform === "darwin" &&
++      environment.processArch === "arm64" &&
++      environment.isPackaged
++        ? {
++            managedDesktopArtifactHelperPath: environment.path.join(
++              environment.resourcesPath,
++              "desktop-artifact",
++              "t3-desktop-artifact",
++            ),
++          }
++        : {}),
+       desktopTelemetryFd: 4,
+       desktopTelemetryControlFd: 5,
+       ...Option.match(input.resourceMonitorPath, {
+diff --git a/apps/server/src/cli/config.test.ts b/apps/server/src/cli/config.test.ts
+index 70d09a24..fd36ad65 100644
+--- a/apps/server/src/cli/config.test.ts
++++ b/apps/server/src/cli/config.test.ts
+@@ -24,6 +24,7 @@ const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
+   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
+ 
+ const isDesktopBootstrap = Schema.is(DesktopBackendBootstrap);
++const decodeDesktopBootstrap = Schema.decodeUnknownOption(DesktopBackendBootstrap);
+ 
+ const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
+ 
+@@ -80,6 +81,23 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+     () =>
+       Effect.gen(function* () {
+         assert.notProperty(sharedServerCommandFlags, "managedDesktopPresentationVariant");
++        assert.notProperty(sharedServerCommandFlags, "managedDesktopArtifactHelperPath");
++        assert.isFalse(
++          isDesktopBootstrap({
++            ...makeDesktopBootstrap(),
++            managedDesktopArtifactHelperPath: "/resources/desktop-artifact/t3-desktop-artifact",
++          }),
++        );
++        for (const helperPath of ["", " ", null, 42]) {
++          assert.isTrue(
++            Option.isNone(
++              decodeDesktopBootstrap({
++                ...makeDesktopBootstrap({ managedDesktopPresentationVariant: "reasoning" }),
++                managedDesktopArtifactHelperPath: helperPath,
++              }),
++            ),
++          );
++        }
+         for (const invalid of ["other", "", " managed-nightly", "reasoning ", null]) {
+           assert.isFalse(
+             isDesktopBootstrap({
+@@ -88,12 +106,27 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+             }),
+           );
+         }
+-        for (const variant of [undefined, "managed-nightly", "reasoning"] as const) {
+-          const fd = yield* openBootstrapFd(
+-            makeDesktopBootstrap(
+-              variant === undefined ? {} : { managedDesktopPresentationVariant: variant },
+-            ),
+-          );
++        for (const capability of [
++          undefined,
++          {},
++          { managedDesktopPresentationVariant: "managed-nightly" },
++          { managedDesktopPresentationVariant: "reasoning" },
++          {
++            managedDesktopPresentationVariant: "managed-nightly",
++            managedDesktopArtifactHelperPath:
++              "/managed resources/desktop-artifact/t3-desktop-artifact",
++          },
++          {
++            managedDesktopPresentationVariant: "reasoning",
++            managedDesktopArtifactHelperPath:
++              "/reasoning resources/desktop-artifact/t3-desktop-artifact",
++          },
++        ] satisfies ReadonlyArray<Partial<DesktopBackendBootstrapValue> | undefined>) {
++          const payload = makeDesktopBootstrap(capability);
++          const bootstrapFd =
++            capability === undefined
++              ? Option.none<number>()
++              : Option.some(yield* openBootstrapFd(payload));
+           const resolved = yield* resolveServerConfig(
+             {
+               mode: Option.none(),
+@@ -103,7 +136,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+               cwd: Option.none(),
+               devUrl: Option.none(),
+               noBrowser: Option.none(),
+-              bootstrapFd: Option.some(fd),
++              bootstrapFd,
+               autoBootstrapProjectFromCwd: Option.none(),
+               logWebSocketEvents: Option.none(),
+               tailscaleServeEnabled: Option.none(),
+@@ -117,6 +150,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+                   ConfigProvider.fromEnv({
+                     env: {
+                       T3CODE_MANAGED_DESKTOP_PRESENTATION_VARIANT: "reasoning",
++                      T3CODE_MANAGED_DESKTOP_ARTIFACT_HELPER_PATH: "/injected/helper",
+                       T3CODE_DESKTOP_PRESENTATION_VARIANT: "reasoning",
+                       T3CODE_DESKTOP_APP_USER_MODEL_ID: "com.t3tools.t3code.reasoning",
+                     },
+@@ -126,8 +160,17 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+               ),
+             ),
+           );
+-          assert.equal(resolved.managedDesktopPresentationVariant, variant);
+-          if (variant === undefined)
++          assert.equal(
++            resolved.managedDesktopPresentationVariant,
++            payload.managedDesktopPresentationVariant,
++          );
++          assert.equal(
++            resolved.managedDesktopArtifactHelperPath,
++            payload.managedDesktopArtifactHelperPath,
++          );
++          if (payload.managedDesktopArtifactHelperPath === undefined)
++            assert.notProperty(resolved, "managedDesktopArtifactHelperPath");
++          if (payload.managedDesktopPresentationVariant === undefined)
+             assert.notProperty(resolved, "managedDesktopPresentationVariant");
+         }
+       }),
+diff --git a/apps/server/src/cli/config.ts b/apps/server/src/cli/config.ts
+index 75b31805..9617cd2f 100644
+--- a/apps/server/src/cli/config.ts
++++ b/apps/server/src/cli/config.ts
+@@ -380,6 +380,10 @@ export const resolveServerConfig = (
+       ...(bootstrap?.managedDesktopPresentationVariant === undefined
+         ? {}
+         : { managedDesktopPresentationVariant: bootstrap.managedDesktopPresentationVariant }),
++      ...(bootstrap?.managedDesktopPresentationVariant !== undefined &&
++      bootstrap.managedDesktopArtifactHelperPath !== undefined
++        ? { managedDesktopArtifactHelperPath: bootstrap.managedDesktopArtifactHelperPath }
++        : {}),
+       desktopTelemetryFd,
+       desktopTelemetryControlFd,
+       resourceMonitorPath,
+diff --git a/apps/server/src/config.ts b/apps/server/src/config.ts
+index dfccbf1b..c08fcd27 100644
+--- a/apps/server/src/config.ts
++++ b/apps/server/src/config.ts
+@@ -84,6 +84,7 @@ export class ServerConfig extends Context.Service<
+     readonly startupPresentation: StartupPresentation;
+     readonly desktopBootstrapToken: string | undefined;
+     readonly managedDesktopPresentationVariant?: DesktopBackendBootstrap["managedDesktopPresentationVariant"];
++    readonly managedDesktopArtifactHelperPath?: DesktopBackendBootstrap["managedDesktopArtifactHelperPath"];
+     readonly desktopTelemetryFd?: number | undefined;
+     readonly desktopTelemetryControlFd?: number | undefined;
+     readonly resourceMonitorPath?: string | undefined;
+diff --git a/packages/contracts/src/desktopBootstrap.ts b/packages/contracts/src/desktopBootstrap.ts
+index 9ccf5573..a3f6cea1 100644
+--- a/packages/contracts/src/desktopBootstrap.ts
++++ b/packages/contracts/src/desktopBootstrap.ts
+@@ -20,9 +20,17 @@ export const DesktopBackendBootstrap = Schema.Struct({
+   managedDesktopPresentationVariant: Schema.optionalKey(
+     Schema.Literals(["managed-nightly", "reasoning"]),
+   ),
++  // This native staging capability requires the managed desktop identity above.
++  managedDesktopArtifactHelperPath: Schema.optionalKey(TrimmedNonEmptyString),
+   desktopTelemetryFd: Schema.optionalKey(PositiveInt),
+   desktopTelemetryControlFd: Schema.optionalKey(PositiveInt),
+   resourceMonitorPath: Schema.optionalKey(TrimmedNonEmptyString),
+-});
++}).check(
++  Schema.makeFilter(
++    (bootstrap) =>
++      bootstrap.managedDesktopArtifactHelperPath === undefined ||
++      bootstrap.managedDesktopPresentationVariant !== undefined,
++  ),
++);
+ 
+ export type DesktopBackendBootstrap = typeof DesktopBackendBootstrap.Type;

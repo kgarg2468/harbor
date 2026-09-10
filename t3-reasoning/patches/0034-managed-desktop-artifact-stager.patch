@@ -1,0 +1,1764 @@
+diff --git a/apps/desktop/scripts/build-desktop-artifact-helper.mjs b/apps/desktop/scripts/build-desktop-artifact-helper.mjs
+new file mode 100644
+index 00000000..fd037b0e
+--- /dev/null
++++ b/apps/desktop/scripts/build-desktop-artifact-helper.mjs
+@@ -0,0 +1,79 @@
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFS from "node:fs";
++import * as NodePath from "node:path";
++import * as NodeURL from "node:url";
++import * as NodeUtil from "node:util";
++import * as NodeProcess from "node:process";
++
++export function validateDesktopArtifactHelper(file) {
++  const stat = NodeFS.lstatSync(file);
++  if (!stat.isFile() || stat.nlink !== 1 || !(stat.mode & 0o111)) {
++    throw new Error("Desktop artifact helper must be an executable regular file with one link.");
++  }
++  const header = NodeFS.readFileSync(file).subarray(0, 12);
++  if (
++    header.length < 12 ||
++    header.readUInt32LE(0) !== 0xfeedfacf ||
++    header.readUInt32LE(4) !== 0x0100000c
++  ) {
++    throw new Error("Desktop artifact helper must be a Mach-O arm64 executable.");
++  }
++  const output = NodeChildProcess.execFileSync(file, ["--self-check"], {
++    encoding: "utf8",
++    timeout: 10000,
++    maxBuffer: 128,
++  });
++  if (output !== "T3DESKTOP1 darwin arm64\n")
++    throw new Error("Desktop artifact helper self-check failed.");
++}
++
++export function buildDesktopArtifactHelper({
++  output,
++  arch = NodeProcess.arch,
++  platform = NodeProcess.platform,
++}) {
++  if (platform !== "darwin" || arch !== "arm64")
++    throw new Error("Desktop artifact helper requires a macOS arm64 target on macOS.");
++  const source = NodeURL.fileURLToPath(
++    new URL("../../../native/desktop-artifact/main.c", import.meta.url),
++  );
++  NodeFS.mkdirSync(NodePath.dirname(output), { recursive: true });
++  const temporary = `${output}.${NodeProcess.pid}.tmp`;
++  try {
++    NodeChildProcess.execFileSync(
++      "/usr/bin/cc",
++      [
++        "-arch",
++        "arm64",
++        "-std=c11",
++        "-O2",
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++        "-Wno-deprecated-declarations",
++        source,
++        "-o",
++        temporary,
++      ],
++      { stdio: "inherit" },
++    );
++    NodeFS.chmodSync(temporary, 0o755);
++    validateDesktopArtifactHelper(temporary);
++    NodeFS.renameSync(temporary, output);
++    validateDesktopArtifactHelper(output);
++  } finally {
++    NodeFS.rmSync(temporary, { force: true });
++  }
++}
++
++if (
++  NodeProcess.argv[1] &&
++  NodeFS.realpathSync(NodeProcess.argv[1]) ===
++    NodeFS.realpathSync(NodeURL.fileURLToPath(import.meta.url))
++) {
++  const { values } = NodeUtil.parseArgs({
++    options: { output: { type: "string" }, arch: { type: "string", default: NodeProcess.arch } },
++  });
++  if (!values.output) throw new Error("--output is required");
++  buildDesktopArtifactHelper({ output: values.output, arch: values.arch });
++}
+diff --git a/apps/desktop/scripts/build-desktop-artifact-helper.test.mjs b/apps/desktop/scripts/build-desktop-artifact-helper.test.mjs
+new file mode 100644
+index 00000000..8bc7c22f
+--- /dev/null
++++ b/apps/desktop/scripts/build-desktop-artifact-helper.test.mjs
+@@ -0,0 +1,116 @@
++import * as NodeAssert from "node:assert/strict";
++import * as NodeFS from "node:fs";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import * as NodeProcess from "node:process";
++import * as NodeURL from "node:url";
++import * as NodeChildProcess from "node:child_process";
++import * as NodeTest from "node:test";
++import { MANAGED_DESKTOP_ARTIFACT_MAX_BYTES } from "../../../packages/contracts/src/managedDesktopUpdate.ts";
++import {
++  buildDesktopArtifactHelper,
++  validateDesktopArtifactHelper,
++} from "./build-desktop-artifact-helper.mjs";
++
++const descriptor = [
++  "T3DESKTOP1",
++  "0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa",
++  "reasoning",
++  "3",
++  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
++  "b".repeat(64),
++  "a".repeat(64),
++  "",
++].join("\n");
++NodeTest.test("unsupported helper targets refuse before compilation", () => {
++  NodeAssert.throws(() =>
++    buildDesktopArtifactHelper({ platform: "linux", arch: "arm64", output: "/unused" }),
++  );
++  NodeAssert.throws(() =>
++    buildDesktopArtifactHelper({ platform: "darwin", arch: "x64", output: "/unused" }),
++  );
++});
++NodeTest.test(
++  "packaged helper self-check and real EOF-before-COMMIT protocol",
++  { skip: NodeProcess.platform !== "darwin" || NodeProcess.arch !== "arm64" },
++  async () => {
++    const root = NodeFS.realpathSync(
++      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "artifact-helper-build-")),
++    );
++    const output = NodePath.join(root, "prod-resources/desktop-artifact/t3-desktop-artifact");
++    try {
++      const nativeTests = NodePath.join(root, "native-tests");
++      NodeChildProcess.execFileSync("/usr/bin/cc", [
++        "-std=c11",
++        "-O2",
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++        "-Wno-deprecated-declarations",
++        "-Wno-unused-function",
++        NodeURL.fileURLToPath(new URL("../../../native/desktop-artifact/test.c", import.meta.url)),
++        "-o",
++        nativeTests,
++      ]);
++      NodeAssert.equal(
++        NodeChildProcess.execFileSync(nativeTests, [], { encoding: "utf8", timeout: 10000 }),
++        "native desktop artifact tests passed (13 groups)\n",
++      );
++      buildDesktopArtifactHelper({ output });
++      validateDesktopArtifactHelper(output);
++      NodeFS.chmodSync(output, 0o600);
++      NodeAssert.throws(() => validateDesktopArtifactHelper(output));
++      NodeFS.chmodSync(output, 0o755);
++      const stage = async (commit, archive = "abc", header = descriptor) => {
++        const child = NodeChildProcess.spawn(output, ["--stage", root], {
++          stdio: ["pipe", "pipe", "pipe", "pipe"],
++        });
++        const lines = [];
++        let buffer = "";
++        const exit = new Promise((resolve, reject) => {
++          child.once("error", reject);
++          child.once("close", resolve);
++        });
++        child.stdout.on("data", (data) => {
++          buffer += data.toString();
++          while (buffer.includes("\n")) {
++            const end = buffer.indexOf("\n");
++            const line = buffer.slice(0, end);
++            buffer = buffer.slice(end + 1);
++            lines.push(line);
++            if (line === "READY") child.stdio[3].end(archive);
++            if (line === "VERIFIED") child.stdin.end(commit ? "COMMIT\n" : "");
++          }
++        });
++        child.stdin.write(header);
++        return { code: await exit, lines };
++      };
++      const parent = NodePath.join(
++        root,
++        "runtime/desktop-artifacts/v1/reasoning-darwin-arm64/0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa",
++      );
++      const aborted = await stage(false);
++      NodeAssert.deepEqual(aborted, { code: 2, lines: ["READY", "VERIFIED"] });
++      NodeAssert.deepEqual(NodeFS.readdirSync(parent), []);
++      const maxHeader = descriptor.replace("\n3\n", `\n${MANAGED_DESKTOP_ARTIFACT_MAX_BYTES}\n`);
++      const overHeader = descriptor.replace(
++        "\n3\n",
++        `\n${MANAGED_DESKTOP_ARTIFACT_MAX_BYTES + 1}\n`,
++      );
++      NodeAssert.deepEqual(await stage(true, "", maxHeader), { code: 2, lines: ["READY"] });
++      NodeAssert.deepEqual(await stage(true, "", overHeader), { code: 2, lines: [] });
++      NodeAssert.deepEqual(await stage(true, "ab"), { code: 2, lines: ["READY"] });
++      NodeAssert.deepEqual(await stage(true), {
++        code: 0,
++        lines: ["READY", "VERIFIED", "PUBLISHED"],
++      });
++      const beforeReuse = NodeFS.readdirSync(parent).sort();
++      for (let i = 0; i < 3; i++) {
++        NodeAssert.deepEqual(await stage(true), { code: 0, lines: ["REUSED"] });
++        NodeAssert.deepEqual(NodeFS.readdirSync(parent).sort(), beforeReuse);
++      }
++    } finally {
++      NodeFS.rmSync(root, { recursive: true, force: true });
++    }
++  },
++);
+diff --git a/apps/server/src/cloud/managedDesktopArtifact.test.ts b/apps/server/src/cloud/managedDesktopArtifact.test.ts
+new file mode 100644
+index 00000000..abcd3211
+--- /dev/null
++++ b/apps/server/src/cloud/managedDesktopArtifact.test.ts
+@@ -0,0 +1,326 @@
++/* oxlint-disable t3code/no-manual-effect-runtime-in-tests -- These tests exercise real helper process settlement and AbortSignal cancellation. */
++// @effect-diagnostics nodeBuiltinImport:off - Tests control native process pipes and disposable filesystem fixtures.
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFSP from "node:fs/promises";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import * as NodeProcess from "node:process";
++import * as NodeStream from "node:stream";
++import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
++import * as Effect from "effect/Effect";
++import * as Stream from "effect/Stream";
++import {
++  managedDesktopArtifactStorageSegments,
++  MANAGED_DESKTOP_ARTIFACT_MAX_BYTES,
++} from "@t3tools/contracts";
++import type { VerifiedManagedDesktopAsset } from "./managedRelease.ts";
++import {
++  stageManagedDesktopArtifact,
++  type ManagedDesktopArtifactDependencies,
++} from "./managedDesktopArtifact.ts";
++
++const asset: VerifiedManagedDesktopAsset = {
++  version: "0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  presentationVariant: "reasoning",
++  file: "reasoning.zip",
++  bytes: 3,
++  sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
++  manifestSha256: "b".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++  platform: "darwin",
++  arch: "arm64",
++  format: "zip",
++  bundleId: "com.reasoning.app",
++  productName: "Reasoning",
++  urlSchemes: ["reasoning"],
++};
++const source = {
++  openArchive: () => Effect.succeed(Stream.make(Buffer.from("a"), Buffer.from("bc"))),
++};
++const unavailable: ManagedDesktopArtifactDependencies = {
++  platform: "linux",
++  arch: "arm64",
++  executable: async () => {},
++  spawn: () => {
++    throw new Error("Must not spawn");
++  },
++};
++
++it.each(["linux", "missing", "not-executable", "x64"])(
++  "refuses %s before opening the source",
++  async (kind) => {
++    let opened = false;
++    const input = {
++      baseDir: "/unused",
++      asset,
++      ...(kind === "missing" ? {} : { helperPath: "/unused/helper" }),
++      source: {
++        openArchive: () => {
++          opened = true;
++          return source.openArchive();
++        },
++      },
++    };
++    const dependencies = {
++      ...unavailable,
++      platform: kind === "linux" ? "linux" : "darwin",
++      arch: kind === "x64" ? "x64" : "arm64",
++      executable: async () => {
++        if (kind === "not-executable") throw new Error("ENOENT");
++      },
++    };
++    await expect(
++      Effect.runPromise(stageManagedDesktopArtifact(input, dependencies)),
++    ).rejects.toThrow();
++    expect(opened).toBe(false);
++  },
++);
++
++it("refuses oversized anonymous spools before starting the helper or source", async () => {
++  let started = false,
++    opened = false;
++  const dependencies = {
++    ...unavailable,
++    platform: "darwin",
++    executable: async () => {
++      started = true;
++    },
++  };
++  await expect(
++    Effect.runPromise(
++      stageManagedDesktopArtifact(
++        {
++          baseDir: "/unused",
++          helperPath: "/unused/helper",
++          asset: { ...asset, bytes: MANAGED_DESKTOP_ARTIFACT_MAX_BYTES + 1 },
++          source: {
++            openArchive: () => {
++              opened = true;
++              return source.openArchive();
++            },
++          },
++        },
++        dependencies,
++      ),
++    ),
++  ).rejects.toThrow();
++  expect(started).toBe(false);
++  expect(opened).toBe(false);
++});
++
++function fakeHelper(result: string, code: number, early = false) {
++  const events: string[] = [];
++  const output = new NodeStream.PassThrough();
++  let settle!: (code: number) => void;
++  const settled = new Promise<number>((resolve) => {
++    settle = resolve;
++  });
++  const control = new NodeStream.Writable({
++    write(bytes, _encoding, callback) {
++      const message = bytes.toString();
++      if (message === "COMMIT\n") {
++        events.push("commit");
++        output.write(`${result}\n`);
++        settle(code);
++      } else {
++        events.push("header");
++        output.write(early ? `${result}\n` : "READY\n");
++        if (early) settle(code);
++      }
++      callback();
++    },
++  });
++  const archive = new NodeStream.Writable({
++    write(_bytes, _encoding, callback) {
++      events.push("bytes");
++      callback();
++    },
++    final(callback) {
++      events.push("eof");
++      output.write("VERIFIED\n");
++      callback();
++    },
++  });
++  const dependencies: ManagedDesktopArtifactDependencies = {
++    platform: "darwin",
++    arch: "arm64",
++    executable: async () => {},
++    spawn: () => ({ control, archive, output, settled }),
++  };
++  return { events, dependencies };
++}
++it.each([
++  ["PUBLISHED", 0],
++  ["REUSED", 0],
++  ["UNKNOWN_DURABILITY", 3],
++  ["PUBLISHED", 2],
++] as const)("requires durable helper result %s / %i", async (result, code) => {
++  const fake = fakeHelper(result, code);
++  const running = Effect.runPromise(
++    stageManagedDesktopArtifact(
++      { baseDir: "/unused", helperPath: "/bundled/helper", asset, source },
++      fake.dependencies,
++    ),
++  );
++  if (code === 0) await expect(running).resolves.toMatchObject({ sha256: asset.sha256 });
++  else await expect(running).rejects.toThrow();
++  expect(fake.events).toEqual(["header", "bytes", "bytes", "eof", "commit"]);
++});
++
++it.each([0, 2])(
++  "early REUSED requires successful process settlement (%i) without opening the source",
++  async (code) => {
++    const fake = fakeHelper("REUSED", code, true);
++    let factoryAccessed = false;
++    const unavailableSource = {
++      get openArchive() {
++        factoryAccessed = true;
++        return () => {
++          throw new Error("early reuse must not open a source");
++        };
++      },
++    };
++    const running = Effect.runPromise(
++      stageManagedDesktopArtifact(
++        { baseDir: "/unused", helperPath: "/bundled/helper", asset, source: unavailableSource },
++        fake.dependencies,
++      ),
++    );
++    if (code === 0) await expect(running).resolves.toMatchObject({ sha256: asset.sha256 });
++    else await expect(running).rejects.toThrow();
++    expect(factoryAccessed).toBe(false);
++    expect(fake.events).toEqual(["header"]);
++  },
++);
++
++describe.skipIf(NodeProcess.platform !== "darwin" || NodeProcess.arch !== "arm64")(
++  "bundled native transaction",
++  () => {
++    let root: string, helperPath: string;
++    beforeAll(async () => {
++      root = await NodeFSP.realpath(
++        await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "desktop-artifact-ts-")),
++      );
++      helperPath = NodePath.join(root, "helper");
++      const repo = NodePath.resolve(import.meta.dirname, "../../../..");
++      NodeChildProcess.execFileSync(NodeProcess.execPath, [
++        NodePath.join(repo, "apps/desktop/scripts/build-desktop-artifact-helper.mjs"),
++        "--arch",
++        "arm64",
++        "--output",
++        helperPath,
++      ]);
++    });
++    afterAll(async () => {
++      await NodeFSP.rm(root, { recursive: true, force: true });
++    });
++    const setup = async () => ({
++      baseDir: await NodeFSP.mkdtemp(NodePath.join(root, "stage-")),
++      helperPath,
++      asset,
++      source,
++    });
++    it("publishes an opaque 0600 ZIP and reuses exact immutable content", async () => {
++      const input = await setup();
++      const descriptor = await Effect.runPromise(stageManagedDesktopArtifact(input));
++      const archive = NodePath.join(
++        input.baseDir,
++        ...managedDesktopArtifactStorageSegments(descriptor),
++      );
++      expect(await NodeFSP.readFile(archive, "utf8")).toBe("abc");
++      expect((await NodeFSP.stat(archive)).mode & 0o777).toBe(0o600);
++      const inode = (await NodeFSP.stat(archive)).ino;
++      const parent = NodePath.dirname(NodePath.dirname(archive));
++      const entries = await NodeFSP.readdir(parent);
++      let opened = false;
++      for (let i = 0; i < 3; i++) {
++        expect(
++          await Effect.runPromise(
++            stageManagedDesktopArtifact({
++              ...input,
++              source: {
++                openArchive: () => {
++                  opened = true;
++                  throw new Error("ordinary reuse must not download");
++                },
++              },
++            }),
++          ),
++        ).toEqual(descriptor);
++        expect(await NodeFSP.readdir(parent)).toEqual(entries);
++      }
++      expect(opened).toBe(false);
++      expect((await NodeFSP.stat(archive)).ino).toBe(inode);
++    });
++    it("refuses a linked storage ancestor before opening the source", async () => {
++      const input = await setup();
++      let opened = false;
++      await NodeFSP.symlink(root, NodePath.join(input.baseDir, "runtime"));
++      await expect(
++        Effect.runPromise(
++          stageManagedDesktopArtifact({
++            ...input,
++            source: {
++              openArchive: () => {
++                opened = true;
++                return source.openArchive();
++              },
++            },
++          }),
++        ),
++      ).rejects.toThrow();
++      expect(opened).toBe(false);
++    });
++    it("interrupts the source, waits for anonymous-spool cleanup without leaving archive files", async () => {
++      const input = await setup();
++      let signalOpen!: () => void,
++        closed = false;
++      const opened = new Promise<void>((resolve) => {
++        signalOpen = resolve;
++      });
++      const interrupted = {
++        openArchive: () =>
++          Effect.gen(function* () {
++            yield* Effect.addFinalizer(() =>
++              Effect.sync(() => {
++                closed = true;
++              }),
++            );
++            return Stream.concat(
++              Stream.make(Buffer.from("a")),
++              Stream.fromEffect(Effect.sync(signalOpen).pipe(Effect.andThen(Effect.never))),
++            );
++          }),
++      };
++      const controller = new AbortController();
++      const running = Effect.runPromise(
++        stageManagedDesktopArtifact({ ...input, source: interrupted }),
++        { signal: controller.signal },
++      );
++      await opened;
++      controller.abort();
++      await expect(running).rejects.toThrow();
++      expect(closed).toBe(true);
++      const parent = NodePath.join(
++        input.baseDir,
++        "runtime/desktop-artifacts/v1",
++        asset.releaseArtifactId,
++        asset.version,
++      );
++      expect(await NodeFSP.readdir(parent)).toEqual([]);
++    });
++    it("refuses conflicting concurrent descriptor records without rewriting the winner", async () => {
++      const input = await setup();
++      await Effect.runPromise(stageManagedDesktopArtifact(input));
++      await expect(
++        Effect.runPromise(
++          stageManagedDesktopArtifact({
++            ...input,
++            asset: { ...asset, manifestSha256: "c".repeat(64) },
++          }),
++        ),
++      ).rejects.toThrow();
++    });
++  },
++);
+diff --git a/apps/server/src/cloud/managedDesktopArtifact.ts b/apps/server/src/cloud/managedDesktopArtifact.ts
+new file mode 100644
+index 00000000..ca43623a
+--- /dev/null
++++ b/apps/server/src/cloud/managedDesktopArtifact.ts
+@@ -0,0 +1,209 @@
++// @effect-diagnostics nodeBuiltinImport:off - This boundary owns a native helper's byte/control pipes and waits for process settlement.
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFS from "node:fs";
++import * as NodeFSP from "node:fs/promises";
++import * as NodeProcess from "node:process";
++import type * as NodeStream from "node:stream";
++import { ManagedDesktopArtifactDescriptor } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++import * as Stream from "effect/Stream";
++import type { VerifiedManagedDesktopAsset } from "./managedRelease.ts";
++import type { ManagedDesktopArtifactSource } from "./managedReleaseSource.ts";
++
++const decodeDescriptor = Schema.decodeUnknownEffect(ManagedDesktopArtifactDescriptor);
++export class ManagedDesktopArtifactError extends Error {
++  readonly _tag = "ManagedDesktopArtifactError";
++  readonly outcome: "refused" | "unknown-durability";
++  constructor(cause: unknown, outcome: "refused" | "unknown-durability" = "refused") {
++    super(
++      outcome === "unknown-durability"
++        ? "Managed desktop artifact publication durability unknown"
++        : "Managed desktop artifact staging refused",
++      { cause },
++    );
++    this.outcome = outcome;
++  }
++}
++const failure = (cause: unknown) => new ManagedDesktopArtifactError(cause);
++const io = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: failure });
++
++/** The desktop supplies only its bundled helper. Portable runtimes have no fallback. */
++export interface ManagedDesktopArtifactProcess {
++  readonly control: NodeStream.Writable;
++  readonly archive: NodeStream.Writable;
++  readonly output: NodeStream.Readable;
++  readonly settled: Promise<number | null>;
++}
++export interface ManagedDesktopArtifactDependencies {
++  readonly platform: string;
++  readonly arch: string;
++  readonly executable: (file: string) => Promise<void>;
++  readonly spawn: (file: string, baseDir: string) => ManagedDesktopArtifactProcess;
++}
++const nativeDependencies: ManagedDesktopArtifactDependencies = {
++  platform: NodeProcess.platform,
++  arch: NodeProcess.arch,
++  executable: (file) => NodeFSP.access(file, NodeFS.constants.X_OK),
++  spawn: (file, baseDir) => {
++    const child = NodeChildProcess.spawn(file, ["--stage", baseDir], {
++      stdio: ["pipe", "pipe", "ignore", "pipe"],
++      shell: false,
++    });
++    const settled = new Promise<number | null>((resolve, reject) => {
++      child.once("error", reject);
++      child.once("close", resolve);
++    });
++    return {
++      control: child.stdin!,
++      output: child.stdout!,
++      archive: child.stdio[3] as NodeStream.Writable,
++      settled,
++    };
++  },
++};
++const write = (pipe: NodeStream.Writable, bytes: string | Uint8Array) =>
++  new Promise<void>((resolve, reject) => {
++    pipe.write(bytes, (error) => (error ? reject(error) : resolve()));
++  });
++
++function session(process: ManagedDesktopArtifactProcess) {
++  const lines: string[] = [];
++  let buffer = "",
++    total = 0;
++  let terminal: Error | undefined;
++  let wake: (() => void) | undefined;
++  const fail = (error: Error) => {
++    terminal = error;
++    wake?.();
++  };
++  // Keep pipe errors observed even when interruption disposes a pending write.
++  process.control.on("error", fail);
++  process.archive.on("error", fail);
++  process.output.on("error", fail);
++  process.output.on("data", (chunk: Buffer) => {
++    total += chunk.length;
++    if (total > 128) {
++      fail(new Error("Unbounded helper response"));
++      return;
++    }
++    buffer += chunk.toString("utf8");
++    for (;;) {
++      const end = buffer.indexOf("\n");
++      if (end < 0) break;
++      lines.push(buffer.slice(0, end));
++      buffer = buffer.slice(end + 1);
++    }
++    wake?.();
++  });
++  const settled = process.settled.then(
++    (code) => {
++      fail(new Error(`Artifact helper exited (${code})`));
++      return code;
++    },
++    (error: unknown) => {
++      fail(error instanceof Error ? error : new Error(String(error)));
++      return null;
++    },
++  );
++  const next = async () => {
++    while (!lines.length) {
++      if (terminal) throw terminal;
++      await new Promise<void>((resolve) => {
++        wake = resolve;
++      });
++      wake = undefined;
++    }
++    return lines.shift()!;
++  };
++  return {
++    process,
++    next,
++    settled,
++    close: async () => {
++      // EOF on both inputs disarms a pre-COMMIT helper. After COMMIT we still
++      // wait for publication settlement, so cancellation cannot erase a winner.
++      process.control.destroy();
++      process.archive.destroy();
++      await settled;
++      process.output.destroy();
++    },
++  };
++}
++
++export const stageManagedDesktopArtifact = Effect.fn("cloud.stageManagedDesktopArtifact")(
++  function* (
++    input: {
++      readonly baseDir: string;
++      readonly helperPath?: string;
++      readonly asset: VerifiedManagedDesktopAsset;
++      readonly source: Pick<ManagedDesktopArtifactSource, "openArchive">;
++    },
++    dependencies: ManagedDesktopArtifactDependencies = nativeDependencies,
++  ) {
++    const asset = input.asset;
++    const descriptor = yield* decodeDescriptor({
++      schemaVersion: 1,
++      targetVersion: asset.version,
++      releaseArtifactId: asset.releaseArtifactId,
++      presentationVariant: asset.presentationVariant,
++      bytes: asset.bytes,
++      sha256: asset.sha256,
++      manifestSha256: asset.manifestSha256,
++      releaseInputSha256: asset.releaseInputSha256,
++    });
++    const helper = input.helperPath;
++    if (dependencies.platform !== "darwin" || dependencies.arch !== "arm64" || !helper) {
++      return yield* Effect.fail(failure("Bundled macOS arm64 artifact helper required"));
++    }
++    yield* io(() => dependencies.executable(helper));
++    yield* Effect.acquireUseRelease(
++      Effect.sync(() => session(dependencies.spawn(helper, input.baseDir))),
++      (running) =>
++        Effect.scoped(
++          Effect.gen(function* () {
++            const header = [
++              "T3DESKTOP1",
++              descriptor.targetVersion,
++              descriptor.presentationVariant,
++              String(descriptor.bytes),
++              descriptor.sha256,
++              descriptor.manifestSha256,
++              descriptor.releaseInputSha256,
++              "",
++            ].join("\n");
++            yield* io(() => write(running.process.control, header));
++            // READY proves platform/filesystem capability and owned fd setup before
++            // we open the network source. Unsupported/missing helpers never download.
++            const initial = yield* io(running.next);
++            if (initial === "REUSED") {
++              if ((yield* io(() => running.settled)) !== 0)
++                return yield* Effect.fail(failure("Helper did not complete durable reuse"));
++              return;
++            }
++            if (initial !== "READY")
++              return yield* Effect.fail(failure("Helper did not become ready"));
++            const stream = yield* input.source.openArchive(asset);
++            yield* Stream.runForEach(stream, (chunk) =>
++              io(() => write(running.process.archive, chunk)),
++            );
++            running.process.archive.end();
++            if ((yield* io(running.next)) !== "VERIFIED")
++              return yield* Effect.fail(failure("Helper did not verify archive"));
++            yield* io(() => write(running.process.control, "COMMIT\n"));
++            running.process.control.end();
++            const result = yield* io(running.next);
++            const code = yield* io(() => running.settled);
++            if (result === "UNKNOWN_DURABILITY")
++              return yield* Effect.fail(
++                new ManagedDesktopArtifactError("Published content retained", "unknown-durability"),
++              );
++            if (code !== 0 || (result !== "PUBLISHED" && result !== "REUSED"))
++              return yield* Effect.fail(failure("Helper refused publication"));
++          }),
++        ),
++      (running) => io(running.close).pipe(Effect.orDie),
++    );
++    return descriptor;
++  },
++);
+diff --git a/native/desktop-artifact/main.c b/native/desktop-artifact/main.c
+new file mode 100644
+index 00000000..11f4d697
+--- /dev/null
++++ b/native/desktop-artifact/main.c
+@@ -0,0 +1,338 @@
++/* Bundled macOS arm64 transaction helper. No extraction, shell, or network.
++ * stdin: T3DESKTOP1, version, variant, byte count, sha256, manifest hash, input hash
++ * (one LF-terminated field each); then COMMIT\n after VERIFIED.
++ * fd 3: archive bytes followed by EOF. stdout: early REUSED without READY, or
++ * READY, VERIFIED, then PUBLISHED/REUSED after COMMIT. Early reuse verifies and
++ * fsyncs the existing artifact before allocating memory or requesting bytes.
++ * EOF before COMMIT never publishes. All filesystem work is relative to held
++ * directory descriptors. COMMIT copies the read-only anonymous mapping into
++ * a unique hidden directory and fully verifies/fsyncs it before RENAME_EXCL.
++ * After rename, the canonical directory/files must match the retained handles
++ * and pass fresh content/durability checks before PUBLISHED is acknowledged.
++ * Cleanup only unmaps memory and closes descriptors, never deletes/truncates.
++ * Pre-rename failures leave only hidden residue, which consumers ignore.
++ * A substituted source that wins the rename is refused and preserved; cleanup
++ * cannot safely remove mutable basenames. A valid renamed artifact remains
++ * available for exact, freshly hashed and fsynced reuse after a process crash.
++ */
++#define _DARWIN_C_SOURCE
++#include <CommonCrypto/CommonDigest.h>
++#include <sys/attr.h>
++#include <sys/stat.h>
++#include <sys/mman.h>
++#include <sys/types.h>
++#include <sys/stdio.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <errno.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <signal.h>
++#include <limits.h>
++
++#define DIRFLAGS (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
++#define FILEFLAGS (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
++#define MAX_SAFE_INTEGER UINT64_C(9007199254740991)
++/* MANAGED_DESKTOP_ARTIFACT_MAX_BYTES in the shared contract: 512 MiB. */
++#define MAX_ARTIFACT_BYTES UINT64_C(536870912)
++
++typedef struct {
++  char version[192], variant[32], sha[65], manifest[65], input[65];
++  uint64_t bytes;
++  char record[1024];
++} descriptor;
++typedef struct {
++  int version, destination, output_archive, output_record;
++  int published, verified;
++  unsigned char *spool;
++  char hidden_name[64];
++  descriptor d;
++} transaction;
++/* Narrow syscall seams for deterministic native regression tests. */
++static ssize_t (*write_call)(int, const void *, size_t) = write;
++static int (*sync_call)(int) = fsync;
++static int (*rename_call)(int, const char *, int, const char *, unsigned int) = renameatx_np;
++
++static int write_all(int fd, const void *data, size_t size) {
++  const unsigned char *p = data;
++  while (size) {
++    ssize_t n = write_call(fd, p, size);
++    if (n < 0 && errno == EINTR) continue;
++    if (n <= 0) return -1;
++    p += n; size -= (size_t)n;
++  }
++  return 0;
++}
++static int line(int fd, char *out, size_t cap) {
++  size_t used = 0;
++  while (used < cap) {
++    char c;
++    ssize_t n = read(fd, &c, 1);
++    if (n < 0 && errno == EINTR) continue;
++    if (n != 1 || c == '\0' || c == '\r') return -1;
++    if (c == '\n') { out[used] = 0; return 0; }
++    if (used + 1 >= cap) return -1;
++    out[used++] = c;
++  }
++  return -1;
++}
++static int hex_digest(const char *s) {
++  if (strlen(s) != 64) return 0;
++  return strspn(s, "0123456789abcdef") == 64;
++}
++static int numeric(const char **p, const char *suffix, int positive) {
++  const char *start = *p;
++  if (**p < '0' || **p > '9' || (positive && **p == '0')) return 0;
++  while (**p >= '0' && **p <= '9') ++*p;
++  if (*p - start > 1 && *start == '0') return 0;
++  size_t n = strlen(suffix);
++  if (strncmp(*p, suffix, n)) return 0;
++  *p += n; return 1;
++}
++static int valid_version(const descriptor *d) {
++  const char *p = d->version;
++  if (!numeric(&p, ".", 0) || !numeric(&p, ".", 0) || !numeric(&p, "-nightly.", 0)) return 0;
++  if (strlen(p) < 9 || *p == '0' || strspn(p, "0123456789") != 8 || p[8] != '.') return 0;
++  p += 9;
++  if (!numeric(&p, ".managed.", 0)) return 0;
++  const char *counter = p;
++  if (!numeric(&p, ".p", 1) || p - counter > 18) return 0;
++  if (strtoull(counter, NULL, 10) > MAX_SAFE_INTEGER) return 0;
++  return strlen(p) == 12 && !strncmp(p, d->input, 12);
++}
++static int record_descriptor(descriptor *d) {
++  if (strcmp(d->variant, "managed-nightly") && strcmp(d->variant, "reasoning")) return -1;
++  if (!hex_digest(d->sha) || !hex_digest(d->manifest) || !hex_digest(d->input) ||
++      !d->bytes || d->bytes > MAX_ARTIFACT_BYTES || !valid_version(d)) return -1;
++  int n = snprintf(d->record, sizeof(d->record),
++    "{\"schemaVersion\":1,\"targetVersion\":\"%s\",\"releaseArtifactId\":\"%s-darwin-arm64\","
++    "\"presentationVariant\":\"%s\",\"bytes\":%llu,\"sha256\":\"%s\",\"manifestSha256\":\"%s\",\"releaseInputSha256\":\"%s\"}",
++    d->version, d->variant, d->variant, (unsigned long long)d->bytes, d->sha, d->manifest, d->input);
++  return n > 0 && (size_t)n < sizeof(d->record) ? 0 : -1;
++}
++static int read_header(int fd, descriptor *d) {
++  char magic[32], count[32];
++  if (line(fd, magic, sizeof(magic)) || strcmp(magic, "T3DESKTOP1") ||
++      line(fd, d->version, sizeof(d->version)) || line(fd, d->variant, sizeof(d->variant)) ||
++      line(fd, count, sizeof(count)) || line(fd, d->sha, sizeof(d->sha)) ||
++      line(fd, d->manifest, sizeof(d->manifest)) || line(fd, d->input, sizeof(d->input))) return -1;
++  if (!*count || count[0] == '0' || strspn(count, "0123456789") != strlen(count) || strlen(count) > 16) return -1;
++  d->bytes = strtoull(count, NULL, 10);
++  return record_descriptor(d);
++}
++static int child_directory(int parent, const char *name, int create) {
++  if (create && mkdirat(parent, name, 0700) && errno != EEXIST) return -1;
++  int fd = openat(parent, name, DIRFLAGS);
++  if (fd < 0) return -1;
++  if (create && sync_call(parent)) { close(fd); return -1; }
++  return fd;
++}
++/* Walk an absolute root without following even intermediate symlinks. */
++static int open_root(const char *path) {
++  if (path[0] != '/' || strlen(path) >= PATH_MAX) return -1;
++  char copy[PATH_MAX]; strcpy(copy, path);
++  int fd = open("/", DIRFLAGS);
++  char *save, *part = strtok_r(copy, "/", &save);
++  while (fd >= 0 && part) {
++    if (!strcmp(part, ".") || !strcmp(part, "..")) { close(fd); return -1; }
++    int next = child_directory(fd, part, 0);
++    close(fd); fd = next; part = strtok_r(NULL, "/", &save);
++  }
++  return fd;
++}
++static int supports_exclusive_rename(int fd) {
++  struct attrlist request = {0};
++  struct { uint32_t length; vol_capabilities_attr_t caps; } result = {0};
++  request.bitmapcount = ATTR_BIT_MAP_COUNT;
++  request.volattr = ATTR_VOL_INFO | ATTR_VOL_CAPABILITIES;
++  if (fgetattrlist(fd, &request, &result, sizeof(result), 0)) return 0;
++  unsigned i = VOL_CAPABILITIES_INTERFACES;
++  return (result.caps.valid[i] & result.caps.capabilities[i] & VOL_CAP_INT_RENAME_EXCL) != 0;
++}
++static int (*capability_call)(int) = supports_exclusive_rename;
++static void init_transaction(transaction *t, const descriptor *d) {
++  memset(t, 0, sizeof(*t));
++  t->version = t->destination = t->output_archive = t->output_record = -1;
++  t->d = *d;
++}
++static int existing_if_present(transaction *t);
++/* 0 ready for bytes, 1 durably reused, -1 refusal. */
++static int prepare(transaction *t, const char *root) {
++  int fd = open_root(root);
++  if (fd < 0 || !capability_call(fd)) { if (fd >= 0) close(fd); return -1; }
++  char artifact[64]; snprintf(artifact, sizeof(artifact), "%s-darwin-arm64", t->d.variant);
++  const char *segments[] = { "runtime", "desktop-artifacts", "v1", artifact, t->d.version };
++  for (size_t i = 0; i < sizeof(segments)/sizeof(*segments); ++i) {
++    int next = child_directory(fd, segments[i], 1); close(fd); fd = next;
++    if (fd < 0) return -1;
++  }
++  t->version = fd;
++  if (!capability_call(fd)) return -1;
++  int existing = existing_if_present(t);
++  if (existing) return existing;
++  /* Anonymous pages have no filesystem name another actor can replace or
++   * move into a canonical artifact. mmap failure is refused before READY.
++   * This intentionally trades a disk spool for address space/swap backing. */
++  void *memory = mmap(NULL, (size_t)t->d.bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++  if (memory == MAP_FAILED) return -1;
++  t->spool = memory;
++  return 0;
++}
++
++static int hash_fd(int input, const descriptor *d, unsigned char *spool) {
++  CC_SHA256_CTX hash; CC_SHA256_Init(&hash);
++  unsigned char buffer[65536], digest[CC_SHA256_DIGEST_LENGTH];
++  uint64_t total = 0;
++  for (;;) {
++    ssize_t n = read(input, buffer, sizeof(buffer));
++    if (n < 0 && errno == EINTR) continue;
++    if (n < 0) return -1;
++    if (!n) break;
++    if ((uint64_t)n > d->bytes - total) return -1;
++    if (spool) memcpy(spool + total, buffer, (size_t)n);
++    total += (uint64_t)n; CC_SHA256_Update(&hash, buffer, (CC_LONG)n);
++  }
++  CC_SHA256_Final(digest, &hash);
++  char hex[65];
++  for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) snprintf(hex+i*2, 3, "%02x", digest[i]);
++  return total == d->bytes && !strcmp(hex, d->sha) ? 0 : -1;
++}
++static int ingest(transaction *t, int input) {
++  if (!t->spool || hash_fd(input, &t->d, t->spool)) return -1;
++  if (mprotect(t->spool, (size_t)t->d.bytes, PROT_READ)) return -1;
++  t->verified = 1;
++  return 0;
++}
++static int regular_file(int parent, const char *name, uint64_t size) {
++  int fd = openat(parent, name, FILEFLAGS);
++  struct stat st;
++  if (fd < 0) return -1;
++  if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 || st.st_size < 0 || (uint64_t)st.st_size != size) {
++    close(fd); return -1;
++  }
++  return fd;
++}
++static int same_inode(int left, int right) {
++  struct stat a, b;
++  return !fstat(left, &a) && !fstat(right, &b) && a.st_dev == b.st_dev && a.st_ino == b.st_ino;
++}
++static int named_inode(int parent, const char *name, int fd) {
++  struct stat named, held;
++  return !fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) && !fstat(fd, &held) &&
++    named.st_dev == held.st_dev && named.st_ino == held.st_ino;
++}
++/* -1 means content/identity refusal; -2 means verified data lacks durability. */
++static int verify_destination(transaction *t, int owned, const char *name) {
++  int directory = openat(t->version, name, DIRFLAGS);
++  if (directory < 0) return -1;
++  int result = -1, record = -1, archive = -1;
++  if (owned && !same_inode(directory, t->destination)) goto done;
++  size_t size = strlen(t->d.record);
++  record = regular_file(directory, "descriptor.json", size);
++  if (record < 0 || (owned && !same_inode(record, t->output_record))) goto done;
++  char data[1024]; size_t used = 0;
++  while (used < size) {
++    ssize_t n = read(record, data + used, size - used);
++    if (n < 0 && errno == EINTR) continue;
++    if (n <= 0) goto done;
++    used += (size_t)n;
++  }
++  if (memcmp(data, t->d.record, size)) goto done;
++  archive = regular_file(directory, "archive.zip", t->d.bytes);
++  if (archive < 0 || (owned && !same_inode(archive, t->output_archive)) || hash_fd(archive, &t->d, NULL)) goto done;
++  /* Every reuser establishes its own durability evidence, including the parent. */
++  if (sync_call(archive) || sync_call(record) || sync_call(directory) || sync_call(t->version)) { result = -2; goto done; }
++  if (!named_inode(directory, "archive.zip", archive) || !named_inode(directory, "descriptor.json", record) ||
++      !named_inode(t->version, name, directory)) goto done;
++  result = 0;
++done:
++  if (archive >= 0) close(archive);
++  if (record >= 0) close(record);
++  close(directory); return result;
++}
++static int verify_existing(transaction *t) {
++  return verify_destination(t, 0, t->d.sha) ? -1 : 0;
++}
++/* A missing entry is distinct from an existing invalid or linked entry. */
++static int existing_if_present(transaction *t) {
++  struct stat st;
++  if (fstatat(t->version, t->d.sha, &st, AT_SYMLINK_NOFOLLOW)) return errno == ENOENT ? 0 : -1;
++  return verify_existing(t) ? -1 : 1;
++}
++/* 0 published, 1 reused, -1 refusal, -2 publication durability unknown.
++ * Ordinary pre-rename failures never create the canonical hash directory.
++ */
++static int publish(transaction *t) {
++  if (!t->verified) return -1;
++  int existing = existing_if_present(t);
++  if (existing) return existing;
++  for (int tries = 0; tries < 16; ++tries) {
++    unsigned char random[16]; arc4random_buf(random, sizeof(random));
++    strcpy(t->hidden_name, ".attempt-");
++    for (int i = 0; i < 16; ++i) snprintf(t->hidden_name + 9 + i*2, 3, "%02x", random[i]);
++    if (!mkdirat(t->version, t->hidden_name, 0700)) break;
++    if (errno != EEXIST || tries == 15) return -1;
++  }
++  t->destination = openat(t->version, t->hidden_name, DIRFLAGS);
++  if (t->destination < 0) return -1;
++  t->output_archive = openat(t->destination, "archive.zip", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
++  if (t->output_archive < 0 || write_all(t->output_archive, t->spool, (size_t)t->d.bytes)) return -1;
++  if (sync_call(t->output_archive)) return -1;
++  t->output_record = openat(t->destination, "descriptor.json", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
++  if (t->output_record < 0 || write_all(t->output_record, t->d.record, strlen(t->d.record))) return -1;
++  if (verify_destination(t, 1, t->hidden_name)) return -1;
++  if (rename_call(t->version, t->hidden_name, t->version, t->d.sha, RENAME_EXCL)) {
++    if (errno != EEXIST) return -1;
++    return verify_existing(t) ? -1 : 1;
++  }
++  t->published = 1;
++  // renameatx_np accepts a source name, not a source fd. Never acknowledge a
++  // substituted source: bind the final directory/files to our retained fds.
++  return verify_destination(t, 1, t->d.sha);
++}
++static void cleanup(transaction *t) {
++  if (t->spool) { munmap(t->spool, (size_t)t->d.bytes); t->spool = NULL; }
++  // Hidden residue is ignored by consumers. Canonical output may already have
++  // been accepted by a reuser; preserve both on every outcome.
++  if (t->output_archive >= 0) close(t->output_archive);
++  if (t->output_record >= 0) close(t->output_record);
++  if (t->destination >= 0) close(t->destination);
++  if (t->version >= 0) close(t->version);
++}
++#ifndef DESKTOP_ARTIFACT_TEST
++int main(int argc, char **argv) {
++  signal(SIGPIPE, SIG_IGN);
++#if !defined(__APPLE__) || !defined(__aarch64__)
++  (void)argc; (void)argv; return 2;
++#else
++  if (argc == 2 && !strcmp(argv[1], "--self-check")) {
++    puts("T3DESKTOP1 darwin arm64"); return 0;
++  }
++  if (argc != 3 || strcmp(argv[1], "--stage")) return 2;
++  descriptor d = {0};
++  if (read_header(STDIN_FILENO, &d)) return 2;
++  transaction t; init_transaction(&t, &d);
++  int result = 2;
++  int prepared = prepare(&t, argv[2]);
++  if (prepared < 0) goto done;
++  if (prepared == 1) {
++    result = write_all(STDOUT_FILENO, "REUSED\n", 7) ? 2 : 0;
++    goto done;
++  }
++  if (write_all(STDOUT_FILENO, "READY\n", 6) || ingest(&t, 3)) goto done;
++  if (write_all(STDOUT_FILENO, "VERIFIED\n", 9)) goto done;
++  char command[16];
++  if (line(STDIN_FILENO, command, sizeof(command)) || strcmp(command, "COMMIT")) goto done;
++  int status = publish(&t);
++  if (status == -2) { write_all(STDOUT_FILENO, "UNKNOWN_DURABILITY\n", 19); result = 3; }
++  else if (status >= 0) {
++    const char *response = status ? "REUSED\n" : "PUBLISHED\n";
++    result = write_all(STDOUT_FILENO, response, strlen(response)) ? 2 : 0;
++  }
++done:
++  cleanup(&t); return result;
++#endif
++}
++#endif
+diff --git a/native/desktop-artifact/test.c b/native/desktop-artifact/test.c
+new file mode 100644
+index 00000000..b6895244
+--- /dev/null
++++ b/native/desktop-artifact/test.c
+@@ -0,0 +1,308 @@
++#define DESKTOP_ARTIFACT_TEST
++#include "main.c"
++#include <assert.h>
++#include <dirent.h>
++#include <sys/wait.h>
++
++static char root[PATH_MAX];
++static descriptor fixture(void) {
++  descriptor d = {0};
++  strcpy(d.version, "0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa");
++  strcpy(d.variant, "reasoning");
++  strcpy(d.sha, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
++  memset(d.manifest, 'b', 64); memset(d.input, 'a', 64); d.bytes = 3;
++  assert(!record_descriptor(&d)); return d;
++}
++static int bytes(const char *value) {
++  int p[2]; assert(!pipe(p)); assert(write(p[1], value, strlen(value)) == (ssize_t)strlen(value)); close(p[1]); return p[0];
++}
++static void setup(transaction *t) {
++  char pattern[] = "/private/tmp/t3-native-artifact-XXXXXX";
++  char *directory = mkdtemp(pattern); assert(directory); strcpy(root, directory);
++  descriptor d = fixture(); init_transaction(t, &d); assert(!prepare(t, root));
++}
++static void feed(transaction *t) { int input = bytes("abc"); assert(!ingest(t, input)); close(input); }
++/* Test fixture cleanup only. Production never removes a filesystem object. */
++static void remove_fixture(int parent, const char *name) {
++  int fd = openat(parent, name, DIRFLAGS);
++  if (fd < 0) { assert(!unlinkat(parent, name, 0)); return; }
++  DIR *dir = fdopendir(fd); assert(dir); struct dirent *entry;
++  while ((entry = readdir(dir))) {
++    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
++    remove_fixture(fd, entry->d_name);
++  }
++  closedir(dir); assert(!unlinkat(parent, name, AT_REMOVEDIR));
++}
++static void finish(transaction *t) { cleanup(t); assert(!t->spool); remove_fixture(AT_FDCWD, root); }
++static void put(int dir, const char *name, const char *value) {
++  int fd = openat(dir, name, O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW, 0600); assert(fd >= 0);
++  assert(write(fd, value, strlen(value)) == (ssize_t)strlen(value)); close(fd);
++}
++static void content(int dir, const char *name, const char *expected) {
++  int fd = openat(dir, name, FILEFLAGS); assert(fd >= 0);
++  char buffer[1024]; ssize_t n = read(fd, buffer, sizeof(buffer));
++  assert(n == (ssize_t)strlen(expected) && !memcmp(buffer, expected, (size_t)n)); close(fd);
++}
++static int sync_count, fail_at, synced[16];
++static int sync_test(int fd) { synced[sync_count++] = fd; if (sync_count == fail_at) { errno = EIO; return -1; } return fsync(fd); }
++static void reset_sync(int failure) { sync_count = 0; fail_at = failure; sync_call = sync_test; }
++static ssize_t partial_write(int fd, const void *p, size_t n) { return write(fd, p, n > 1 ? 1 : n); }
++static ssize_t zero_write(int fd, const void *p, size_t n) { (void)fd; (void)p; (void)n; return 0; }
++static void absent(transaction *t) {
++  struct stat st; assert(fstatat(t->version, t->d.sha, &st, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
++}
++static void healthy_retry(int expected) {
++  transaction retry; descriptor d = fixture(); init_transaction(&retry, &d);
++  int prepared = prepare(&retry, root);
++  if (expected == 1) { assert(prepared == 1 && !retry.spool); }
++  else { assert(!prepared); feed(&retry); assert(publish(&retry) == expected); }
++  cleanup(&retry);
++}
++static ssize_t failing_write(int fd, const void *p, size_t n) { (void)fd; (void)p; (void)n; errno = ENOSPC; return -1; }
++static void test_write_and_hash(void) {
++  transaction t; setup(&t); feed(&t); write_call = partial_write; assert(!publish(&t)); write_call = write; finish(&t);
++  setup(&t); feed(&t); write_call = zero_write; assert(publish(&t) == -1); write_call = write;
++  absent(&t); assert(verify_existing(&t) == -1); healthy_retry(0); finish(&t);
++  setup(&t); feed(&t); write_call = failing_write; assert(publish(&t) == -1); write_call = write;
++  absent(&t); healthy_retry(0); finish(&t);
++  const char *bad[] = {"", "ab", "abd", "abcd"};
++  for (unsigned i = 0; i < 4; ++i) {
++    setup(&t); int input = bytes(bad[i]); assert(ingest(&t, input) == -1); close(input);
++    assert(publish(&t) == -1); finish(&t);
++  }
++}
++static void test_durability(void) {
++  transaction t;
++  for (int failure = 1; failure <= 9; ++failure) {
++    setup(&t); feed(&t); reset_sync(failure);
++    assert(publish(&t) == (failure <= 5 ? -1 : -2)); sync_call = fsync;
++    if (failure <= 5) {
++      absent(&t); assert(!t.published); healthy_retry(0);
++    } else {
++      assert(t.published); assert(!verify_existing(&t)); healthy_retry(1);
++    }
++    int held = dup(t.version); cleanup(&t); assert(!t.spool);
++    int published = openat(held, t.d.sha, DIRFLAGS); assert(published >= 0);
++    content(published, "archive.zip", "abc"); close(published); close(held); remove_fixture(AT_FDCWD, root);
++  }
++  setup(&t); feed(&t); reset_sync(0); assert(!publish(&t));
++  assert(sync_count == 9 && synced[0] == t.output_archive && synced[4] == t.version && synced[8] == t.version);
++  for (int failure = 1; failure <= 4; ++failure) { reset_sync(failure); assert(verify_existing(&t) == -1); }
++  reset_sync(0); assert(!verify_existing(&t)); assert(sync_count == 4 && synced[3] == t.version);
++  sync_call = fsync; finish(&t);
++}
++static int attempt_count(int parent) {
++  int fd = openat(parent, ".", DIRFLAGS); assert(fd >= 0);
++  DIR *directory = fdopendir(fd); assert(directory); int count = 0; struct dirent *entry;
++  while ((entry = readdir(directory))) if (!strncmp(entry->d_name, ".attempt-", 9)) count++;
++  closedir(directory); return count;
++}
++static int forbidden_rename(int a, const char *source, int b, const char *destination, unsigned flags) {
++  (void)a; (void)source; (void)b; (void)destination; (void)flags; assert(!"ordinary reuse must not materialize or rename"); return -1;
++}
++static void test_early_reuse(void) {
++  transaction winner; setup(&winner); feed(&winner);
++  transaction downloaded; init_transaction(&downloaded, &winner.d); assert(!prepare(&downloaded, root)); feed(&downloaded);
++  assert(!publish(&winner)); assert(attempt_count(winner.version) == 0);
++  write_call = failing_write; rename_call = forbidden_rename;
++  // Another publisher completed during download: avoid named materialization.
++  assert(publish(&downloaded) == 1 && downloaded.destination == -1); cleanup(&downloaded);
++  for (int i = 0; i < 4; ++i) {
++    transaction reused; init_transaction(&reused, &winner.d);
++    assert(prepare(&reused, root) == 1 && !reused.spool && reused.destination == -1);
++    cleanup(&reused); assert(attempt_count(winner.version) == 0);
++  }
++  // Five directory syncs precede the existing artifact's four durability syncs.
++  for (int failure = 6; failure <= 9; ++failure) {
++    transaction refused; init_transaction(&refused, &winner.d); reset_sync(failure);
++    assert(prepare(&refused, root) == -1 && !refused.spool); cleanup(&refused); sync_call = fsync;
++  }
++  // Every early reuse freshly hashes the archive, rather than trusting presence.
++  int fd = openat(winner.destination, "archive.zip", O_WRONLY); assert(fd >= 0);
++  assert(write(fd, "abd", 3) == 3); close(fd);
++  transaction invalid; init_transaction(&invalid, &winner.d);
++  assert(prepare(&invalid, root) == -1 && !invalid.spool); cleanup(&invalid);
++  assert(attempt_count(winner.version) == 0);
++  write_call = write; rename_call = renameatx_np; finish(&winner);
++}
++static transaction *concurrent_winner;
++static int competing_rename(int a, const char *source, int b, const char *destination, unsigned flags) {
++  rename_call = renameatx_np; assert(!publish(concurrent_winner));
++  return renameatx_np(a, source, b, destination, flags);
++}
++static int race_kind; static ino_t race_inode;
++static int racing_rename(int source_parent, const char *source, int parent, const char *destination, unsigned flags) {
++  if (race_kind == 0) assert(!mkdirat(parent, destination, 0700));
++  else if (race_kind == 1) put(parent, destination, "keep");
++  else assert(!symlinkat("sentinel", parent, destination));
++  struct stat st; assert(!fstatat(parent, destination, &st, AT_SYMLINK_NOFOLLOW)); race_inode = st.st_ino;
++  assert(flags == RENAME_EXCL); return renameatx_np(source_parent, source, parent, destination, flags);
++}
++static void test_destination_races(void) {
++  for (race_kind = 0; race_kind < 3; ++race_kind) {
++    transaction t; setup(&t); feed(&t); rename_call = racing_rename;
++    assert(publish(&t) == -1); rename_call = renameatx_np;
++    struct stat st; assert(!fstatat(t.version, t.d.sha, &st, AT_SYMLINK_NOFOLLOW)); assert(st.st_ino == race_inode); finish(&t);
++  }
++  transaction winner; setup(&winner); feed(&winner);
++  transaction loser; init_transaction(&loser, &winner.d); assert(!prepare(&loser, root)); feed(&loser);
++  assert(!publish(&winner)); struct stat before, after;
++  assert(!fstatat(winner.version, winner.d.sha, &before, 0));
++  assert(publish(&loser) == 1); assert(!fstatat(winner.version, winner.d.sha, &after, 0)); assert(before.st_ino == after.st_ino); cleanup(&loser);
++  descriptor conflict = winner.d; memset(conflict.manifest, 'c', 64); assert(!record_descriptor(&conflict));
++  init_transaction(&loser, &conflict); assert(prepare(&loser, root) == -1 && !loser.spool);
++  assert(!fstatat(winner.version, winner.d.sha, &after, 0)); assert(before.st_ino == after.st_ino);
++  cleanup(&loser); finish(&winner);
++  // A true concurrent winner arrives after the early check, at final rename.
++  setup(&winner); feed(&winner);
++  init_transaction(&loser, &winner.d); assert(!prepare(&loser, root)); feed(&loser);
++  concurrent_winner = &winner; rename_call = competing_rename;
++  assert(publish(&loser) == 1); rename_call = renameatx_np;
++  assert(!verify_existing(&loser)); assert(attempt_count(winner.version) == 1);
++  healthy_retry(1); assert(attempt_count(winner.version) == 1);
++  cleanup(&loser); finish(&winner);
++}
++static void test_verified_payload_replacement(void) {
++  transaction t; setup(&t); feed(&t);
++  // Exact former attack point: after VERIFIED, substitute payload/archive.zip.
++  // The verified source now has no name at all; a forged payload is ignored.
++  assert(!mkdirat(t.version, "payload", 0700));
++  int original = openat(t.version, "payload", DIRFLAGS); assert(original >= 0);
++  put(original, "archive.zip", "fake-original");
++  assert(!renameat(t.version, "payload", t.version, "moved-payload"));
++  assert(!mkdirat(t.version, "payload", 0700));
++  int replacement = openat(t.version, "payload", DIRFLAGS); assert(replacement >= 0);
++  put(replacement, "archive.zip", "bad");
++  assert(!publish(&t)); content(t.destination, "archive.zip", "abc");
++  cleanup(&t); assert(!t.spool);
++  content(replacement, "archive.zip", "bad"); content(original, "archive.zip", "fake-original");
++  close(replacement); close(original); remove_fixture(AT_FDCWD, root);
++}
++static void test_cancellation_file_replacement(void) {
++  transaction t; setup(&t); feed(&t); int parent = dup(t.version); assert(parent >= 0);
++  // There is no filesystem-backed verified source. Replacing either former
++  // cleanup basename cannot redirect munmap or cause any filesystem deletion.
++  const char *names[] = { "archive.zip", "descriptor.json" };
++  for (unsigned i = 0; i < 2; ++i) {
++    put(parent, names[i], "original");
++    assert(!renameat(parent, names[i], parent, i ? "original-record" : "original-archive"));
++    put(parent, names[i], "keep");
++  }
++  cleanup(&t); assert(!t.spool);
++  for (unsigned i = 0; i < 2; ++i) content(parent, names[i], "keep");
++  content(parent, "original-archive", "original"); content(parent, "original-record", "original");
++  close(parent); remove_fixture(AT_FDCWD, root);
++}
++static transaction *substituted; static int substitution_kind, substitution_calls;
++static int substituting_sync(int fd) {
++  const int triggers[] = {1, 1, 4, 6, 9};
++  if (++substitution_calls == triggers[substitution_kind]) {
++    transaction *t = substituted; const char *name = t->published ? t->d.sha : t->hidden_name;
++    if (substitution_kind == 0 || substitution_kind == 3) {
++      assert(!renameat(t->version, name, t->version, "held-output")); assert(!mkdirat(t->version, name, 0700));
++      int replaced = openat(t->version, name, DIRFLAGS); assert(replaced >= 0);
++      put(replaced, "archive.zip", "bad"); put(replaced, "descriptor.json", t->d.record); close(replaced);
++    } else {
++      assert(!renameat(t->destination, "archive.zip", t->destination, "held-archive"));
++      put(t->destination, "archive.zip", "bad");
++    }
++  }
++  return fsync(fd);
++}
++static void test_output_substitution(void) {
++  for (substitution_kind = 0; substitution_kind < 5; ++substitution_kind) {
++    transaction t; setup(&t); feed(&t); substituted = &t; substitution_calls = 0; sync_call = substituting_sync;
++    assert(publish(&t) == -1); sync_call = fsync;
++    int parent = dup(t.version); if (!t.published) absent(&t); cleanup(&t);
++    int replaced = openat(parent, t.published ? t.d.sha : t.hidden_name, DIRFLAGS); assert(replaced >= 0);
++    content(replaced, "archive.zip", "bad"); close(replaced); close(parent); remove_fixture(AT_FDCWD, root);
++  }
++}
++static int rename_substitution;
++static int substituting_rename(int a, const char *source, int b, const char *destination, unsigned flags) {
++  int replacement;
++  if (rename_substitution < 2) {
++    assert(!renameat(a, source, a, "held-source")); assert(!mkdirat(a, source, 0700));
++    replacement = openat(a, source, DIRFLAGS); assert(replacement >= 0);
++    descriptor d = fixture(); put(replacement, "descriptor.json", d.record);
++  } else {
++    replacement = openat(a, source, DIRFLAGS); assert(replacement >= 0);
++    assert(!renameat(replacement, "archive.zip", replacement, "held-archive"));
++  }
++  put(replacement, "archive.zip", rename_substitution % 2 ? "abc" : "bad"); close(replacement);
++  return renameatx_np(a, source, b, destination, flags);
++}
++static void test_rename_source_substitution(void) {
++  for (rename_substitution = 0; rename_substitution < 4; ++rename_substitution) {
++    transaction t; setup(&t); feed(&t); rename_call = substituting_rename;
++    assert(publish(&t) == -1); rename_call = renameatx_np;
++    int parent = dup(t.version); cleanup(&t);
++    int replaced = openat(parent, t.d.sha, DIRFLAGS); assert(replaced >= 0);
++    content(replaced, "archive.zip", rename_substitution % 2 ? "abc" : "bad");
++    close(replaced); close(parent); remove_fixture(AT_FDCWD, root);
++  }
++}
++static int rename_exit_mode;
++static int interrupted_rename(int a, const char *source, int b, const char *destination, unsigned flags) {
++  if (rename_exit_mode == 0) { errno = EIO; return -1; }
++  if (rename_exit_mode == 1) _exit(91);
++  assert(!renameatx_np(a, source, b, destination, flags)); _exit(92);
++}
++static void test_prerename_failure_and_process_exit(void) {
++  for (rename_exit_mode = 0; rename_exit_mode < 3; ++rename_exit_mode) {
++    transaction t; setup(&t); feed(&t); rename_call = interrupted_rename;
++    if (rename_exit_mode == 0) { assert(publish(&t) == -1); }
++    else {
++      pid_t child = fork(); assert(child >= 0);
++      if (!child) { publish(&t); _exit(99); }
++      int status; assert(waitpid(child, &status, 0) == child);
++      assert(WIFEXITED(status) && WEXITSTATUS(status) == (rename_exit_mode == 1 ? 91 : 92));
++    }
++    rename_call = renameatx_np;
++    if (rename_exit_mode < 2) { absent(&t); healthy_retry(0); }
++    else { assert(!verify_existing(&t)); healthy_retry(1); }
++    finish(&t);
++  }
++}
++static void test_reuse_files(void) {
++  for (int kind = 0; kind < 5; ++kind) {
++    transaction t; setup(&t); feed(&t); assert(!publish(&t));
++    int dir = openat(t.version, t.d.sha, DIRFLAGS); assert(dir >= 0);
++    if (kind == 0) { int fd = openat(dir,"archive.zip",O_WRONLY); assert(write(fd,"abd",3)==3); close(fd); }
++    if (kind == 1) assert(!linkat(dir,"archive.zip",dir,"other",0));
++    if (kind == 2) { assert(!renameat(dir,"archive.zip",dir,"other")); assert(!symlinkat("other",dir,"archive.zip")); }
++    if (kind == 3) assert(!linkat(dir,"descriptor.json",dir,"other",0));
++    if (kind == 4) { assert(!renameat(dir,"descriptor.json",dir,"other")); assert(!symlinkat("other",dir,"descriptor.json")); }
++    assert(verify_existing(&t) == -1); close(dir); finish(&t);
++  }
++}
++static int unsupported(int fd) { (void)fd; return 0; }
++static void test_capability_and_ancestors(void) {
++  transaction t; setup(&t); finish(&t);
++  char pattern[] = "/private/tmp/t3-native-artifact-XXXXXX";
++  strcpy(root, mkdtemp(pattern)); descriptor d = fixture(); init_transaction(&t, &d);
++  capability_call = unsupported; assert(prepare(&t, root) == -1); capability_call = supports_exclusive_rename;
++  assert(!t.spool); finish(&t);
++  setup(&t); int rootfd = open_root(root); assert(rootfd >= 0);
++  assert(!renameat(rootfd, "runtime", rootfd, "owned-runtime")); assert(!mkdirat(rootfd, "sentinel", 0700));
++  assert(!symlinkat("sentinel", rootfd, "runtime")); feed(&t); assert(!publish(&t));
++  int sentinel = openat(rootfd, "sentinel", DIRFLAGS); assert(sentinel >= 0);
++  assert(faccessat(sentinel, "desktop-artifacts", F_OK, 0) == -1 && errno == ENOENT);
++  assert(!verify_existing(&t)); close(sentinel); close(rootfd); finish(&t);
++}
++static void test_header(void) {
++  descriptor d = fixture(), decoded = {0}; char header[1024];
++  snprintf(header,sizeof(header),"T3DESKTOP1\n%s\n%s\n3\n%s\n%s\n%s\n",d.version,d.variant,d.sha,d.manifest,d.input);
++  int fd = bytes(header); assert(!read_header(fd,&decoded)); close(fd); assert(!strcmp(d.record,decoded.record));
++  fd=bytes("T3DESKTOP1\n../evil\n"); assert(read_header(fd,&decoded)==-1); close(fd);
++  char command[16]; fd=bytes(""); assert(line(fd,command,sizeof(command))==-1); close(fd);
++}
++static void test_spool_limit(void) {
++  descriptor d = fixture(); d.bytes = MAX_ARTIFACT_BYTES; assert(!record_descriptor(&d));
++  d.bytes++; assert(record_descriptor(&d) == -1);
++}
++int main(void) {
++  test_header(); test_spool_limit(); test_capability_and_ancestors(); test_write_and_hash(); test_durability();
++  test_early_reuse(); test_destination_races(); test_verified_payload_replacement(); test_cancellation_file_replacement(); test_output_substitution(); test_rename_source_substitution(); test_prerename_failure_and_process_exit(); test_reuse_files();
++  puts("native desktop artifact tests passed (13 groups)"); return 0;
++}
+diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
+index 0c191e5b..79f8017a 100644
+--- a/packages/contracts/src/index.ts
++++ b/packages/contracts/src/index.ts
+@@ -40,3 +40,4 @@ export * from "./resourceTelemetry.ts";
+ export * from "./usage.ts";
+ export * from "./updateAdmission.ts";
+ export * from "./rpc.ts";
++export * from "./managedDesktopUpdate.ts";
+diff --git a/packages/contracts/src/managedDesktopUpdate.test.ts b/packages/contracts/src/managedDesktopUpdate.test.ts
+new file mode 100644
+index 00000000..46f56f86
+--- /dev/null
++++ b/packages/contracts/src/managedDesktopUpdate.test.ts
+@@ -0,0 +1,73 @@
++import { describe, expect, it } from "vite-plus/test";
++import * as Schema from "effect/Schema";
++import {
++  ManagedDesktopArtifactDescriptor,
++  MANAGED_DESKTOP_ARTIFACT_MAX_BYTES,
++  managedDesktopArtifactStorageSegments,
++} from "./managedDesktopUpdate.ts";
++
++const descriptor = {
++  schemaVersion: 1 as const,
++  targetVersion: "0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa",
++  releaseArtifactId: "reasoning-darwin-arm64" as const,
++  presentationVariant: "reasoning" as const,
++  bytes: 42,
++  sha256: "b".repeat(64),
++  manifestSha256: "c".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++};
++const decode = Schema.decodeUnknownSync(ManagedDesktopArtifactDescriptor);
++describe("ManagedDesktopArtifactDescriptor", () => {
++  it("accepts both fixed variants and derives only fixed storage segments", () => {
++    expect(decode(descriptor)).toEqual(descriptor);
++    expect(
++      decode({
++        ...descriptor,
++        presentationVariant: "managed-nightly",
++        releaseArtifactId: "managed-nightly-darwin-arm64",
++      }),
++    ).toBeDefined();
++    expect(managedDesktopArtifactStorageSegments(descriptor)).toEqual([
++      "runtime",
++      "desktop-artifacts",
++      "v1",
++      descriptor.releaseArtifactId,
++      descriptor.targetVersion,
++      descriptor.sha256,
++      "archive.zip",
++    ]);
++  });
++  it.each([
++    { path: "/tmp/archive.zip" },
++    { url: "https://example.com/archive.zip" },
++    { schemaVersion: 2 },
++    { bytes: 0 },
++    { bytes: 1.5 },
++    { bytes: Number.MAX_SAFE_INTEGER + 1 },
++    { sha256: "A".repeat(64) },
++    { manifestSha256: "a" },
++    { targetVersion: "../escape" },
++    { targetVersion: "1.2.3" },
++    { targetVersion: "0.0.39-nightly.20260909.0.managed.9007199254740992.paaaaaaaaaaaa" },
++    { releaseInputSha256: "d".repeat(64) },
++    { presentationVariant: "managed-nightly" },
++    { releaseArtifactId: "reasoning-linux-x64" },
++  ])("refuses malformed or extra fields %j", (change) => {
++    expect(() => decode({ ...descriptor, ...change })).toThrow();
++  });
++  it("bounds the anonymous spool at exactly 512 MiB", () => {
++    expect(MANAGED_DESKTOP_ARTIFACT_MAX_BYTES).toBe(536870912);
++    expect(decode({ ...descriptor, bytes: MANAGED_DESKTOP_ARTIFACT_MAX_BYTES }).bytes).toBe(
++      MANAGED_DESKTOP_ARTIFACT_MAX_BYTES,
++    );
++    expect(() =>
++      decode({ ...descriptor, bytes: MANAGED_DESKTOP_ARTIFACT_MAX_BYTES + 1 }),
++    ).toThrow();
++  });
++  it("stays closed when nested in another schema", () => {
++    const nested = Schema.decodeUnknownSync(
++      Schema.Struct({ artifact: ManagedDesktopArtifactDescriptor }),
++    );
++    expect(() => nested({ artifact: { ...descriptor, archivePath: "x" } })).toThrow();
++  });
++});
+diff --git a/packages/contracts/src/managedDesktopUpdate.ts b/packages/contracts/src/managedDesktopUpdate.ts
+new file mode 100644
+index 00000000..0acf4dd9
+--- /dev/null
++++ b/packages/contracts/src/managedDesktopUpdate.ts
+@@ -0,0 +1,64 @@
++import * as Schema from "effect/Schema";
++
++export const ManagedDesktopPresentationVariant = Schema.Literals(["managed-nightly", "reasoning"]);
++export type ManagedDesktopPresentationVariant = typeof ManagedDesktopPresentationVariant.Type;
++export const ManagedDesktopReleaseArtifactId = Schema.Literals([
++  "managed-nightly-darwin-arm64",
++  "reasoning-darwin-arm64",
++]);
++export type ManagedDesktopReleaseArtifactId = typeof ManagedDesktopReleaseArtifactId.Type;
++
++/** Anonymous pre-COMMIT spool limit; mirrored by the bundled native helper. */
++export const MANAGED_DESKTOP_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
++
++const digest = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
++const numeric = "(?:0|[1-9]\\d*)";
++const versionPattern = new RegExp(
++  `^${numeric}\\.${numeric}\\.${numeric}-nightly\\.[1-9]\\d{7}\\.${numeric}\\.managed\\.([1-9]\\d*)\\.p([0-9a-f]{12})$`,
++);
++
++/** Closed wire record. Paths and download URLs are never part of the contract. */
++export const ManagedDesktopArtifactDescriptor = Schema.Struct({
++  schemaVersion: Schema.Literal(1),
++  targetVersion: Schema.String.check(Schema.isPattern(versionPattern)),
++  releaseArtifactId: ManagedDesktopReleaseArtifactId,
++  presentationVariant: ManagedDesktopPresentationVariant,
++  bytes: Schema.Int.check(
++    Schema.isGreaterThan(0),
++    Schema.isLessThanOrEqualTo(MANAGED_DESKTOP_ARTIFACT_MAX_BYTES),
++  ),
++  sha256: digest,
++  manifestSha256: digest,
++  releaseInputSha256: digest,
++})
++  .check(
++    Schema.makeFilter((value) => {
++      const version = versionPattern.exec(value.targetVersion);
++      return (
++        value.releaseArtifactId === `${value.presentationVariant}-darwin-arm64` &&
++        version !== null &&
++        Number.isSafeInteger(Number(version[1])) &&
++        version[2] === value.releaseInputSha256.slice(0, 12)
++      );
++    }),
++  )
++  .annotate({ parseOptions: { onExcessProperty: "error" } });
++export type ManagedDesktopArtifactDescriptor = typeof ManagedDesktopArtifactDescriptor.Type;
++
++const decodeDescriptor = Schema.decodeUnknownSync(ManagedDesktopArtifactDescriptor);
++
++/** Revalidates even typed callers before deriving filesystem segments. */
++export function managedDesktopArtifactStorageSegments(
++  descriptor: ManagedDesktopArtifactDescriptor,
++): ReadonlyArray<string> {
++  const value = decodeDescriptor(descriptor);
++  return [
++    "runtime",
++    "desktop-artifacts",
++    "v1",
++    value.releaseArtifactId,
++    value.targetVersion,
++    value.sha256,
++    "archive.zip",
++  ];
++}
+diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
+index 9c763407..ce7f0607 100644
+--- a/scripts/build-desktop-artifact.test.ts
++++ b/scripts/build-desktop-artifact.test.ts
+@@ -24,6 +24,7 @@ import {
+   DESKTOP_ELECTRON_LANGUAGES,
+   DESKTOP_FILE_EXCLUSIONS,
+   DESKTOP_EXTRA_RESOURCES,
++  MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES,
+   LINUX_BROWSER_SECRET_EXTRA_RESOURCES,
+   MAC_FILE_EXCLUSIONS,
+   InvalidMacPasskeyRpDomainError,
+@@ -69,6 +70,7 @@ import {
+   copyDirectoryPreservingSymlinks,
+   LinuxBrowserSecretHostError,
+   stageBrowserSecret,
++  stageDesktopArtifactHelper,
+   validateWindowsPackagedPayload,
+   WindowsPrimaryNativeProbeError,
+   WindowsDesktopBuildPrerequisitesMissingError,
+@@ -715,6 +717,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+ 
+     assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
+       "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
++      "!apps/desktop/resources/desktop-artifact",
++      "!apps/desktop/resources/desktop-artifact/**/*",
++      "!apps/desktop/prod-resources/desktop-artifact",
++      "!apps/desktop/prod-resources/desktop-artifact/**/*",
+       "!apps/desktop/resources/browser-secret",
+       "!apps/desktop/resources/browser-secret/**/*",
+       "!apps/desktop/prod-resources/browser-secret",
+@@ -2407,3 +2413,72 @@ it("ignores trailing separators", () => {
+     ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
+   );
+ });
++
++it.effect("ships the native artifact helper only in managed macOS arm64 resources", () =>
++  Effect.gen(function* () {
++    const managed = "0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa";
++    for (const [platform, arch, version] of [
++      ["mac", "arm64", managed],
++      ["mac", "x64", managed],
++      ["mac", "arm64", "1.2.3"],
++      ["linux", "arm64", managed],
++    ] as const) {
++      const config = yield* createBuildConfig(
++        platform,
++        "zip",
++        version,
++        false,
++        false,
++        undefined,
++        undefined,
++        false,
++        arch,
++      );
++      const resources = config.extraResources as ReadonlyArray<{ from: string; to: string }>;
++      assert.strictEqual(
++        resources.some((resource) => resource.to === "desktop-artifact"),
++        platform === "mac" && arch === "arm64" && version === managed,
++      );
++    }
++    for (const resource of MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES) {
++      assert.ok(DESKTOP_FILE_EXCLUSIONS.includes(`!${resource.from}` as never));
++    }
++  }).pipe(Effect.provide(NodeServices.layer)),
++);
++
++it.effect("compiles the desktop artifact helper only for managed macOS arm64 staging", () => {
++  const commands: Array<{ readonly args: ReadonlyArray<string> }> = [];
++  const spawner = Layer.succeed(
++    ChildProcessSpawner.ChildProcessSpawner,
++    ChildProcessSpawner.make((command) => {
++      commands.push(command as unknown as (typeof commands)[number]);
++      return Effect.succeed(mockProcess(0));
++    }),
++  );
++  return Effect.gen(function* () {
++    const managed = "0.0.39-nightly.20260909.0.managed.1.paaaaaaaaaaaa";
++    for (const [platform, arch, version] of [
++      ["linux", "arm64", managed],
++      ["mac", "x64", managed],
++      ["mac", "arm64", "1.2.3"],
++      ["mac", "arm64", managed],
++    ] as const) {
++      yield* stageDesktopArtifactHelper({
++        repoRoot: "/repo",
++        stageResourcesDir: "/stage/prod-resources",
++        platform,
++        arch,
++        version,
++        verbose: false,
++      });
++    }
++    assert.lengthOf(commands, 1);
++    assert.deepStrictEqual(commands[0]!.args, [
++      "/repo/apps/desktop/scripts/build-desktop-artifact-helper.mjs",
++      "--arch",
++      "arm64",
++      "--output",
++      "/stage/prod-resources/desktop-artifact/t3-desktop-artifact",
++    ]);
++  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, spawner)));
++});
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index cfa6bfdf..a0d94205 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -958,6 +958,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
+   // so the SDK's optional platform packages (each a ~200MB bundled executable)
+   // are dead weight. The trailing dash keeps the SDK's own JS package.
+   "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
++  "!apps/desktop/resources/desktop-artifact",
++  "!apps/desktop/resources/desktop-artifact/**/*",
++  "!apps/desktop/prod-resources/desktop-artifact",
++  "!apps/desktop/prod-resources/desktop-artifact/**/*",
+   "!apps/desktop/resources/browser-secret",
+   "!apps/desktop/resources/browser-secret/**/*",
+   "!apps/desktop/prod-resources/browser-secret",
+@@ -1092,6 +1096,9 @@ export const DESKTOP_EXTRA_RESOURCES = [
+     to: "resource-monitor",
+   },
+ ] as const;
++export const MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES = [
++  { from: "apps/desktop/prod-resources/desktop-artifact", to: "desktop-artifact" },
++] as const;
+ export const LINUX_BROWSER_SECRET_EXTRA_RESOURCES = [
+   { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
+ ] as const;
+@@ -2221,6 +2228,39 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function*
+   }
+ });
+ 
++export const stageDesktopArtifactHelper = Effect.fn("stageDesktopArtifactHelper")(
++  function* (input: {
++    readonly repoRoot: string;
++    readonly stageResourcesDir: string;
++    readonly platform: typeof BuildPlatform.Type;
++    readonly arch: typeof BuildArch.Type;
++    readonly version: string;
++    readonly verbose: boolean;
++  }) {
++    if (
++      input.platform !== "mac" ||
++      input.arch !== "arm64" ||
++      !isManagedDesktopVersion(input.version)
++    )
++      return;
++    const path = yield* Path.Path;
++    yield* runCommand(
++      ChildProcess.make(
++        "node",
++        [
++          path.join(input.repoRoot, "apps/desktop/scripts/build-desktop-artifact-helper.mjs"),
++          "--arch",
++          "arm64",
++          "--output",
++          path.join(input.stageResourcesDir, "desktop-artifact", "t3-desktop-artifact"),
++        ],
++        { cwd: input.repoRoot },
++      ),
++      { label: "build managed desktop artifact helper", verbose: input.verbose },
++    );
++  },
++);
++
+ export const stageBrowserSecret = Effect.fn("stageBrowserSecret")(function* (input: {
+   readonly repoRoot: string;
+   readonly stageResourcesDir: string;
+@@ -2623,6 +2663,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+     // hand-packed server.asar sidecar (see WINDOWS_SERVER_ASAR_RESOURCE).
+     extraResources: [
+       ...DESKTOP_EXTRA_RESOURCES,
++      ...(platform === "mac" && arch === "arm64" && isManagedDesktopVersion(version)
++        ? MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES
++        : []),
+       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
+       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
+       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
+@@ -3603,6 +3646,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+     arch: options.arch,
+     verbose: options.verbose,
+   });
++  yield* stageDesktopArtifactHelper({
++    repoRoot,
++    stageResourcesDir,
++    platform: options.platform,
++    arch: options.arch,
++    version: appVersion,
++    verbose: options.verbose,
++  });
+   yield* stageBrowserSecret({
+     repoRoot,
+     stageResourcesDir,
