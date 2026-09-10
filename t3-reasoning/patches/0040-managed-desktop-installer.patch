@@ -1,0 +1,1584 @@
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+index 456360dae18d51a5496f52eaaf234d7b007e47d1..8f10f39dda0dd61219b16e22d298e88e63351ac9 100644
+--- a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+@@ -1,9 +1,10 @@
+-// @effect-diagnostics nodeBuiltinImport:off -- Tests use isolated fixture trees and fake native process runners.
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Tests use isolated fixture trees and fake native process runners.
+ import { afterEach, describe, expect, it } from "@effect/vitest";
+ import * as fs from "node:fs/promises";
+ import path from "node:path";
+ import os from "node:os";
+ import { createHash } from "node:crypto";
++import { execFile } from "node:child_process";
+ import { crc32, deflateRawSync } from "node:zlib";
+ import type { ManagedDesktopArtifactDescriptor } from "@t3tools/contracts";
+ import { managedDesktopArtifactStorageSegments } from "@t3tools/contracts";
+@@ -142,6 +143,75 @@ async function fixture(archiveBytes = zip([{ name: "Product.app/Contents/Info.pl
+   return { root, source, installed, descriptor, archive, plist, env, behavior, calls, seams, make };
+ }
+ describe("managed desktop artifact preparation", () => {
++  it.skipIf(process.platform !== "darwin")(
++    "extracts authenticated ZIP bytes through native ditto stdin",
++    async () => {
++      const f = await fixture();
++      const destination = path.join(f.root, "native-extract");
++      await fs.mkdir(destination);
++      const bytes = zip([
++        { name: "Product.app/Contents/proof.txt", contents: "authenticated bytes" },
++      ]);
++      await new Promise<void>((resolve, reject) => {
++        const child = execFile("/usr/bin/ditto", ["-x", "-k", "-", destination], (error) =>
++          error ? reject(error) : resolve(),
++        );
++        child.stdin!.end(bytes);
++      });
++      expect(
++        await fs.readFile(path.join(destination, "Product.app/Contents/proof.txt"), "utf8"),
++      ).toBe("authenticated bytes");
++    },
++  );
++
++  it("claims authenticated tokens once and detaches abort/TTL cleanup", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const controller = new AbortController();
++    const token = await p.prepare(f.descriptor, { signal: controller.signal, ttlMs: 50 });
++    const scratch = (await fs.readdir(f.root)).filter((name) =>
++      name.startsWith("managed-desktop-"),
++    );
++    expect(scratch).toHaveLength(1);
++    const handoff = await p.claim(token);
++    for (const entry of scratch) await expect(fs.stat(path.join(f.root, entry))).rejects.toThrow();
++    expect(p.isPrepared(token)).toBe(false);
++    await expect(p.claim(token)).rejects.toThrow("consumed token");
++    await expect(p.claim(Object.freeze({}) as typeof token)).rejects.toThrow("token");
++    controller.abort();
++    await p.cancel(token);
++    await new Promise((resolve) => setTimeout(resolve, 80));
++    expect((await fs.stat(handoff.stagedBundle)).isDirectory()).toBe(true);
++    await handoff.cleanup();
++    await expect(fs.stat(handoff.stagedBundle)).rejects.toThrow();
++  });
++  it("preserves an inode-substituted extraction directory during claim cleanup", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    const scratch = path.join(
++      f.root,
++      (await fs.readdir(f.root)).find((name) => name.startsWith("managed-desktop-"))!,
++    );
++    await fs.rename(scratch, scratch + ".original");
++    await fs.mkdir(scratch);
++    await fs.writeFile(path.join(scratch, "unowned"), "keep");
++    const handoff = await p.claim(token);
++    expect(await fs.readFile(path.join(scratch, "unowned"), "utf8")).toBe("keep");
++    expect((await fs.stat(handoff.stagedBundle)).isDirectory()).toBe(true);
++    await handoff.cleanup();
++  });
++  it("rejects content changes between preparation and claim", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    const staged = f.calls.find(
++      ([command, args]) => command.endsWith("/ditto") && args.length === 2,
++    )![1][1]!;
++    await fs.writeFile(path.join(staged, "Contents/Resources/app.asar"), "tampered");
++    await expect(p.claim(token)).rejects.toThrow("prepared bundle changed");
++    expect(p.isPrepared(token)).toBe(false);
++  });
+   it("preserves substituted staging paths during cleanup", async () => {
+     const f = await fixture();
+     const p = f.make();
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+index 58c8cc20e3bc29a6043f6bee424d1ba14793523e..e185880638ffd53b010c93add4fd50c075dd47fa 100644
+--- a/apps/desktop/src/updates/ManagedDesktopArtifact.ts
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+@@ -11,6 +11,7 @@ import {
+   managedDesktopArtifactStorageSegments,
+ } from "@t3tools/contracts";
+ import * as Schema from "effect/Schema";
++import { bundleDigest, bundleOwner } from "./managedDesktopInstallHelper.ts";
+ import type { ManagedDesktopPresentationIdentity } from "../app/DesktopEnvironment.ts";
+ 
+ export interface ManagedDesktopArtifactEnvironment {
+@@ -210,6 +211,11 @@ export function createManagedDesktopArtifactPreparer(
+       installedBundle: string;
+       stagedBundle: string;
+       cleanup: () => Promise<void>;
++      detach: () => void;
++      releaseScratch: () => Promise<void>;
++      digest: string;
++      installedOwner: Awaited<ReturnType<typeof bundleOwner>>;
++      stagedOwner: Awaited<ReturnType<typeof bundleOwner>>;
+     }
+   >();
+   async function tree(root: string): Promise<void> {
+@@ -314,11 +320,8 @@ export function createManagedDesktopArtifactPreparer(
+       };
+       let timer: ReturnType<typeof setTimeout> | undefined;
+       let token: PreparedManagedDesktopArtifact | undefined;
+-      const cleanup = async () => {
+-        if (timer) clearTimeout(timer);
+-        options.signal?.removeEventListener("abort", onAbort);
+-        if (token) tokens.delete(token);
+-        for (const owner of owned.splice(0)) {
++      const removeOwned = async (owners: typeof owned) => {
++        for (const owner of owners) {
+           try {
+             const stat = await io.lstat(owner.entry);
+             if (
+@@ -334,6 +337,12 @@ export function createManagedDesktopArtifactPreparer(
+           }
+         }
+       };
++      const cleanup = async () => {
++        if (timer) clearTimeout(timer);
++        options.signal?.removeEventListener("abort", onAbort);
++        if (token) tokens.delete(token);
++        await removeOwned(owned.splice(0));
++      };
+       const onAbort = () => {
+         void cleanup().catch(() => {});
+       };
+@@ -443,7 +452,28 @@ export function createManagedDesktopArtifactPreparer(
+         if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > 2 ** 31 - 1)
+           fail("invalid preparation TTL");
+         token = Object.freeze({}) as PreparedManagedDesktopArtifact;
+-        tokens.set(token, { descriptor, installedBundle, stagedBundle, cleanup });
++        const digest = await bundleDigest(stagedBundle);
++        const installedOwner = await bundleOwner(installedBundle);
++        const stagedOwner = await bundleOwner(stagedBundle);
++        cancelled();
++        tokens.set(token, {
++          descriptor,
++          installedBundle,
++          stagedBundle,
++          cleanup,
++          digest,
++          installedOwner,
++          stagedOwner,
++          releaseScratch: async () => {
++            const scratch = owned.filter((owner) => owner.entry !== stagedBundle);
++            await removeOwned(scratch);
++            for (const owner of scratch) owned.splice(owned.indexOf(owner), 1);
++          },
++          detach: () => {
++            if (timer) clearTimeout(timer);
++            options.signal?.removeEventListener("abort", onAbort);
++          },
++        });
+         options.signal?.addEventListener("abort", onAbort, { once: true });
+         timer = setTimeout(() => {
+           void cleanup().catch(() => {});
+@@ -455,6 +485,42 @@ export function createManagedDesktopArtifactPreparer(
+         throw error;
+       }
+     },
++    /** Private installer handoff: authenticated and consumed synchronously before any await. */
++    async claim(token: PreparedManagedDesktopArtifact) {
++      const prepared = tokens.get(token);
++      if (!prepared) throw new Error("Managed desktop artifact: invalid or consumed token");
++      tokens.delete(token);
++      prepared.detach();
++      try {
++        const installedOwner = await bundleOwner(prepared.installedBundle);
++        const stagedOwner = await bundleOwner(prepared.stagedBundle);
++        const digest = await bundleDigest(prepared.stagedBundle);
++        if (
++          digest !== prepared.digest ||
++          installedOwner.dev !== prepared.installedOwner.dev ||
++          installedOwner.ino !== prepared.installedOwner.ino ||
++          stagedOwner.dev !== prepared.stagedOwner.dev ||
++          stagedOwner.ino !== prepared.stagedOwner.ino
++        )
++          throw new Error("Managed desktop artifact: prepared bundle changed");
++        await prepared.releaseScratch();
++        return Object.freeze({
++          installedBundle: prepared.installedBundle,
++          stagedBundle: prepared.stagedBundle,
++          installedOwner: Object.freeze(installedOwner),
++          stagedOwner: Object.freeze(stagedOwner),
++          digest,
++          bundleId: identity.bundleId,
++          productName: identity.productName,
++          urlSchemes: identity.urlSchemes,
++          targetVersion: prepared.descriptor.targetVersion,
++          cleanup: prepared.cleanup,
++        });
++      } catch (error) {
++        await prepared.cleanup();
++        throw error;
++      }
++    },
+     isPrepared(token: PreparedManagedDesktopArtifact): boolean {
+       return tokens.has(token);
+     },
+diff --git a/apps/desktop/src/updates/ManagedDesktopInstaller.test.ts b/apps/desktop/src/updates/ManagedDesktopInstaller.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a72c53b72aa1b9a3047fbd28f780ae531578c162
+--- /dev/null
++++ b/apps/desktop/src/updates/ManagedDesktopInstaller.test.ts
+@@ -0,0 +1,212 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Fake child and private temporary handoff records.
++import { afterEach, describe, expect, it } from "@effect/vitest";
++import * as fs from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import { Duplex } from "node:stream";
++import { EventEmitter } from "node:events";
++import type { ChildProcess } from "node:child_process";
++import {
++  createManagedDesktopInstaller,
++  type ManagedDesktopInstallerSeams,
++} from "./ManagedDesktopInstaller.ts";
++import type { PreparedManagedDesktopArtifact } from "./ManagedDesktopArtifact.ts";
++const roots: string[] = [];
++afterEach(async () => {
++  for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
++});
++async function fixture() {
++  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "installer-test-")));
++  roots.push(root);
++  const events: string[] = [];
++  const writes: string[] = [];
++  let arm = true;
++  let ready = true;
++  let spawnFailure = false;
++  const pipe = new Duplex({
++    read() {},
++    write(chunk, _encoding, callback) {
++      writes.push(String(chunk));
++      events.push("commit");
++      callback();
++      if (arm) queueMicrotask(() => pipe.push("ARMED\n"));
++    },
++  });
++  const child = Object.assign(new EventEmitter(), {
++    stdio: [null, null, null, pipe],
++    unref: () => {
++      events.push("unref");
++    },
++  }) as unknown as ChildProcess;
++  const token = Object.freeze({}) as PreparedManagedDesktopArtifact;
++  let used = false;
++  const seams: ManagedDesktopInstallerSeams = {
++    executable: "/fake/electron",
++    pid: 12345,
++    uid: process.getuid!(),
++    timeoutMs: 50,
++    spawn: (executable, args, options) => {
++      if (spawnFailure) throw new Error("spawn failed");
++      expect(executable).toBe("/fake/electron");
++      expect(args[1]).toBe("--managed-desktop-install-helper");
++      expect(options).toMatchObject({
++        detached: true,
++        shell: false,
++        env: { ELECTRON_RUN_AS_NODE: "1" },
++        stdio: ["ignore", "ignore", "ignore", "pipe"],
++      });
++      queueMicrotask(() => {
++        if (ready) pipe.push("READY\n");
++      });
++      return child;
++    },
++  };
++  const installer = createManagedDesktopInstaller(
++    {
++      stateDir: root,
++      helperPath: "/fake/helper.cjs",
++      quit: () => {
++        events.push("quit");
++      },
++      preparer: {
++        claim: async (t) => {
++          if (t !== token || used) throw new Error("invalid token");
++          used = true;
++          return {
++            installedBundle: path.join(root, "Product.app"),
++            stagedBundle: path.join(root, ".Product.managed-test.app"),
++            installedOwner: { dev: 1, ino: 1 },
++            stagedOwner: { dev: 1, ino: 2 },
++            digest: "a".repeat(64),
++            bundleId: "com.example",
++            productName: "Product",
++            urlSchemes: ["product"],
++            targetVersion: "1.2.3",
++            cleanup: async () => {
++              events.push("cleanup");
++            },
++          };
++        },
++      },
++    },
++    seams,
++  );
++  return {
++    root,
++    installer,
++    token,
++    events,
++    writes,
++    pipe,
++    child,
++    setSpawnFailure: () => {
++      spawnFailure = true;
++    },
++    setArm: (v: boolean) => {
++      arm = v;
++    },
++    setReady: (v: boolean) => {
++      ready = v;
++    },
++  };
++}
++describe("installer accepted-phase handoff", () => {
++  it("READY precedes stop; COMMIT follows stop; ARMED precedes quit", async () => {
++    const f = await fixture();
++    const reservation = await f.installer.prepareInstall(f.token);
++    expect(f.events).toEqual([]);
++    await reservation.stopAndInstall(async () => {
++      f.events.push("stop");
++    });
++    expect(f.events).toEqual(["stop", "commit", "unref", "quit"]);
++    await expect(reservation.stopAndInstall(async () => {})).rejects.toThrow();
++  });
++  it("cancels READY handoff without a commit", async () => {
++    const f = await fixture();
++    const r = await f.installer.prepareInstall(f.token);
++    await r.cancel();
++    expect(f.writes).toEqual([]);
++    expect(f.events).toEqual(["cleanup"]);
++    await expect(r.stopAndInstall(async () => {})).rejects.toThrow();
++  });
++  it("READY timeout cleans staging and never stops backend", async () => {
++    const f = await fixture();
++    f.setReady(false);
++    await expect(f.installer.prepareInstall(f.token)).rejects.toThrow("timeout");
++    expect(f.events).toEqual(["cleanup"]);
++  });
++  it("backend stop failure never commits", async () => {
++    const f = await fixture();
++    const r = await f.installer.prepareInstall(f.token);
++    await expect(
++      r.stopAndInstall(async () => {
++        throw new Error("stop failed");
++      }),
++    ).rejects.toThrow("stop failed");
++    expect(f.writes).toEqual([]);
++    expect(f.events).toEqual([]);
++    await r.cancel();
++    await expect(r.stopAndInstall(async () => {})).rejects.toThrow();
++    expect((await fs.readdir(f.root)).length).toBe(1);
++    expect(f.events).toEqual([]);
++  });
++  it("missing ARMED retains committed ownership and does not quit", async () => {
++    const f = await fixture();
++    f.setArm(false);
++    const r = await f.installer.prepareInstall(f.token);
++    await expect(r.stopAndInstall(async () => {})).rejects.toThrow("timeout");
++    await r.cancel();
++    expect(f.events).toEqual(["commit"]);
++    expect((await fs.readdir(f.root)).length).toBe(1);
++    f.pipe.destroy();
++  });
++  it("accepted-phase abort and cancel during backend stop retain staging and commit", async () => {
++    const f = await fixture();
++    const controller = new AbortController();
++    const r = await f.installer.prepareInstall(f.token, { signal: controller.signal });
++    await r.stopAndInstall(async () => {
++      controller.abort();
++      await r.cancel();
++      expect(f.pipe.destroyed).toBe(false);
++      expect(f.events).toEqual([]);
++      expect((await fs.readdir(f.root)).length).toBe(1);
++    });
++    expect(f.events).toEqual(["commit", "unref", "quit"]);
++  });
++  it("cannot reclaim the same prepared token", async () => {
++    const f = await fixture();
++    const r = await f.installer.prepareInstall(f.token);
++    await expect(f.installer.prepareInstall(f.token)).rejects.toThrow("token");
++    await r.cancel();
++  });
++  it("pipe failure while ready cannot stop backend", async () => {
++    const f = await fixture();
++    const r = await f.installer.prepareInstall(f.token);
++    f.pipe.emit("error", new Error("pipe failed"));
++    await expect(
++      r.stopAndInstall(async () => {
++        f.events.push("stop");
++      }),
++    ).rejects.toThrow("pipe failed");
++    await r.cancel();
++    expect(f.events).toEqual(["cleanup"]);
++  });
++  it("cleans a failed spawn without committing", async () => {
++    const f = await fixture();
++    f.setSpawnFailure();
++    await expect(f.installer.prepareInstall(f.token)).rejects.toThrow("spawn failed");
++    expect(f.events).toEqual(["cleanup"]);
++    expect(f.writes).toEqual([]);
++    expect(await fs.readdir(f.root)).toEqual([]);
++  });
++  it("cannot cancel an ARMED helper or return ownership", async () => {
++    const f = await fixture();
++    const controller = new AbortController();
++    const r = await f.installer.prepareInstall(f.token, { signal: controller.signal });
++    await r.stopAndInstall(async () => {});
++    controller.abort();
++    await r.cancel();
++    expect(f.events).toEqual(["commit", "unref", "quit"]);
++    await expect(f.installer.prepareInstall(f.token)).rejects.toThrow("token");
++  });
++});
+diff --git a/apps/desktop/src/updates/ManagedDesktopInstaller.ts b/apps/desktop/src/updates/ManagedDesktopInstaller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..434a944059b1f9123544bcc95b218961ffa1c531
+--- /dev/null
++++ b/apps/desktop/src/updates/ManagedDesktopInstaller.ts
+@@ -0,0 +1,237 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Native detached process handoff.
++import * as fs from "node:fs/promises";
++import path from "node:path";
++import { randomUUID } from "node:crypto";
++import { spawn, type ChildProcess } from "node:child_process";
++import type { Duplex } from "node:stream";
++import type {
++  createManagedDesktopArtifactPreparer,
++  PreparedManagedDesktopArtifact,
++} from "./ManagedDesktopArtifact.ts";
++import { durableRecord, type ManagedDesktopInstallTask } from "./managedDesktopInstallHelper.ts";
++
++export interface ManagedDesktopInstallerOptions {
++  readonly preparer: Pick<ReturnType<typeof createManagedDesktopArtifactPreparer>, "claim">;
++  readonly stateDir: string;
++  readonly helperPath: string;
++  readonly quit: () => void;
++}
++export interface ManagedDesktopInstallerSeams {
++  readonly spawn: (
++    executable: string,
++    args: readonly string[],
++    options: Parameters<typeof spawn>[2],
++  ) => ChildProcess;
++  readonly executable: string;
++  readonly pid: number;
++  readonly uid: number;
++  readonly timeoutMs: number;
++}
++const defaults: ManagedDesktopInstallerSeams = {
++  spawn: (executable, args, options) => spawn(executable, [...args], options),
++  executable: process.execPath,
++  pid: process.pid,
++  uid: process.getuid?.() ?? -1,
++  timeoutMs: 30_000,
++};
++export function createManagedDesktopInstaller(
++  options: ManagedDesktopInstallerOptions,
++  seams: ManagedDesktopInstallerSeams = defaults,
++) {
++  return {
++    async prepareInstall(
++      token: PreparedManagedDesktopArtifact,
++      request: { readonly signal?: AbortSignal } = {},
++    ) {
++      const handoff = await options.preparer.claim(token);
++      let directory: string | undefined;
++      let child: ChildProcess | undefined;
++      let pipe: Duplex | undefined;
++      let phase:
++        | "preparing"
++        | "ready"
++        | "stopping"
++        | "accepted-failed"
++        | "committed"
++        | "armed"
++        | "cancelled" = "preparing";
++      let failed: Error | undefined;
++      let pending:
++        | { expected: string; resolve: () => void; reject: (e: Error) => void }
++        | undefined;
++      let buffer = "";
++      const fail = (error: Error) => {
++        failed ??= error;
++        pending?.reject(failed);
++        pending = undefined;
++        if (phase === "ready") void cancel().catch(() => {});
++      };
++      const wait = (expected: string) =>
++        new Promise<void>((resolve, reject) => {
++          if (failed) {
++            reject(failed);
++            return;
++          }
++          const timer = setTimeout(() => {
++            pending = undefined;
++            reject(new Error(`Installer ${expected} timeout`));
++          }, seams.timeoutMs);
++          pending = {
++            expected,
++            resolve: () => {
++              clearTimeout(timer);
++              resolve();
++            },
++            reject: (error) => {
++              clearTimeout(timer);
++              reject(error);
++            },
++          };
++        });
++      // After COMMIT was written ownership is uncertain until ARMED. Never delete a
++      // possibly committed task or staging tree, even if its acknowledgement is lost.
++      let cleanupPromise: Promise<void> | undefined;
++      const cancel = async () => {
++        if (
++          phase === "stopping" ||
++          phase === "accepted-failed" ||
++          phase === "committed" ||
++          phase === "armed"
++        )
++          return;
++        if (cleanupPromise) return cleanupPromise;
++        phase = "cancelled";
++        fail(new Error("Managed desktop installation cancelled"));
++        request.signal?.removeEventListener("abort", onAbort);
++        pipe?.destroy();
++        cleanupPromise = (async () => {
++          await handoff.cleanup();
++          if (directory) await fs.rm(directory, { recursive: true, force: true });
++        })();
++        return cleanupPromise;
++      };
++      const onAbort = () => {
++        void cancel().catch(() => {});
++      };
++      try {
++        if (request.signal?.aborted) throw new Error("Managed desktop installation cancelled");
++        await fs.mkdir(options.stateDir, { recursive: true, mode: 0o700 });
++        const state = await fs.lstat(options.stateDir);
++        if (
++          !state.isDirectory() ||
++          state.isSymbolicLink() ||
++          state.uid !== seams.uid ||
++          (await fs.realpath(options.stateDir)) !== options.stateDir
++        )
++          throw new Error("Unsafe installer state directory");
++        directory = await fs.mkdtemp(path.join(options.stateDir, "install-"));
++        await fs.chmod(directory, 0o700);
++        const id = randomUUID();
++        const task: ManagedDesktopInstallTask = {
++          schemaVersion: 1,
++          id,
++          uid: seams.uid,
++          parentPid: seams.pid,
++          installedBundle: handoff.installedBundle,
++          stagedBundle: handoff.stagedBundle,
++          installedOwner: handoff.installedOwner,
++          stagedOwner: handoff.stagedOwner,
++          backupBundle: path.join(
++            path.dirname(handoff.installedBundle),
++            `.${handoff.productName}.previous-${id}.app`,
++          ),
++          digest: handoff.digest,
++          bundleId: handoff.bundleId,
++          productName: handoff.productName,
++          targetVersion: handoff.targetVersion,
++          urlSchemes: handoff.urlSchemes,
++        };
++        await durableRecord(directory, "task.json", task);
++        child = seams.spawn(
++          seams.executable,
++          [
++            options.helperPath,
++            "--managed-desktop-install-helper",
++            path.join(directory, "task.json"),
++          ],
++          {
++            detached: true,
++            shell: false,
++            env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
++            stdio: ["ignore", "ignore", "ignore", "pipe"],
++          },
++        );
++        child.on("error", fail);
++        child.on("exit", () => fail(new Error("Installer helper exited")));
++        pipe = child.stdio[3] as Duplex | undefined;
++        if (!pipe) throw new Error("Installer control pipe unavailable");
++        pipe.on("error", fail);
++        pipe.on("close", () => fail(new Error("Installer control pipe closed")));
++        pipe.on("data", (data: Buffer) => {
++          buffer += data.toString("utf8");
++          if (buffer.length > 128) {
++            fail(new Error("Invalid helper response"));
++            return;
++          }
++          while (buffer.includes("\n")) {
++            const end = buffer.indexOf("\n");
++            const message = buffer.slice(0, end);
++            buffer = buffer.slice(end + 1);
++            if (!pending || message !== pending.expected) {
++              fail(new Error("Unexpected helper response"));
++              return;
++            }
++            const current = pending;
++            pending = undefined;
++            current.resolve();
++          }
++        });
++        request.signal?.addEventListener("abort", onAbort, { once: true });
++        if (request.signal?.aborted) throw new Error("Managed desktop installation cancelled");
++        await wait("READY");
++        phase = "ready";
++        return Object.freeze({
++          cancel,
++          /** Invoke only inside the reservation controller's accepted phase. The
++           * caller captures the exact owned backend generations in this callback. */
++          async stopAndInstall(stopBackend: () => Promise<void>): Promise<void> {
++            if (phase !== "ready" || failed)
++              throw failed ?? new Error("Installer handoff already used");
++            phase = "stopping";
++            request.signal?.removeEventListener("abort", onAbort);
++            try {
++              await stopBackend();
++              if (failed) throw failed;
++              const armed = wait("ARMED");
++              phase = "committed";
++              try {
++                pipe!.write(`COMMIT ${id}\n`, (error) => {
++                  if (error) fail(error);
++                });
++              } catch (error) {
++                fail(error instanceof Error ? error : new Error(String(error)));
++              }
++              await armed;
++              phase = "armed";
++              request.signal?.removeEventListener("abort", onAbort);
++              child!.unref();
++              pipe!.destroy();
++              options.quit();
++            } catch (error) {
++              if (phase === "stopping") {
++                phase = "accepted-failed";
++                // Accepted work cannot be cancelled or retried: some generations
++                // may already be stopped and the caller retains its lifecycle fence.
++                pipe!.destroy();
++              }
++              throw error;
++            }
++          },
++        });
++      } catch (error) {
++        await cancel();
++        throw error;
++      }
++    },
++  };
++}
+diff --git a/apps/desktop/src/updates/managedDesktopInstallHelper.test.ts b/apps/desktop/src/updates/managedDesktopInstallHelper.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6dd672a0897cbd0cc4307a86765fc27f6624328
+--- /dev/null
++++ b/apps/desktop/src/updates/managedDesktopInstallHelper.test.ts
+@@ -0,0 +1,458 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Isolated filesystem fixtures, no real app mutation.
++import { afterEach, describe, expect, it } from "@effect/vitest";
++import * as fs from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import { randomUUID } from "node:crypto";
++import {
++  atomicBundleSwap,
++  waitForParentExit,
++  nativeRun,
++  bundleDigest,
++  bundleOwner,
++  durableRecord,
++  parseInstallTask,
++  runInstallHelper,
++  type HelperSeams,
++  type ManagedDesktopInstallTask,
++} from "./managedDesktopInstallHelper.ts";
++const roots: string[] = [];
++afterEach(async () => {
++  for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
++});
++async function fixture() {
++  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "helper-test-")));
++  roots.push(root);
++  const directory = path.join(root, "state");
++  await fs.mkdir(directory, { mode: 0o700 });
++  const installedBundle = path.join(root, "Product.app");
++  const stagedBundle = path.join(root, ".Product.managed-fixture.app");
++  await fs.mkdir(installedBundle);
++  await fs.mkdir(stagedBundle);
++  await fs.writeFile(path.join(installedBundle, "old"), "old");
++  await fs.writeFile(path.join(stagedBundle, "new"), "new");
++  const id = randomUUID();
++  const task: ManagedDesktopInstallTask = {
++    schemaVersion: 1,
++    id,
++    uid: process.getuid!(),
++    parentPid: 12345,
++    installedBundle,
++    stagedBundle,
++    backupBundle: path.join(root, `.Product.previous-${id}.app`),
++    installedOwner: await bundleOwner(installedBundle),
++    stagedOwner: await bundleOwner(stagedBundle),
++    digest: await bundleDigest(stagedBundle),
++    productName: "Product",
++    bundleId: "com.example.product",
++    targetVersion: "1.2.3",
++    urlSchemes: ["product"],
++  };
++  const plist: Record<string, unknown> = {
++    CFBundleIdentifier: task.bundleId,
++    CFBundleName: task.productName,
++    CFBundleVersion: task.targetVersion,
++    CFBundleShortVersionString: task.targetVersion,
++    CFBundleURLTypes: [{ CFBundleURLSchemes: task.urlSchemes }],
++  };
++  const calls: string[] = [];
++  const envs: NodeJS.ProcessEnv[] = [];
++  const seams: HelperSeams = {
++    parentPid: () => task.parentPid,
++    swap: async (a, b) => {
++      calls.push(`swap:${a}:${b}`);
++      // Deterministic in-process stand-in. Native crash tests below exercise the
++      // actual indivisible macOS exchange, never this stand-in's internals.
++      const temporary = a + ".exchange";
++      await fs.rename(a, temporary);
++      await fs.rename(b, a);
++      await fs.rename(temporary, b);
++    },
++    rename: async (a, b) => {
++      calls.push(`rename:${String(a)}:${String(b)}`);
++      await fs.rename(a, b);
++    },
++    waitForExit: async (pid) => {
++      calls.push(`wait:${pid}`);
++    },
++    run: async (command, _args, env) => {
++      calls.push(command);
++      if (command === "/usr/bin/open") envs.push(env!);
++      return command === "/usr/bin/plutil" ? JSON.stringify(plist) : "";
++    },
++  };
++  const taskPath = path.join(directory, "task.json");
++  await durableRecord(directory, "task.json", task);
++  const responses: string[] = [];
++  return {
++    root,
++    directory,
++    task,
++    taskPath,
++    seams,
++    calls,
++    plist,
++    envs,
++    responses,
++    send: (m: string) => {
++      responses.push(m);
++    },
++  };
++}
++async function* frames(...messages: string[]) {
++  yield* messages;
++}
++describe("detached install helper", () => {
++  it("READY then EOF performs no mutation and no owner claim", async () => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames(), f.send, f.seams);
++    expect(f.responses).toEqual(["READY\n"]);
++    expect(f.calls.some((c) => c.startsWith("rename:") || c.startsWith("wait:"))).toBe(false);
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    await expect(fs.stat(path.join(f.directory, "owner.json"))).rejects.toThrow();
++  });
++  it.each(["CANCEL\n", "COMMIT wrong\n"])("rejects %s without mutation", async (message) => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames(message), f.send, f.seams);
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++  });
++  it("durably owns before ARMED, waits for parent, retains backup, and strips node mode on reopen", async () => {
++    const f = await fixture();
++    let ownerAtArmed: Promise<string> | undefined;
++    await runInstallHelper(
++      f.taskPath,
++      frames(`COMMIT ${f.task.id}\n`),
++      (m) => {
++        f.send(m);
++        if (m === "ARMED\n")
++          ownerAtArmed = fs.readFile(path.join(f.directory, "owner.json"), "utf8");
++      },
++      f.seams,
++    );
++    expect(JSON.parse(await ownerAtArmed!)).toMatchObject({ committed: true, id: f.task.id });
++    expect(f.responses).toEqual(["READY\n", "ARMED\n"]);
++    expect(f.calls.findIndex((c) => c.startsWith("wait:"))).toBeLessThan(
++      f.calls.findIndex((c) => c.startsWith("swap:")),
++    );
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["new"]);
++    expect(await fs.readdir(f.task.backupBundle)).toEqual(["old"]);
++    expect(f.envs[0]).not.toHaveProperty("ELECTRON_RUN_AS_NODE");
++    expect(
++      JSON.parse(await fs.readFile(path.join(f.directory, "result.json"), "utf8")),
++    ).toMatchObject({ status: "installed" });
++  });
++  it("does not move bundles while the old PID remains alive", async () => {
++    const f = await fixture();
++    let release!: () => void;
++    let reached!: () => void;
++    const waiting = new Promise<void>((r) => {
++      reached = r;
++    });
++    const exit = new Promise<void>((r) => {
++      release = r;
++    });
++    const running = runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, {
++      ...f.seams,
++      waitForExit: async () => {
++        reached();
++        await exit;
++      },
++    });
++    await waiting;
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    release();
++    await running;
++  });
++  it.each([1, 2, 3, 4])("rolls back failure boundary %i", async (boundary) => {
++    const f = await fixture();
++    let verification = 0;
++    const seams: HelperSeams = {
++      ...f.seams,
++      swap: async (a, b) => {
++        if (boundary === 1) throw new Error("exchange unavailable");
++        await f.seams.swap(a, b);
++      },
++      rename: async (a, b) => {
++        if (boundary === 2) throw new Error("backup rename failure");
++        await fs.rename(a, b);
++      },
++      run: async (command, args, env) => {
++        if (command === "/usr/bin/codesign" && ++verification === 3 && boundary === 3)
++          throw new Error("signature failure");
++        if (command === "/usr/bin/open" && boundary === 4) throw new Error("open failure");
++        return f.seams.run(command, args, env);
++      },
++    };
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, seams);
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    expect(
++      JSON.parse(await fs.readFile(path.join(f.directory, "result.json"), "utf8")),
++    ).not.toMatchObject({ status: "installed" });
++  });
++  it.each(["CFBundleIdentifier", "CFBundleVersion", "CFBundleShortVersionString", "CFBundleName"])(
++    "rejects incorrect %s before READY",
++    async (key) => {
++      const f = await fixture();
++      f.plist[key] = "wrong";
++      await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow(
++        "identity",
++      );
++      expect(f.responses).toEqual([]);
++    },
++  );
++  it("rejects staged contents changed since preparation", async () => {
++    const f = await fixture();
++    await fs.writeFile(path.join(f.task.stagedBundle, "new"), "tampered");
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow("digest");
++  });
++  it("rejects reusing committed owner record", async () => {
++    const f = await fixture();
++    await durableRecord(f.directory, "owner.json", { id: f.task.id });
++    await expect(
++      runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, f.seams),
++    ).rejects.toThrow();
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++  });
++  it("continues after ARMED response failure", async () => {
++    const f = await fixture();
++    await runInstallHelper(
++      f.taskPath,
++      frames(`COMMIT ${f.task.id}\n`),
++      (m) => {
++        if (m === "ARMED\n") throw new Error("pipe gone");
++      },
++      f.seams,
++    );
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["new"]);
++  });
++  it("rechecks ownership and content after parent exit", async () => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, {
++      ...f.seams,
++      waitForExit: async () => {
++        await fs.writeFile(path.join(f.task.stagedBundle, "new"), "changed");
++      },
++    });
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++  });
++  it("rejects symlink staging and escaping tree links", async () => {
++    const f = await fixture();
++    await fs.symlink(f.root, path.join(f.task.stagedBundle, "escape"));
++    await expect(bundleDigest(f.task.stagedBundle)).rejects.toThrow("escape");
++  });
++  it("strictly rejects unknown fields and non-sibling paths", async () => {
++    const f = await fixture();
++    expect(() => parseInstallTask({ ...f.task, extra: true })).toThrow();
++    expect(() => parseInstallTask({ ...f.task, stagedBundle: "/tmp/elsewhere.app" })).toThrow();
++  });
++  it("rejects public task records", async () => {
++    const f = await fixture();
++    await fs.chmod(f.taskPath, 0o644);
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow("record");
++  });
++  it("rejects a symlink task file", async () => {
++    const f = await fixture();
++    await fs.rename(f.taskPath, f.taskPath + ".original");
++    await fs.symlink(f.taskPath + ".original", f.taskPath);
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow();
++  });
++  it("rejects a symlink task directory", async () => {
++    const f = await fixture();
++    await fs.rename(f.directory, f.directory + ".original");
++    await fs.symlink(f.directory + ".original", f.directory);
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow(
++      "directory",
++    );
++  });
++  it("rejects a replacement staging inode", async () => {
++    const f = await fixture();
++    await fs.rename(f.task.stagedBundle, f.task.stagedBundle + ".original");
++    await fs.mkdir(f.task.stagedBundle);
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow("owner");
++  });
++  it("rejects a replacement installed inode", async () => {
++    const f = await fixture();
++    await fs.rename(f.task.installedBundle, f.task.installedBundle + ".original");
++    await fs.mkdir(f.task.installedBundle);
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow("owner");
++  });
++  it("rejects an occupied backup path", async () => {
++    const f = await fixture();
++    await fs.mkdir(f.task.backupBundle);
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow("backup");
++  });
++  it("rejects URL scheme mismatch and signature failure before READY", async () => {
++    const f = await fixture();
++    f.plist.CFBundleURLTypes = [];
++    await expect(runInstallHelper(f.taskPath, frames(), f.send, f.seams)).rejects.toThrow(
++      "identity",
++    );
++    f.plist.CFBundleURLTypes = [{ CFBundleURLSchemes: f.task.urlSchemes }];
++    await expect(
++      runInstallHelper(f.taskPath, frames(), f.send, {
++        ...f.seams,
++        run: async (command, args, env) => {
++          if (command === "/usr/bin/codesign") throw new Error("signature");
++          return f.seams.run(command, args, env);
++        },
++      }),
++    ).rejects.toThrow("signature");
++    expect(f.responses).toEqual([]);
++  });
++  it("treats EOF in a partial COMMIT as cancellation", async () => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}`), f.send, f.seams);
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    await expect(fs.stat(path.join(f.directory, "owner.json"))).rejects.toThrow();
++  });
++  it("handles a fragmented COMMIT", async () => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames("COM", `MIT ${f.task.id}\n`), f.send, f.seams);
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["new"]);
++  });
++  it("records rollback failure and retains previous bundle when restoration fails", async () => {
++    const f = await fixture();
++    let count = 0;
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, {
++      ...f.seams,
++      swap: async (a, b) => {
++        if (++count >= 2) throw new Error("rollback exchange failure");
++        await f.seams.swap(a, b);
++      },
++      run: async (command, args, env) => {
++        if (command === "/usr/bin/open") throw new Error("reopen failure");
++        return f.seams.run(command, args, env);
++      },
++    });
++    expect(await fs.readdir(f.task.backupBundle)).toEqual(["old"]);
++    expect(
++      JSON.parse(await fs.readFile(path.join(f.directory, "result.json"), "utf8")),
++    ).toMatchObject({ status: "rollback-failed" });
++  });
++  it("frames the exact two-files versus single-payload digest collision", async () => {
++    const f = await fixture();
++    const a = path.join(f.root, "tree-a");
++    const b = path.join(f.root, "tree-b");
++    await fs.mkdir(a);
++    await fs.mkdir(b);
++    await fs.writeFile(path.join(a, "a"), "hello");
++    await fs.writeFile(path.join(a, "b"), "world");
++    const fileMode = (await fs.stat(path.join(a, "b"))).mode;
++    await fs.writeFile(path.join(b, "a"), "hello" + JSON.stringify(["b", fileMode]) + "world");
++    expect(await bundleDigest(a)).not.toBe(await bundleDigest(b));
++  });
++  it("rejects an unrelated parent before READY", async () => {
++    const f = await fixture();
++    await expect(
++      runInstallHelper(f.taskPath, frames(), f.send, { ...f.seams, parentPid: () => 999 }),
++    ).rejects.toThrow("relationship");
++    expect(f.responses).toEqual([]);
++  });
++  it("ends waiting on reparenting without probing a reused PID", async () => {
++    let reads = 0;
++    await waitForParentExit(12345, () => (++reads === 1 ? 12345 : 1), 1_000);
++    expect(reads).toBe(2);
++  });
++  it("bounds a stuck parent and preserves the installed bundle", async () => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, {
++      ...f.seams,
++      waitForExit: (pid) => waitForParentExit(pid, () => pid, 1),
++    });
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    expect(f.calls.some((c) => c.startsWith("swap:"))).toBe(false);
++  });
++  it("rolls back an exchange whose acknowledgement is lost", async () => {
++    const f = await fixture();
++    let exchanges = 0;
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, {
++      ...f.seams,
++      swap: async (a, b) => {
++        await f.seams.swap(a, b);
++        if (++exchanges === 1) throw new Error("ack lost");
++      },
++    });
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++  });
++  it.skipIf(process.platform !== "darwin")(
++    "atomically exchanges real macOS temp directories",
++    async () => {
++      const f = await fixture();
++      await atomicBundleSwap(f.task.installedBundle, f.task.stagedBundle);
++      expect(await bundleOwner(f.task.installedBundle)).toEqual(f.task.stagedOwner);
++      expect(await bundleOwner(f.task.stagedBundle)).toEqual(f.task.installedOwner);
++      await atomicBundleSwap(f.task.installedBundle, f.task.stagedBundle);
++      expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    },
++  );
++
++  it
++    .skipIf(process.platform !== "darwin")
++    .each([
++      "before-swap",
++      "swapped",
++      "swap-durable",
++      "verified",
++      "backed-up",
++      "backup-durable",
++      "reopened",
++      "rolled-back",
++    ])("keeps a valid installed path after actual helper death at %s", async (boundary) => {
++    const f = await fixture();
++    const helperUrl = new URL("./managedDesktopInstallHelper.ts", import.meta.url).href;
++    const program = `
++      const helper=await import(${JSON.stringify(helperUrl)});
++      const task=${JSON.stringify(f.task)};
++      const plist=${JSON.stringify(f.plist)};
++      const boundary=${JSON.stringify(boundary)};
++      async function* control(){yield 'COMMIT '+task.id+'\\n';}
++      await helper.runInstallHelper(${JSON.stringify(f.taskPath)},control(),()=>{}, {
++        ...helper.helperDefaults,
++        parentPid:()=>task.parentPid,
++        waitForExit:async()=>{},
++        run:async(command)=>{
++          if(command==='/usr/bin/plutil')return JSON.stringify(plist);
++          if(command==='/usr/bin/open' && boundary==='rolled-back')throw new Error('reopen failed');
++          return '';
++        },
++        checkpoint:async(phase)=>{if(phase===boundary)process.kill(process.pid,'SIGKILL');},
++      });
++      throw new Error('Crash checkpoint was not reached');
++    `;
++    await expect(
++      nativeRun(process.execPath, ["--input-type=module", "-e", program]),
++    ).rejects.toMatchObject({ signal: "SIGKILL" });
++    const entries = await fs.readdir(f.task.installedBundle);
++    expect(entries).toEqual([
++      boundary === "before-swap" || boundary === "rolled-back" ? "old" : "new",
++    ]);
++    expect(await bundleOwner(f.task.installedBundle)).toEqual(
++      boundary === "before-swap" || boundary === "rolled-back"
++        ? f.task.installedOwner
++        : f.task.stagedOwner,
++    );
++    if (entries[0] === "new")
++      expect(await bundleDigest(f.task.installedBundle)).toBe(f.task.digest);
++  });
++
++  it("rolls back a backup rename whose acknowledgement is lost", async () => {
++    const f = await fixture();
++    await runInstallHelper(f.taskPath, frames(`COMMIT ${f.task.id}\n`), f.send, {
++      ...f.seams,
++      rename: async (a, b) => {
++        await fs.rename(a, b);
++        throw new Error("backup ack lost");
++      },
++    });
++    expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++  });
++  it.skipIf(process.platform !== "darwin")(
++    "fails native exchange without removing the installed path",
++    async () => {
++      const f = await fixture();
++      await fs.rm(f.task.stagedBundle, { recursive: true });
++      await expect(atomicBundleSwap(f.task.installedBundle, f.task.stagedBundle)).rejects.toThrow();
++      expect(await fs.readdir(f.task.installedBundle)).toEqual(["old"]);
++    },
++  );
++});
+diff --git a/apps/desktop/src/updates/managedDesktopInstallHelper.ts b/apps/desktop/src/updates/managedDesktopInstallHelper.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..68820283486295f3fd9a818f15d8e19f39a1de5c
+--- /dev/null
++++ b/apps/desktop/src/updates/managedDesktopInstallHelper.ts
+@@ -0,0 +1,418 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off -- Detached Node-only installer process.
++import * as fs from "node:fs/promises";
++import { constants } from "node:fs";
++import path from "node:path";
++import { createHash } from "node:crypto";
++import { execFile } from "node:child_process";
++import { Socket } from "node:net";
++
++export interface BundleOwner {
++  readonly dev: number;
++  readonly ino: number;
++}
++export interface ManagedDesktopInstallTask {
++  readonly schemaVersion: 1;
++  readonly id: string;
++  readonly uid: number;
++  readonly parentPid: number;
++  readonly installedBundle: string;
++  readonly stagedBundle: string;
++  readonly backupBundle: string;
++  readonly installedOwner: BundleOwner;
++  readonly stagedOwner: BundleOwner;
++  readonly digest: string;
++  readonly bundleId: string;
++  readonly productName: string;
++  readonly targetVersion: string;
++  readonly urlSchemes: readonly string[];
++}
++export const nativeRun = (
++  command: string,
++  args: readonly string[],
++  env = process.env,
++): Promise<string> =>
++  new Promise((resolve, reject) =>
++    execFile(command, [...args], { env, maxBuffer: 1024 * 1024 }, (error, stdout) =>
++      error ? reject(error) : resolve(stdout),
++    ),
++  );
++// Snapshot checks detect substitution but do not defend against an active same-UID
++// attacker racing filesystem operations; this matches the preparer cleanup boundary.
++export async function bundleDigest(root: string): Promise<string> {
++  const hash = createHash("sha256");
++  const walk = async (entry: string): Promise<void> => {
++    const stat = await fs.lstat(entry);
++    const real = await fs.realpath(entry);
++    if (real !== root && !real.startsWith(root + path.sep))
++      throw new Error("bundle symlink escape");
++    const relative = path.relative(root, entry);
++    if (path.basename(entry).toLowerCase() === "app-update.yml")
++      throw new Error("upstream updater metadata");
++    const record = (kind: string, bytes: number, digest: string) => {
++      // Each record is self-framed JSON. File bytes are represented by a fixed-size
++      // payload digest, so payloads cannot impersonate subsequent entry headers.
++      hash.update(
++        JSON.stringify([kind, Buffer.byteLength(relative), relative, stat.mode, bytes, digest]) +
++          "\n",
++      );
++    };
++    if (stat.isSymbolicLink()) {
++      const target = Buffer.from(await fs.readlink(entry));
++      record("symlink", target.length, createHash("sha256").update(target).digest("hex"));
++    } else if (stat.isDirectory()) {
++      record("directory", 0, "");
++      for (const name of (await fs.readdir(entry)).sort()) await walk(path.join(entry, name));
++    } else if (stat.isFile() && stat.nlink === 1) {
++      const handle = await fs.open(entry, constants.O_RDONLY | constants.O_NOFOLLOW);
++      const payload = createHash("sha256");
++      let bytes = 0;
++      try {
++        for await (const chunk of handle.createReadStream({ autoClose: false })) {
++          bytes += chunk.length;
++          payload.update(chunk);
++        }
++        if (bytes !== stat.size) throw new Error("bundle changed during digest");
++        record("file", bytes, payload.digest("hex"));
++      } finally {
++        await handle.close();
++      }
++    } else throw new Error("nonregular bundle entry");
++  };
++  if ((await fs.realpath(root)) !== root || !(await fs.lstat(root)).isDirectory())
++    throw new Error("invalid bundle root");
++  await walk(root);
++  return hash.digest("hex");
++}
++export async function bundleOwner(entry: string): Promise<BundleOwner> {
++  const stat = await fs.lstat(entry);
++  if (!stat.isDirectory() || stat.isSymbolicLink() || (await fs.realpath(entry)) !== entry)
++    throw new Error("unsafe bundle path");
++  return { dev: stat.dev, ino: stat.ino };
++}
++const sameOwner = (a: BundleOwner, b: BundleOwner) => a.dev === b.dev && a.ino === b.ino;
++export function parseInstallTask(value: unknown): ManagedDesktopInstallTask {
++  if (!value || typeof value !== "object") throw new Error("invalid task");
++  const t = value as ManagedDesktopInstallTask;
++  const keys = [
++    "schemaVersion",
++    "id",
++    "uid",
++    "parentPid",
++    "installedBundle",
++    "stagedBundle",
++    "backupBundle",
++    "installedOwner",
++    "stagedOwner",
++    "digest",
++    "bundleId",
++    "productName",
++    "targetVersion",
++    "urlSchemes",
++  ].sort();
++  if (
++    JSON.stringify(Object.keys(t).sort()) !== JSON.stringify(keys) ||
++    t.schemaVersion !== 1 ||
++    !/^[a-f0-9-]{36}$/.test(t.id) ||
++    !Number.isSafeInteger(t.uid) ||
++    t.uid < 0 ||
++    !Number.isSafeInteger(t.parentPid) ||
++    t.parentPid <= 1 ||
++    !/^[a-f0-9]{64}$/.test(t.digest)
++  )
++    throw new Error("invalid task fields");
++  for (const owner of [t.installedOwner, t.stagedOwner])
++    if (
++      !owner ||
++      Object.keys(owner).sort().join() !== "dev,ino" ||
++      !Number.isSafeInteger(owner.dev) ||
++      !Number.isSafeInteger(owner.ino)
++    )
++      throw new Error("invalid owner");
++  for (const field of [t.productName, t.bundleId, t.targetVersion])
++    if (typeof field !== "string" || !field || field.length > 256 || field.includes("\0"))
++      throw new Error("invalid identity");
++  if (
++    path.basename(t.productName) !== t.productName ||
++    [".", ".."].includes(t.productName) ||
++    !Array.isArray(t.urlSchemes) ||
++    !t.urlSchemes.length ||
++    t.urlSchemes.length > 32 ||
++    t.urlSchemes.some((s) => typeof s !== "string" || !/^[a-z][a-z0-9+.-]*$/i.test(s))
++  )
++    throw new Error("invalid schemes/product");
++  for (const entry of [t.installedBundle, t.stagedBundle, t.backupBundle])
++    if (
++      typeof entry !== "string" ||
++      !path.isAbsolute(entry) ||
++      path.normalize(entry) !== entry ||
++      entry.includes("\0")
++    )
++      throw new Error("invalid paths");
++  const parent = path.dirname(t.installedBundle);
++  if (
++    path.basename(t.installedBundle) !== `${t.productName}.app` ||
++    path.dirname(t.stagedBundle) !== parent ||
++    path.dirname(t.backupBundle) !== parent ||
++    !path.basename(t.stagedBundle).startsWith(`.${t.productName}.managed-`) ||
++    !t.stagedBundle.endsWith(".app") ||
++    t.backupBundle !== path.join(parent, `.${t.productName}.previous-${t.id}.app`) ||
++    new Set([t.installedBundle, t.stagedBundle, t.backupBundle]).size !== 3
++  )
++    throw new Error("path containment");
++  return t;
++}
++// Fixed program only: paths are positional arguments, never interpolated code.
++const atomicSwapProgram = `ObjC.import('stdlib');
++ObjC.bindFunction('renamex_np', ['int', ['char *', 'char *', 'unsigned int']]);
++function run(argv) {
++  if (argv.length !== 2) throw new Error('Expected two paths');
++  var result = $.renamex_np(argv[0], argv[1], 2);
++  if (result !== 0) throw new Error('Atomic bundle exchange failed: ' + result);
++  return '0';
++}`;
++export async function atomicBundleSwap(installed: string, other: string): Promise<void> {
++  if (process.platform !== "darwin" || path.dirname(installed) !== path.dirname(other))
++    throw new Error("Atomic bundle exchange unavailable");
++  const result = await nativeRun("/usr/bin/osascript", [
++    "-l",
++    "JavaScript",
++    "-e",
++    atomicSwapProgram,
++    installed,
++    other,
++  ]);
++  if (result.trim() !== "0") throw new Error("Atomic bundle exchange returned an invalid result");
++}
++export async function waitForParentExit(
++  parentPid: number,
++  parent: () => number = () => process.ppid,
++  timeoutMs = 120_000,
++): Promise<void> {
++  const deadline = Date.now() + timeoutMs;
++  // Reparenting ends this exact relationship. Reuse of the former parent's PID
++  // cannot recreate it, unlike kill(pid, 0) probing an unrelated future process.
++  while (parent() === parentPid) {
++    if (Date.now() >= deadline) throw new Error("Desktop parent exit timeout");
++    await new Promise((resolve) => setTimeout(resolve, Math.min(200, timeoutMs)));
++  }
++}
++export interface HelperSeams {
++  readonly run: typeof nativeRun;
++  readonly parentPid: () => number;
++  readonly waitForExit: (pid: number) => Promise<void>;
++  readonly swap: typeof atomicBundleSwap;
++  readonly rename: typeof fs.rename;
++  readonly checkpoint?: (phase: string) => Promise<void>;
++}
++export const helperDefaults: HelperSeams = {
++  run: nativeRun,
++  parentPid: () => process.ppid,
++  rename: fs.rename,
++  swap: atomicBundleSwap,
++  waitForExit: waitForParentExit,
++};
++async function syncDirectory(directory: string): Promise<void> {
++  const handle = await fs.open(directory, constants.O_RDONLY);
++  try {
++    await handle.sync();
++  } finally {
++    await handle.close();
++  }
++}
++export async function durableRecord(
++  directory: string,
++  name: string,
++  value: unknown,
++): Promise<void> {
++  const handle = await fs.open(
++    path.join(directory, name),
++    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
++    0o600,
++  );
++  try {
++    await handle.writeFile(JSON.stringify(value));
++    await handle.sync();
++  } finally {
++    await handle.close();
++  }
++  await syncDirectory(directory);
++}
++export async function verifyInstallTarget(
++  task: ManagedDesktopInstallTask,
++  bundle: string,
++  run = nativeRun,
++): Promise<void> {
++  if ((await bundleDigest(bundle)) !== task.digest) throw new Error("target digest mismatch");
++  const p = JSON.parse(
++    await run("/usr/bin/plutil", [
++      "-convert",
++      "json",
++      "-o",
++      "-",
++      path.join(bundle, "Contents/Info.plist"),
++    ]),
++  );
++  const schemes = Array.isArray(p.CFBundleURLTypes)
++    ? p.CFBundleURLTypes.flatMap((t: { CFBundleURLSchemes?: unknown }) =>
++        Array.isArray(t?.CFBundleURLSchemes) ? t.CFBundleURLSchemes : [null],
++      )
++    : [];
++  if (
++    p.CFBundleIdentifier !== task.bundleId ||
++    p.CFBundleName !== task.productName ||
++    (p.CFBundleDisplayName !== undefined && p.CFBundleDisplayName !== task.productName) ||
++    p.CFBundleVersion !== task.targetVersion ||
++    p.CFBundleShortVersionString !== task.targetVersion ||
++    JSON.stringify(schemes.sort()) !== JSON.stringify([...task.urlSchemes].sort())
++  )
++    throw new Error("target identity/version mismatch");
++  await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle]);
++}
++export async function validateInstallPaths(task: ManagedDesktopInstallTask): Promise<void> {
++  if (
++    !sameOwner(await bundleOwner(task.installedBundle), task.installedOwner) ||
++    !sameOwner(await bundleOwner(task.stagedBundle), task.stagedOwner)
++  )
++    throw new Error("bundle owner changed");
++  try {
++    await fs.lstat(task.backupBundle);
++  } catch (error) {
++    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
++    throw error;
++  }
++  throw new Error("backup already exists");
++}
++export async function runInstallHelper(
++  taskPath: string,
++  control: AsyncIterable<Buffer | string>,
++  send: (message: string) => void,
++  seams: HelperSeams = helperDefaults,
++): Promise<void> {
++  const directory = path.dirname(taskPath);
++  const dir = await fs.lstat(directory);
++  if (
++    !dir.isDirectory() ||
++    dir.isSymbolicLink() ||
++    (dir.mode & 0o777) !== 0o700 ||
++    dir.uid !== process.getuid?.() ||
++    (await fs.realpath(directory)) !== directory ||
++    path.basename(taskPath) !== "task.json"
++  )
++    throw new Error("unsafe task directory");
++  const handle = await fs.open(
++    taskPath,
++    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
++  );
++  let task: ManagedDesktopInstallTask;
++  try {
++    const stat = await handle.stat();
++    if (
++      !stat.isFile() ||
++      stat.nlink !== 1 ||
++      stat.uid !== dir.uid ||
++      (stat.mode & 0o777) !== 0o600 ||
++      stat.size > 16384
++    )
++      throw new Error("unsafe task record");
++    task = parseInstallTask(JSON.parse(await handle.readFile("utf8")));
++  } finally {
++    await handle.close();
++  }
++  if (task.uid !== dir.uid) throw new Error("task ownership mismatch");
++  if (seams.parentPid() !== task.parentPid) throw new Error("Desktop parent relationship mismatch");
++  await validateInstallPaths(task);
++  await verifyInstallTarget(task, task.stagedBundle, seams.run);
++  if (seams.parentPid() !== task.parentPid) throw new Error("Desktop parent exited before READY");
++  send("READY\n");
++  let input = "";
++  let committed = false;
++  const messages = control[Symbol.asyncIterator]();
++  while (true) {
++    const next = await messages.next();
++    if (next.done) break;
++    input += next.value.toString();
++    if (input.length > 128) throw new Error("invalid control frame");
++    if (!input.includes("\n")) continue;
++    if (input !== `COMMIT ${task.id}\n`) return;
++    committed = true;
++    break;
++  }
++  if (!committed) return;
++  await durableRecord(directory, "owner.json", { id: task.id, pid: process.pid, committed: true });
++  // Ownership is durable before ARMED; pipe failure cannot disarm a committed task.
++  try {
++    send("ARMED\n");
++  } catch {
++    /* continue installation */
++  }
++  let status = "failed";
++  let detail = "";
++  try {
++    await seams.waitForExit(task.parentPid);
++    await validateInstallPaths(task);
++    await verifyInstallTarget(task, task.stagedBundle, seams.run);
++    await seams.checkpoint?.("before-swap");
++    await seams.swap(task.installedBundle, task.stagedBundle);
++    await seams.checkpoint?.("swapped");
++    await syncDirectory(path.dirname(task.installedBundle));
++    await seams.checkpoint?.("swap-durable");
++    if (!sameOwner(await bundleOwner(task.installedBundle), task.stagedOwner))
++      throw new Error("installed owner mismatch");
++    await verifyInstallTarget(task, task.installedBundle, seams.run);
++    await seams.checkpoint?.("verified");
++    await seams.rename(task.stagedBundle, task.backupBundle);
++    await seams.checkpoint?.("backed-up");
++    await syncDirectory(path.dirname(task.installedBundle));
++    await seams.checkpoint?.("backup-durable");
++    const env = { ...process.env };
++    delete env.ELECTRON_RUN_AS_NODE;
++    await seams.run("/usr/bin/open", [task.installedBundle], env);
++    await seams.checkpoint?.("reopened");
++    status = "installed";
++  } catch (error) {
++    detail = String(error).slice(0, 2048);
++    try {
++      // Inspect actual inode ownership, including a swap/rename whose OS operation
++      // succeeded but whose subprocess acknowledgement was lost.
++      if (sameOwner(await bundleOwner(task.installedBundle), task.stagedOwner)) {
++        let previous: string | undefined;
++        for (const candidate of [task.stagedBundle, task.backupBundle]) {
++          try {
++            if (sameOwner(await bundleOwner(candidate), task.installedOwner)) previous = candidate;
++          } catch (candidateError) {
++            if ((candidateError as NodeJS.ErrnoException).code !== "ENOENT") throw candidateError;
++          }
++        }
++        if (!previous) throw new Error("Previous bundle owner unavailable");
++        await seams.swap(task.installedBundle, previous);
++        await seams.checkpoint?.("rolled-back");
++        await syncDirectory(path.dirname(task.installedBundle));
++        if (!sameOwner(await bundleOwner(task.installedBundle), task.installedOwner))
++          throw new Error("Rollback owner mismatch");
++        status = "rolled-back";
++        const env = { ...process.env };
++        delete env.ELECTRON_RUN_AS_NODE;
++        await seams.run("/usr/bin/open", [task.installedBundle], env);
++      }
++    } catch (rollbackError) {
++      status = "rollback-failed";
++      detail += `; ${String(rollbackError).slice(0, 2048)}`;
++    }
++  }
++  await durableRecord(directory, "result.json", { id: task.id, status, detail });
++}
++if (process.argv[2] === "--managed-desktop-install-helper") {
++  const pipe = new Socket({ fd: 3, readable: true, writable: true });
++  pipe.on("error", () => {});
++  void runInstallHelper(process.argv[3] ?? "", pipe, (message) => {
++    pipe.write(message);
++  }).then(
++    () => {
++      pipe.destroy();
++    },
++    () => {
++      pipe.destroy();
++      process.exitCode = 1;
++    },
++  );
++}
+diff --git a/apps/desktop/vite.config.ts b/apps/desktop/vite.config.ts
+index 294a02030a83f2e4e4da0bc08e6be6208bb31290..a335291c4adcb0c80a9f82561dd9984fb9327cd3 100644
+--- a/apps/desktop/vite.config.ts
++++ b/apps/desktop/vite.config.ts
+@@ -83,6 +83,14 @@ export default defineConfig({
+       outExtensions: () => ({ js: ".cjs" }),
+       entry: ["src/preview-pip-preload.ts"],
+     },
++    {
++      format: "cjs",
++      outDir: "dist-electron",
++      sourcemap: true,
++      outExtensions: () => ({ js: ".cjs" }),
++      entry: ["src/updates/managedDesktopInstallHelper.ts"],
++      deps: { alwaysBundle: () => true },
++    },
+   ],
+   test: {
+     // The Windows lane runs workspace suites concurrently; filesystem-heavy

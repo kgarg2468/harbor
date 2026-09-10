@@ -1,0 +1,782 @@
+diff --git a/apps/desktop/src/backend/DesktopBackendManager.test.ts b/apps/desktop/src/backend/DesktopBackendManager.test.ts
+index ed3c156d6aa05df6ab6aabd6765cc8701ce1d507..9a64374eb09105144df14ad9faee9e63e79eb877 100644
+--- a/apps/desktop/src/backend/DesktopBackendManager.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendManager.test.ts
+@@ -282,6 +282,12 @@ function makeTestInstance(input: MakeInstanceInput) {
+       handleControl: () => Effect.void,
+       handleControlForSource: () => Effect.void,
+       removeControlSource: () => Effect.void,
++      publishUpdateReportAcknowledged: () =>
++        Effect.fail(
++          new DesktopTelemetryPublisher.DesktopUpdateReportAcknowledgementFailed({
++            message: "report acknowledgement unused by fixture",
++          }),
++        ),
+       publishUpdateReport: () => Effect.void,
+       updateRequests: Stream.empty,
+       updateCommits: Stream.empty,
+diff --git a/apps/desktop/src/backend/DesktopBackendPool.test.ts b/apps/desktop/src/backend/DesktopBackendPool.test.ts
+index 65d0ce30ce0be44d0290f68dc76acabeb882337d..d37c5e5a74463e10205422681cd786c676f23659 100644
+--- a/apps/desktop/src/backend/DesktopBackendPool.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendPool.test.ts
+@@ -88,6 +88,12 @@ function makePoolLayer(
+           handleControl: () => Effect.void,
+           handleControlForSource: () => Effect.void,
+           removeControlSource: () => Effect.void,
++          publishUpdateReportAcknowledged: () =>
++            Effect.fail(
++              new DesktopTelemetryPublisher.DesktopUpdateReportAcknowledgementFailed({
++                message: "report acknowledgement unused by fixture",
++              }),
++            ),
+           publishUpdateReport: () => Effect.void,
+           updateRequests: Stream.empty,
+           updateCommits: Stream.empty,
+diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
+index 0ed5c41c8093963cc55e370407078f3d65d57dae..aa0afaf0a8872a2c975e60e86e68ff2738a9f6e6 100644
+--- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
++++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
+@@ -977,3 +977,223 @@ describe("DesktopTelemetryPublisher", () => {
+     );
+   });
+ });
++
++const dispositionReport = {
++  ...upToDateReport,
++  requestId: "request-receipt",
++  attemptId: "attempt-receipt",
++  targetVersion: artifact.targetVersion,
++  artifact,
++  commitDisposition: "accepted",
++} as const;
++const receipt = {
++  version: 1,
++  type: "desktopUpdateStatusAcknowledgement",
++  requestId: dispositionReport.requestId,
++  attemptId: dispositionReport.attemptId,
++  targetVersion: artifact.targetVersion,
++  artifact,
++  commitDisposition: "accepted",
++} as const;
++
++describe("descriptor-bound report receipts", () => {
++  it.effect("bounds permanent correlations without evicting completed or failed attempts", () =>
++    Effect.gen(function* () {
++      const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const run = { instanceId: "primary", runId: 1 };
++      let channel = yield* publisher.reservationTransport.openRun(run);
++      const reports = yield* Queue.unbounded<DesktopHostTelemetryMessageValue>();
++      yield* decodeEncoded(publisher.encoded).pipe(
++        Stream.filter((message) => message.type === "desktopUpdateStatus"),
++        Stream.runForEach((message) => Queue.offer(reports, message)),
++        Effect.forkChild,
++      );
++      yield* Effect.yieldNow;
++      const reportFor = (attemptId: string) => ({ ...dispositionReport, attemptId });
++      const publish = (attemptId: string) =>
++        publisher.publishUpdateReportAcknowledged([run], reportFor(attemptId));
++      // All four terminal paths retain their correlation permanently.
++      const success = yield* publish("bounded-success").pipe(Effect.forkChild);
++      yield* Queue.take(reports);
++      yield* channel.handleControl({ ...receipt, attemptId: "bounded-success" });
++      yield* Fiber.join(success);
++      const timeout = yield* publish("bounded-timeout").pipe(Effect.forkChild);
++      yield* Queue.take(reports);
++      yield* TestClock.adjust(Duration.seconds(31));
++      assert.isTrue(Exit.isFailure(yield* Fiber.await(timeout)));
++      const interrupted = yield* publish("bounded-interrupted").pipe(Effect.forkChild);
++      yield* Queue.take(reports);
++      yield* Fiber.interrupt(interrupted);
++      const closed = yield* publish("bounded-closed").pipe(Effect.forkChild);
++      yield* Queue.take(reports);
++      yield* channel.close("exit");
++      assert.isTrue(Exit.isFailure(yield* Fiber.await(closed)));
++      channel = yield* publisher.reservationTransport.openRun(run);
++      for (let i = 4; i < DesktopTelemetryPublisher.UPDATE_REPORT_ACKNOWLEDGEMENT_CAPACITY; i++) {
++        const attemptId = `bounded-${i}`;
++        const pending = yield* publish(attemptId).pipe(Effect.forkChild);
++        yield* Queue.take(reports);
++        yield* channel.handleControl({ ...receipt, attemptId });
++        yield* Fiber.join(pending);
++      }
++      // Immediate refusal needs neither a receipt, an exit nor a timeout;
++      // there is no installed waiter and the broadcast stream stays empty.
++      for (let i = 0; i < 3; i++) {
++        const error = yield* publish("overflow").pipe(Effect.flip);
++        assert.include(error.message, "capacity exhausted");
++        yield* channel.handleControl({ ...receipt, attemptId: "overflow" });
++        yield* Effect.yieldNow;
++        assert.equal(yield* Queue.size(reports), 0);
++      }
++      for (const attemptId of [
++        "bounded-success",
++        "bounded-timeout",
++        "bounded-interrupted",
++        "bounded-closed",
++      ]) {
++        yield* channel.handleControl({ ...receipt, attemptId });
++        const error = yield* publish(attemptId).pipe(Effect.flip);
++        assert.include(error.message, "already published");
++      }
++      // Refused overflow attempts did not grow the tombstone set or displace
++      // its oldest entry: they still report capacity, never duplicate reuse.
++      assert.include((yield* publish("overflow").pipe(Effect.flip)).message, "capacity exhausted");
++      assert.equal(yield* Queue.size(reports), 0);
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect("does not lose immediate receipts and refuses a run that exits after its receipt", () =>
++    Effect.gen(function* () {
++      const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++      const runs = [
++        { instanceId: "primary", runId: 1 },
++        { instanceId: "other", runId: 2 },
++      ];
++      const channels = yield* Effect.all(runs.map(publisher.reservationTransport.openRun));
++      for (const channel of channels) {
++        yield* decodeEncoded(channel.encoded).pipe(
++          Stream.filter((m) => m.type === "desktopUpdateStatus"),
++          Stream.runForEach(() => channel.handleControl(receipt)),
++          Effect.forkChild,
++        );
++      }
++      yield* Effect.yieldNow;
++      yield* publisher.publishUpdateReportAcknowledged(runs, dispositionReport);
++      const report = { ...dispositionReport, attemptId: "exit-after-receipt" };
++      const pending = yield* publisher
++        .publishUpdateReportAcknowledged(runs, report)
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      yield* channels[0]!.handleControl({ ...receipt, attemptId: report.attemptId });
++      yield* channels[0]!.close("exit");
++      yield* channels[1]!.handleControl({ ...receipt, attemptId: report.attemptId });
++      assert.isTrue(Exit.isFailure(yield* Fiber.await(pending)));
++    }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++
++  it.effect(
++    "registers before broadcast and requires every exact generation despite early, duplicate and wrong receipts",
++    () =>
++      Effect.gen(function* () {
++        const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++        const runs = [
++          { instanceId: "primary", runId: 1 },
++          { instanceId: "primary", runId: 2 },
++        ];
++        const channels = yield* Effect.all(runs.map(publisher.reservationTransport.openRun));
++        const unrelated = yield* publisher.reservationTransport.openRun({
++          instanceId: "other",
++          runId: 1,
++        });
++        yield* channels[0]!.handleControl(receipt); // too early
++        const seen = yield* Queue.unbounded<number>();
++        for (const [index, channel] of channels.entries()) {
++          yield* decodeEncoded(channel.encoded).pipe(
++            Stream.filter((m) => m.type === "desktopUpdateStatus"),
++            Stream.runForEach(() => Queue.offer(seen, index)),
++            Effect.forkChild,
++          );
++        }
++        yield* Effect.yieldNow;
++        const fiber = yield* publisher
++          .publishUpdateReportAcknowledged(runs, dispositionReport)
++          .pipe(Effect.forkChild);
++        yield* Queue.take(seen);
++        yield* Queue.take(seen);
++        assert.isUndefined(fiber.pollUnsafe());
++        yield* unrelated.handleControl(receipt);
++        yield* publisher.handleControl(receipt);
++        yield* channels[0]!.handleControl(receipt);
++        yield* channels[0]!.handleControl(receipt);
++        for (const wrong of [
++          { requestId: "wrong" },
++          { attemptId: "wrong" },
++          { targetVersion: "wrong" },
++          { commitDisposition: "rejected" as const },
++          { artifact: { ...artifact, bytes: 99 } },
++        ]) {
++          yield* channels[1]!.handleControl({ ...receipt, ...wrong });
++        }
++        yield* Effect.yieldNow;
++        assert.isUndefined(fiber.pollUnsafe());
++        yield* channels[1]!.handleControl(receipt);
++        yield* Fiber.join(fiber);
++        yield* channels[1]!.handleControl(receipt); // late duplicate
++        assert.isTrue(
++          Exit.isFailure(
++            yield* publisher
++              .publishUpdateReportAcknowledged(runs, dispositionReport)
++              .pipe(Effect.exit),
++          ),
++        );
++      }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++  it.effect(
++    "fails missing, closed and silent generations and cleans only interrupted waiters",
++    () =>
++      Effect.gen(function* () {
++        const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++        const run = { instanceId: "primary", runId: 1 };
++        assert.isTrue(
++          Exit.isFailure(
++            yield* publisher
++              .publishUpdateReportAcknowledged([run], dispositionReport)
++              .pipe(Effect.exit),
++          ),
++        );
++        const channel = yield* publisher.reservationTransport.openRun(run);
++        const first = yield* publisher
++          .publishUpdateReportAcknowledged([run], dispositionReport)
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        const secondReport = { ...dispositionReport, attemptId: "second" };
++        const second = yield* publisher
++          .publishUpdateReportAcknowledged([run], secondReport)
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        yield* Fiber.interrupt(first);
++        yield* channel.handleControl(receipt);
++        assert.isUndefined(second.pollUnsafe());
++        yield* channel.handleControl({ ...receipt, attemptId: "second" });
++        yield* Fiber.join(second);
++        const silent = yield* publisher
++          .publishUpdateReportAcknowledged([run], { ...dispositionReport, attemptId: "silent" })
++          .pipe(Effect.forkChild);
++        yield* TestClock.adjust(Duration.seconds(31));
++        assert.isTrue(Exit.isFailure(yield* Fiber.await(silent)));
++        const closing = yield* publisher
++          .publishUpdateReportAcknowledged([run], { ...dispositionReport, attemptId: "closing" })
++          .pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        yield* channel.close("exit");
++        assert.isTrue(Exit.isFailure(yield* Fiber.await(closing)));
++        assert.isTrue(
++          Exit.isFailure(
++            yield* publisher
++              .publishUpdateReportAcknowledged([run], { ...dispositionReport, attemptId: "closed" })
++              .pipe(Effect.exit),
++          ),
++        );
++      }).pipe(Effect.provide(makeQuietPublisherLayer())),
++  );
++});
+diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
+index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dcc736e9d1 100644
+--- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
++++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
+@@ -1,5 +1,6 @@
+ import {
+   DesktopHostTelemetryMessage,
++  DesktopUpdateStatusAcknowledgement,
+   type DesktopHostTelemetryMessage as DesktopHostTelemetryMessageValue,
+   type DesktopHostTelemetrySnapshot,
+   type DesktopTelemetryControlMessage,
+@@ -41,6 +42,11 @@ const IDLE_THRESHOLD_SECONDS = 60;
+ // A reservation exchange that hears nothing from its run for this long is
+ // reported as unanswered; the transaction treats silence as a refusal.
+ const RESERVATION_REPLY_TIMEOUT = Duration.seconds(30);
++// More than eleven years of daily install attempts in one desktop process.
++// Never evict: an old receipt must not authorize reuse of its correlation.
++// Once full, fail closed until the desktop process restarts (closing every
++// trusted run channel and discarding its outstanding wire receipts).
++export const UPDATE_REPORT_ACKNOWLEDGEMENT_CAPACITY = 4096;
+ const encodeMessage = Schema.encodeSync(Schema.fromJsonString(DesktopHostTelemetryMessage));
+ const textEncoder = new TextEncoder();
+ 
+@@ -96,6 +102,11 @@ export interface DesktopUpdateReservationTransport {
+   ) => Effect.Effect<DesktopUpdateReservationExchange>;
+ }
+ 
++export class DesktopUpdateReportAcknowledgementFailed extends Schema.TaggedErrorClass<DesktopUpdateReportAcknowledgementFailed>()(
++  "DesktopUpdateReportAcknowledgementFailed",
++  { message: Schema.String },
++) {}
++
+ export class DesktopTelemetryPublisher extends Context.Service<
+   DesktopTelemetryPublisher,
+   {
+@@ -112,6 +123,11 @@ export class DesktopTelemetryPublisher extends Context.Service<
+         to backends that attach later (including the one spawned after a
+         relaunch). */
+     readonly publishUpdateReport: (report: DesktopUpdateStatusReport) => Effect.Effect<void>;
++    /** Broadcast a disposition only after installing exact-generation receipt waiters. */
++    readonly publishUpdateReportAcknowledged: (
++      runs: ReadonlyArray<OwnedBackendRun>,
++      report: DesktopUpdateStatusReport,
++    ) => Effect.Effect<void, DesktopUpdateReportAcknowledgementFailed>;
+     /** Update requests received over the control channel. Single consumer. */
+     readonly updateRequests: Stream.Stream<DesktopTelemetryRequestDesktopUpdate>;
+     readonly updateCommits: Stream.Stream<DesktopTelemetryCommitDesktopUpdate>;
+@@ -127,6 +143,10 @@ interface ReservationRunEntry {
+   readonly commands: Queue.Queue<DesktopUpdateReservationCommand, Cause.Done>;
+   /** At most one in-flight exchange per attempt id. */
+   readonly pending: Map<string, Deferred.Deferred<DesktopUpdateReservationExchange>>;
++  readonly reportPending: Map<
++    string,
++    Deferred.Deferred<void, DesktopUpdateReportAcknowledgementFailed>
++  >;
+   closed: boolean;
+ }
+ 
+@@ -419,6 +439,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+         return Queue.offer(updateCommitQueue, message).pipe(Effect.asVoid);
+       case "cancelDesktopUpdate":
+         return Queue.offer(updateCancellationQueue, message).pipe(Effect.asVoid);
++      case "desktopUpdateStatusAcknowledgement":
+       case "desktopUpdateReservationReply":
+         // Only a run channel can correlate a reply with the generation that
+         // sent it. A reply on a string-keyed source has no trusted run.
+@@ -524,6 +545,18 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+       if (generations.size === 0) reservationRuns.delete(entry.run.instanceId);
+     }
+     Queue.endUnsafe(entry.commands);
++    const reportWaiters = [...entry.reportPending.values()];
++    entry.reportPending.clear();
++    for (const waiter of reportWaiters) {
++      Deferred.doneUnsafe(
++        waiter,
++        Effect.fail(
++          new DesktopUpdateReportAcknowledgementFailed({
++            message: `${describeRun(entry.run)} closed: ${reason}`,
++          }),
++        ),
++      );
++    }
+     const waiters = [...entry.pending.values()];
+     entry.pending.clear();
+     const result = Effect.succeed(unanswered(`${describeRun(entry.run)} closed: ${reason}`));
+@@ -572,6 +605,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+           sourceId: runSourceId(run),
+           commands,
+           pending: new Map(),
++          reportPending: new Map(),
+           closed: false,
+         };
+         // Registration and the displaced entry's retirement are one
+@@ -594,6 +628,18 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+           encoded: encodeWithHello(Stream.merge(globalBody, Stream.fromQueue(commands))),
+           handleControl: (message) => {
+             switch (message.type) {
++              case "desktopUpdateStatusAcknowledgement":
++                return Effect.suspend(() => {
++                  if (entry.closed) return Effect.void;
++                  const decoded = Schema.decodeUnknownOption(DesktopUpdateStatusAcknowledgement)(
++                    message,
++                  );
++                  if (Option.isNone(decoded)) return Effect.void;
++                  const waiter = entry.reportPending.get(reportKey(decoded.value));
++                  return waiter === undefined
++                    ? Effect.void
++                    : Deferred.succeed(waiter, undefined).pipe(Effect.asVoid);
++                });
+               case "desktopUpdateReservationReply":
+                 return settleReply(entry, message);
+               case "setDiagnosticsDemand":
+@@ -668,6 +714,116 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+       }),
+     );
+ 
++  // Explicit field ordering makes wire/object key order irrelevant. Tombstones
++  // prevent a replay or late receipt from authorizing a second publication.
++  const reportKey = (report: DesktopUpdateStatusAcknowledgement): string =>
++    JSON.stringify([
++      report.requestId,
++      report.attemptId,
++      report.targetVersion,
++      report.commitDisposition,
++      report.artifact.schemaVersion,
++      report.artifact.targetVersion,
++      report.artifact.releaseArtifactId,
++      report.artifact.presentationVariant,
++      report.artifact.bytes,
++      report.artifact.sha256,
++      report.artifact.manifestSha256,
++      report.artifact.releaseInputSha256,
++    ]);
++  const usedReports = new Set<string>();
++  const publishUpdateReportAcknowledged: DesktopTelemetryPublisher["Service"]["publishUpdateReportAcknowledged"] =
++    (runs, report) =>
++      Effect.uninterruptibleMask((restore) =>
++        Effect.gen(function* () {
++          const receipt = yield* Schema.decodeUnknownEffect(DesktopUpdateStatusAcknowledgement)({
++            version: 1,
++            type: "desktopUpdateStatusAcknowledgement",
++            requestId: report.requestId,
++            attemptId: report.attemptId,
++            targetVersion: report.targetVersion,
++            commitDisposition: report.commitDisposition,
++            artifact: report.artifact,
++          }).pipe(
++            Effect.mapError(
++              () =>
++                new DesktopUpdateReportAcknowledgementFailed({
++                  message: "A descriptor-bound disposition report is required",
++                }),
++            ),
++          );
++          // Validate the actual publication before registering; encoding the stream
++          // later must not silently drop invalid report fields.
++          yield* Effect.try({
++            try: () => encodeMessage(report, { onExcessProperty: "error" }),
++            catch: (cause) =>
++              new DesktopUpdateReportAcknowledgementFailed({
++                message: `Invalid update report: ${String(cause)}`,
++              }),
++          });
++          const key = reportKey(receipt);
++          const waiters: Array<{
++            entry: ReservationRunEntry;
++            waiter: Deferred.Deferred<void, DesktopUpdateReportAcknowledgementFailed>;
++          }> = [];
++          const installed = yield* Effect.sync(() => {
++            if (runs.length === 0) return "No backend generations supplied";
++            if (usedReports.has(key)) return "This disposition report was already published";
++            if (usedReports.size >= UPDATE_REPORT_ACKNOWLEDGEMENT_CAPACITY)
++              return "Desktop update report acknowledgement capacity exhausted; restart the desktop app";
++            const entries = runs.map(lookupRun);
++            if (entries.some((entry) => entry === undefined || entry.closed))
++              return "A required backend generation is not open";
++            usedReports.add(key);
++            for (const entry of new Set(entries)) {
++              if (entry === undefined) continue;
++              const waiter = Deferred.makeUnsafe<void, DesktopUpdateReportAcknowledgementFailed>();
++              entry.reportPending.set(key, waiter);
++              waiters.push({ entry, waiter });
++            }
++            return undefined;
++          });
++          if (installed !== undefined)
++            return yield* Effect.fail(
++              new DesktopUpdateReportAcknowledgementFailed({ message: installed }),
++            );
++          const release = Effect.sync(() => {
++            for (const { entry, waiter } of waiters) {
++              if (entry.reportPending.get(key) === waiter) entry.reportPending.delete(key);
++            }
++          });
++          return yield* restore(
++            publishUpdateReport(report).pipe(
++              Effect.andThen(
++                Effect.all(
++                  waiters.map(({ waiter }) => Deferred.await(waiter)),
++                  { concurrency: "unbounded" },
++                ),
++              ),
++              Effect.timeoutOption(RESERVATION_REPLY_TIMEOUT),
++              Effect.flatMap((result) =>
++                Effect.suspend(() => {
++                  if (Option.isNone(result))
++                    return Effect.fail(
++                      new DesktopUpdateReportAcknowledgementFailed({
++                        message: "Desktop update report acknowledgement timed out",
++                      }),
++                    );
++                  if (waiters.some(({ entry }) => entry.closed || lookupRun(entry.run) !== entry))
++                    return Effect.fail(
++                      new DesktopUpdateReportAcknowledgementFailed({
++                        message:
++                          "A required backend generation closed before all acknowledgements arrived",
++                      }),
++                    );
++                  return Effect.void;
++                }),
++              ),
++            ),
++          ).pipe(Effect.ensuring(release));
++        }),
++      );
++
+   return DesktopTelemetryPublisher.of({
+     latest: Ref.get(latest),
+     changes: Stream.fromPubSub(changes),
+@@ -676,6 +832,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+     handleControlForSource,
+     removeControlSource,
+     publishUpdateReport,
++    publishUpdateReportAcknowledged,
+     updateRequests: Stream.fromQueue(updateRequestQueue),
+     updateCommits: Stream.fromQueue(updateCommitQueue),
+     updateCancellations: Stream.fromQueue(updateCancellationQueue),
+diff --git a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
+index 62b27d43971fa195e9ec16aa7099a4f4208d469b..9ac757e1d0069b51da8718ab524c328bf2055e7e 100644
+--- a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
++++ b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
+@@ -32,10 +32,23 @@ const settle = Effect.gen(function* () {
+   }
+ });
+ 
++const artifact = {
++  schemaVersion: 1,
++  targetVersion: "1.2.4-nightly.20260910.0.managed.1.paaaaaaaaaaaa",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  presentationVariant: "reasoning",
++  bytes: 1234,
++  sha256: "b".repeat(64),
++  manifestSha256: "c".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++} as const;
++
+ const request = (requestId: string): DesktopTelemetryRequestDesktopUpdate => ({
+   version: 1,
+   type: "requestDesktopUpdate",
+   requestId,
++  targetVersion: artifact.targetVersion,
++  artifact,
+ });
+ 
+ function runRemoteUpdatesTest(
+@@ -60,6 +73,12 @@ function runRemoteUpdatesTest(
+         handleControl: () => Effect.void,
+         handleControlForSource: () => Effect.void,
+         removeControlSource: () => Effect.void,
++        publishUpdateReportAcknowledged: () =>
++          Effect.fail(
++            new DesktopTelemetryPublisher.DesktopUpdateReportAcknowledgementFailed({
++              message: "report acknowledgement unused by fixture",
++            }),
++          ),
+         publishUpdateReport: (report) =>
+           Effect.sync(() => {
+             reports.push(report);
+diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
+index f15acec8f92e1afcd85436f5d0ecdbccbd54260b..af6ed5bdfa5aaba135b88fa25f03c429f327c0fa 100644
+--- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
++++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
+@@ -10,6 +10,7 @@ import { it } from "@effect/vitest";
+ import {
+   DesktopHostTelemetryMessage,
+   DesktopTelemetryControlMessage,
++  type DesktopUpdateStatusAcknowledgement,
+   type DesktopUpdateReservationAction,
+   type DesktopUpdateReservationCommand,
+   type DesktopUpdateReservationReply,
+@@ -202,6 +203,7 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+ 
+   const requests = yield* Queue.unbounded<DesktopTelemetryControlMessage>();
+   const replies = yield* Queue.unbounded<DesktopUpdateReservationReply>();
++  const acknowledgements = yield* Queue.unbounded<DesktopUpdateStatusAcknowledgement>();
+   let controlFd: number;
+   if (options.control === "refused") {
+     NodeFS.writeFileSync(controlPath, "");
+@@ -221,6 +223,11 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+       Stream.tap((message) =>
+         message.type === "requestDesktopUpdate" ? Queue.offer(requests, message) : Effect.void,
+       ),
++      Stream.tap((message) =>
++        message.type === "desktopUpdateStatusAcknowledgement"
++          ? Queue.offer(acknowledgements, message)
++          : Effect.void,
++      ),
+       // Startup writes such as `setHostPowerIntervals` are not under test.
+       Stream.filter((message) => message.type === "desktopUpdateReservationReply"),
+       Stream.runForEach((message) => Queue.offer(replies, message)),
+@@ -255,7 +262,9 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+   return {
+     receiver,
+     takeRequest: Queue.take(requests),
+-    send: (message: DesktopUpdateReservationCommand) =>
++    takeAcknowledgement: Queue.take(acknowledgements),
++    pendingAcknowledgements: Queue.size(acknowledgements),
++    send: (message: DesktopHostTelemetryMessage) =>
+       Effect.sync(() => {
+         if (inputWriter === undefined) throw new Error("telemetry input is already closed");
+         NodeFS.writeSync(inputWriter, `${encodeHostMessage(message)}\n`);
+@@ -271,6 +280,50 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+ });
+ 
+ it.layer(NodeServices.layer)("DesktopTelemetryReceiver reservation commands", (it) => {
++  it.effect("acknowledges a disposition only after recording and publishing the exact report", () =>
++    Effect.gen(function* () {
++      const harness = yield* makeReceiverHarness();
++      const subscription = yield* harness.receiver.desktopUpdates;
++      const reports = yield* Queue.unbounded<DesktopHostTelemetryMessage>();
++      yield* subscription.changes.pipe(
++        Stream.runForEach((report) => Queue.offer(reports, report)),
++        Effect.forkScoped,
++      );
++      const report = dispositionReport();
++      const { attemptId: _attempt, commitDisposition: _disposition, ...ordinary } = report;
++      yield* harness.send(ordinary);
++      yield* Queue.take(reports);
++      assert.equal(yield* harness.pendingAcknowledgements, 0);
++      yield* harness.send(report);
++      const ack = yield* harness.takeAcknowledgement;
++      assert.deepEqual(ack, {
++        version: 1,
++        type: "desktopUpdateStatusAcknowledgement",
++        requestId: report.requestId,
++        attemptId: report.attemptId,
++        targetVersion: report.targetVersion,
++        artifact,
++        commitDisposition: "accepted",
++      });
++      assert.deepEqual(yield* Queue.take(reports), report);
++      assert.deepEqual((yield* harness.receiver.desktopUpdates).latest, Option.some(report));
++    }),
++  );
++  it.effect(
++    "retains the received report but visibly degrades on acknowledgement write failure",
++    () =>
++      Effect.gen(function* () {
++        const harness = yield* makeReceiverHarness({ control: "refused" });
++        const report = dispositionReport();
++        yield* harness.send(report);
++        const health = yield* harness.takeHealth;
++        assert.equal(health.status, "degraded");
++        assert.isTrue(Option.exists(health.lastError, (error) => error.includes("'write'")));
++        assert.deepEqual((yield* harness.receiver.desktopUpdates).latest, Option.some(report));
++        assert.equal(yield* harness.pendingAcknowledgements, 0);
++      }),
++  );
++
+   it.effect("writes the exact content-bound update request and refuses mismatches", () =>
+     Effect.gen(function* () {
+       const harness = yield* makeReceiverHarness();
+@@ -455,3 +508,33 @@ it.layer(NodeServices.layer)("DesktopTelemetryReceiver reservation commands", (i
+     }),
+   );
+ });
++
++function dispositionReport() {
++  return {
++    version: 1,
++    type: "desktopUpdateStatus",
++    requestId: "receipt-request",
++    attemptId: "receipt-attempt",
++    targetVersion: artifact.targetVersion,
++    artifact,
++    commitDisposition: "accepted",
++    state: {
++      enabled: true,
++      status: "downloaded",
++      channel: "latest",
++      currentVersion: "1.2.3",
++      hostArch: "arm64",
++      appArch: "arm64",
++      runningUnderArm64Translation: false,
++      availableVersion: artifact.targetVersion,
++      downloadedVersion: artifact.targetVersion,
++      releaseNotes: [],
++      omittedReleaseCount: 0,
++      downloadPercent: 100,
++      checkedAt: null,
++      message: null,
++      errorContext: null,
++      canRetry: false,
++    },
++  } as const;
++}
+diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
+index 53172818d5b214d731c1280b08a04ca5ecffef22..546d57cc3fdb1357cf953996a19569b860d0fb42 100644
+--- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
++++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
+@@ -404,7 +404,18 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+     controlMutex.withPermits(1)(
+       Effect.gen(function* () {
+         const fd = config.desktopTelemetryControlFd;
+-        if (fd === undefined) return;
++        if (fd === undefined) {
++          if (message.type === "desktopUpdateStatusAcknowledgement") {
++            return yield* Effect.fail(
++              new DesktopTelemetryControlFailed({
++                fd: -1,
++                operation: "acknowledge",
++                cause: "Control descriptor unavailable",
++              }),
++            );
++          }
++          return;
++        }
+         const encoded = yield* encodeControlMessage(
+           message,
+           message.type === "requestDesktopUpdate" ? { onExcessProperty: "error" } : undefined,
+@@ -595,6 +606,25 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+           return recordContact.pipe(
+             Effect.andThen(Ref.set(latestUpdateReport, Option.some(message))),
+             Effect.andThen(PubSub.publish(updateReportChanges, message)),
++            Effect.andThen(() => {
++              if (
++                message.artifact === undefined ||
++                message.requestId === undefined ||
++                message.targetVersion === undefined ||
++                message.attemptId === undefined ||
++                message.commitDisposition === undefined
++              )
++                return Effect.void;
++              return sendControlMessage({
++                version: 1,
++                type: "desktopUpdateStatusAcknowledgement",
++                requestId: message.requestId,
++                attemptId: message.attemptId,
++                targetVersion: message.targetVersion,
++                commitDisposition: message.commitDisposition,
++                artifact: message.artifact,
++              });
++            }),
+             Effect.asVoid,
+           );
+         }
+diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
+index 4e881178fe1f878774ab2fa79e6e2ea46250691d..3dc00c3217726a50536e08d2c2ec72a4ef86f989 100644
+--- a/packages/contracts/src/resourceTelemetry.test.ts
++++ b/packages/contracts/src/resourceTelemetry.test.ts
+@@ -374,3 +374,26 @@ describe("content-bound status excess properties", () => {
+     expect(decodeHostMessage({ ...hello, url: "ignored" })).toEqual(hello);
+   });
+ });
++
++it("accepts only closed descriptor-bound disposition acknowledgements", () => {
++  const ack = {
++    version: 1,
++    type: "desktopUpdateStatusAcknowledgement",
++    requestId: "request",
++    attemptId: "attempt",
++    targetVersion: artifact.targetVersion,
++    artifact,
++    commitDisposition: "accepted",
++  };
++  expect(decodeControlMessage(ack)).toEqual(ack);
++  for (const key of ["requestId", "attemptId", "targetVersion", "artifact", "commitDisposition"]) {
++    const invalid = { ...ack };
++    delete invalid[key as keyof typeof invalid];
++    expect(() => decodeControlMessage(invalid)).toThrow();
++  }
++  expect(() => decodeControlMessage({ ...ack, targetVersion: "1.2.3" })).toThrow();
++  expect(() => decodeControlMessage({ ...ack, outcome: "ready-to-install" })).toThrow();
++  expect(() =>
++    decodeControlMessage({ ...ack, artifact: { ...artifact, path: "/tmp/archive" } }),
++  ).toThrow();
++});
+diff --git a/packages/contracts/src/resourceTelemetry.ts b/packages/contracts/src/resourceTelemetry.ts
+index 64b0389ab488b9d48c724190a592ba147e8ad2d9..7e2557c4a5bae433ce40779773a15c1d4e7ea63f 100644
+--- a/packages/contracts/src/resourceTelemetry.ts
++++ b/packages/contracts/src/resourceTelemetry.ts
+@@ -353,6 +353,20 @@ export const DesktopUpdateStatusReport = Schema.Union([
+ ]);
+ export type DesktopUpdateStatusReport = typeof DesktopUpdateStatusReport.Type;
+ 
++/** Receipt of a recorded and published descriptor-bound disposition, never a readiness report. */
++export const DesktopUpdateStatusAcknowledgement = Schema.Struct({
++  version: Schema.Literal(1),
++  type: Schema.Literal("desktopUpdateStatusAcknowledgement"),
++  requestId: TrimmedNonEmptyString,
++  attemptId: TrimmedNonEmptyString,
++  targetVersion: ManagedDesktopArtifactDescriptor.fields.targetVersion,
++  commitDisposition: DesktopUpdateCommitDisposition,
++  artifact: ManagedDesktopArtifactDescriptor,
++})
++  .check(Schema.makeFilter((input) => input.targetVersion === input.artifact.targetVersion))
++  .annotate({ parseOptions: { onExcessProperty: "error" } });
++export type DesktopUpdateStatusAcknowledgement = typeof DesktopUpdateStatusAcknowledgement.Type;
++
+ export const DesktopUpdateReservationAction = Schema.Literals(["reserve", "abort", "commit"]);
+ export type DesktopUpdateReservationAction = typeof DesktopUpdateReservationAction.Type;
+ 
+@@ -466,6 +480,7 @@ export const DesktopTelemetryControlMessage = Schema.Union([
+   DesktopTelemetryCommitDesktopUpdate,
+   DesktopTelemetryCancelDesktopUpdate,
+   DesktopUpdateReservationReply,
++  DesktopUpdateStatusAcknowledgement,
+ ]);
+ export type DesktopTelemetryControlMessage = typeof DesktopTelemetryControlMessage.Type;
+ 

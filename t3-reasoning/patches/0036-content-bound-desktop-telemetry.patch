@@ -1,0 +1,420 @@
+diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
+index e746c33073d8bd26fa13bb5850797b3ecc6284c1..0ed5c41c8093963cc55e370407078f3d65d57dae 100644
+--- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
++++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
+@@ -27,6 +27,17 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
+ import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
+ import * as DesktopTelemetryPublisher from "./DesktopTelemetryPublisher.ts";
+ 
++const artifact = {
++  schemaVersion: 1,
++  targetVersion: "1.2.4-nightly.20260910.0.managed.1.paaaaaaaaaaaa",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  presentationVariant: "reasoning",
++  bytes: 1234,
++  sha256: "b".repeat(64),
++  manifestSha256: "c".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++} as const;
++
+ function makeElectronAppLayer(
+   metrics: ReadonlyArray<Electron.ProcessMetric>,
+   onMetricsRead: () => void = () => undefined,
+@@ -537,11 +548,26 @@ describe("DesktopTelemetryPublisher", () => {
+           version: 1,
+           type: "requestDesktopUpdate",
+           requestId: "req-9",
++          targetVersion: artifact.targetVersion,
++          artifact,
+         });
+         const received = yield* Fiber.join(requestFiber);
+-        assert.equal(Option.getOrThrow(received).requestId, "req-9");
++        assert.deepEqual(Option.getOrThrow(received), {
++          version: 1,
++          type: "requestDesktopUpdate",
++          requestId: "req-9",
++          targetVersion: artifact.targetVersion,
++          artifact,
++        });
+ 
+-        yield* publisher.publishUpdateReport(upToDateReport);
++        const readyReport = {
++          ...upToDateReport,
++          requestId: "req-9",
++          outcome: "ready-to-install" as const,
++          targetVersion: artifact.targetVersion,
++          artifact,
++        };
++        yield* publisher.publishUpdateReport(readyReport);
+ 
+         // A subscriber that attaches after the publish (the backend spawned
+         // by a relaunch) still sees the latest report replayed.
+@@ -558,7 +584,8 @@ describe("DesktopTelemetryPublisher", () => {
+         if (replayedReport.type !== "desktopUpdateStatus") {
+           return assert.fail("Expected a desktop update status report.");
+         }
+-        assert.equal(replayedReport.outcome, "up-to-date");
++        assert.deepEqual(replayedReport, readyReport);
++        assert.isUndefined(replayedReport.commitDisposition);
+         assert.equal(replayedReport.state.currentVersion, "1.2.3");
+       }).pipe(Effect.provide(layer));
+     }),
+diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
+index 7c4c19f64a2497df2f591d57f987dcb1445fe906..c92f2d65ab5f1341151dfbcde10a9303e196d577 100644
+--- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
++++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
+@@ -483,7 +483,13 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+         electronPid: process.pid,
+       } as const),
+       body,
+-    ).pipe(Stream.map((message) => textEncoder.encode(`${encodeMessage(message)}\n`)));
++    ).pipe(
++      Stream.map((message) =>
++        textEncoder.encode(
++          `${encodeMessage(message, message.type === "desktopUpdateStatus" && message.artifact !== undefined ? { onExcessProperty: "error" } : undefined)}\n`,
++        ),
++      ),
++    );
+   const encoded = encodeWithHello(globalBody);
+ 
+   const publishUpdateReport: DesktopTelemetryPublisher["Service"]["publishUpdateReport"] = (
+diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
+index 4307c88cae5a277086ecd63037cff3492cfd9791..f15acec8f92e1afcd85436f5d0ecdbccbd54260b 100644
+--- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
++++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
+@@ -44,6 +44,17 @@ import {
+   writeAllToFileDescriptor,
+ } from "./DesktopTelemetryReceiver.ts";
+ 
++const artifact = {
++  schemaVersion: 1,
++  targetVersion: "1.2.4-nightly.20260910.0.managed.1.paaaaaaaaaaaa",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  presentationVariant: "reasoning",
++  bytes: 1234,
++  sha256: "b".repeat(64),
++  manifestSha256: "c".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++} as const;
++
+ describe("DesktopTelemetryReceiver", () => {
+   it("degrades a hello-only stream after the first-sample deadline", () => {
+     expect(isDesktopTelemetryContactStale(Option.some(1_000), 90_999)).toBe(false);
+@@ -189,6 +200,7 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+   });
+   yield* Effect.addFinalizer(() => closeInput);
+ 
++  const requests = yield* Queue.unbounded<DesktopTelemetryControlMessage>();
+   const replies = yield* Queue.unbounded<DesktopUpdateReservationReply>();
+   let controlFd: number;
+   if (options.control === "refused") {
+@@ -206,6 +218,9 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+     }).pipe(
+       Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
+       Stream.mapEffect((value) => decodeControlMessage(value)),
++      Stream.tap((message) =>
++        message.type === "requestDesktopUpdate" ? Queue.offer(requests, message) : Effect.void,
++      ),
+       // Startup writes such as `setHostPowerIntervals` are not under test.
+       Stream.filter((message) => message.type === "desktopUpdateReservationReply"),
+       Stream.runForEach((message) => Queue.offer(replies, message)),
+@@ -239,6 +254,7 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+ 
+   return {
+     receiver,
++    takeRequest: Queue.take(requests),
+     send: (message: DesktopUpdateReservationCommand) =>
+       Effect.sync(() => {
+         if (inputWriter === undefined) throw new Error("telemetry input is already closed");
+@@ -255,6 +271,23 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
+ });
+ 
+ it.layer(NodeServices.layer)("DesktopTelemetryReceiver reservation commands", (it) => {
++  it.effect("writes the exact content-bound update request and refuses mismatches", () =>
++    Effect.gen(function* () {
++      const harness = yield* makeReceiverHarness();
++      yield* harness.receiver.requestDesktopUpdate("req-1", artifact.targetVersion, artifact);
++      assert.deepEqual(yield* harness.takeRequest, {
++        version: 1,
++        type: "requestDesktopUpdate",
++        requestId: "req-1",
++        targetVersion: artifact.targetVersion,
++        artifact,
++      });
++      const result = yield* harness.receiver
++        .requestDesktopUpdate("req-bad", "latest", artifact)
++        .pipe(Effect.exit);
++      assert.isTrue(Exit.isFailure(result));
++    }),
++  );
+   it.effect("answers an abort while the reserve it ends is still pending", () =>
+     Effect.gen(function* () {
+       const harness = yield* makeReceiverHarness();
+diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
+index c613172f066aec28bc3ef23eb6a35809c85178c2..53172818d5b214d731c1280b08a04ca5ecffef22 100644
+--- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
++++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
+@@ -7,6 +7,7 @@ import {
+   type DesktopHostTelemetryMessage as DesktopHostTelemetryMessageValue,
+   type DesktopHostTelemetrySnapshot,
+   DesktopTelemetryControlMessage,
++  type ManagedDesktopArtifactDescriptor,
+   type DesktopUpdateReservationCommand,
+   type DesktopUpdateReservationReply,
+   type DesktopUpdateStatusReport,
+@@ -186,6 +187,8 @@ export class DesktopTelemetryReceiver extends Context.Service<
+         requestId. */
+     readonly requestDesktopUpdate: (
+       requestId: string,
++      targetVersion: string,
++      artifact: ManagedDesktopArtifactDescriptor,
+     ) => Effect.Effect<void, DesktopTelemetryControlError>;
+     readonly commitDesktopUpdate: (
+       requestId: string,
+@@ -402,7 +405,10 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+       Effect.gen(function* () {
+         const fd = config.desktopTelemetryControlFd;
+         if (fd === undefined) return;
+-        const encoded = yield* encodeControlMessage(message).pipe(
++        const encoded = yield* encodeControlMessage(
++          message,
++          message.type === "requestDesktopUpdate" ? { onExcessProperty: "error" } : undefined,
++        ).pipe(
+           Effect.mapError(
+             (cause) =>
+               new DesktopTelemetryControlFailed({
+@@ -702,11 +708,13 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+     health: Ref.get(health),
+     subscribeHealth: subscribeBeforeSnapshotWithoutMutex(healthChanges, Ref.get(health)),
+     setDiagnosticsDemand,
+-    requestDesktopUpdate: (requestId) =>
++    requestDesktopUpdate: (requestId, targetVersion, artifact) =>
+       sendControlMessage({
+         version: 1,
+         type: "requestDesktopUpdate",
+         requestId,
++        targetVersion,
++        artifact,
+       }),
+     commitDesktopUpdate: (requestId) =>
+       sendControlMessage({ version: 1, type: "commitDesktopUpdate", requestId }),
+diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
+index 3cc7302c23a35100a66229bbcd4c2f4728b40e81..4e881178fe1f878774ab2fa79e6e2ea46250691d 100644
+--- a/packages/contracts/src/resourceTelemetry.test.ts
++++ b/packages/contracts/src/resourceTelemetry.test.ts
+@@ -9,6 +9,17 @@ import {
+   DesktopUpdateStatusReport,
+ } from "./resourceTelemetry.ts";
+ 
++const artifact = {
++  schemaVersion: 1,
++  targetVersion: "1.2.4-nightly.20260910.0.managed.1.paaaaaaaaaaaa",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  presentationVariant: "reasoning",
++  bytes: 1234,
++  sha256: "b".repeat(64),
++  manifestSha256: "c".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++} as const;
++
+ const updateState = {
+   enabled: true,
+   status: "downloaded",
+@@ -30,7 +41,9 @@ const updateState = {
+ 
+ const decodeHostMessage = Schema.decodeUnknownSync(DesktopHostTelemetryMessage);
+ const decodeControlMessage = Schema.decodeUnknownSync(DesktopTelemetryControlMessage);
+-const encodeControlMessage = Schema.encodeSync(DesktopTelemetryControlMessage);
++const encodeControlMessage = Schema.encodeSync(DesktopTelemetryControlMessage, {
++  onExcessProperty: "error",
++});
+ 
+ describe("DesktopUpdateStatusReport", () => {
+   const decode = Schema.decodeUnknownSync(DesktopUpdateStatusReport);
+@@ -42,6 +55,8 @@ describe("DesktopUpdateStatusReport", () => {
+       type: "desktopUpdateStatus",
+       requestId: "req-1",
+       outcome: "ready-to-install",
++      targetVersion: artifact.targetVersion,
++      artifact,
+       state: updateState,
+     });
+ 
+@@ -278,3 +293,84 @@ describe("DesktopUpdateReservationReply", () => {
+     expect(decoded).not.toHaveProperty("runId");
+   });
+ });
++
++describe("content-bound desktop update requests", () => {
++  const request = {
++    version: 1,
++    type: "requestDesktopUpdate",
++    requestId: "req-1",
++    targetVersion: artifact.targetVersion,
++    artifact,
++  } as const;
++  it("round-trips the exact descriptor", () => {
++    expect(decodeControlMessage(encodeControlMessage(request))).toEqual(request);
++  });
++  it("rejects incomplete, excess, mismatched and malformed content in both directions", () => {
++    const invalid = [
++      { ...request, artifact: undefined },
++      { ...request, targetVersion: undefined },
++      { ...request, targetVersion: "latest" },
++      { ...request, targetVersion: artifact.targetVersion.replace("1.2.4", "1.2.5") },
++      { ...request, url: "https://example.com/archive.zip" },
++      ...Object.keys(artifact).map((key) => ({
++        ...request,
++        artifact: { ...artifact, [key]: undefined },
++      })),
++      { ...request, artifact: { ...artifact, url: "https://example.com/archive.zip" } },
++      { ...request, artifact: { ...artifact, sha256: "bad" } },
++      { ...request, artifact: { ...artifact, bytes: 0 } },
++      { ...request, artifact: { ...artifact, presentationVariant: "managed-nightly" } },
++    ];
++    for (const value of invalid) {
++      expect(() => decodeControlMessage(value)).toThrow();
++      expect(() => encodeControlMessage(value as typeof request), JSON.stringify(value)).toThrow();
++    }
++  });
++  it("requires the same explicit content identity on ready reports without implying acceptance", () => {
++    const report = {
++      version: 1,
++      type: "desktopUpdateStatus",
++      requestId: request.requestId,
++      outcome: "ready-to-install",
++      targetVersion: request.targetVersion,
++      artifact,
++      state: updateState,
++    };
++    expect(decodeHostMessage(report)).toEqual(report);
++    for (const value of [
++      { ...report, artifact: undefined },
++      { ...report, requestId: undefined },
++      { ...report, targetVersion: "1.2.4" },
++    ]) {
++      expect(() => decodeHostMessage(value)).toThrow();
++      expect(() =>
++        Schema.encodeSync(DesktopHostTelemetryMessage)(value as DesktopUpdateStatusReport),
++      ).toThrow();
++    }
++  });
++});
++
++describe("content-bound status excess properties", () => {
++  const report = {
++    version: 1,
++    type: "desktopUpdateStatus",
++    requestId: "req-1",
++    outcome: "ready-to-install",
++    targetVersion: artifact.targetVersion,
++    artifact,
++    state: updateState,
++  };
++  it("rejects top-level excess properties directly and through the host union", () => {
++    for (const outcome of ["ready-to-install", "failed", undefined]) {
++      const forged = { ...report, outcome, url: "https://example.com/archive.zip" };
++      expect(() => Schema.decodeUnknownSync(DesktopUpdateStatusReport)(forged)).toThrow();
++      expect(() => decodeHostMessage(forged)).toThrow();
++    }
++  });
++  it("preserves permissive ordinary reports and unrelated telemetry", () => {
++    const ordinary = { version: 1, type: "desktopUpdateStatus", state: updateState };
++    expect(decodeHostMessage({ ...ordinary, url: "ignored" })).toEqual(ordinary);
++    const hello = { version: 1, type: "desktopTelemetryHello", electronPid: 123 };
++    expect(decodeHostMessage({ ...hello, url: "ignored" })).toEqual(hello);
++  });
++});
+diff --git a/packages/contracts/src/resourceTelemetry.ts b/packages/contracts/src/resourceTelemetry.ts
+index f6a3c5567ae764dfe4aaeb43931cce5991817158..64b0389ab488b9d48c724190a592ba147e8ad2d9 100644
+--- a/packages/contracts/src/resourceTelemetry.ts
++++ b/packages/contracts/src/resourceTelemetry.ts
+@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
+ import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+ import { HostPowerSnapshot } from "./background.ts";
+ import { DesktopUpdateStateSchema } from "./ipc.ts";
++import { ManagedDesktopArtifactDescriptor } from "./managedDesktopUpdate.ts";
+ 
+ export const RESOURCE_MONITOR_PROTOCOL_VERSION = 3 as const;
+ 
+@@ -304,7 +305,7 @@ export type DesktopUpdateCommitDisposition = typeof DesktopUpdateCommitDispositi
+  * knows whether the app on its machine can be updated and how a
+  * server-triggered run is progressing.
+  */
+-export const DesktopUpdateStatusReport = Schema.Struct({
++const DesktopUpdateStatusReportBody = Schema.Struct({
+   version: Schema.Literal(1),
+   type: Schema.Literal("desktopUpdateStatus"),
+   // Set while a server-triggered run owns the flow; absent for the attach
+@@ -312,6 +313,8 @@ export const DesktopUpdateStatusReport = Schema.Struct({
+   requestId: Schema.optionalKey(TrimmedNonEmptyString),
+   // Terminal marker for a server-triggered run; absent while it is working.
+   outcome: Schema.optionalKey(DesktopUpdateRemoteOutcome),
++  targetVersion: Schema.optionalKey(ManagedDesktopArtifactDescriptor.fields.targetVersion),
++  artifact: Schema.optionalKey(ManagedDesktopArtifactDescriptor),
+   reason: Schema.optionalKey(TrimmedNonEmptyString),
+   // Set together once an install attempt has reserved its backends: the
+   // reservation attempt (distinct from `requestId`) and whether the desktop
+@@ -320,12 +323,34 @@ export const DesktopUpdateStatusReport = Schema.Struct({
+   commitDisposition: Schema.optionalKey(DesktopUpdateCommitDisposition),
+   state: DesktopUpdateStateSchema,
+ }).check(
++  Schema.makeFilter(
++    (input) =>
++      ((input.targetVersion === undefined) === (input.artifact === undefined) &&
++        (input.artifact === undefined ||
++          (input.requestId !== undefined &&
++            input.targetVersion === input.artifact.targetVersion)) &&
++        (input.outcome !== "ready-to-install" || input.artifact !== undefined)) ||
++      "ready-to-install requires requestId and matching targetVersion/artifact",
++  ),
+   Schema.makeFilter(
+     (input) =>
+       (input.attemptId === undefined) === (input.commitDisposition === undefined) ||
+       "attemptId and commitDisposition must be supplied together",
+   ),
+ );
++// The permissive branch must never accept a content-bound report after
++// stripping unknown fields; those reports use the closed branch exclusively.
++export const DesktopUpdateStatusReport = Schema.Union([
++  DesktopUpdateStatusReportBody.check(
++    Schema.makeFilter(
++      (input) =>
++        input.artifact === undefined &&
++        input.targetVersion === undefined &&
++        input.outcome !== "ready-to-install",
++    ),
++  ),
++  DesktopUpdateStatusReportBody.annotate({ parseOptions: { onExcessProperty: "error" } }),
++]);
+ export type DesktopUpdateStatusReport = typeof DesktopUpdateStatusReport.Type;
+ 
+ export const DesktopUpdateReservationAction = Schema.Literals(["reserve", "abort", "commit"]);
+@@ -401,15 +426,23 @@ export type DesktopTelemetrySetHostPowerIntervals =
+   typeof DesktopTelemetrySetHostPowerIntervals.Type;
+ 
+ /**
+- * Server -> desktop main: run the app's own update flow now (check ->
+- * download -> quit-and-install) with no local confirmation. The remote click
+- * on the machine that sent the RPC is the consent.
++ * Server -> desktop main: prepare the exact content-bound artifact.
++ * Installation still requires a separate explicit commit.
+  */
+ export const DesktopTelemetryRequestDesktopUpdate = Schema.Struct({
+   version: Schema.Literal(1),
+   type: Schema.Literal("requestDesktopUpdate"),
+   requestId: TrimmedNonEmptyString,
+-});
++  targetVersion: ManagedDesktopArtifactDescriptor.fields.targetVersion,
++  artifact: ManagedDesktopArtifactDescriptor,
++})
++  .check(
++    Schema.makeFilter(
++      (input) =>
++        input.targetVersion === input.artifact.targetVersion || "targetVersion must match artifact",
++    ),
++  )
++  .annotate({ parseOptions: { onExcessProperty: "error" } });
+ export type DesktopTelemetryRequestDesktopUpdate = typeof DesktopTelemetryRequestDesktopUpdate.Type;
+ 
+ export const DesktopTelemetryCommitDesktopUpdate = Schema.Struct({
