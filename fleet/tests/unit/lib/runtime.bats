@@ -163,14 +163,35 @@ reader_unreadable() {
   # runtime-install entry records. And a conflicting pair in it must not turn a
   # library's source-time registration into a runtime.reader_conflict, which for
   # lib/node.sh would abort harbor bootstrap before preflight.
-  HARBOR_RUNTIME_READERS=" claude:printf" \
+  HARBOR_RUNTIME_READERS=" claude:printf" HARBOR_RUNTIME_READERS_PID=1 \
     run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; harbor_journal_observe runtime-install claude'
   assert_success
   assert_output '"unobservable:runtime-install:claude"'
-  HARBOR_RUNTIME_READERS=" prefix:some_other_reader" \
+  HARBOR_RUNTIME_READERS=" prefix:some_other_reader" HARBOR_RUNTIME_READERS_PID=1 \
     run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/versions.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; . "${HARBOR_ROOT}/lib/node.sh"; harbor_runtime_reader_for prefix'
   assert_success
   assert_output harbor_node_prefix_version
+}
+
+@test "the registry is this process's, under allexport, after readonly, and against a shadowed unset" {
+  # Three ways the export bit would have answered wrong, which is why the marker is a
+  # pid instead. Under set -a every assignment is exported, so a registry this process
+  # built looks inherited and a re-source would drop it — and SHELLOPTS can turn set -a
+  # on from the environment. A caller that made the variable readonly would abort the
+  # re-source under set -e, because a reset assignment runs on every source rather than
+  # only the first. And discarding an inherited registry needed unset, a builtin an
+  # exported shell function can shadow into a no-op, handing back the very registry the
+  # discard exists to refuse.
+  local libs='. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"'
+  run bash -c "set -a; ${libs}; reader(){ printf 9.9.9; }; harbor_runtime_reader_register prefix reader; ${libs}; harbor_runtime_reader_for prefix"
+  assert_success
+  assert_output reader
+  run bash -c "set -e; ${libs}; reader(){ printf 9.9.9; }; harbor_runtime_reader_register prefix reader; readonly HARBOR_RUNTIME_READERS; ${libs}; harbor_runtime_reader_for prefix"
+  assert_success
+  assert_output reader
+  run bash -c 'unset(){ :; }; evil(){ printf 9.9.9; }; export -f unset evil; export HARBOR_RUNTIME_READERS=" prefix:evil" HARBOR_RUNTIME_READERS_PID=1; exec bash -c '"'"'. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; harbor_journal_observe runtime-install /tmp/x'"'"''
+  assert_success
+  assert_output '"unobservable:runtime-install:/tmp/x"'
 }
 
 @test "the target vocabulary means the same thing in a locale whose collation folds case" {

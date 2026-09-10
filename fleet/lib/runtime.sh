@@ -30,27 +30,33 @@
 # the operator as a manual journal resolution. Re-registering an unchanged pair is
 # already a no-op, so keeping the registry across a re-source changes nothing else.
 #
-# What is not kept is a registry that arrived from the environment, and the two cases
-# are told apart by whether the variable is exported: a re-source inside one process
-# sees the plain shell variable lib/ set, while anything an outside caller could
-# arrange is exported into us. Harbor runs the agents as the operator and treats that
-# account as untrusted, so an exported registry is that account's input, not Harbor's
-# state — and honouring it would let it decide what a runtime-install entry records a
-# version as, and would let a single conflicting prefix pair turn lib/node.sh's
-# source-time registration into a runtime.reader_conflict that aborts harbor bootstrap
-# before preflight. Dropped here, both are simply not reachable from outside.
-# declare -p prints "declare -FLAGS NAME=VALUE", and only the flags field answers the
-# question; the value is registered function names, which are as free to contain an x
-# as "prefix" is, so the flags are cut out before they are looked at.
-# The || true is load-bearing: declare -p returns 1 for a variable that is not set,
-# which is the ordinary first-source case, and callers run this file under set -e.
-harbor_runtime_readers_flags="$(declare -p HARBOR_RUNTIME_READERS 2>/dev/null || true)"
-harbor_runtime_readers_flags="${harbor_runtime_readers_flags#declare -}"
-case "${harbor_runtime_readers_flags%% *}" in
-  *x*) unset HARBOR_RUNTIME_READERS ;;
-esac
-unset harbor_runtime_readers_flags
-HARBOR_RUNTIME_READERS="${HARBOR_RUNTIME_READERS:-}"
+# What is not kept is a registry that arrived from outside this process. Harbor runs
+# the agents as the operator and treats that account as untrusted, so a registry from
+# the environment is that account's input rather than Harbor's own state: honouring it
+# would let it say what a runtime-install entry records a version as, and would let one
+# conflicting prefix pair turn lib/node.sh's source-time registration into a
+# runtime.reader_conflict that aborts harbor bootstrap before preflight.
+#
+# The two are told apart by a companion variable holding the pid that initialised the
+# registry. Same pid means this process built it and a re-source must leave it alone;
+# anything else, including both variables arriving together from a parent, means it is
+# not ours and the registry starts empty. The pid is what makes the marker hard to
+# supply from outside, since an operator exporting one would have to name the pid
+# harbor has not been given yet.
+#
+# Reading the export bit with declare -p was the obvious way to ask this and is the
+# wrong one, in three ways that between them cover both directions of the answer. It
+# says "not ours" for a registry this process built under set -a, where every
+# assignment is exported and SHELLOPTS can turn that on from the environment. It
+# aborts under set -e if a caller ever made the variable readonly, because the reset
+# assignment runs on every source rather than only the first. And clearing it needs
+# unset, a builtin an exported shell function can shadow into a no-op, which hands
+# back the exact registry the check exists to discard. Comparing a pid needs none of
+# those: no unset, no export bit, and on a re-source no assignment at all.
+if [ "${HARBOR_RUNTIME_READERS_PID:-}" != "$$" ]; then
+  HARBOR_RUNTIME_READERS=""
+  HARBOR_RUNTIME_READERS_PID="$$"
+fi
 # harbor_runtime_reader_register NAME FN: FN is the version reader for the target key
 # NAME. Called at source time by the library that owns NAME, so the dispatch below can
 # find it in any process that sourced that library.
