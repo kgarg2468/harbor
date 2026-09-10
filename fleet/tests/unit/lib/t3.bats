@@ -600,3 +600,140 @@ fake_systemctl() {
     assert_equal "$(tree_snapshot)" "${before}"
   done
 }
+
+fake_service_install() {
+  fake_service_t3 "${1}"
+  fake_systemctl "${3:-active}"
+  export SERVICE_INSTALL_RC="${2:-0}"
+  export SERVICE_TEST_DIR="${BATS_TEST_TMPDIR}"
+  export SERVICE_STATE_ROOT="${FIX_ROOT}"
+  export SERVICE_POST_FIXTURE="${4:-installed-current}"
+  export SERVICE_T3_VERSION="${T3_VERSION}"
+  cat >"$(harbor_t3_bin "${FIX_HOME}")" <<'SH'
+#!/bin/sh
+if [ "$*" = --version ]; then
+  printf 't3 v%s\n' "${SERVICE_T3_VERSION}"
+  exit 0
+fi
+case "$*" in
+  'service status') cat "${SERVICE_TEST_DIR}/service-body" ;;
+  'service install')
+    printf '%s\n' "$*" >>"${SERVICE_TEST_DIR}/service-mutations"
+    # The vendor must never run before Harbor has durably prepared its entry.
+    grep -q '"phase": "prepared"' "${SERVICE_STATE_ROOT}/journal/0001-t3-service.json" || exit 96
+    [ "${SERVICE_INSTALL_RC}" = 0 ] || { echo install-broke; exit "${SERVICE_INSTALL_RC}"; }
+    cp "${HARBOR_ROOT}/tests/fixtures/t3/service-status/${SERVICE_POST_FIXTURE}" "${SERVICE_TEST_DIR}/service-body"
+    ;;
+  *) exit 97 ;;
+esac
+SH
+}
+
+@test "healthy service install is a no-op with zero shim calls" {
+  harbor_t3_service_status() { printf installed-current; }
+  harbor_t3_service_healthy() { return 0; }
+  harbor_t3_run() { echo unexpected >"${BATS_TEST_TMPDIR}/unexpected-call"; return 97; }
+  local before
+  before="$(tree_snapshot)"
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_success
+  assert_equal "$(journal_names)" ''
+  assert [ ! -e "${BATS_TEST_TMPDIR}/unexpected-call" ]
+  assert_equal "$(tree_snapshot)" "${before}"
+}
+
+service_protected_snapshot() {
+  find "${FIX_HOME}/.config" "${DECOY_HOME}" -exec ls -ldn {} + | sort
+  find "${FIX_HOME}/.config" "${DECOY_HOME}" -type f -exec cksum {} + | sort
+}
+
+@test "service install journals created or modified and preserves vendor lifecycle paths" {
+  local pre ownership protected
+  for pre in not-installed update-pending; do
+    ownership=modified
+    [ "${pre}" != not-installed ] || ownership=created
+    fake_service_install "${pre}"
+    mkdir -p "${FIX_HOME}/.config/systemd/user"
+    printf 'sentinel\n' >"${FIX_HOME}/.config/systemd/user/sentinel"
+    protected="$(service_protected_snapshot)"
+    acquire
+    run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+    assert_success
+    assert_equal "$(journal_names)" 0001-t3-service.json
+    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 target)" '"t3code.service"'
+    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" "\"${ownership}\""
+    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" "\"${pre}\""
+    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 post_state)" '"installed-current"'
+    assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+    assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-mutations")" 'service install'
+    assert_equal "$(service_protected_snapshot)" "${protected}"
+    run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+    assert_success
+    assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-mutations")" 'service install'
+    assert_equal "$(journal_names)" 0001-t3-service.json
+    assert_equal "$(service_protected_snapshot)" "${protected}"
+    harbor_lock_release "${FIX_ROOT}"
+    rm "${FIX_ROOT}/journal/0001-t3-service.json" "${BATS_TEST_TMPDIR}/service-mutations"
+  done
+}
+
+@test "unknown service refuses with no entry or vendor mutation" {
+  fake_service_install unrecognized-text
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_failure 3
+  assert_output --partial unknown
+  assert_equal "$(journal_names)" ''
+  assert [ ! -e "${BATS_TEST_TMPDIR}/service-mutations" ]
+}
+
+@test "failed service install leaves prepared and reports vendor failure" {
+  fake_service_install not-installed 7
+  acquire
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial install-broke
+  assert_output --partial 0001-t3-service.json
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "service verification requires both current and active and names both readings" {
+  local post active
+  for post in installed-current update-pending; do
+    active=active
+    [ "${post}" != installed-current ] || active=inactive
+    fake_service_install not-installed 0 "${active}" "${post}"
+    acquire
+    run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+    assert_failure 2
+    assert_output --partial "service status=${post}"
+    assert_output --partial "is-active=${active}"
+    assert_output --partial 0001-t3-service.json
+    assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+    harbor_lock_release "${FIX_ROOT}"
+    rm "${FIX_ROOT}/journal/0001-t3-service.json"
+  done
+}
+
+@test "service install crash leaves prepared and recovery uses the service observer" {
+  fake_service_install not-installed
+  run env HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=t3-service-installed \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; . "${HARBOR_ROOT}/lib/versions.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; . "${HARBOR_ROOT}/lib/agents.sh"; . "${HARBOR_ROOT}/lib/t3.sh"; HARBOR_PID=$$; harbor_versions_load "${HARBOR_ROOT}/versions.lock"; harbor_lock_acquire "${1}" operator; harbor_t3_service_install "${1}" "${2}"' \
+    _ "${FIX_ROOT}" "${FIX_HOME}"
+  assert_equal "${status}" 137
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  rm -rf "${FIX_ROOT}/lock.d"
+  acquire
+  HARBOR_AGENTS_HOME="${FIX_HOME}"
+  assert_equal "$(harbor_journal_observe t3-service t3code.service)" '"installed-current"'
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  cp "${HARBOR_ROOT}/tests/fixtures/t3/service-status/not-installed" "${BATS_TEST_TMPDIR}/service-body"
+  fixture_entry "${FIX_ROOT}" 0002 t3-service t3code.service created prepared '"not-installed"' '"installed-current"'
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-mutations")" 'service install'
+  harbor_lock_release "${FIX_ROOT}"
+}

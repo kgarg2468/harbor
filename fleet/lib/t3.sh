@@ -181,6 +181,47 @@ harbor_t3_service_healthy() {
   active="$(HOME="${1}" systemctl --user is-active t3code.service 2>/dev/null)" || return 1
   [ "${active}" = active ]
 }
+# The t3-service op has its own observer; recovery supplies the explicit operator
+# home through the same context as the CLI readers, never the ambient HOME.
+harbor_observe_op_t3_service() {
+  local home state
+  home="$(harbor_agents_home)" || exit "$?"
+  state="$(harbor_t3_service_status "${home}")" || exit "$?"
+  printf '"%s"' "$(harbor_json_escape "${state}")"
+}
+# harbor_t3_service_install STATE_ROOT HOME: the vendor owns the unit lifecycle.
+# Prepare before invoking it and attest applied only when both readings agree.
+harbor_t3_service_install() {
+  local root="${1}" home="${2}" pre ownership entry out post active active_rc=0
+  # shellcheck disable=SC2034
+  HARBOR_AGENTS_HOME="${home}"
+  pre="$(harbor_t3_service_status "${home}")" || exit "$?"
+  # An unreadable state is a refusal rather than an install, because the entry this
+  # would write names a transition out of a state Harbor never read. Installing over
+  # it would leave the journal vouching for a before that was a guess.
+  [ "${pre}" != unknown ] || harbor_die 3 t3.service_unknown "t3 service status did not answer with a state this pinned build recognizes, so Harbor will not install over it: the entry would record a transition out of a state it never read; ask t3 itself with 'harbor service status' and rerun harbor provision once it answers; nothing was installed or journaled"
+  if [ "${pre}" = installed-current ] && harbor_t3_service_healthy "${home}"; then
+    return 0
+  fi
+  ownership=modified
+  [ "${pre}" != not-installed ] || ownership=created
+  harbor_journal_create "${root}" t3-service t3code.service "${ownership}" prepared "\"$(harbor_json_escape "${pre}")\"" '"installed-current"' || exit "$?"
+  entry="${HARBOR_JOURNAL_ENTRY}"
+  harbor_step "t3-service-prepared"
+  if ! out="$(harbor_t3_run "${home}" service install 2>&1)"; then
+    out="$(printf '%s' "${out}" | tr '\n\r' '  ')"
+    harbor_die 2 t3.service_install_failed "t3 service install failed: ${out}; $(basename "${entry}") stays prepared, rerun after fixing the cause"
+  fi
+  harbor_step "t3-service-installed"
+  post="$(harbor_t3_service_status "${home}")" || exit "$?"
+  active="$(HOME="${home}" systemctl --user is-active t3code.service 2>/dev/null)" || active_rc="$?"
+  if [ "${post}" != installed-current ] || [ "${active}" != active ] || [ "${active_rc}" != 0 ]; then
+    harbor_die 2 t3.service_verify "after t3 service install: service status=${post}, is-active=${active} (exit ${active_rc}); $(basename "${entry}") stays prepared"
+  fi
+  harbor_journal_set_phase "${entry}" applied || exit "$?"
+  harbor_step "t3-service-applied"
+  harbor_msg "installed t3 service"
+}
 # Register beside the definition so every process sourcing this library can observe
 # a prepared t3 runtime-install entry, including recovery without an install.
 harbor_runtime_reader_register t3 harbor_t3_reader
