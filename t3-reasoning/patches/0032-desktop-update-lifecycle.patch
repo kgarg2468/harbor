@@ -1,0 +1,1094 @@
+diff --git a/apps/desktop/src/backend/DesktopBackendManager.test.ts b/apps/desktop/src/backend/DesktopBackendManager.test.ts
+index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc8701ce1d507 100644
+--- a/apps/desktop/src/backend/DesktopBackendManager.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendManager.test.ts
+@@ -1,3 +1,4 @@
++import * as DesktopUpdateLifecycle from "./desktopUpdateLifecycle.ts";
+ import {
+   DesktopBackendBootstrap,
+   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
+@@ -223,6 +224,7 @@ const reserveCommand: DesktopUpdateReservationCommand = {
+ };
+ 
+ interface MakeInstanceInput {
++  readonly lifecycle?: DesktopUpdateLifecycle.DesktopUpdateLifecycle["Service"];
+   readonly spawnerLayer: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner>;
+   readonly httpClientLayer?: Layer.Layer<HttpClient.HttpClient>;
+   readonly backendOutputLog?: Partial<DesktopObservability.DesktopBackendOutputLogShape>;
+@@ -262,6 +264,9 @@ function makeTestInstance(input: MakeInstanceInput) {
+     ...input.backendOutputLog,
+   };
+   const servicesLayer = Layer.mergeAll(
++    input.lifecycle
++      ? Layer.succeed(DesktopUpdateLifecycle.DesktopUpdateLifecycle, input.lifecycle)
++      : DesktopUpdateLifecycle.layer,
+     FileSystem.layerNoop({
+       exists: () => Effect.succeed(true),
+     }),
+@@ -1375,6 +1380,10 @@ describe("DesktopBackendManager", () => {
+         assert.isTrue(yield* Ref.get(backendReadyFlag));
+         assert.deepEqual(yield* instance.currentConfig, Option.some(baseConfig));
+ 
++        assert.deepEqual(yield* instance.generationSnapshot!, {
++          _tag: "supported",
++          run: { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 },
++        });
+         const runningSnapshot = yield* instance.snapshot;
+         assert.equal(runningSnapshot.ready, true);
+         assert.deepEqual(runningSnapshot.activePid, Option.some(123));
+@@ -1383,6 +1392,10 @@ describe("DesktopBackendManager", () => {
+         yield* Deferred.await(teardownStarted).pipe(Effect.timeout("1 second"));
+         assert.isFalse(yield* Ref.get(backendReadyFlag));
+         assert.equal(shutdownCount, 1);
++        assert.deepEqual(yield* instance.generationSnapshot!, {
++          _tag: "supported",
++          run: { instanceId: DesktopBackendManager.PRIMARY_INSTANCE_ID, runId: 1 },
++        });
+         yield* Deferred.succeed(finishTeardown, undefined);
+         yield* Fiber.join(stopFiber).pipe(Effect.timeout("1 second"));
+         assert.equal(startCount, 1);
+@@ -1398,6 +1411,7 @@ describe("DesktopBackendManager", () => {
+           "backend process exited",
+         );
+ 
++        assert.deepEqual(yield* instance.generationSnapshot!, { _tag: "stopped" });
+         const stoppedSnapshot = yield* instance.snapshot;
+         assert.isFalse(yield* Ref.get(backendReadyFlag));
+         assert.equal(shutdownCount, 1);
+@@ -1411,6 +1425,7 @@ describe("DesktopBackendManager", () => {
+   it.effect("restarts when start is requested during stop teardown", () =>
+     Effect.scoped(
+       Effect.gen(function* () {
++        const lifecycle = yield* DesktopUpdateLifecycle.make;
+         const starts = yield* Queue.unbounded<number>();
+         const teardownStarted = yield* Deferred.make<void>();
+         const finishTeardown = yield* Deferred.make<void>();
+@@ -1447,6 +1462,7 @@ describe("DesktopBackendManager", () => {
+         );
+ 
+         const instance = yield* makeTestInstance({
++          lifecycle,
+           spawnerLayer,
+           httpClientLayer: httpClientLayer(() => Effect.never),
+         });
+@@ -1458,6 +1474,7 @@ describe("DesktopBackendManager", () => {
+         yield* Deferred.await(teardownStarted).pipe(Effect.timeout("1 second"));
+         yield* instance.start;
+         assert.equal((yield* instance.snapshot).desiredRunning, true);
++        assert.equal((yield* lifecycle.tryFreeze)._tag, "busy");
+ 
+         yield* Deferred.succeed(finishTeardown, undefined);
+         yield* Fiber.join(stopFiber).pipe(Effect.timeout("1 second"));
+@@ -1998,3 +2015,186 @@ describe("DesktopBackendManager", () => {
+     ),
+   );
+ });
++
++describe("manager update lifecycle fence", () => {
++  it.effect("reports the allocated run during spawn and excludes replacement starts", () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const lifecycle = yield* DesktopUpdateLifecycle.make;
++        const entered = yield* Deferred.make<void>();
++        const releaseSpawn = yield* Deferred.make<void>();
++        const exited = yield* Deferred.make<void>();
++        let spawns = 0;
++        const instance = yield* makeTestInstance({
++          lifecycle,
++          spawnerLayer: Layer.succeed(
++            ChildProcessSpawner.ChildProcessSpawner,
++            ChildProcessSpawner.make(() =>
++              Effect.gen(function* () {
++                spawns++;
++                yield* Deferred.succeed(entered, undefined);
++                yield* Deferred.await(releaseSpawn);
++                yield* Effect.addFinalizer(() => Deferred.succeed(exited, undefined));
++                return makeProcess({
++                  exitCode: Deferred.await(exited).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
++                });
++              }),
++            ),
++          ),
++        });
++        yield* instance.start;
++        yield* Deferred.await(entered);
++        assert.deepEqual(yield* instance.generationSnapshot!, {
++          _tag: "supported",
++          run: { instanceId: "primary", runId: 1 },
++        });
++        const frozen = yield* lifecycle.tryFreeze;
++        if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++        assert.deepEqual(frozen.backends.runs, [{ instanceId: "primary", runId: 1 }]);
++        const start = yield* instance.start.pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(start.pollUnsafe());
++        assert.equal(spawns, 1);
++        yield* frozen.backends.release;
++        yield* Fiber.join(start);
++        yield* Deferred.succeed(releaseSpawn, undefined);
++        yield* Effect.yieldNow;
++        yield* instance.stop();
++        assert.deepEqual(yield* instance.generationSnapshot!, { _tag: "stopped" });
++      }),
++    ),
++  );
++});
++
++it.effect("keeps a scheduled restart fenced until release", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const lifecycle = yield* DesktopUpdateLifecycle.make;
++      const starts = yield* Queue.unbounded<number>();
++      let count = 0;
++      const instance = yield* makeTestInstance({
++        lifecycle,
++        httpClientLayer: httpClientLayer(() => Effect.never),
++        spawnerLayer: Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Effect.sync(() => {
++              count++;
++              return makeProcess({
++                exitCode: Queue.offer(starts, count).pipe(
++                  Effect.as(ChildProcessSpawner.ExitCode(1)),
++                ),
++              });
++            }),
++          ),
++        ),
++      });
++      yield* instance.start;
++      assert.equal(yield* Queue.take(starts), 1);
++      yield* TestClock.adjust(Duration.millis(1));
++      const frozen = yield* lifecycle.tryFreeze;
++      if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++      assert.deepEqual(frozen.backends.runs, []);
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.equal(count, 1);
++      assert.isTrue((yield* instance.snapshot).restartScheduled);
++      yield* frozen.backends.release;
++      assert.equal(yield* Queue.take(starts), 2);
++    }),
++  ).pipe(Effect.provide(TestClock.layer())),
++);
++
++for (const running of [false, true]) {
++  it.effect(
++    `retained fence permits ${running ? "running" : "stopped"} manager shutdown but no replacement`,
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const lifecycle = yield* DesktopUpdateLifecycle.make;
++          const managerScope = yield* Scope.make();
++          const started = yield* Deferred.make<void>();
++          const exited = yield* Deferred.make<void>();
++          let count = 0;
++          const instance = yield* makeTestInstance({
++            lifecycle,
++            spawnerLayer: Layer.succeed(
++              ChildProcessSpawner.ChildProcessSpawner,
++              ChildProcessSpawner.make(() =>
++                Effect.gen(function* () {
++                  count++;
++                  yield* Effect.addFinalizer(() => Deferred.succeed(exited, undefined));
++                  yield* Deferred.succeed(started, undefined);
++                  return makeProcess({
++                    exitCode: Deferred.await(exited).pipe(
++                      Effect.as(ChildProcessSpawner.ExitCode(0)),
++                    ),
++                  });
++                }),
++              ),
++            ),
++          }).pipe(Scope.provide(managerScope));
++          if (running) {
++            yield* instance.start;
++            yield* Deferred.await(started);
++          }
++          const frozen = yield* lifecycle.tryFreeze;
++          if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++          const stopping = yield* instance.stop().pipe(Effect.forkChild);
++          const replacement = yield* instance.start.pipe(Effect.forkChild);
++          yield* Effect.yieldNow;
++          assert.isUndefined(stopping.pollUnsafe());
++          assert.isUndefined(replacement.pollUnsafe());
++          frozen.backends.retainUntilProcessExit();
++          yield* Fiber.join(stopping);
++          yield* Scope.close(managerScope, Exit.void);
++          yield* frozen.backends.release;
++          assert.deepEqual(yield* instance.generationSnapshot!, { _tag: "stopped" });
++          assert.equal(count, running ? 1 : 0);
++          assert.isUndefined(replacement.pollUnsafe());
++          yield* Fiber.interrupt(replacement);
++        }),
++      ),
++  );
++}
++
++it.effect("retained shutdown cancels a scheduled restart without creating a replacement", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const lifecycle = yield* DesktopUpdateLifecycle.make;
++      const managerScope = yield* Scope.make();
++      const starts = yield* Queue.unbounded<number>();
++      let count = 0;
++      const instance = yield* makeTestInstance({
++        lifecycle,
++        httpClientLayer: httpClientLayer(() => Effect.never),
++        spawnerLayer: Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make(() =>
++            Effect.sync(() => {
++              count++;
++              return makeProcess({
++                exitCode: Queue.offer(starts, count).pipe(
++                  Effect.as(ChildProcessSpawner.ExitCode(1)),
++                ),
++              });
++            }),
++          ),
++        ),
++      }).pipe(Scope.provide(managerScope));
++      yield* instance.start;
++      assert.equal(yield* Queue.take(starts), 1);
++      yield* TestClock.adjust(Duration.millis(1));
++      assert.isTrue((yield* instance.snapshot).restartScheduled);
++      const frozen = yield* lifecycle.tryFreeze;
++      if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++      frozen.backends.retainUntilProcessExit();
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.equal(count, 1);
++      yield* Scope.close(managerScope, Exit.void);
++      assert.isFalse((yield* instance.snapshot).restartScheduled);
++      yield* frozen.backends.release;
++      yield* TestClock.adjust(Duration.seconds(1));
++      assert.equal(count, 1);
++    }),
++  ).pipe(Effect.provide(TestClock.layer())),
++);
+diff --git a/apps/desktop/src/backend/DesktopBackendManager.ts b/apps/desktop/src/backend/DesktopBackendManager.ts
+index 67e176a237be6b74fae4c1c88af5b1be3613e111..5f4d12f9e7c5273377dd6f956f88697572ba5b80 100644
+--- a/apps/desktop/src/backend/DesktopBackendManager.ts
++++ b/apps/desktop/src/backend/DesktopBackendManager.ts
+@@ -50,6 +50,7 @@ import {
+ } from "@t3tools/contracts";
+ import { waitForHttpReady as waitForHttpReadyShared } from "@t3tools/shared/httpReadiness";
+ 
++import * as DesktopUpdateLifecycle from "./desktopUpdateLifecycle.ts";
+ import * as DesktopObservability from "../app/DesktopObservability.ts";
+ import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
+ import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
+@@ -266,6 +267,8 @@ export interface DesktopBackendInstance {
+   readonly label: Effect.Effect<string>;
+   readonly start: Effect.Effect<void>;
+   readonly stop: (options?: { readonly timeout?: Duration.Duration }) => Effect.Effect<void>;
++  // Optional for existing external test doubles; every production factory instance supplies it.
++  readonly generationSnapshot?: Effect.Effect<DesktopUpdateLifecycle.DesktopBackendGeneration>;
+   readonly currentConfig: Effect.Effect<Option.Option<DesktopBackendStartConfig>>;
+   readonly snapshot: Effect.Effect<DesktopBackendSnapshot>;
+   // Polls desiredRunning + the instance's own ready flag until the
+@@ -644,7 +647,9 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+   | DesktopTelemetryPublisher.DesktopTelemetryPublisher
+   | DesktopWslEnvironment.DesktopWslEnvironment
+   | Scope.Scope
++  | DesktopUpdateLifecycle.DesktopUpdateLifecycle
+ > {
++  const lifecycle = yield* DesktopUpdateLifecycle.DesktopUpdateLifecycle;
+   const parentScope = yield* Scope.Scope;
+   const fileSystem = yield* FileSystem.FileSystem;
+   const backendOutputLogFactory = yield* DesktopObservability.DesktopBackendOutputLogFactory;
+@@ -673,6 +678,30 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+   );
+   const currentConfig = Ref.get(state).pipe(Effect.map((current) => current.config));
+ 
++  const generationSnapshot = Ref.get(state).pipe(
++    Effect.map((current): DesktopUpdateLifecycle.DesktopBackendGeneration => {
++      if (Option.isNone(current.active)) return { _tag: "stopped" };
++      const config = Option.getOrUndefined(current.config);
++      if (
++        config === undefined ||
++        config.runningDistro !== undefined ||
++        config.bootstrapDelivery !== "fd3" ||
++        config.bootstrap.desktopTelemetryFd === undefined ||
++        config.bootstrap.desktopTelemetryControlFd === undefined
++      ) {
++        return {
++          _tag: "unsupported",
++          reason: `Backend ${spec.id} has no supported duplex reservation transport.`,
++        };
++      }
++      return { _tag: "supported", run: { instanceId: spec.id, runId: current.active.value.id } };
++    }),
++  );
++  yield* Effect.acquireRelease(
++    lifecycle.addOwner(generationSnapshot),
++    (removeOwner) => removeOwner,
++  ).pipe(Effect.asVoid);
++
+   const cancelRestart = Effect.gen(function* () {
+     const restartFiber = yield* Ref.modify(state, (current) => [
+       current.restartFiber,
+@@ -847,6 +876,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+         const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
+           reason: string,
+         ) {
++          yield* Scope.close(runScope, Exit.void).pipe(Effect.ignore);
+           yield* mutex.withPermits(1)(
+             Effect.gen(function* () {
+               const { isCurrentRun, nextState, pid, exitObserved, stopRequested, wasReady } =
+@@ -919,7 +949,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+               }
+             }),
+           );
+-        });
++        }, lifecycle.withTeardown);
+ 
+         const program = runBackendProcess({
+           ...config.value,
+@@ -1011,11 +1041,15 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+         }));
+       }),
+     ),
+-  ).pipe(Effect.withSpan("desktop.backendInstance.start", { attributes: { id: spec.id } }));
++  ).pipe(
++    lifecycle.withMutation,
++    Effect.withSpan("desktop.backendInstance.start", { attributes: { id: spec.id } }),
++  );
+ 
+   const scheduleRestart = Effect.fn("desktop.backendInstance.scheduleRestart")(function* (
+     reason: string,
+   ) {
++    if (yield* lifecycle.isRetained) return;
+     const scheduled = yield* Ref.modify(state, (latest) => {
+       if (!latest.desiredRunning || Option.isSome(latest.restartFiber)) {
+         return [Option.none<Duration.Duration>(), latest] as const;
+@@ -1041,16 +1075,18 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+         const restartFiber = yield* Effect.forkIn(
+           Effect.sleep(delay).pipe(
+             Effect.andThen(
+-              Ref.modify(state, (latest) => {
+-                const shouldRestart = latest.desiredRunning;
+-                return [
+-                  shouldRestart,
+-                  {
+-                    ...latest,
+-                    restartFiber: Option.none(),
+-                  },
+-                ] as const;
+-              }),
++              lifecycle.withMutation(
++                Ref.modify(state, (latest) => {
++                  const shouldRestart = latest.desiredRunning;
++                  return [
++                    shouldRestart,
++                    {
++                      ...latest,
++                      restartFiber: Option.none(),
++                    },
++                  ] as const;
++                }),
++              ),
+             ),
+             Effect.flatMap((shouldRestart) => (shouldRestart ? start : Effect.void)),
+             Effect.catchCause((cause) =>
+@@ -1157,12 +1193,12 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+           if (cleanup.needsCleanup) {
+             yield* backendOutputLog.discardSession;
+           }
+-          if (cleanup.shouldStart) {
++          if (cleanup.shouldStart && !(yield* lifecycle.isRetained)) {
+             yield* start;
+           }
+         }),
+     });
+-  });
++  }, lifecycle.withTeardown);
+ 
+   const waitForReady = (timeout: Duration.Duration): Effect.Effect<boolean> =>
+     Effect.gen(function* () {
+@@ -1189,6 +1225,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
+     start,
+     stop,
+     currentConfig,
++    generationSnapshot,
+     snapshot,
+     waitForReady,
+   } satisfies DesktopBackendInstance;
+diff --git a/apps/desktop/src/backend/DesktopBackendPool.test.ts b/apps/desktop/src/backend/DesktopBackendPool.test.ts
+index 956006610d62408ab2ab44f919728a651b6dfb25..65d0ce30ce0be44d0290f68dc76acabeb882337d 100644
+--- a/apps/desktop/src/backend/DesktopBackendPool.test.ts
++++ b/apps/desktop/src/backend/DesktopBackendPool.test.ts
+@@ -1,4 +1,11 @@
++import * as Scope from "effect/Scope";
++import * as Exit from "effect/Exit";
++import * as Context from "effect/Context";
++import * as DesktopUpdateLifecycle from "./desktopUpdateLifecycle.ts";
+ import { assert, describe, it } from "@effect/vitest";
++import * as Deferred from "effect/Deferred";
++import * as Fiber from "effect/Fiber";
++import * as Sink from "effect/Sink";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+@@ -43,28 +50,36 @@ function makeStubInstance(
+ 
+ function makePoolLayer(
+   labelRef: Ref.Ref<string>,
++  lifecycle?: DesktopUpdateLifecycle.DesktopUpdateLifecycle["Service"],
++  spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"],
++  onConstruct?: (id: string) => Effect.Effect<void>,
+ ): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
+   return DesktopBackendPool.layer.pipe(
+     Layer.provideMerge(
+       Layer.mergeAll(
+-        FileSystem.layerNoop({}),
++        lifecycle
++          ? Layer.succeed(DesktopUpdateLifecycle.DesktopUpdateLifecycle, lifecycle)
++          : DesktopUpdateLifecycle.layer,
++        FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
+         Layer.succeed(
+           ChildProcessSpawner.ChildProcessSpawner,
+-          ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
++          spawner ?? ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
+         ),
+         Layer.succeed(
+           HttpClient.HttpClient,
+-          HttpClient.make(() => Effect.die("unexpected HTTP request")),
++          HttpClient.make(() => Effect.never),
+         ),
+         Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
+-          forInstance: () =>
++          forInstance: (id) =>
+             Effect.succeed({
+               beginSession: () => Effect.void,
+               writeOutputChunk: () => Effect.void,
+               persistFailureSnapshot: () => Effect.void,
+               persistFailure: () => Effect.void,
+               discardSession: Effect.void,
+-            } satisfies DesktopObservability.DesktopBackendOutputLogShape),
++            } satisfies DesktopObservability.DesktopBackendOutputLogShape).pipe(
++              Effect.tap(() => onConstruct?.(id) ?? Effect.void),
++            ),
+         } satisfies DesktopObservability.DesktopBackendOutputLogFactory["Service"]),
+         Layer.succeed(DesktopTelemetryPublisher.DesktopTelemetryPublisher, {
+           latest: Effect.succeed(Option.none()),
+@@ -170,3 +185,246 @@ describe("DesktopBackendPool", () => {
+     ),
+   );
+ });
++
++const supportedConfig: DesktopBackendStartConfig = {
++  executablePath: "/electron",
++  args: [],
++  entryPath: "/server/bin.mjs",
++  cwd: "/server",
++  env: {},
++  extendEnv: true,
++  bootstrap: {
++    mode: "desktop",
++    noBrowser: true,
++    port: 3773,
++    t3Home: "/tmp/t3",
++    host: "127.0.0.1",
++    desktopBootstrapToken: "token",
++    tailscaleServeEnabled: false,
++    tailscaleServePort: 443,
++    desktopTelemetryFd: 4,
++    desktopTelemetryControlFd: 5,
++  },
++  bootstrapDelivery: "fd3",
++  httpBaseUrl: new URL("http://127.0.0.1:3773"),
++  captureOutput: true,
++  preflightFailure: Option.none(),
++};
++describe("pool update lifecycle fence", () => {
++  it.effect(
++    "shares one fence across primary construction, registration, closing, and exact live owners",
++    () =>
++      Effect.scoped(
++        Effect.gen(function* () {
++          const lifecycle = yield* DesktopUpdateLifecycle.make;
++          const label = yield* Ref.make("primary");
++          const closing = yield* Deferred.make<void>();
++          const finishClose = yield* Deferred.make<void>();
++          const spawned = yield* Deferred.make<void>();
++          const constructing = yield* Deferred.make<void>();
++          const finishConstruction = yield* Deferred.make<void>();
++          const spawner = ChildProcessSpawner.make(() =>
++            Effect.gen(function* () {
++              yield* Effect.addFinalizer(() =>
++                Deferred.succeed(closing, undefined).pipe(
++                  Effect.andThen(Deferred.await(finishClose)),
++                ),
++              );
++              yield* Deferred.succeed(spawned, undefined);
++              return ChildProcessSpawner.makeHandle({
++                pid: ChildProcessSpawner.ProcessId(123),
++                stdout: Stream.empty,
++                stderr: Stream.empty,
++                all: Stream.empty,
++                exitCode: Deferred.await(finishClose).pipe(
++                  Effect.as(ChildProcessSpawner.ExitCode(0)),
++                ),
++                isRunning: Effect.succeed(true),
++                kill: () => Effect.void,
++                stdin: Sink.drain,
++                getInputFd: () => Sink.drain,
++                getOutputFd: () => Stream.empty,
++                unref: Effect.succeed(Effect.void),
++              });
++            }),
++          );
++          const initialFreeze = yield* lifecycle.tryFreeze;
++          if (initialFreeze._tag !== "frozen") return assert.fail("expected freeze");
++          const building = yield* Layer.build(
++            makePoolLayer(label, lifecycle, spawner, (id) =>
++              id === "primary"
++                ? Effect.void
++                : Deferred.succeed(constructing, undefined).pipe(
++                    Effect.andThen(Deferred.await(finishConstruction)),
++                  ),
++            ),
++          ).pipe(Effect.map(Context.get(DesktopBackendPool.DesktopBackendPool)), Effect.forkChild);
++          yield* Effect.yieldNow;
++          assert.isUndefined(building.pollUnsafe());
++          yield* initialFreeze.backends.release;
++          const pool = yield* Fiber.join(building);
++          const spec = {
++            id: DesktopBackendPool.BackendInstanceId("local-secondary"),
++            label: Effect.succeed("secondary"),
++            configResolve: Effect.succeed(supportedConfig),
++          };
++          const stoppedFreeze = yield* lifecycle.tryFreeze;
++          if (stoppedFreeze._tag !== "frozen") return assert.fail("expected freeze");
++          assert.deepEqual(stoppedFreeze.backends.runs, []);
++          const registering = yield* pool.register(spec).pipe(Effect.forkChild);
++          yield* Effect.yieldNow;
++          assert.isUndefined(registering.pollUnsafe());
++          yield* stoppedFreeze.backends.release;
++          yield* Deferred.await(constructing);
++          assert.equal((yield* lifecycle.tryFreeze)._tag, "busy");
++          yield* Deferred.succeed(finishConstruction, undefined);
++          const instance = yield* Fiber.join(registering);
++          yield* instance.start;
++          yield* Deferred.await(spawned);
++          const frozen = yield* lifecycle.tryFreeze;
++          if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++          assert.deepEqual(frozen.backends.runs, [{ instanceId: spec.id, runId: 1 }]);
++          const unregistering = yield* pool.unregister(spec.id).pipe(Effect.forkChild);
++          yield* Effect.yieldNow;
++          assert.isUndefined(unregistering.pollUnsafe());
++          yield* frozen.backends.release;
++          yield* Deferred.await(closing);
++          assert.deepEqual(yield* instance.generationSnapshot!, {
++            _tag: "supported",
++            run: { instanceId: spec.id, runId: 1 },
++          });
++          assert.equal((yield* lifecycle.tryFreeze)._tag, "busy");
++          yield* Deferred.succeed(finishClose, undefined);
++          yield* Fiber.join(unregistering);
++          const empty = yield* lifecycle.tryFreeze;
++          if (empty._tag !== "frozen") return assert.fail("expected freeze");
++          assert.deepEqual(empty.backends.runs, []);
++          yield* empty.backends.release;
++        }),
++      ),
++  );
++
++  for (const config of [
++    { ...supportedConfig, runningDistro: "Ubuntu" },
++    { ...supportedConfig, bootstrapDelivery: "stdin" as const },
++  ]) {
++    it.effect(
++      `rejects live unsupported owner ${"runningDistro" in config ? config.runningDistro : config.bootstrapDelivery}`,
++      () =>
++        Effect.scoped(
++          Effect.gen(function* () {
++            const lifecycle = yield* DesktopUpdateLifecycle.make;
++            const label = yield* Ref.make("primary");
++            const poolContext = yield* Layer.build(
++              makePoolLayer(
++                label,
++                lifecycle,
++                ChildProcessSpawner.make(() => Effect.never),
++              ),
++            );
++            const pool = Context.get(poolContext, DesktopBackendPool.DesktopBackendPool);
++            const instance = yield* pool.register({
++              id: DesktopBackendPool.BackendInstanceId("wsl:test"),
++              label: Effect.succeed("WSL"),
++              configResolve: Effect.succeed(config),
++            });
++            yield* instance.start;
++            assert.equal((yield* lifecycle.tryFreeze)._tag, "unsupported");
++            yield* pool.unregister(instance.id);
++            const empty = yield* lifecycle.tryFreeze;
++            if (empty._tag !== "frozen") return assert.fail("expected freeze");
++            assert.deepEqual(empty.backends.runs, []);
++            yield* empty.backends.release;
++          }),
++        ),
++    );
++  }
++});
++
++it.effect("captures every local generation and no saved remote records", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const lifecycle = yield* DesktopUpdateLifecycle.make;
++      const label = yield* Ref.make("primary");
++      const context = yield* Layer.build(
++        makePoolLayer(
++          label,
++          lifecycle,
++          ChildProcessSpawner.make(() => Effect.never),
++        ),
++      );
++      const pool = Context.get(context, DesktopBackendPool.DesktopBackendPool);
++      for (const id of ["local-a", "local-b"]) {
++        const instance = yield* pool.register({
++          id: DesktopBackendPool.BackendInstanceId(id),
++          label: Effect.succeed(id),
++          configResolve: Effect.succeed(supportedConfig),
++        });
++        yield* instance.start;
++      }
++      // The fixture provides no saved-environment or remote-connection service.
++      const frozen = yield* lifecycle.tryFreeze;
++      if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++      assert.deepEqual(frozen.backends.runs, [
++        { instanceId: "local-a", runId: 1 },
++        { instanceId: "local-b", runId: 1 },
++      ]);
++      yield* frozen.backends.release;
++    }),
++  ),
++);
++
++it.effect(
++  "retained freeze allows unregister and real pool shutdown while starts and registration remain blocked",
++  () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const lifecycle = yield* DesktopUpdateLifecycle.make;
++        const poolScope = yield* Scope.make();
++        const label = yield* Ref.make("primary");
++        const spawned = yield* Deferred.make<void>();
++        let count = 0;
++        const context = yield* Layer.build(
++          makePoolLayer(
++            label,
++            lifecycle,
++            ChildProcessSpawner.make(() =>
++              Effect.gen(function* () {
++                count++;
++                yield* Deferred.succeed(spawned, undefined);
++                return yield* Effect.never;
++              }),
++            ),
++          ),
++        ).pipe(Scope.provide(poolScope));
++        const pool = Context.get(context, DesktopBackendPool.DesktopBackendPool);
++        const spec = {
++          id: DesktopBackendPool.BackendInstanceId("local-retained"),
++          label: Effect.succeed("local"),
++          configResolve: Effect.succeed(supportedConfig),
++        };
++        const instance = yield* pool.register(spec);
++        yield* instance.start;
++        yield* Deferred.await(spawned);
++        const frozen = yield* lifecycle.tryFreeze;
++        if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++        const unregister = yield* pool.unregister(spec.id).pipe(Effect.forkChild);
++        const register = yield* pool
++          .register({ ...spec, id: DesktopBackendPool.BackendInstanceId("replacement") })
++          .pipe(Effect.forkChild);
++        const start = yield* instance.start.pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        assert.isUndefined(unregister.pollUnsafe());
++        frozen.backends.retainUntilProcessExit();
++        yield* Fiber.join(unregister);
++        yield* Scope.close(poolScope, Exit.void);
++        yield* frozen.backends.release;
++        assert.deepEqual(yield* instance.generationSnapshot!, { _tag: "stopped" });
++        assert.equal(count, 1);
++        assert.isUndefined(register.pollUnsafe());
++        assert.isUndefined(start.pollUnsafe());
++        yield* Fiber.interrupt(register);
++        yield* Fiber.interrupt(start);
++      }),
++    ),
++);
+diff --git a/apps/desktop/src/backend/DesktopBackendPool.ts b/apps/desktop/src/backend/DesktopBackendPool.ts
+index 27e24d55c6bdbfb7fd6dc00623e97ae5d84d0ab7..3640bd6289ffb6ac8a725e053bfa54efedc8487a 100644
+--- a/apps/desktop/src/backend/DesktopBackendPool.ts
++++ b/apps/desktop/src/backend/DesktopBackendPool.ts
+@@ -93,6 +93,7 @@ import * as FileSystem from "effect/FileSystem";
+ import { HttpClient } from "effect/unstable/http";
+ import { ChildProcessSpawner } from "effect/unstable/process";
+ 
++import * as DesktopUpdateLifecycle from "./desktopUpdateLifecycle.ts";
+ import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
+ import * as DesktopBackendManager from "./DesktopBackendManager.ts";
+ import * as DesktopObservability from "../app/DesktopObservability.ts";
+@@ -175,6 +176,7 @@ export class DesktopBackendPool extends Context.Service<
+ // orchestrators that build their own specs can confirm the layer graph
+ // satisfies them at compile time.
+ export type BackendInstanceFactoryRequirements =
++  | DesktopUpdateLifecycle.DesktopUpdateLifecycle
+   | FileSystem.FileSystem
+   | ChildProcessSpawner.ChildProcessSpawner
+   | HttpClient.HttpClient
+@@ -210,6 +212,7 @@ type UnregisterAction =
+ export const layer = Layer.effect(
+   DesktopBackendPool,
+   Effect.gen(function* () {
++    const lifecycle = yield* DesktopUpdateLifecycle.DesktopUpdateLifecycle;
+     const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+     const desktopWindow = yield* DesktopWindow.DesktopWindow;
+     const electronDialog = yield* ElectronDialog.ElectronDialog;
+@@ -301,7 +304,7 @@ export const layer = Layer.effect(
+         ),
+       onShutdown: () => desktopWindow.handleBackendNotReady,
+       onPreflightFailed: handlePrimaryPreflightFailure,
+-    });
++    }).pipe(lifecycle.withMutation);
+ 
+     const instancesRef = yield* SynchronizedRef.make<
+       ReadonlyMap<BackendInstanceId, RegisteredInstance>
+@@ -337,12 +340,12 @@ export const layer = Layer.effect(
+               ] as const);
+             }
+             return Effect.gen(function* () {
+-              // Provide the captured factory services first, then the child scope
+-              // last so instance finalizers are owned by the unregisterable scope.
++              // Override the captured context’s layer scope at the factory boundary
++              // so finalizers belong to this unregisterable instance.
+               const instanceScope = yield* Scope.fork(layerScope, "sequential");
+               const instance = yield* DesktopBackendManager.makeBackendInstance(spec).pipe(
+-                Effect.provide(factoryContext),
+                 Scope.provide(instanceScope),
++                Effect.provide(factoryContext),
+               );
+               const next = new Map(current);
+               next.set(spec.id, {
+@@ -437,8 +440,8 @@ export const layer = Layer.effect(
+         ),
+       ),
+       primary: Effect.succeed(primary),
+-      register,
+-      unregister,
++      register: (spec) => lifecycle.withMutation(register(spec)),
++      unregister: (id) => lifecycle.withTeardown(unregister(id)),
+     });
+   }),
+ );
+diff --git a/apps/desktop/src/backend/desktopUpdateLifecycle.test.ts b/apps/desktop/src/backend/desktopUpdateLifecycle.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e4cf41efd922afe23a4d312668205702322f106
+--- /dev/null
++++ b/apps/desktop/src/backend/desktopUpdateLifecycle.test.ts
+@@ -0,0 +1,143 @@
++import { assert, describe, it } from "@effect/vitest";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
++import * as Lifecycle from "./desktopUpdateLifecycle.ts";
++
++describe("desktop update lifecycle", () => {
++  it.effect("returns busy immediately during mutation and recovers after interruption", () =>
++    Effect.gen(function* () {
++      const lifecycle = yield* Lifecycle.make;
++      const entered = yield* Deferred.make<void>();
++      const worker = yield* lifecycle
++        .withMutation(Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)))
++        .pipe(Effect.forkChild);
++      yield* Deferred.await(entered);
++      assert.equal((yield* lifecycle.tryFreeze)._tag, "busy");
++      yield* Fiber.interrupt(worker);
++      const frozen = yield* lifecycle.tryFreeze;
++      assert.equal(frozen._tag, "frozen");
++      if (frozen._tag === "frozen") yield* frozen.backends.release;
++    }),
++  );
++
++  it.effect("blocks mutation until idempotent release; interrupted waiters own no permit", () =>
++    Effect.gen(function* () {
++      const lifecycle = yield* Lifecycle.make;
++      const frozen = yield* lifecycle.tryFreeze;
++      assert.equal(frozen._tag, "frozen");
++      if (frozen._tag !== "frozen") return;
++      let ran = false;
++      const worker = yield* lifecycle
++        .withMutation(
++          Effect.sync(() => {
++            ran = true;
++          }),
++        )
++        .pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isFalse(ran);
++      yield* Fiber.interrupt(worker);
++      yield* frozen.backends.release;
++      yield* frozen.backends.release;
++      yield* lifecycle.withMutation(
++        Effect.sync(() => {
++          ran = true;
++        }),
++      );
++      assert.isTrue(ran);
++      const next = yield* lifecycle.tryFreeze;
++      assert.equal(next._tag, "frozen");
++      if (next._tag === "frozen") yield* next.backends.release;
++    }),
++  );
++
++  it.effect("retaining a fence is synchronous and irrevocable", () =>
++    Effect.gen(function* () {
++      const lifecycle = yield* Lifecycle.make;
++      const frozen = yield* lifecycle.tryFreeze;
++      if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++      frozen.backends.retainUntilProcessExit();
++      frozen.backends.retainUntilProcessExit();
++      yield* frozen.backends.release;
++      const worker = yield* lifecycle.withMutation(Effect.void).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      assert.isUndefined(worker.pollUnsafe());
++      assert.equal((yield* lifecycle.tryFreeze)._tag, "busy");
++      yield* Fiber.interrupt(worker);
++    }),
++  );
++
++  it.effect("returns exact owners, omits stopped owners, and releases unsupported snapshots", () =>
++    Effect.gen(function* () {
++      const lifecycle = yield* Lifecycle.make;
++      const removeSupported = yield* lifecycle.addOwner(
++        Effect.succeed({ _tag: "supported", run: { instanceId: "primary", runId: 9 } }),
++      );
++      const removeStopped = yield* lifecycle.addOwner(Effect.succeed({ _tag: "stopped" }));
++      const remove = yield* lifecycle.addOwner(
++        Effect.succeed({ _tag: "unsupported", reason: "WSL" }),
++      );
++      assert.deepEqual(yield* lifecycle.tryFreeze, { _tag: "unsupported", reason: "WSL" });
++      yield* remove;
++      const frozen = yield* lifecycle.tryFreeze;
++      if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++      assert.deepEqual(frozen.backends.runs, [{ instanceId: "primary", runId: 9 }]);
++      yield* frozen.backends.release;
++      yield* removeStopped;
++      yield* removeSupported;
++    }),
++  );
++
++  it.effect("interrupted inventory collection releases the fence", () =>
++    Effect.gen(function* () {
++      const lifecycle = yield* Lifecycle.make;
++      const entered = yield* Deferred.make<void>();
++      const remove = yield* lifecycle.addOwner(
++        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
++      );
++      const freezing = yield* lifecycle.tryFreeze.pipe(Effect.forkChild);
++      yield* Deferred.await(entered);
++      yield* Fiber.interrupt(freezing);
++      yield* remove;
++      yield* lifecycle.withMutation(Effect.void);
++      const frozen = yield* lifecycle.tryFreeze;
++      assert.equal(frozen._tag, "frozen");
++      if (frozen._tag === "frozen") yield* frozen.backends.release;
++    }),
++  );
++});
++
++it.effect("retention wakes only teardown waiters without reopening mutation", () =>
++  Effect.gen(function* () {
++    const lifecycle = yield* Lifecycle.make;
++    const frozen = yield* lifecycle.tryFreeze;
++    if (frozen._tag !== "frozen") return assert.fail("expected freeze");
++    let tornDown = false;
++    let started = false;
++    const teardown = yield* lifecycle
++      .withTeardown(
++        Effect.sync(() => {
++          tornDown = true;
++        }),
++      )
++      .pipe(Effect.forkChild);
++    const mutation = yield* lifecycle
++      .withMutation(
++        Effect.sync(() => {
++          started = true;
++        }),
++      )
++      .pipe(Effect.forkChild);
++    yield* Effect.yieldNow;
++    assert.isFalse(tornDown);
++    assert.isFalse(started);
++    frozen.backends.retainUntilProcessExit();
++    yield* Fiber.join(teardown);
++    yield* frozen.backends.release;
++    assert.isTrue(tornDown);
++    assert.isFalse(started);
++    assert.isTrue(yield* lifecycle.isRetained);
++    yield* Fiber.interrupt(mutation);
++  }),
++);
+diff --git a/apps/desktop/src/backend/desktopUpdateLifecycle.ts b/apps/desktop/src/backend/desktopUpdateLifecycle.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..01d18a96f87848a7f65ade74605398dead500edc
+--- /dev/null
++++ b/apps/desktop/src/backend/desktopUpdateLifecycle.ts
+@@ -0,0 +1,134 @@
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import type {
++  DesktopUpdateFreezeResult,
++  OwnedBackendRun,
++} from "../updates/desktopUpdateReservation.ts";
++
++export type DesktopBackendGeneration =
++  | { readonly _tag: "supported"; readonly run: OwnedBackendRun }
++  | { readonly _tag: "unsupported"; readonly reason: string }
++  | { readonly _tag: "stopped" };
++
++export class DesktopUpdateLifecycle extends Context.Service<
++  DesktopUpdateLifecycle,
++  {
++    readonly tryFreeze: Effect.Effect<DesktopUpdateFreezeResult>;
++    /** Mutations may overlap each other, but are exclusive with a frozen inventory. */
++    readonly withMutation: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
++    /** Teardown is excluded during a provisional freeze, but may finish after retention. */
++    readonly withTeardown: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
++    readonly isRetained: Effect.Effect<boolean>;
++    /** Called inside the construction mutation; removal belongs to the instance scope. */
++    readonly addOwner: (
++      snapshot: Effect.Effect<DesktopBackendGeneration>,
++    ) => Effect.Effect<Effect.Effect<void>>;
++  }
++>()("@t3tools/desktop/backend/desktopUpdateLifecycle") {}
++
++export const make = Effect.sync(() => {
++  let mutations = 0;
++  let retained = false;
++  let teardownFence: Deferred.Deferred<void> | undefined;
++  let fence: Deferred.Deferred<void> | undefined;
++  const owners = new Set<Effect.Effect<DesktopBackendGeneration>>();
++  const guard =
++    (teardown: boolean): DesktopUpdateLifecycle["Service"]["withMutation"] =>
++    (effect) =>
++      Effect.uninterruptibleMask((restore) => {
++        const enter: Effect.Effect<void> = Effect.suspend(() => {
++          if (fence !== undefined && !(teardown && retained)) {
++            return restore(Deferred.await(teardown ? teardownFence! : fence)).pipe(
++              Effect.andThen(enter),
++            );
++          }
++          mutations++;
++          return Effect.void;
++        });
++        return enter.pipe(
++          Effect.andThen(() =>
++            restore(effect).pipe(
++              Effect.ensuring(
++                Effect.sync(() => {
++                  mutations--;
++                }),
++              ),
++            ),
++          ),
++        );
++      });
++  const guarded = guard(false);
++  const withTeardown = guard(true);
++  const tryFreeze = Effect.suspend(() => {
++    let abort: Effect.Effect<void> = Effect.void;
++    return Effect.uninterruptibleMask((restore) =>
++      Effect.gen(function* () {
++        if (mutations > 0 || fence !== undefined)
++          return {
++            _tag: "busy",
++            reason: "Desktop backend lifecycle work is active or frozen.",
++          } as const;
++        const acquired = Deferred.makeUnsafe<void>();
++        fence = acquired;
++        const teardownReleased = Deferred.makeUnsafe<void>();
++        teardownFence = teardownReleased;
++        let released = false;
++        const release = Effect.uninterruptible(
++          Effect.suspend(() => {
++            if (retained || released) return Effect.void;
++            released = true;
++            fence = undefined;
++            teardownFence = undefined;
++            Deferred.doneUnsafe(teardownReleased, Effect.void);
++            return Deferred.succeed(acquired, undefined).pipe(Effect.asVoid);
++          }),
++        );
++        abort = release;
++        const snapshots = yield* restore(Effect.forEach(owners, (snapshot) => snapshot)).pipe(
++          Effect.onExit((exit) => (exit._tag === "Failure" ? release : Effect.void)),
++        );
++        const unsupported = snapshots.find((snapshot) => snapshot._tag === "unsupported");
++        if (unsupported?._tag === "unsupported") {
++          yield* release;
++          return unsupported;
++        }
++        return {
++          _tag: "frozen",
++          backends: {
++            runs: snapshots.flatMap((snapshot) =>
++              snapshot._tag === "supported" ? [snapshot.run] : [],
++            ),
++            release,
++            retainUntilProcessExit: () => {
++              if (!released && !retained) {
++                retained = true;
++                Deferred.doneUnsafe(teardownReleased, Effect.void);
++              }
++            },
++          },
++        } as const;
++      }),
++    ).pipe(Effect.onExit((exit) => (exit._tag === "Failure" ? abort : Effect.void)));
++  });
++  return DesktopUpdateLifecycle.of({
++    tryFreeze,
++    withMutation: guarded,
++    withTeardown,
++    isRetained: Effect.sync(() => retained),
++    addOwner: (snapshot) =>
++      guarded(
++        Effect.sync(() => {
++          owners.add(snapshot);
++          return withTeardown(
++            Effect.sync(() => {
++              owners.delete(snapshot);
++            }),
++          );
++        }),
++      ),
++  });
++});
++
++export const layer = Layer.effect(DesktopUpdateLifecycle, make);
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 3337228aa9622b36dd9e8cf942641f57efb85c6c..2d380b806b4b3336e22bb4424a45b6641e6136f7 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -39,6 +39,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
+ import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
+ import * as DesktopAssets from "./app/DesktopAssets.ts";
+ import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
++import * as DesktopUpdateLifecycle from "./backend/desktopUpdateLifecycle.ts";
+ import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
+ import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
+ import * as DesktopNetworkInterfaces from "./backend/DesktopNetworkInterfaces.ts";
+@@ -173,6 +174,7 @@ const desktopAppActivationLayer = DesktopAppActivation.layer.pipe(
+ // WSL second instance gets registered later in the migration. See
+ // DesktopBackendPool.ts header for the full rollout plan.
+ const desktopBackendLayer = DesktopBackendPool.layer.pipe(
++  Layer.provideMerge(DesktopUpdateLifecycle.layer),
+   Layer.provideMerge(DesktopAppIdentity.layer),
+   Layer.provideMerge(DesktopBackendConfiguration.layer),
+   Layer.provideMerge(DesktopWslEnvironment.layer),
