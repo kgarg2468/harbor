@@ -122,7 +122,7 @@ async function write(root, files) {
 // ordered patches applied to the working tree, provenance next to the git
 // metadata, and a lock beside it. The upstream tree carries the source's
 // own desktop builder entry so the wrapper can require it.
-async function makeFixture({ trackedFixture = false, variant = "managed-nightly" } = {}) {
+async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, variant = "managed-nightly" } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "t3-desktop-builder-")));
   const lockDir = path.join(root, "lock");
   const patches = [];
@@ -151,8 +151,10 @@ async function makeFixture({ trackedFixture = false, variant = "managed-nightly"
   await git(source, ["init", "-q", "-b", "main"]);
   await git(source, ["add", "-A"]);
   if (trackedFixture) {
-    await write(source, { "vendor/compiler/cases/node_modules/example/index.js": "export default 42;\n" });
-    await git(source, ["add", "-f", "vendor/compiler/cases/node_modules/example/index.js"]);
+    const fixtureFile = `${typeof trackedFixture === "string" ? trackedFixture : "vendor/compiler/cases/node_modules"}/example/index.js`;
+    await write(source, { [fixtureFile]: "export default 42;\n" });
+    await chmod(path.join(source, fixtureFile), fixtureMode);
+    await git(source, ["add", "-f", fixtureFile]);
   }
   await git(source, ["commit", "-q", "-m", "upstream"]);
   const commit = (await git(source, ["rev-parse", "HEAD"])).stdout.trim();
@@ -575,15 +577,44 @@ describe("buildManagedDesktopRuntime", () => {
 
 describe("tracked dependency fixtures", () => {
   for (const variant of ["managed-nightly", "reasoning"]) {
-    it(`accepts a pristine tracked node_modules fixture for ${variant}`, async () => {
-      const fx = await makeFixture({ trackedFixture: true, variant });
-      try {
-        await build(fx);
-        assert.ok(fx.calls.some((call) => call.command === "pnpm" && call.args[0] === "install"));
-      } finally {
-        await rm(fx.root, { recursive: true, force: true });
-      }
-    });
+    for (const fixtureMode of [0o644, 0o755]) {
+      it(`accepts a pristine tracked node_modules fixture mode ${fixtureMode.toString(8)} for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture: true, fixtureMode, variant });
+        try {
+          await build(fx);
+          assert.ok(fx.calls.some((call) => call.command === "pnpm" && call.args[0] === "install"));
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    for (const trackedFixture of ["node_modules", "apps/server/node_modules", "apps/desktop/node_modules", "packages/contracts/node_modules"]) {
+      it(`rejects tracked installation ${trackedFixture} for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture, variant });
+        try {
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    for (const fixtureMode of [0o644, 0o755]) {
+      it(`rejects tracked fixture mode ${fixtureMode.toString(8)} drift with core.filemode=false for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture: true, fixtureMode, variant });
+        try {
+          await git(fx.source, ["config", "core.filemode", "false"]);
+          const file = path.join(fx.source, "vendor/compiler/cases/node_modules/example/index.js");
+          const changedMode = fixtureMode === 0o644 ? 0o755 : 0o644;
+          await chmod(file, changedMode);
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+          assert.equal((await lstat(file)).mode & 0o777, changedMode, "the rejected mode remains untouched");
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
 
     it(`rejects stale additions inside a tracked node_modules fixture for ${variant}`, async () => {
       for (const addition of ["example/stale.js", "empty-directory", "external-link", "dangling-link"]) {

@@ -504,6 +504,8 @@ export async function refuseExistingEnvFiles(source) {
 // fixture entries may be supplied only after prepared-source verification;
 // their bytes already match the expected tree. Walk every fixture descendant
 // so ignored additions (including empty directories) cannot hide in it.
+// Source/package/workspace install roots never qualify as fixtures. Compare
+// executable state explicitly because Git may have core.filemode disabled.
 // Symlinks are never allowed inside these subtrees or followed, and nothing
 // is removed. Git metadata outside dependency subtrees is skipped.
 export async function refusePriorBuildState(source, trackedDependencyEntries = new Map()) {
@@ -511,15 +513,20 @@ export async function refusePriorBuildState(source, trackedDependencyEntries = n
   while (pending.length > 0) {
     const dir = pending.pop();
     const entries = await readdir(path.join(source, dir), { withFileTypes: true }).catch((error) => fail(`cannot read ${dir} in source: ${error.message}`));
+    const installRoot = dir === "." || entries.some((entry) => ["package.json", "pnpm-workspace.yaml"].includes(entry.name));
     for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       if (entry.name === ".git" && !dir.split("/").includes("node_modules")) continue;
       const relative = dir === "." ? entry.name : `${dir}/${entry.name}`;
       const inDependencies = relative.split("/").includes("node_modules");
       const expectedMode = trackedDependencyEntries.get(relative);
-      const trackedFixtureEntry = entry.isDirectory()
+      let trackedFixtureEntry = entry.isDirectory()
         ? expectedMode === "040000"
         : entry.isFile() && ["100644", "100755"].includes(expectedMode);
-      if ((inDependencies && !trackedFixtureEntry) || relative === MONITOR_TARGET_DIRECTORY) {
+      if (trackedFixtureEntry && entry.isFile()) {
+        const { mode } = await lstat(path.join(source, relative));
+        trackedFixtureEntry = (mode & 0o111) === (expectedMode === "100755" ? 0o111 : 0);
+      }
+      if ((inDependencies && !trackedFixtureEntry) || (entry.name === "node_modules" && installRoot) || relative === MONITOR_TARGET_DIRECTORY) {
         fail(`source already contains ${relative}; a fresh prepared source tree without installed dependencies or native build output is required`);
       }
       if (entry.isDirectory()) pending.push(relative);
