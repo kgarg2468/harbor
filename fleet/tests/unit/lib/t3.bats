@@ -800,3 +800,76 @@ SH
     assert [ ! -e "${FIX_ROOT}/lock.d" ]
   done
 }
+
+engines_login_fixture() {
+  local installed="${1}" locked="${2}" node_exit="${3:-0}" package key
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")" "${FIX_HOME}/login-bin"
+  printf '{\n  "engines": {\n    "node": "%s"\n  }\n}\n' "${installed}" >"${package}"
+  # Only the login profile adds this directory; the inherited PATH cannot supply
+  # the fixture, even after /etc/profile or macOS path_helper rewrites PATH.
+  printf 'PATH="${HOME}/login-bin:${PATH}"\nexport PATH\n' >"${FIX_HOME}/.profile"
+  {
+    printf '#!/bin/sh\n'
+    printf '[ "$*" = --version ] || exit 97\n'
+    printf 'printf "v21.0.0\\n"\nexit %s\n' "${node_exit}"
+  } >"${FIX_HOME}/login-bin/node"
+  chmod 0755 "${FIX_HOME}/login-bin/node"
+  local lock="${BATS_TEST_TMPDIR}/engines.lock"
+  for key in ${HARBOR_VERSION_KEYS}; do
+    if [ "${key}" = t3_engines_node ]; then
+      printf '%s=%s\n' "${key}" "${locked}"
+    else
+      printf '%s=%s\n' "${key}" "$(harbor_version_get "${key}")"
+    fi
+  done >"${lock}"
+  harbor_versions_load "${lock}"
+}
+
+@test "require engines passes only the fixture login shell's exact Node version" {
+  # This range admits exactly 21.0.0: success proves that exact value flowed into
+  # the real comparison, not merely that the fixture executable exists.
+  engines_login_fixture '>=21.0.0 <=21.0.0' '>=21.0.0 <=21.0.0'
+  assert_equal "$(HOME="${FIX_HOME}" sh -lc 'node --version')" v21.0.0
+  run harbor_t3_require_engines "${FIX_HOME}"
+  assert_success
+  assert_output ''
+}
+
+@test "require engines preserves the versions refusal for an unsatisfying Node" {
+  engines_login_fixture '>=22.16' '>=22.16'
+  run harbor_versions_require_installed_engines 21.0.0 '>=22.16'
+  assert_failure 3
+  local expected="${output}"
+  run harbor_t3_require_engines "${FIX_HOME}"
+  assert_failure 3
+  assert_output "${expected}"
+  assert_output --partial versions.installed_engines_range
+  assert_output --partial 21.0.0
+  assert_output --partial '>=22.16'
+}
+
+@test "require engines preserves lock drift refusal even when Node satisfies both" {
+  engines_login_fixture '>=20' '>=21'
+  assert harbor_semver_satisfies 21.0.0 '>=20'
+  assert harbor_semver_satisfies 21.0.0 '>=21'
+  run harbor_versions_require_installed_engines 21.0.0 '>=20'
+  assert_failure 3
+  local expected="${output}"
+  run harbor_t3_require_engines "${FIX_HOME}"
+  assert_failure 3
+  assert_output "${expected}"
+  assert_output --partial versions.installed_engines_drift
+  assert_output --partial "engines.node '>=20'"
+  assert_output --partial "t3_engines_node '>=21'"
+}
+
+@test "require engines names the operator profile and PATH when login Node fails" {
+  engines_login_fixture '>=21' '>=21' 7
+  run harbor_t3_require_engines "${FIX_HOME}"
+  assert_failure 3
+  assert_output --partial t3.node_shell
+  assert_output --partial "operator's shell profile / PATH"
+  assert_output --partial 'without an interactive profile'
+  refute_output --partial reinstall
+}

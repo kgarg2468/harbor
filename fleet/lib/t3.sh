@@ -62,6 +62,39 @@ harbor_t3_package_engines() {
   [ -n "${range}" ] || harbor_die 2 t3.engines_unreadable "${package} carries no engines.node range; rerun harbor provision to install the locked t3 package"
   printf '%s' "${range}"
 }
+# harbor_t3_require_engines HOME: the provision-time twin of the lint's range check
+# (design section 2), run against the package that is actually installed. Both halves
+# of the comparison belong to lib/versions.sh, which refuses an empty range, a range
+# that has drifted from the lock, and an unsatisfying Node each with its own message;
+# this function only supplies the two values, so those refusals keep one wording.
+harbor_t3_require_engines() {
+  local home="${1}" range out version rest field shaped
+  range="$(harbor_t3_package_engines "${home}")" || exit "$?"
+  # The launcher has no interactive profile, so probe the operator's login shell
+  # instead of trusting the Node inherited by this provisioning process. A node the
+  # login shell cannot resolve, or a shadowed one, is the failure this check is for,
+  # so the probe must go through the same resolution the launcher will.
+  out="$(HOME="${home}" sh -lc 'node --version' 2>/dev/null)" || out=""
+  version=""
+  case "${out}" in
+    v*) version="${out#v}" ;;
+  esac
+  # The same three-field fence harbor_t3_installed_version applies, enumerated for
+  # the same reason: a bracket range would resolve by the ambient locale's collation.
+  rest="${version#*.}"
+  case "${version}" in
+    *.*.*.*) shaped=no ;;
+    *.*.*) shaped=three ;;
+    *) shaped=no ;;
+  esac
+  for field in "${version%%.*}" "${rest%%.*}" "${rest#*.}"; do
+    case "${field}" in
+      "" | *[!0123456789]*) shaped=no ;;
+    esac
+  done
+  [ "${shaped}" = three ] || harbor_die 3 t3.node_shell "the operator's login shell could not resolve a node reporting a v-prefixed three-field numeric version; fix the operator's shell profile / PATH, including any shadowed node: T3's service launcher runs without an interactive profile"
+  harbor_versions_require_installed_engines "${version}" "${range}"
+}
 # harbor_t3_reader: recovery has no home argument, so use the same explicit home
 # the agent readers use. An unset HARBOR_AGENTS_HOME keeps harbor_agents_home's exit
 # 2; falling back to HOME could confidently observe an entirely different install.
