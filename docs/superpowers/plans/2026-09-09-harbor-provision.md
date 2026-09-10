@@ -326,7 +326,20 @@ So the adapter has four answers, and the difference between the last two is load
 
 Whether each agent is `unsupported` is a measurement, not an assumption: the implementer runs the pinned CLI's `--help` and records in the handoff which subcommand, if any, is documented as machine-readable. Fixtures are captured from that release. If a tool turns out to be `unsupported`, that is a legitimate outcome and the tests assert the `unsupported` path rather than being weakened.
 
-**Tests.** Each captured fixture classifies to its recorded answer; an empty body, a non-zero exit with a valid body, and an unrecognized body each classify `unknown`; a missing status subcommand classifies `unsupported`; the adapter never prints the vendor body to stdout, so no credential-adjacent text can reach a caller that is capturing it.
+**The measurement, taken at the pinned releases.** Neither agent is `unsupported`; both document a status subcommand.
+
+| agent | command | logged in | logged out |
+| --- | --- | --- | --- |
+| `claude` 2.1.267 | `claude auth status --json` | exit 0, `{"loggedIn": true, "authMethod": "claude.ai", …}` | exit 1, `{"loggedIn": false, "authMethod": "none", …}` |
+| `codex` 0.154.0 | `codex login status` | exit 0, `Logged in using ChatGPT` | exit 1, `Not logged in` |
+
+`claude auth status --help` lists `--json  Output as JSON (default)`, so the JSON is the documented machine-readable form and `loggedIn` is the field to read. `codex login status --help` documents the subcommand but offers no JSON flag, so its answer is prose and is matched with one anchored `case` per outcome, the same way Task 5 anchors each vendor's `--version` spelling.
+
+**This corrects the classification rule below.** A non-zero exit with a valid body is not `unknown` — it is the ordinary logged-out answer for *both* agents. So the adapter classifies on the body and treats the exit status as corroborating only: a recognized logged-out body is `logged-out` whatever the exit status, an empty or unrecognized body is `unknown` whatever the exit status. Classifying on the exit status would report every logged-out node as `unknown`, and `unknown` never journals a transition, so `harbor auth <agent>` could never record a successful login.
+
+**Fixtures must carry no personal data.** The logged-in `claude` body also has `email`, `orgId`, `orgName`, `projectsDirectory`, and `subscriptionType`. Fixtures use placeholder values for all of them; only `loggedIn` is read, and the rest are present in the fixture solely so the parser is measured against the real shape.
+
+**Tests.** Each captured fixture classifies to its recorded answer, which per the measurement above means the four real cases — `claude` logged in and out, `codex` logged in and out — including that the two logged-out fixtures classify `logged-out` and not `unknown` despite exiting 1. An empty body and an unrecognized body each classify `unknown`, at either exit status. A status subcommand that is missing entirely classifies `unsupported`; neither pinned agent is, so that path is exercised with a shim that has no status subcommand rather than being dropped. The adapter never prints the vendor body to stdout, so no credential-adjacent text can reach a caller that is capturing it — asserted against the logged-in `claude` fixture, whose body carries an email and an org id.
 
 **Commit:** `feat(agents): version-pinned auth status adapters`
 

@@ -29,6 +29,16 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/journal.sh"
 # shellcheck source=lib/entrypoint.sh
 . "${HARBOR_ROOT}/lib/entrypoint.sh"
+# lib/runtime.sh owns the runtime-install observer and comes before lib/agents.sh, which
+# registers its two readers in that registry at source time. Both are sourced here and
+# not only where a command needs them: harbor auth claude runs operator journal recovery
+# under its lock like every other operator command, and a claude or codex
+# runtime-install entry left prepared by a crashed provision is decidable only in a
+# process that loaded the library that can read it.
+# shellcheck source=lib/runtime.sh
+. "${HARBOR_ROOT}/lib/runtime.sh"
+# shellcheck source=lib/agents.sh
+. "${HARBOR_ROOT}/lib/agents.sh"
 # shellcheck source=lib/auth.sh
 . "${HARBOR_ROOT}/lib/auth.sh"
 harbor_usage() {
@@ -40,6 +50,11 @@ subcommands:
                                       operator (design section 3.6); --tailscale-ssh is
                                       refused until the vendor-smoke probe records that
                                       the operator can run the --ssh form without sudo
+  auth claude                         run Claude Code's own login, attended, as the
+  auth codex                          operator, and journal only a logged-out to
+                                      logged-in transition the tool's own status command
+                                      reported (design section 3.6); Harbor never logs
+                                      either tool out and never reads its credentials
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
   help                                print this text

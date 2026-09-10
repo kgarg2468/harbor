@@ -26,14 +26,18 @@ HARBOR_AUTH_PROBE_ACCEPTED="accepted"
 # tailscale up has returned, read every few seconds.
 HARBOR_AUTH_POLL_SECONDS=5
 HARBOR_AUTH_TIMEOUT_SECONDS=600
-HARBOR_AUTH_USAGE="usage: harbor auth tailscale [--tailscale-ssh]"
+HARBOR_AUTH_USAGE="usage: harbor auth tailscale [--tailscale-ssh] | harbor auth claude | harbor auth codex"
 # harbor_auth_refuse_root: exit 3 as root. The login URL binds this node to whoever
 # opens it, the state root this command takes its lock in is the operator's own, and
 # the daemon grant of design section 5.2 is what makes the unprivileged up possible at
 # all, so a root run is refused before anything is read.
+#
+# The message names "harbor auth" rather than one subcommand, because all three attended
+# logins refuse through this one function and a message naming tailscale would be read
+# by an operator who typed claude.
 harbor_auth_refuse_root() {
   [ "$(id -u)" != 0 ] \
-    || harbor_die 3 auth.root "harbor auth tailscale is the operator's attended login and runs unprivileged (design section 3.6): rerun it as the operator without sudo; nothing was changed"
+    || harbor_die 3 auth.root "harbor auth is the operator's attended login and runs unprivileged (design section 3.6): rerun it as the operator without sudo; nothing was changed"
 }
 # harbor_auth_record_value RECORD KEY: the string value bootstrap.json carries under
 # KEY, or nothing when the record is absent, unreadable, or carries no such string. A
@@ -239,20 +243,33 @@ harbor_auth_tailscale() {
   done
   harbor_msg "this node is logged in to its tailnet (BackendState Running); next, as the operator: harbor provision"
 }
-# harbor_auth_cmd TOOL [flag...]: the dispatcher's entry, harbor auth <tool>. Only
-# tailscale is in this release; claude, codex, and connect are design section 8's PR 4
-# and are named as such rather than as unknown. Root is refused first, before the
-# entrypoint check judges anything. The record and the probe are production paths, and
-# both take a fixture stand-in for the unit lane in the way lib/entrypoint.sh takes its
-# own: the caller is never root here, so a stand-in grants nothing, since every path it
-# can name is one it could already read, and the command reads those two files and
-# mutates neither. Then the installed-entrypoint check of design section 5.2, the
-# pinned tailscale_version for the gate, and the operator state root of section 3.7.
+# harbor_auth_cmd TOOL [flag...]: the dispatcher's entry, harbor auth <tool>. tailscale
+# is this file's own command, claude and codex are lib/agents.sh's, and connect is still
+# named as a later step of this release rather than as unknown. Root is refused first,
+# before the entrypoint check judges anything. The record and the probe are production
+# paths, and both take a fixture stand-in for the unit lane in the way lib/entrypoint.sh
+# takes its own: the caller is never root here, so a stand-in grants nothing, since
+# every path it can name is one it could already read, and the command reads those two
+# files and mutates neither. Then the installed-entrypoint check of design section 5.2,
+# the pinned tailscale_version for the gate, and the operator state root of section 3.7.
+#
+# The agent arm reads neither of those two files and takes no flags. Whose Tailscale
+# this node runs says nothing about whose Anthropic or OpenAI account the operator is
+# about to sign in to, and the pinned tailscale_version decides nothing there either, so
+# the arm goes straight to lib/agents.sh, which refuses root and creates the operator
+# state root itself, in the order harbor_auth_tailscale established.
 harbor_auth_cmd() {
   local tool="${1:-}" record probe locked
   case "${tool}" in
     tailscale) shift ;;
-    claude | codex | connect)
+    claude | codex)
+      shift
+      [ "$#" -eq 0 ] || harbor_die 3 usage "${HARBOR_AUTH_USAGE}"
+      harbor_state_root_for_principal
+      harbor_agents_auth "${HARBOR_STATE_ROOT}" "${HOME}" "${tool}"
+      return 0
+      ;;
+    connect)
       harbor_die 3 usage "harbor auth ${tool} is not part of this release (design section 8, PR 4); ${HARBOR_AUTH_USAGE}"
       ;;
     *) harbor_die 3 usage "${HARBOR_AUTH_USAGE}" ;;

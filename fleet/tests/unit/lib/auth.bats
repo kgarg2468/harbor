@@ -25,6 +25,15 @@ setup() {
   # byte for byte what the State record row of design section 5.2 writes.
   # shellcheck source=lib/state.sh
   . "${HARBOR_ROOT}/lib/state.sh"
+  # lib/runtime.sh before lib/agents.sh, which registers its readers in that registry at
+  # source time. They are sourced here for harbor_agents_bin alone: harbor auth claude
+  # and harbor auth codex are dispatched from this file into that library, and the tests
+  # below put their stand-in CLIs where it says the agents live rather than where this
+  # file guesses they do.
+  # shellcheck source=lib/runtime.sh
+  . "${HARBOR_ROOT}/lib/runtime.sh"
+  # shellcheck source=lib/agents.sh
+  . "${HARBOR_ROOT}/lib/agents.sh"
   # shellcheck source=lib/auth.sh
   . "${HARBOR_ROOT}/lib/auth.sh"
   # The operator state root is not created here: creating it is the command's own job
@@ -716,13 +725,15 @@ assert_url_only_on_terminal() {
   assert [ ! -e "${HARBOR_SHIM_LOG}" ]
 }
 
-@test "harbor auth: usage, the tools of a later release, and help name the command" {
+@test "harbor auth: usage, the tool of a later step, and help name the commands" {
   run env HOME="${FIX_HOME}" "${HARBOR}" auth
   assert_failure 3
   assert_output --partial "usage: harbor auth tailscale [--tailscale-ssh]"
-  run env HOME="${FIX_HOME}" "${HARBOR}" auth claude
+  assert_output --partial "harbor auth claude"
+  assert_output --partial "harbor auth codex"
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth connect
   assert_failure 3
-  assert_output --partial "harbor auth claude is not part of this release"
+  assert_output --partial "harbor auth connect is not part of this release"
   run env HOME="${FIX_HOME}" "${HARBOR}" auth github
   assert_failure 3
   assert_output --partial "usage: harbor auth tailscale"
@@ -730,4 +741,172 @@ assert_url_only_on_terminal() {
   run "${HARBOR}" help
   assert_success
   assert_output --partial "auth tailscale [--tailscale-ssh]"
+  assert_output --partial "auth claude"
+  assert_output --partial "auth codex"
+}
+
+# ---- harbor auth claude and harbor auth codex ----------------------------------------
+
+# The agent logins of design section 3.6, through the public command. Their transition
+# matrix belongs to lib/agents.sh and is asserted in tests/unit/lib/agents.bats; what is
+# asserted here is what the dispatcher owns — that the operator state root is created
+# 0700 before the lock, that the command journals its transition and gives the lock back,
+# and that a tool name outside the release is a usage error.
+
+AGENT_URL='https://vendor.example.com/activate/FIXTURE0000'
+
+agent_state() {
+  printf '%s/agent-state.%s' "${BATS_TEST_TMPDIR}" "${1}"
+}
+
+agent_log() {
+  # Every argv the stand-in CLIs were called with, one call per line
+  printf '%s/agent.log' "${BATS_TEST_TMPDIR}"
+}
+
+agent_cli() {
+  # agent_cli AGENT PRE POST: AGENT's stand-in CLI at the path lib/agents.sh installs it
+  # to under the fixture home. It records every argv, answers its own status command out
+  # of a state file starting at PRE, and answers its login by printing what an attended
+  # vendor login prints and writing POST into that state file.
+  local agent="${1}" pre="${2}" post="${3}" bin login
+  case "${agent}" in
+    claude) login='auth login' ;;
+    codex) login='login' ;;
+  esac
+  bin="$(harbor_agents_bin "${agent}" "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  printf '%s' "${pre}" >"$(agent_state "${agent}")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >>"%s"\n' "$(agent_log)"
+    printf 'state="$(cat "%s")"\n' "$(agent_state "${agent}")"
+    printf 'case "$*" in\n'
+    printf '  *--help*) exit 0 ;;\n'
+    printf '  "%s")\n' "${login}"
+    printf '    echo "%s"\n' "${AGENT_URL}"
+    printf '    printf "%%s" "%s" >"%s"\n' "${post}" "$(agent_state "${agent}")"
+    printf '    exit 0\n'
+    printf '    ;;\n'
+    printf 'esac\n'
+    printf 'case "${state}" in\n'
+    printf '  logged-in) cat "%s/tests/fixtures/agents/%s-status/logged-in.out" ;;\n' "${HARBOR_ROOT}" "${agent}"
+    printf '  *)\n'
+    printf '    cat "%s/tests/fixtures/agents/%s-status/logged-out.out"\n' "${HARBOR_ROOT}" "${agent}"
+    printf '    exit 1\n'
+    printf '    ;;\n'
+    printf 'esac\n'
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+agent_cmd() {
+  # agent_cmd AGENT [ENV=VALUE...]: the public command against the fixture home.
+  # HARBOR_DEV is not set and no fixture record or probe is pointed at it, because this
+  # arm reads neither: the bootstrap record says whose Tailscale this node runs, which
+  # decides nothing about whose Anthropic or OpenAI account the operator signs in to.
+  local agent="${1}"
+  shift
+  run env HOME="${FIX_HOME}" ${1+"$@"} "${HARBOR}" auth "${agent}"
+}
+
+@test "harbor auth <agent>: creates the operator state root with its modes before the lock, logs in, journals the transition, and releases the lock" {
+  local agent seq=0
+  for agent in claude codex; do
+    seq=$((seq + 1))
+    agent_cli "${agent}" logged-out logged-in
+    [ "${seq}" != 1 ] || assert [ ! -e "${FIX_ROOT}" ]
+    agent_cmd "${agent}"
+    assert_success
+    # The vendor's own login output reached the terminal where the vendor printed it.
+    assert_output --partial "${AGENT_URL}"
+    assert_output --partial "${agent} is logged in on this node"
+    refute_output --partial "failed at step"
+    # The state root and its journal carry the section 3.7 modes, and the log is 0600.
+    run ls -ld "${FIX_ROOT}" "${FIX_ROOT}/journal"
+    assert_line --index 0 --regexp '^drwx------'
+    assert_line --index 1 --regexp '^drwx------'
+    run ls -l "${FIX_ROOT}/harbor.log"
+    assert_output --regexp '^-rw-------'
+    # The lock and its gate were both given back.
+    assert [ ! -e "${FIX_ROOT}/lock.d" ]
+    assert [ ! -e "${FIX_ROOT}/reclaim.d" ]
+    # One auth entry per agent, applied, naming the transition it watched both ends of.
+    assert_equal "$(entry_phase "${FIX_ROOT}" "000${seq}")" applied
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" target)" "\"${agent}\""
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" pre_state)" '"logged-out"'
+    assert_equal "$(entry_raw "${FIX_ROOT}" "000${seq}" post_state)" '"logged-in"'
+    harbor_journal_validate "${FIX_ROOT}/journal/000${seq}-auth.json"
+  done
+  run cat "${FIX_ROOT}/harbor.log"
+  assert_output --partial "command auth claude"
+  assert_output --partial "command auth codex"
+  assert_output --partial "step lock-acquired"
+  assert_output --partial "step recovery-scan"
+  assert_output --regexp ' exit 0$'
+  # The login URL is the operator's to read on the terminal and is in nothing Harbor
+  # wrote, and no tailscale shim was reached by either run.
+  refute_output --partial "${AGENT_URL}"
+  refute grep -qF -- "${AGENT_URL}" "$(agent_log)"
+  assert [ ! -e "${HARBOR_SHIM_LOG}" ]
+  # Each vendor was asked its status, its login, and its status again, and nothing else.
+  run cat "$(agent_log)"
+  assert_output "auth status --json
+auth login
+auth status --json
+login status
+login
+login status"
+}
+
+@test "harbor auth <agent>: the operator state root exists 0700 before the lock is taken" {
+  # The ordering, not the end state, asserted the way tests/integration/assert_auth.sh
+  # asserts it for tailscale: lock-gate is a step boundary inside harbor_lock_acquire
+  # that sits strictly after harbor_state_root_create and strictly before the mkdir of
+  # lock.d. A SIGKILL there freezes the filesystem in a shape only that order can make,
+  # and had the order been the other way round harbor_lock_acquire would have died at
+  # lock.no_state_root before ever logging lock-gate, so the run would exit 3 here
+  # instead of 137.
+  agent_cli claude logged-out logged-in
+  assert [ ! -e "${FIX_ROOT}" ]
+  agent_cmd claude HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=lock-gate
+  assert_equal "${status}" 137
+  run ls -ld "${FIX_ROOT}" "${FIX_ROOT}/reclaim.d"
+  assert_line --index 0 --regexp '^drwx------'
+  assert_line --index 1 --regexp '^drwx------'
+  assert [ ! -e "${FIX_ROOT}/lock.d" ]
+  run ls -l "${FIX_ROOT}/harbor.log"
+  assert_output --regexp '^-rw-------'
+  run cat "${FIX_ROOT}/harbor.log"
+  assert_output --partial "command auth claude"
+  assert_output --partial "step lock-gate"
+  # Nothing was journaled on the way to the lock, and the vendor was never called: the
+  # journal directory itself is created under the lock, after this boundary.
+  assert [ ! -e "${FIX_ROOT}/journal" ]
+  assert [ ! -e "$(agent_log)" ]
+}
+
+@test "harbor auth <agent>: an agent that is not installed is exit 3 naming harbor provision" {
+  # The state root is still created, because the check that refuses is the command's
+  # own and sits after the preflight the lock needs; what must not happen is a login.
+  agent_cmd claude
+  assert_failure 3
+  assert_output --partial "agents.not_installed"
+  assert_output --partial "harbor provision"
+  assert [ ! -e "$(agent_log)" ]
+  assert [ ! -e "${FIX_ROOT}/journal" ]
+}
+
+@test "harbor auth <agent>: a flag is a usage error before the state root is created" {
+  # Neither agent login takes a flag at this release, and an unrecognized one is refused
+  # rather than passed on to the vendor.
+  agent_cli claude logged-out logged-in
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth claude --force
+  assert_failure 3
+  assert_output --partial "usage: harbor auth tailscale [--tailscale-ssh] | harbor auth claude | harbor auth codex"
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth codex extra
+  assert_failure 3
+  assert_output --partial "usage: harbor auth"
+  assert [ ! -e "${FIX_ROOT}" ]
+  assert [ ! -e "$(agent_log)" ]
 }
