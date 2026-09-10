@@ -145,6 +145,42 @@ harbor_t3_run() {
   harbor_log_vendor "${bin}" ${1+"$@"}
   "${bin}" ${1+"$@"}
 }
+# harbor_t3_service_status HOME: the pinned formatter has no JSON mode and exits
+# zero in every state. Only its whole status lines decide the answer; an empty or
+# unfamiliar body is unknown, never evidence that a service is installed.
+harbor_t3_service_status() {
+  local home="${1}" locked body rc=0 word=unknown newline xt=0
+  newline='
+'
+  locked="$(harbor_version_require t3_version)" || exit "$?"
+  # As with agent auth status, keep the vendor body out of inherited xtrace.
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
+  body="$(harbor_t3_run "${home}" service status 2>&1)" || rc="$?"
+  # Surround the body with newlines so a neighbouring path cannot supply a phrase.
+  case "${newline}${body}${newline}" in
+    # service-status/installed-current: the CLI version must agree with the lock.
+    *"${newline}  Status: installed · t3@${locked}${newline}"*) word="installed-current" ;;
+    # service-status/update-pending
+    *"${newline}  Status: needs an update or repair${newline}"*) word="update-pending" ;;
+    # service-status/not-installed
+    *"${newline}  Status: not installed${newline}"*) word="not-installed" ;;
+    # service-status/unsupported
+    *"${newline}  Status: unavailable on this machine${newline}"*) word=unsupported ;;
+  esac
+  unset body
+  [ "${xt}" = 0 ] || set -x
+  harbor_log t3 "service status is ${word}; t3 exited ${rc}"
+  printf '%s' "${word}"
+}
+# harbor_t3_service_healthy HOME: both the vendor and systemd must agree. Reading
+# health does not install or repair a unit, and the vendor log need not exist.
+harbor_t3_service_healthy() {
+  local active
+  [ "$(harbor_t3_service_status "${1}")" = installed-current ] || return 1
+  active="$(HOME="${1}" systemctl --user is-active t3code.service 2>/dev/null)" || return 1
+  [ "${active}" = active ]
+}
 # Register beside the definition so every process sourcing this library can observe
 # a prepared t3 runtime-install entry, including recovery without an install.
 harbor_runtime_reader_register t3 harbor_t3_reader

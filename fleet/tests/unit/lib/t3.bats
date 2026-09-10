@@ -467,3 +467,136 @@ fake_runnable_t3() {
     assert [ ! -e "$(harbor_agents_prefix "${FIX_HOME}")" ]
   done
 }
+
+fake_service_t3() {
+  # The real run seam still checks --version; only the formatter and exit are fake.
+  local bin
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  cp "${HARBOR_ROOT}/tests/fixtures/t3/service-status/${1}" "${BATS_TEST_TMPDIR}/service-body"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "${1:-}" = --version ]; then echo "t3 v%s"; exit 0; fi\n' "${T3_VERSION}"
+    printf 'printf "%%s\\n" "$*" >"%s/service-call"\n' "${BATS_TEST_TMPDIR}"
+    printf '[ "$*" = "service status" ] || exit 97\n'
+    printf 'cat "%s/service-body"\nexit %s\n' "${BATS_TEST_TMPDIR}" "${2:-0}"
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+fake_systemctl() {
+  # A fixture executable seals the systemctl name, including on macOS.
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$HOME" "$*" >"%s/systemctl-call"\n' "${BATS_TEST_TMPDIR}"
+    printf '[ "$*" = "--user is-active t3code.service" ] || exit 97\n'
+    printf "cat <<'BODY'\n%s\nBODY\nexit %s\n" "${1}" "${2:-0}"
+  } >"${FAKE_BIN}/systemctl"
+  chmod 0755 "${FAKE_BIN}/systemctl"
+}
+
+@test "service formatter fixtures classify by whole status lines" {
+  local fixture expected
+  for fixture in installed-current update-pending not-installed unsupported installed-other-version unrecognized-text empty; do
+    expected="${fixture}"
+    case "${fixture}" in installed-other-version | unrecognized-text | empty) expected=unknown ;; esac
+    fake_service_t3 "${fixture}"
+    run harbor_t3_service_status "${FIX_HOME}"
+    assert_success
+    assert_output "${expected}"
+    assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-call")" 'service status'
+  done
+}
+
+@test "service status body wins over nonzero exits and zero never makes unknown text current" {
+  local fixture
+  for fixture in installed-current update-pending not-installed unsupported; do
+    fake_service_t3 "${fixture}" 7
+    run harbor_t3_service_status "${FIX_HOME}"
+    assert_success
+    assert_output "${fixture}"
+  done
+  fake_service_t3 unrecognized-text 0
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output unknown
+}
+
+@test "service phrases cannot come from a neighbouring path or have trailing text" {
+  local phrase prefix suffix
+  fake_service_t3 empty
+  for phrase in "  Status: installed · t3@${T3_VERSION}" '  Status: needs an update or repair' '  Status: not installed' '  Status: unavailable on this machine'; do
+    for prefix in '  Unit: /home/OPERATOR/' '  Logs: /home/OPERATOR/' ''; do
+      suffix=''
+      [ -n "${prefix}" ] || suffix=' extra'
+      printf 'T3 Code service\n%s%s%s\n' "${prefix}" "${phrase}" "${suffix}" >"${BATS_TEST_TMPDIR}/service-body"
+      run harbor_t3_service_status "${FIX_HOME}"
+      assert_success
+      assert_output unknown
+    done
+  done
+}
+
+@test "service current phrase follows the loaded lock and the run version gate" {
+  fake_service_t3 installed-current
+  T3_VERSION=0.0.37
+  write_install_lock npm:t3@0.0.37
+  # The executable still reports the old version: the seam refuses before status.
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output unknown
+  assert [ ! -e "${BATS_TEST_TMPDIR}/service-call" ]
+  fake_service_t3 installed-current
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output unknown
+  fake_service_t3 installed-other-version
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output installed-current
+}
+
+@test "service health requires current status and exactly active from systemctl" {
+  local answer
+  fake_service_t3 installed-current
+  for answer in inactive 'active extra' ' active' "$(printf 'active\ninactive')" ''; do
+    fake_systemctl "${answer}"
+    run harbor_t3_service_healthy "${FIX_HOME}"
+    assert_failure
+    assert_output ''
+  done
+  fake_systemctl active 1
+  run harbor_t3_service_healthy "${FIX_HOME}"
+  assert_failure
+  fake_systemctl active
+  run harbor_t3_service_healthy "${FIX_HOME}"
+  assert_success
+  assert_output ''
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/systemctl-call")" "$(printf '%s\n--user is-active t3code.service' "${FIX_HOME}")"
+  rm "${BATS_TEST_TMPDIR}/systemctl-call"
+  fake_service_t3 unrecognized-text
+  run harbor_t3_service_healthy "${FIX_HOME}"
+  assert_failure
+  assert_output ''
+  assert [ ! -e "${BATS_TEST_TMPDIR}/systemctl-call" ]
+}
+
+@test "service status and health do not write systemd user files or create vendor logs" {
+  local before fixture
+  mkdir -p "${FIX_HOME}/.config/systemd/user" "${DECOY_HOME}/.config/systemd/user"
+  printf 'sentinel\n' >"${FIX_HOME}/.config/systemd/user/sentinel"
+  fake_service_t3 installed-current
+  fake_systemctl active
+  before="$(tree_snapshot)"
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  run harbor_t3_service_healthy "${FIX_HOME}"
+  assert_success
+  assert_equal "$(tree_snapshot)" "${before}"
+  for fixture in update-pending not-installed unsupported unrecognized-text empty; do
+    cp "${HARBOR_ROOT}/tests/fixtures/t3/service-status/${fixture}" "${BATS_TEST_TMPDIR}/service-body"
+    run harbor_t3_service_healthy "${FIX_HOME}"
+    assert_failure
+    assert_equal "$(tree_snapshot)" "${before}"
+  done
+}

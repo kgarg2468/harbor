@@ -1,0 +1,4 @@
+T3 Code service
+  Status: installed · t3@0.0.38
+  Unit: /home/OPERATOR/.config/systemd/user/t3code.service
+  Logs: /home/OPERATOR/.local/state/t3/t3code.log

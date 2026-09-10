@@ -1,0 +1,5 @@
+T3 Code service
+  Status: needs an update or repair
+  Unit: /home/OPERATOR/.config/systemd/user/t3code.service
+  Logs: /home/OPERATOR/.local/state/t3/t3code.log
+  Next: Run `npx t3@latest service update`.
