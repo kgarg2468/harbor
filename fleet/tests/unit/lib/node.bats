@@ -2,8 +2,10 @@
 load '../test_helper'
 
 setup() {
-  # lib/node.sh depends on lib/log.sh, lib/lock.sh, lib/versions.sh, and
-  # lib/journal.sh, so this file sources those five rather than harbor_load_libs.
+  # lib/node.sh depends on lib/log.sh, lib/lock.sh, lib/versions.sh, lib/journal.sh,
+  # and lib/runtime.sh, so this file sources those six rather than harbor_load_libs.
+  # lib/runtime.sh comes before lib/node.sh, exactly as node/bootstrap.sh sources
+  # them, because lib/node.sh registers its version reader at source time.
   # shellcheck source=lib/log.sh
   . "${HARBOR_ROOT}/lib/log.sh"
   # shellcheck source=lib/lock.sh
@@ -12,6 +14,8 @@ setup() {
   . "${HARBOR_ROOT}/lib/versions.sh"
   # shellcheck source=lib/journal.sh
   . "${HARBOR_ROOT}/lib/journal.sh"
+  # shellcheck source=lib/runtime.sh
+  . "${HARBOR_ROOT}/lib/runtime.sh"
   # shellcheck source=lib/node.sh
   . "${HARBOR_ROOT}/lib/node.sh"
   fixture_state_root
@@ -145,6 +149,31 @@ tab="$(printf '\t')"
   assert_equal "${status}" 2
   assert_output --partial 'node.unreadable'
   assert [ ! -s "${HARBOR_SHIM_LOG}" ]
+}
+
+@test "the prefix reader answers a runtime-install target through the dispatcher: the installed version, the parked tree, absent, and the exit 2 of a runtime that cannot answer" {
+  # lib/runtime.sh owns the op and dispatches an absolute-path target to whatever is
+  # registered for prefix, which is this library's reader. Every assertion here goes
+  # through harbor_journal_observe, the one caller recovery uses, so the registration
+  # is part of what is proved rather than something the test reaches around.
+  assert_equal "$(harbor_runtime_reader_for prefix)" harbor_node_prefix_version
+  assert_equal "$(harbor_journal_observe runtime-install "${PREFIX}")" '"absent"'
+  seed_prefix 20.11.1
+  assert_equal "$(harbor_journal_observe runtime-install "${PREFIX}")" '"20.11.1"'
+  # The prefix holds nothing and the whole previous runtime is parked one path over:
+  # the pre-install state of an interrupted swap, not a third state.
+  mv "${PREFIX}" "${PREVIOUS}"
+  assert_equal "$(harbor_journal_observe runtime-install "${PREFIX}")" '"20.11.1"'
+  assert_equal "$(harbor_node_prefix_version "${PREFIX}")" 20.11.1
+  printf '#!/bin/sh\nexit 1\n' >"${PREVIOUS}/bin/node"
+  run harbor_journal_observe runtime-install "${PREFIX}"
+  assert_equal "${status}" 2
+  assert_output --partial 'node.unreadable'
+  assert_output --partial "${PREVIOUS}/bin/node"
+  # Observation only: nothing was installed, moved, or downloaded.
+  assert [ ! -e "${PREFIX}" ]
+  assert [ ! -s "${HARBOR_SHIM_LOG}" ]
+  assert_equal "$(journal_names)" ""
 }
 
 @test "the tar flag follows the tarball suffix and any other install form exits 3" {
@@ -345,7 +374,7 @@ tab="$(printf '\t')"
   # path over, so the observer reports the parked version rather than "absent".
   seed_prefix 20.11.1
   mv "${PREFIX}" "${PREVIOUS}"
-  assert_equal "$(harbor_observe_op_runtime_install "${PREFIX}")" '"20.11.1"'
+  assert_equal "$(harbor_journal_observe runtime-install "${PREFIX}")" '"20.11.1"'
   acquire
   fixture_entry "${FIX_ROOT}" 0001 runtime-install "${PREFIX}" modified prepared '"20.11.1"' "\"${NODE_VERSION}\""
   run harbor_journal_recover "${FIX_ROOT}"

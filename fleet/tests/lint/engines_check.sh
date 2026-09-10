@@ -16,3 +16,63 @@ lock="${1:-${root}/versions.lock}"
 harbor_versions_require_node_range "${lock}"
 printf '%s: nodejs_version %s satisfies t3_engines_node %s\n' \
   "${lock}" "$(harbor_version_get nodejs_version)" "$(harbor_version_get t3_engines_node)"
+# Install-method agreement (design section 2): the three home-prefix runtimes record
+# their method as npm:<package>@<version>, and the version a method names has to be the
+# version pinned beside it. A lock edit that moved one and not the other would install
+# a version every record then calls something else, and the drift would not surface
+# until a provision run on a real node. This lane has no network, so it proves the
+# agreement of the file with itself; the vendor-smoke lane proves the file against the
+# registry.
+#
+# The form is checked by splitting the method rather than by one glob, because a glob
+# loose enough to accept a scoped name accepts too much: npm:*@* matches 'npm:@1.2.3',
+# which names no package at all, and 'npm:foo@bar@1.2.3', whose trailing field agrees
+# with the pin while the package it would install is something else entirely. Both of
+# those would have gone through and left the version check satisfied. So the package
+# and the version are separated first and each is checked for what it has to be: a
+# package is non-empty and carries no interior @ beyond the one a scope starts with,
+# and a version is the same bare exact spelling versions.lock uses everywhere else.
+harbor_engines_check_install() {
+  local version_key="${1}" install_key="${2}" version install method package named rest field shaped
+  version="$(harbor_version_require "${version_key}")" || exit "$?"
+  install="$(harbor_version_require "${install_key}")" || exit "$?"
+  case "${install}" in
+    npm:?*@?*) method="${install#npm:}" ;;
+    *) harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', which is not the npm:<package>@<version> form design section 2 records a method in" ;;
+  esac
+  package="${method%@*}"
+  named="${method##*@}"
+  # An unscoped name carries no @ at all; a scoped one is @scope/name, so its only @ is
+  # the first character and it has a / after it. Checking only for the interior @ would
+  # accept "@scope", which names a scope and no package inside it.
+  case "${package}" in
+    @*/?*) case "${package#@}" in *@*) package="" ;; esac ;;
+    @* | *@*) package="" ;;
+  esac
+  [ -n "${package}" ] \
+    || harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', whose package part is not a package name; design section 2 records a method as npm:<package>@<version>, where the package is either a bare name or @scope/name"
+  # The version is the three-numeric-field spelling every value in versions.lock uses,
+  # so it is taken apart into its fields rather than matched with one glob:
+  # [0-9]*.[0-9]*.[0-9]* also matches "1.2..3", whose middle field is empty.
+  rest="${named#*.}"
+  case "${named}" in
+    *.*.*.* | *.*.*) shaped=three ;;
+    *) shaped=no ;;
+  esac
+  case "${named}" in
+    *.*.*.*) shaped=no ;;
+  esac
+  for field in "${named%%.*}" "${rest%%.*}" "${rest#*.}"; do
+    case "${field}" in
+      "" | *[!0-9]*) shaped=no ;;
+    esac
+  done
+  [ "${shaped}" = three ] \
+    || harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', whose version part '${named}' is not the three-numeric-field exact version every value in ${lock} is spelled as; a range, a tag, or an empty field is not the exact version design section 2 requires"
+  [ "${named}" = "${version}" ] \
+    || harbor_die 3 versions.install_version "${lock}: ${install_key} names version ${named} and ${version_key} pins ${version}; a method installs the version pinned beside it, so one of the two is wrong"
+  printf '%s: %s names the %s it pins, %s\n' "${lock}" "${install_key}" "${version_key}" "${version}"
+}
+harbor_engines_check_install claude_code_version claude_code_install
+harbor_engines_check_install codex_version codex_install
+harbor_engines_check_install t3_version t3_install

@@ -31,17 +31,50 @@ write_lock() {
   assert_equal "${HARBOR_VERSION_KEYS}" "ubuntu_release tailscale_apt_channel tailscale_version nodejs_version nodejs_install nodejs_sha256 claude_code_version claude_code_install codex_version codex_install t3_version t3_install t3_engines_node"
 }
 
-@test "the shipped versions.lock parses with the eight PR 3 keys pinned and the five PR 4 keys empty" {
+@test "the shipped versions.lock parses with all thirteen keys pinned" {
   harbor_versions_load "$(harbor_versions_lock_path)"
   assert_equal "$(harbor_versions_lock_path)" "${HARBOR_ROOT}/versions.lock"
-  for k in ubuntu_release tailscale_apt_channel tailscale_version nodejs_version nodejs_install nodejs_sha256 t3_version t3_engines_node; do
+  for k in ${HARBOR_VERSION_KEYS}; do
     run harbor_version_require "${k}"
     assert_success
     refute_output ''
   done
-  for k in claude_code_version claude_code_install codex_version codex_install t3_install; do
-    assert_equal "$(harbor_version_get "${k}")" ""
+}
+
+@test "the shipped agent and t3 versions are bare exact versions, never a range" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  # Design section 2: every value is exact, never latest and never a range. A range
+  # operator here would make the installer's compare-before-acting meaningless, since
+  # no installed version could ever equal it.
+  for k in claude_code_version codex_version t3_version; do
+    run harbor_version_require "${k}"
+    assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+$'
   done
+}
+
+@test "each install method names its own pinned version" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  # The install methods of the three home-prefix runtimes are npm:<name>@<version>,
+  # and the version they name has to be the version pinned beside them: a lock edit
+  # that moved one and not the other would install a version the record then claims
+  # is something else. tests/lint/engines_check.sh proves the same thing in the static
+  # lane, where it fails before a run ever happens.
+  assert_equal "$(harbor_version_require claude_code_install)" "npm:@anthropic-ai/claude-code@$(harbor_version_require claude_code_version)"
+  assert_equal "$(harbor_version_require codex_install)" "npm:@openai/codex@$(harbor_version_require codex_version)"
+  assert_equal "$(harbor_version_require t3_install)" "npm:t3@$(harbor_version_require t3_version)"
+}
+
+@test "the PR 3 t3 pair is unchanged, so PR 4 installs against the version Node was pinned for" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  # Design section 2 pins t3_version and t3_engines_node together, in PR 3, because
+  # Node.js cannot be pinned against an unpinned T3. PR 4 installs at that pin and
+  # proves the pair; it does not move it. These two literals are the PR 3 values, so
+  # an edit to either fails here rather than silently repinning Node's constraint.
+  assert_equal "$(harbor_version_require t3_version)" "0.0.38"
+  assert_equal "$(harbor_version_require t3_engines_node)" "^22.16 || ^23.11 || >=24.10"
+  # And the pinned Node still satisfies it, which is what the pair is for.
+  run harbor_semver_satisfies "$(harbor_version_require nodejs_version)" "$(harbor_version_require t3_engines_node)"
+  assert_success
 }
 
 @test "values are returned exactly and comments and blank lines are ignored" {
@@ -332,4 +365,58 @@ unsat() {
   assert_equal "${status}" 3
   assert_output --partial 'versions.unset'
   assert_output --partial 'nodejs_version'
+}
+
+@test "installed engines: a range equal to the lock, satisfied by the node, passes" {
+  write_lock "t3_engines_node=>=24.10"
+  harbor_versions_load "${LOCK}"
+  run harbor_versions_require_installed_engines 24.20.0 ">=24.10"
+  assert_success
+  assert_output ''
+}
+
+@test "installed engines: a node that misses the installed range exits 3 naming both" {
+  write_lock "t3_engines_node=>=24.10"
+  harbor_versions_load "${LOCK}"
+  run harbor_versions_require_installed_engines 22.16.0 ">=24.10"
+  assert_failure 3
+  assert_output --partial 'versions.installed_engines_range'
+  assert_output --partial '22.16.0'
+  assert_output --partial '>=24.10'
+}
+
+@test "installed engines: a range that differs from the lock is drift, even when the node satisfies both" {
+  # The case the row exists for. 24.20.0 satisfies >=24.10 and >=24.0.0 alike, so a
+  # check that only asked "does this node's Node work" would pass and leave the
+  # disagreement between the package and the lock to surface on some other node.
+  write_lock "t3_engines_node=>=24.10"
+  harbor_versions_load "${LOCK}"
+  run harbor_versions_require_installed_engines 24.20.0 ">=24.0.0"
+  assert_failure 3
+  assert_output --partial 'versions.installed_engines_drift'
+  assert_output --partial '>=24.0.0'
+  assert_output --partial '>=24.10'
+  # And drift is reported ahead of the range, not instead of it: a node that satisfies
+  # neither still has to hear that the two ranges disagree first, because the range it
+  # was measured against is the one the check cannot trust yet. Checking satisfaction
+  # first would pass the assertions above unnoticed, since 24.20.0 satisfies both.
+  run harbor_versions_require_installed_engines 22.0.0 ">=24.0.0"
+  assert_failure 3
+  assert_output --partial 'versions.installed_engines_drift'
+  refute_output --partial 'versions.installed_engines_range'
+}
+
+@test "installed engines: an empty installed range is refused, never read as no constraint" {
+  write_lock "t3_engines_node=>=24.10"
+  harbor_versions_load "${LOCK}"
+  run harbor_versions_require_installed_engines 24.20.0 ""
+  assert_failure 3
+  assert_output --partial 'versions.installed_engines_empty'
+}
+
+@test "installed engines: the shipped lock and its own range agree, which is the healthy provision path" {
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  run harbor_versions_require_installed_engines \
+    "$(harbor_version_require nodejs_version)" "$(harbor_version_require t3_engines_node)"
+  assert_success
 }

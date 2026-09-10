@@ -105,10 +105,21 @@ Modified: `lib/node.sh` (observer moved out), `lib/versions.sh` (installed-packa
 **Interfaces produced:**
 
 ```text
-harbor_runtime_cli_version CMD          -> "absent" | bare version | exit 2
 harbor_runtime_reader_register NAME FN  -> registers FN as the version reader for target NAME
+harbor_runtime_reader_for NAME          -> the registered function, or return 1
 harbor_observe_op_runtime_install TARGET-> JSON string, the pre_state/post_state form
 ```
+
+**Amended during 4a — there is no generic version reader.** This task originally also produced `harbor_runtime_cli_version CMD -> "absent" | bare version | exit 2`, a shared "ask a CLI its version" helper for the vendor libraries. Measured against the pinned releases, every one of the four runtimes decorates its answer differently:
+
+| runtime | `--version` prints |
+| --- | --- |
+| `claude` 2.1.267 | `2.1.267 (Claude Code)` |
+| `codex` 0.154.0 | `codex-cli 0.154.0` |
+| `t3` 0.0.38 | `t3 v0.0.38` |
+| `node` 24.20.0 | `v24.20.0` |
+
+A shared reader would have to accept all four shapes, which is the same as accepting a decorated string from the wrong vendor as a version — and reading one runtime's answer as another's is precisely the failure this task exists to prevent, one level down. Node already has `harbor_node_installed_version`; Tasks 5, 7 and 9 each anchor their own vendor's spelling in their own `case` against a fixture captured from the pinned release, as those tasks already require. The helper was cut rather than merged unused.
 
 **Contract.** `lib/runtime.sh` owns the op. `harbor_observe_op_runtime_install` dispatches on the shape of its target: an absolute path is a prefix and is read by the reader registered for `prefix`; a bare `[a-z0-9-]+` name is a runtime and is read by the reader registered for that name. A target with no registered reader renders `"unobservable:runtime-install:<target>"` rather than guessing, which is the same fail-closed shape `harbor_journal_observe` already uses for an op with no observer. Registration is a flat `NAME=FN` list in one string variable, because `lib/` is bash 3.2 and has no associative arrays.
 
@@ -531,6 +542,12 @@ Validation: `connect` is the default and is accepted. `tailnet` is **refused wit
 **Why the creation is step 5 and not step 1.** Section 5.4's table lists the creation first in its prose, but its constraint is "before any journaling", and section 3.7's is "immediately before acquisition" — neither says before every check. Putting it first would make a refused preflight mutate: root running `harbor provision` would create a state root under root's home and only then be told it is the wrong principal. Every cheap non-mutating refusal therefore runs first, which is also what the shipped `harbor auth tailscale` already does — `harbor_auth_refuse_root` runs before `harbor_state_root_create`, and `assert_auth.sh` proves the creation lands between the refusals and the lock. Provision is that command's twin and must not disagree with it.
 
 The dispatcher sources this file with the provision arguments rather than executing it, exactly as it does `node/bootstrap.sh`, because an installed release carries it `0644`.
+
+**`bin/harbor` must source the reader-owning libraries, and this is not optional.** Task 1 gave the `runtime-install` op one owner and made an unregistered target render `"unobservable:runtime-install:<target>"`. That fail-closed answer is correct, but it is only useful in a process that actually loaded the readers. `bin/harbor` today sources `log`, `checks`, `versions`, `lock`, `journal`, `entrypoint`, and `auth` — not `lib/node.sh`, and not `lib/runtime.sh`. That was harmless through PR 3, because the only `runtime-install` entries were Node.js entries in the **root** journal, which only `node/bootstrap.sh` recovers, and it sources both.
+
+PR 4 breaks that: `harbor_agents_install` and `harbor_t3_install` write `runtime-install` entries into the **operator** journal, and every operator command runs operator journal recovery — including `harbor journal resolve`, which PR 2 shipped and which reaches recovery through `bin/harbor` alone. So a crash between an agent install and its `applied` write would leave an entry that `harbor journal resolve` reports as unobservable and therefore undecidable, sending the operator to resolve by hand an entry Harbor could have decided for them.
+
+Task 17 therefore adds `lib/runtime.sh`, `lib/agents.sh`, and `lib/t3.sh` to `bin/harbor`'s source list, with `lib/runtime.sh` first, and `tests/unit/bin/harbor.bats` asserts it behaviourally: with an operator-journal `runtime-install` entry for `claude` left `prepared` and the runtime at the locked version on disk, `harbor journal resolve` decides it rather than printing it as undecidable. Asserting the *outcome* rather than the source list is deliberate — a test that greps for source lines passes the day someone reorders them wrongly.
 
 **Tests.** Each precondition fails in isolation with the stated exit code and message and mutates nothing; the state root is created `0700` before the lock, asserted positionally with `HARBOR_FAIL_AFTER=lock-gate`; the checks run in table order, asserted from the log; a root caller exits 3 before the state root is created; the whole preflight on a healthy fixture passes and reaches the first row.
 
