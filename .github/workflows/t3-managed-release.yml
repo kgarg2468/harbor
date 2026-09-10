@@ -262,9 +262,10 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal --no-self-update
           rustup target add "${RUST_TARGET}" --toolchain 1.95.0
           rustup default 1.95.0
-          if ! rustc -vV | grep -qx "host: ${RUST_TARGET}"; then
+          rustc_verbose="$(rustc -vV)"
+          if ! grep -Fxq "host: ${RUST_TARGET}" <<< "${rustc_verbose}"; then
             echo "::error::rustc host is not ${RUST_TARGET}"
-            rustc -vV
+            printf '%s\n' "${rustc_verbose}"
             exit 1
           fi
           {
