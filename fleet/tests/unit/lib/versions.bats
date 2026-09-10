@@ -396,6 +396,14 @@ unsat() {
   assert_output --partial 'versions.installed_engines_drift'
   assert_output --partial '>=24.0.0'
   assert_output --partial '>=24.10'
+  # And drift is reported ahead of the range, not instead of it: a node that satisfies
+  # neither still has to hear that the two ranges disagree first, because the range it
+  # was measured against is the one the check cannot trust yet. Checking satisfaction
+  # first would pass the assertions above unnoticed, since 24.20.0 satisfies both.
+  run harbor_versions_require_installed_engines 22.0.0 ">=24.0.0"
+  assert_failure 3
+  assert_output --partial 'versions.installed_engines_drift'
+  refute_output --partial 'versions.installed_engines_range'
 }
 
 @test "installed engines: an empty installed range is refused, never read as no constraint" {

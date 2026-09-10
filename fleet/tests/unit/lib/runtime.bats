@@ -65,12 +65,21 @@ reader_unreadable() {
 @test "a target outside the [a-z0-9-] vocabulary is unobservable without any lookup, escaped as it was written" {
   harbor_runtime_reader_register prefix reader_witness
   harbor_runtime_reader_register claude reader_claude
+  # Shadow the lookup so the assertion is about lookups and not about invocations: the
+  # witness reader only records that a reader ran, which a dispatcher that looked every
+  # target up and merely missed would also satisfy.
+  LOOKUPS="${BATS_TEST_TMPDIR}/lookups"
+  harbor_runtime_reader_for() {
+    printf '%s\n' "${1}" >>"${LOOKUPS}"
+    return 1
+  }
   assert_equal "$(harbor_observe_op_runtime_install "")" '"unobservable:runtime-install:"'
   assert_equal "$(harbor_observe_op_runtime_install Claude)" '"unobservable:runtime-install:Claude"'
   assert_equal "$(harbor_observe_op_runtime_install 'claude code')" '"unobservable:runtime-install:claude code"'
   assert_equal "$(harbor_observe_op_runtime_install 't3;rm -rf /')" '"unobservable:runtime-install:t3;rm -rf /"'
   assert_equal "$(harbor_observe_op_runtime_install 'a"b')" '"unobservable:runtime-install:a\"b"'
   assert [ ! -e "${WITNESS}" ]
+  assert [ ! -e "${LOOKUPS}" ]
 }
 
 @test "a reader that exits 2 propagates exit 2 and renders nothing" {
@@ -125,13 +134,35 @@ reader_unreadable() {
   assert_output reader_witness
 }
 
-@test "a registered name whose reader is not defined in this process is unobservable, not a 127" {
+@test "a reader that is not a function this process defined is unobservable: undefined, a builtin, or a command on PATH" {
   # A library that registered and then failed to finish sourcing would otherwise take
-  # recovery down with a command-not-found instead of an answer it can act on.
+  # recovery down with a command-not-found instead of an answer it can act on. The
+  # builtin and PATH cases are the reason the test is declare -F and not command -v:
+  # the registry survives a re-source, so it can arrive from the environment, and the
+  # operator account that would export it is the same untrusted account the agents run
+  # as. Under command -v each of these would have run and its output would have become
+  # what the journal entry says the runtime's version is.
   harbor_runtime_reader_register ghost harbor_reader_that_was_never_defined
   run harbor_journal_observe runtime-install ghost
   assert_success
   assert_output '"unobservable:runtime-install:ghost"'
+  harbor_runtime_reader_register builtin printf
+  run harbor_journal_observe runtime-install builtin
+  assert_success
+  assert_output '"unobservable:runtime-install:builtin"'
+  harbor_runtime_reader_register onpath echo
+  run harbor_journal_observe runtime-install onpath
+  assert_success
+  assert_output '"unobservable:runtime-install:onpath"'
+}
+
+@test "a reader inherited from the environment cannot decide what a journal entry says" {
+  # The registry is kept across a re-source, so it is also inheritable. An operator who
+  # exports one has not thereby gained a say in what a runtime-install entry records.
+  HARBOR_RUNTIME_READERS=" claude:printf" \
+    run bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/journal.sh"; . "${HARBOR_ROOT}/lib/runtime.sh"; harbor_journal_observe runtime-install claude'
+  assert_success
+  assert_output '"unobservable:runtime-install:claude"'
 }
 
 @test "re-sourcing lib/runtime.sh keeps the registry, so readers registered above it survive" {

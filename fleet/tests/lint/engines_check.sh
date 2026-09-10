@@ -23,16 +23,38 @@ printf '%s: nodejs_version %s satisfies t3_engines_node %s\n' \
 # until a provision run on a real node. This lane has no network, so it proves the
 # agreement of the file with itself; the vendor-smoke lane proves the file against the
 # registry.
+#
+# The form is checked by splitting the method rather than by one glob, because a glob
+# loose enough to accept a scoped name accepts too much: npm:*@* matches 'npm:@1.2.3',
+# which names no package at all, and 'npm:foo@bar@1.2.3', whose trailing field agrees
+# with the pin while the package it would install is something else entirely. Both of
+# those would have gone through and left the version check satisfied. So the package
+# and the version are separated first and each is checked for what it has to be: a
+# package is non-empty and carries no interior @ beyond the one a scope starts with,
+# and a version is the same bare exact spelling versions.lock uses everywhere else.
 harbor_engines_check_install() {
-  local version_key="${1}" install_key="${2}" version install
+  local version_key="${1}" install_key="${2}" version install method package named
   version="$(harbor_version_require "${version_key}")" || exit "$?"
   install="$(harbor_version_require "${install_key}")" || exit "$?"
   case "${install}" in
-    npm:*@*) ;;
+    npm:?*@?*) method="${install#npm:}" ;;
     *) harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', which is not the npm:<package>@<version> form design section 2 records a method in" ;;
   esac
-  [ "${install##*@}" = "${version}" ] \
-    || harbor_die 3 versions.install_version "${lock}: ${install_key} names version ${install##*@} and ${version_key} pins ${version}; a method installs the version pinned beside it, so one of the two is wrong"
+  package="${method%@*}"
+  named="${method##*@}"
+  # A scoped name is @scope/name, so exactly one @ and it is the first character.
+  case "${package#@}" in
+    "" | *@*) harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', whose package part '${package}' is not a package name; design section 2 records a method as npm:<package>@<version>, with at most a leading @scope" ;;
+  esac
+  case "${named}" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', whose version part '${named}' is not the bare exact version every value in ${lock} is spelled as" ;;
+  esac
+  case "${named}" in
+    *[!0-9.]*) harbor_die 3 versions.install_form "${lock}: ${install_key} is '${install}', whose version part '${named}' carries something other than digits and dots, so it is a range or a tag rather than the exact version design section 2 requires" ;;
+  esac
+  [ "${named}" = "${version}" ] \
+    || harbor_die 3 versions.install_version "${lock}: ${install_key} names version ${named} and ${version_key} pins ${version}; a method installs the version pinned beside it, so one of the two is wrong"
   printf '%s: %s names the %s it pins, %s\n' "${lock}" "${install_key}" "${version_key}" "${version}"
 }
 harbor_engines_check_install claude_code_version claude_code_install

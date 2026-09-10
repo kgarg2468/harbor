@@ -73,10 +73,15 @@ harbor_runtime_reader_for() {
 # shape harbor_journal_observe already uses for an op with no observer, and a target
 # outside that vocabulary is refused before any lookup — the target comes out of a
 # journal file, so it selects a registered function and is never expanded into a
-# command. A registered name whose function is not defined in this process is
-# unobservable too, the same command -v test harbor_journal_observe applies to an
-# observer: a library that registered and then failed to finish sourcing would
-# otherwise take recovery down with a 127 instead of an answer it can act on.
+# command. A registered name whose reader is not a shell function defined in this
+# process is unobservable too, for two reasons. A library that registered and then
+# failed to finish sourcing would otherwise take recovery down with a 127 instead of an
+# answer it can act on. And because the registry survives a re-source it can also
+# arrive from the environment, and the operator account that would set it is the same
+# untrusted account the agents run as — so the test is declare -F rather than
+# command -v, which would have accepted a builtin or anything on PATH and let an
+# exported HARBOR_RUNTIME_READERS choose what a journal entry claims a runtime's
+# version is. Only a function this process defined itself can answer.
 # Inspection only; a reader that cannot read its runtime keeps its own exit.
 harbor_observe_op_runtime_install() {
   local target="${1}" key fn version
@@ -86,7 +91,7 @@ harbor_observe_op_runtime_install() {
     *) key="${target}" ;;
   esac
   if [ -n "${key}" ] && fn="$(harbor_runtime_reader_for "${key}")" \
-    && [ "$(command -v "${fn}" 2>/dev/null)" = "${fn}" ]; then
+    && declare -F "${fn}" >/dev/null 2>&1; then
     version="$("${fn}" "${target}")" || exit "$?"
     printf '"%s"' "$(harbor_json_escape "${version}")"
     return 0
