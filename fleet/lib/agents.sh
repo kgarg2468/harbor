@@ -187,6 +187,93 @@ harbor_agents_install() {
   harbor_step "agents-${agent}-applied"
   harbor_msg "installed ${agent} ${locked} at ${bin}"
 }
+# harbor_agents_auth_status AGENT HOME: what AGENT's own status command says about
+# whether the operator is logged in — "logged-in", "logged-out", "unknown" when the
+# command answered something this pinned adapter does not recognize, and "unsupported"
+# when the installed build documents no such command at all (design section 3.6). The
+# last two are kept apart because harbor auth acts on them differently: "unknown" is a
+# tool that could have answered and did not, "unsupported" is a tool that was never
+# going to, and only the second is a reason to stop expecting an answer.
+#
+# The answer is read out of the body, and the exit status only corroborates it. Both
+# pinned CLIs exit 1 to say logged out — claude auth status --json exits 1 carrying
+# "loggedIn": false, codex login status exits 1 carrying "Not logged in" — so an
+# adapter that classified on the exit status would call every logged-out node
+# "unknown", and since "unknown" never journals a transition, harbor auth could then
+# never record a login that succeeded. A recognized body is therefore its own answer
+# whatever the exit status was, and an empty or unrecognized body is "unknown" whatever
+# the exit status was. The status is logged beside the word for the operator to read,
+# which is the whole of what it decides here.
+#
+# claude's answer is read out of the JSON its own --help calls the default output, with
+# the same anchored sed harbor_auth_record_value reads bootstrap.json with, because
+# nothing under lib/ may depend on jq. The key has to begin a line: a JSON string cannot
+# carry a raw newline, so no value the vendor interpolates into the body — an
+# organization name, an email — can forge a "loggedIn" line, while an unanchored match
+# could be led to one inside a value. codex ships no --json flag at this release, so its
+# answer is prose, and each outcome gets one anchored case the way
+# harbor_agents_installed_version anchors each vendor's --version spelling; the phrase
+# has to begin a line there for the same reason. Both bodies are read with stderr
+# merged, since a command that exits non-zero to report a state may say it on either
+# stream and the body is what decides.
+#
+# "unsupported" is asked of the tool rather than assumed, and asked only when the body
+# was not an answer: the status command's own --help is what documents the subcommand,
+# and it is what the pinned measurement was taken from. Exit 0 there is a build that has
+# the command and merely said something this adapter does not know, which is "unknown";
+# a non-zero --help is a build without the command. An executable that is not there is
+# "unknown" too, because nothing was asked and so nothing can be claimed about what the
+# release ships.
+#
+# Harbor reads only what the tool prints. Nothing here opens, stats, or builds a path
+# under a credential directory, and the body reaches neither stdout nor the log: the
+# whole output of this function is one of the four words, because the logged-in claude
+# body carries the operator's email, organization, and subscription, and a caller
+# capturing this function must never capture those.
+harbor_agents_auth_status() {
+  local agent="${1}" home="${2}" bin body value rc=0 word=unknown newline
+  newline='
+'
+  bin="$(harbor_agents_bin "${agent}" "${home}")" || exit "$?"
+  if [ ! -f "${bin}" ] || [ ! -x "${bin}" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "${agent}" in
+    claude)
+      harbor_log_vendor "${bin}" auth status --json
+      body="$("${bin}" auth status --json 2>&1)" || rc="$?"
+      # The value is taken as the run of characters up to the field separator, so a
+      # trailing comma is not part of it and only the two literals below are answers.
+      value="$(printf '%s\n' "${body}" \
+        | sed -n 's/^[[:space:]]*"loggedIn"[[:space:]]*:[[:space:]]*\([^,[:space:]]*\).*$/\1/p' | sed -n 1p)"
+      case "${value}" in
+        true) word=logged-in ;;
+        false) word=logged-out ;;
+        *)
+          harbor_log_vendor "${bin}" auth status --help
+          "${bin}" auth status --help >/dev/null 2>&1 || word=unsupported
+          ;;
+      esac
+      ;;
+    codex)
+      harbor_log_vendor "${bin}" login status
+      body="$("${bin}" login status 2>&1)" || rc="$?"
+      # A newline is prepended so that the first line of the body is anchored by the
+      # same pattern as every other line, rather than needing a second case arm.
+      case "${newline}${body}" in
+        *"${newline}Logged in using ChatGPT"*) word=logged-in ;;
+        *"${newline}Not logged in"*) word=logged-out ;;
+        *)
+          harbor_log_vendor "${bin}" login status --help
+          "${bin}" login status --help >/dev/null 2>&1 || word=unsupported
+          ;;
+      esac
+      ;;
+  esac
+  harbor_log agents "${agent} auth status is ${word}; ${bin} exited ${rc}"
+  printf '%s' "${word}"
+}
 # The readers are registered at source time, beside the definitions above, so any
 # process that sourced this library can observe a claude or codex runtime-install
 # entry — including harbor journal resolve, which reaches recovery through bin/harbor

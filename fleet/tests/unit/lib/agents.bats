@@ -551,3 +551,235 @@ journal_names() {
   refute_output --partial "${DECOY_HOME}"
   harbor_lock_release "${FIX_ROOT}"
 }
+
+status_fixture() {
+  # status_fixture AGENT NAME: the base path of the body captured from AGENT's pinned
+  # release in state NAME, ".out" beside the exit status in ".exit" as the vendor shim
+  # fixtures already spell it. The fixtures are the measurement, so a version bump moves
+  # them with the lock rather than moving assertions written out here.
+  printf '%s/tests/fixtures/agents/%s-status/%s' "${HARBOR_ROOT}" "${1}" "${2}"
+}
+
+status_log() {
+  # Every argv the fake CLIs below were called with, one call per line: what the adapter
+  # asked the tool, and every path it named while asking.
+  printf '%s/status.log' "${BATS_TEST_TMPDIR}"
+}
+
+fake_status_agent() {
+  # fake_status_agent HOME AGENT FIXTURE: an executable at AGENT's path under HOME that
+  # replies to its status command from FIXTURE.out and exits with FIXTURE.exit, 0 when
+  # that file is absent. Any --help exits 0, which is what a build that documents the
+  # subcommand does and what tells the adapter an answer it did not recognize came from
+  # a command that exists.
+  local bin
+  bin="$(harbor_agents_bin "${2}" "${1}")"
+  mkdir -p "$(dirname "${bin}")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >>"%s"\n' "$(status_log)"
+    printf 'case "$*" in *--help*) exit 0 ;; esac\n'
+    printf 'cat "%s.out"\n' "${3}"
+    printf '[ -f "%s.exit" ] || exit 0\n' "${3}"
+    printf 'exit "$(cat "%s.exit")"\n' "${3}"
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+fake_status_body() {
+  # fake_status_body HOME AGENT TEXT EXIT: the same, for a body this test invents rather
+  # than one captured from a release, at whatever exit status it chooses
+  local base="${BATS_TEST_TMPDIR}/body.${2}"
+  printf '%s' "${3}" >"${base}.out"
+  printf '%s\n' "${4}" >"${base}.exit"
+  fake_status_agent "${1}" "${2}" "${base}"
+}
+
+no_status_agent() {
+  # no_status_agent HOME AGENT: a build that has no status subcommand at all. It refuses
+  # the status command and refuses its --help too, and the second refusal is what
+  # separates "this build never had the command" from "the command said something new".
+  local bin
+  bin="$(harbor_agents_bin "${2}" "${1}")"
+  mkdir -p "$(dirname "${bin}")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >>"%s"\n' "$(status_log)"
+    printf 'echo "error: unknown command" >&2\n'
+    printf 'exit 1\n'
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+status_calls() {
+  # The recorded argv, one call per line joined by "|", so a whole conversation with the
+  # vendor can be asserted as one string
+  tr '\n' '|' <"$(status_log)"
+}
+
+assert_status_unknown() {
+  # assert_status_unknown AGENT TEXT: AGENT's status command printing TEXT is "unknown"
+  # at either exit status, and neither reading leaks TEXT
+  local code
+  for code in 0 1; do
+    fake_status_body "${FIX_HOME}" "${1}" "${2}" "${code}"
+    run harbor_agents_auth_status "${1}" "${FIX_HOME}"
+    assert_success
+    assert_output unknown
+  done
+}
+
+@test "each captured auth-status fixture classifies to the answer it was recorded with" {
+  # The four real cases of the measurement, read out of the bodies the pinned releases
+  # print, through the home the parameter names.
+  fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-in)"
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-in
+  fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-out)"
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-out
+  fake_status_agent "${FIX_HOME}" codex "$(status_fixture codex logged-in)"
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" logged-in
+  fake_status_agent "${FIX_HOME}" codex "$(status_fixture codex logged-out)"
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" logged-out
+  # Each agent was asked exactly its own documented status command and nothing else: a
+  # recognized body settles the question, so no --help probe was needed.
+  assert_equal "$(status_calls)" 'auth status --json|auth status --json|login status|login status|'
+  # The ambient HOME holds the opposite answer for both agents throughout, so a reading
+  # that came from the environment would be visible as that answer.
+  fake_status_agent "${DECOY_HOME}" claude "$(status_fixture claude logged-in)"
+  fake_status_agent "${DECOY_HOME}" codex "$(status_fixture codex logged-in)"
+  assert_equal "${HOME}" "${DECOY_HOME}"
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-out
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" logged-out
+  assert_equal "$(harbor_agents_auth_status claude "${DECOY_HOME}")" logged-in
+  assert_equal "$(harbor_agents_auth_status codex "${DECOY_HOME}")" logged-in
+}
+
+@test "a logged-out body is logged-out and never unknown, though both pinned CLIs exit 1 to say it" {
+  # This is the whole reason the adapter classifies on the body: both captured logged-out
+  # fixtures carry a non-zero exit status, and "unknown" never journals a transition, so
+  # reading the exit status first would make a recorded login impossible.
+  assert_equal "$(cat "$(status_fixture claude logged-out).exit")" 1
+  assert_equal "$(cat "$(status_fixture codex logged-out).exit")" 1
+  fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-out)"
+  fake_status_agent "${FIX_HOME}" codex "$(status_fixture codex logged-out)"
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-out
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" logged-out
+  # The exit status only corroborates, in both directions: the same bodies at exit 0 are
+  # the same answer, and the logged-in bodies delivered with exit 1 are still logged-in.
+  fake_status_body "${FIX_HOME}" claude "$(cat "$(status_fixture claude logged-out).out")" 0
+  fake_status_body "${FIX_HOME}" codex "$(cat "$(status_fixture codex logged-out).out")" 0
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-out
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" logged-out
+  fake_status_body "${FIX_HOME}" claude "$(cat "$(status_fixture claude logged-in).out")" 1
+  fake_status_body "${FIX_HOME}" codex "$(cat "$(status_fixture codex logged-in).out")" 1
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" logged-in
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" logged-in
+}
+
+@test "an empty or unrecognized body is unknown at either exit status, for both agents" {
+  # Nothing at all, prose where a body was expected, and a value that is not the boolean
+  # the field is documented to carry.
+  assert_status_unknown claude ''
+  assert_status_unknown claude 'hello'
+  assert_status_unknown claude '{
+  "loggedIn": "yes",
+  "authMethod": "none"
+}'
+  # Neither spelling of the literal is the literal. The fence enumerates nothing and
+  # compares whole words, so a locale whose collating order folds case cannot make TRUE
+  # an answer.
+  assert_status_unknown claude '{
+  "loggedIn": TRUE
+}'
+  assert_status_unknown claude '{
+  "loggedIn": False
+}'
+  # The key has to begin a line, so a "loggedIn" the vendor interpolated into a value it
+  # took from elsewhere is not read as the field.
+  assert_status_unknown claude '{
+  "orgName": "x\", \"loggedIn\": true",
+  "authMethod": "none"
+}'
+  assert_status_unknown codex ''
+  assert_status_unknown codex 'hello'
+  assert_status_unknown codex 'error: could not check whether you are Logged in using ChatGPT'
+  assert_status_unknown codex 'the account is Not logged in to anything, it says here'
+}
+
+@test "a build whose status subcommand is missing entirely is unsupported, not unknown" {
+  # Neither pinned agent is unsupported, so the path is exercised with a CLI that has no
+  # status subcommand: it refuses the command and refuses its own --help for it, which is
+  # what says the command was never there.
+  local agent
+  for agent in ${HARBOR_AGENTS}; do
+    no_status_agent "${FIX_HOME}" "${agent}"
+    run harbor_agents_auth_status "${agent}" "${FIX_HOME}"
+    assert_success
+    assert_output unsupported
+  done
+  # The probe is second and only on the unrecognized path: each agent was asked its
+  # status command first and its --help only after that answered nothing.
+  assert_equal "$(status_calls)" 'auth status --json|auth status --help|login status|login status --help|'
+  # A build that answers its --help has the command and merely said something new, which
+  # is unknown rather than unsupported, and it costs a probe to tell the two apart.
+  : >"$(status_log)"
+  fake_status_body "${FIX_HOME}" claude 'something new' 1
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" unknown
+  assert_equal "$(status_calls)" 'auth status --json|auth status --help|'
+}
+
+@test "an agent that is not installed is unknown, and a name that is not an agent is exit 3" {
+  # Nothing was asked, so nothing can be claimed about what the release ships: the answer
+  # is the fail-closed one, not unsupported.
+  local name
+  assert_equal "$(harbor_agents_auth_status claude "${FIX_HOME}")" unknown
+  assert_equal "$(harbor_agents_auth_status codex "${FIX_HOME}")" unknown
+  assert [ ! -e "$(status_log)" ]
+  for name in t3 node '' 'claude code' Claude 'claude;rm -rf /'; do
+    run harbor_agents_auth_status "${name}" "${FIX_HOME}"
+    assert_equal "${status}" 3
+    assert_output --partial 'agents.unknown'
+  done
+}
+
+@test "the adapter prints only the status word: no part of the logged-in body reaches stdout or the log" {
+  # The logged-in claude body is the one that carries an email, an organization, and a
+  # subscription, so it is the body a caller capturing this function must not receive.
+  local field
+  harbor_log_open "${BATS_TEST_TMPDIR}/harbor.log" 0600
+  fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-in)"
+  run harbor_agents_auth_status claude "${FIX_HOME}"
+  assert_success
+  # The whole output, stdout and stderr together, is the one word.
+  assert_output logged-in
+  for field in 'operator@example.com' '00000000-0000-0000-0000-000000000000' 'OPERATOR org' SUBSCRIPTION claude.ai loggedIn authMethod projectsDirectory; do
+    refute_output --partial "${field}"
+    refute grep -qF -- "${field}" "${BATS_TEST_TMPDIR}/harbor.log"
+  done
+  # The log did record the reading, so what it holds is the answer and the exit status
+  # and not the body that produced them.
+  assert grep -q 'claude auth status is logged-in' "${BATS_TEST_TMPDIR}/harbor.log"
+}
+
+@test "the adapter reads only what the tool prints: no credential store is named or disturbed" {
+  # Harbor never reads, copies, prints, or inspects a vendor credential store (design
+  # section 3.6). Both stores are seeded here with a decoy secret, and the adapter is run
+  # over every fixture for both agents.
+  local before secret='DECOY-NOT-A-REAL-CREDENTIAL' out
+  mkdir -p "${FIX_HOME}/.claude" "${FIX_HOME}/.codex"
+  printf '{"accessToken":"%s"}\n' "${secret}" >"${FIX_HOME}/.claude/.credentials.json"
+  printf '{"tokens":{"access_token":"%s"}}\n' "${secret}" >"${FIX_HOME}/.codex/auth.json"
+  chmod 0600 "${FIX_HOME}/.claude/.credentials.json" "${FIX_HOME}/.codex/auth.json"
+  fake_status_agent "${FIX_HOME}" claude "$(status_fixture claude logged-in)"
+  fake_status_agent "${FIX_HOME}" codex "$(status_fixture codex logged-out)"
+  before="$(tree_snapshot)"
+  out="$(harbor_agents_auth_status claude "${FIX_HOME}")$(harbor_agents_auth_status codex "${FIX_HOME}")"
+  assert_equal "${out}" logged-inlogged-out
+  # Nothing under either store was created, removed, or rewritten.
+  assert_equal "$(tree_snapshot)" "${before}"
+  # No path under either store was ever passed to the vendor, and no secret reached the
+  # answer.
+  refute grep -qE -- '\.claude|\.codex|credential|auth\.json' "$(status_log)"
+  refute grep -qF -- "${secret}" "$(status_log)"
+  assert_equal "$(status_calls)" 'auth status --json|login status|'
+}

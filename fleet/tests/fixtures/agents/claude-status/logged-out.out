@@ -1,0 +1,7 @@
+{
+  "loggedIn": false,
+  "authMethod": "none",
+  "apiProvider": "anthropic",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/home/OPERATOR/.claude/projects"
+}
