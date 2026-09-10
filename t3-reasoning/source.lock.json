@@ -206,7 +206,7 @@
     {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "c6c995357350f5d25df50c14160bf215b99f09b45dd31366b5727a28c6b6f28c"
+      "sha256": "d7e315b874a6ca42be6f73a89003174c368b28aa5cc6d889532682fe3a2a741b"
     }
   ],
   "variants": {
