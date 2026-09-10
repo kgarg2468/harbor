@@ -133,3 +133,18 @@ reader_unreadable() {
   assert_success
   assert_output '"unobservable:runtime-install:ghost"'
 }
+
+@test "re-sourcing lib/runtime.sh keeps the registry, so readers registered above it survive" {
+  # bin/harbor sources lib/ and then sources node/bootstrap.sh into the same process,
+  # which sources much of lib/ again. A registry that emptied on that second pass would
+  # lose every reader whose library is not sourced again below it, and each of those
+  # runtimes' prepared entries would read as unobservable — a manual journal resolution
+  # for the operator, caused by nothing but the order of two source lines.
+  harbor_runtime_reader_register prefix reader_witness
+  harbor_runtime_reader_register claude reader_claude
+  # shellcheck source=lib/runtime.sh
+  . "${HARBOR_ROOT}/lib/runtime.sh"
+  assert_equal "$(harbor_runtime_reader_for prefix)" reader_witness
+  assert_equal "$(harbor_runtime_reader_for claude)" reader_claude
+  assert_equal "$(harbor_journal_observe runtime-install claude)" '"claude:claude"'
+}

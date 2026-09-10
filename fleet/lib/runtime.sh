@@ -19,7 +19,17 @@
 # spelling in its own case instead (design section 7, vendor status honesty).
 # HARBOR_RUNTIME_READERS: "name:function" pairs, space separated. bash 3.2 has no
 # associative arrays, so the registry is one string and lookup is a scan over it.
-HARBOR_RUNTIME_READERS=""
+#
+# Kept rather than reset, because re-sourcing a library into a process that already
+# has it is deliberate here: bin/harbor sources lib/ and then sources node/bootstrap.sh
+# into the same process, which sources much of lib/ again. A plain assignment would
+# empty the registry on that second pass and only the readers whose libraries are
+# sourced again below it would come back — so a process that had registered claude,
+# codex, and t3 would come out the other side able to observe none of them, and every
+# prepared runtime-install entry for those three would read as unobservable and land on
+# the operator as a manual journal resolution. Re-registering an unchanged pair is
+# already a no-op, so keeping the registry across a re-source changes nothing else.
+HARBOR_RUNTIME_READERS="${HARBOR_RUNTIME_READERS:-}"
 # harbor_runtime_reader_register NAME FN: FN is the version reader for the target key
 # NAME. Called at source time by the library that owns NAME, so the dispatch below can
 # find it in any process that sourced that library.
