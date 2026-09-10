@@ -181,7 +181,7 @@
     {
       "id": "managed-desktop-artifact-preparation",
       "path": "patches/0038-managed-desktop-artifact-preparation.patch",
-      "sha256": "071617e7e54fd16ef9b145e5ca41fec795fc9d2c5b5f16d67d6e6ec47bfb1ece"
+      "sha256": "f39b1451c5e80d1d3c6b75a1bae13bc725999f848b834b99cae58fc0ddd85354"
     },
     {
       "id": "desktop-update-report-ack",
@@ -191,7 +191,7 @@
     {
       "id": "managed-desktop-installer",
       "path": "patches/0040-managed-desktop-installer.patch",
-      "sha256": "fa695a7f790acf07f6420cc85b2e340954f71c406255b53489ee069bc0bee9a7"
+      "sha256": "4ed16a0f29f7f806e123f3a966bfbec1fa7b568da60e0a8d0c3796c12ae2833b"
     },
     {
       "id": "managed-desktop-routing",
