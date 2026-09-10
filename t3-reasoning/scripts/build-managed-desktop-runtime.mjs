@@ -302,7 +302,6 @@ export async function buildManagedDesktopRuntime({
   }
   await requireRegularFile(path.join(sourceDir, DESKTOP_BUILDER_SCRIPT), "source desktop builder");
   await refuseExistingEnvFiles(sourceDir);
-  await refusePriorBuildState(sourceDir);
   if (await exists(destination)) fail(`destination ${destination} already exists; an artifact directory is never rewritten`);
   const childEnv = buildChildEnvironment(env, publicConfig, artifact.variant);
   const pnpmVersion = (
@@ -324,7 +323,7 @@ export async function buildManagedDesktopRuntime({
     const indexDir = path.join(work, "index");
     await mkdir(indexDir);
     log(`verifying prepared ${artifact.variant} source ${sourceDir} against ${descriptor.upstreamCommit}`);
-    const { lockDir } = await verifyPreparedSource({
+    const { lockDir, trackedDependencyEntries } = await verifyPreparedSource({
       source: sourceDir,
       descriptor,
       run,
@@ -332,6 +331,7 @@ export async function buildManagedDesktopRuntime({
       indexDir,
       expectedVariant: artifact.variant,
     });
+    await refusePriorBuildState(sourceDir, trackedDependencyEntries);
     await assertDisjoint([
       ["lock directory", lockDir, "destination", destination],
       ["lock directory", lockDir, "work directory", work],

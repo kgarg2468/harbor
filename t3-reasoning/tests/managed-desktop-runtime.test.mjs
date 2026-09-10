@@ -11,7 +11,7 @@
 // Electron, signs, or touches the network.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -122,7 +122,7 @@ async function write(root, files) {
 // ordered patches applied to the working tree, provenance next to the git
 // metadata, and a lock beside it. The upstream tree carries the source's
 // own desktop builder entry so the wrapper can require it.
-async function makeFixture({ variant = "managed-nightly" } = {}) {
+async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, variant = "managed-nightly" } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "t3-desktop-builder-")));
   const lockDir = path.join(root, "lock");
   const patches = [];
@@ -150,6 +150,12 @@ async function makeFixture({ variant = "managed-nightly" } = {}) {
   });
   await git(source, ["init", "-q", "-b", "main"]);
   await git(source, ["add", "-A"]);
+  if (trackedFixture) {
+    const fixtureFile = `${typeof trackedFixture === "string" ? trackedFixture : "vendor/compiler/cases/node_modules"}/example/index.js`;
+    await write(source, { [fixtureFile]: "export default 42;\n" });
+    await chmod(path.join(source, fixtureFile), fixtureMode);
+    await git(source, ["add", "-f", fixtureFile]);
+  }
   await git(source, ["commit", "-q", "-m", "upstream"]);
   const commit = (await git(source, ["rev-parse", "HEAD"])).stdout.trim();
 
@@ -547,7 +553,7 @@ describe("buildManagedDesktopRuntime", () => {
     await writeFile(path.join(destination, "keep.txt"), "kept\n");
     await rejects(() => build(fx), /already exists/);
     assert.deepEqual(await readdir(destination), ["keep.txt"]);
-    assert.deepEqual(fx.calls, [], "refused before any command ran");
+    assert.ok(fx.calls.every((c) => c.command === "git" || (c.command === "pnpm" && c.args[0] === "--version")), "only verification commands ran");
     await rm(destination, { recursive: true });
     await mkdir(`${destination}.lock`);
     await rejects(() => build(fx), /another publisher holds/);
@@ -567,6 +573,66 @@ describe("buildManagedDesktopRuntime", () => {
     assert.doesNotMatch(error.message, /fixture|other\.invalid|pk_test/);
     await rm(fx.root, { recursive: true, force: true });
   });
+});
+
+describe("tracked dependency fixtures", () => {
+  for (const variant of ["managed-nightly", "reasoning"]) {
+    for (const fixtureMode of [0o644, 0o755]) {
+      it(`accepts a pristine tracked node_modules fixture mode ${fixtureMode.toString(8)} for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture: true, fixtureMode, variant });
+        try {
+          await build(fx);
+          assert.ok(fx.calls.some((call) => call.command === "pnpm" && call.args[0] === "install"));
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    for (const trackedFixture of ["node_modules", "apps/server/node_modules", "apps/desktop/node_modules", "packages/contracts/node_modules"]) {
+      it(`rejects tracked installation ${trackedFixture} for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture, variant });
+        try {
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    for (const fixtureMode of [0o644, 0o755]) {
+      it(`rejects tracked fixture mode ${fixtureMode.toString(8)} drift with core.filemode=false for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture: true, fixtureMode, variant });
+        try {
+          await git(fx.source, ["config", "core.filemode", "false"]);
+          const file = path.join(fx.source, "vendor/compiler/cases/node_modules/example/index.js");
+          const changedMode = fixtureMode === 0o644 ? 0o755 : 0o644;
+          await chmod(file, changedMode);
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+          assert.equal((await lstat(file)).mode & 0o777, changedMode, "the rejected mode remains untouched");
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    it(`rejects stale additions inside a tracked node_modules fixture for ${variant}`, async () => {
+      for (const addition of ["example/stale.js", "empty-directory", "external-link", "dangling-link"]) {
+        const fx = await makeFixture({ trackedFixture: true, variant });
+        const relative = `vendor/compiler/cases/node_modules/${addition}`;
+        try {
+          if (addition === "empty-directory") await mkdir(path.join(fx.source, relative));
+          else if (addition === "external-link") await symlink(fx.lockDir, path.join(fx.source, relative));
+          else if (addition === "dangling-link") await symlink("missing", path.join(fx.source, relative));
+          else await write(fx.source, { [relative]: "stale bytes\n" });
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+          assert.ok(await lstat(path.join(fx.source, relative)), "the rejected entry remains untouched");
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      }
+    });
+  }
 });
 
 describe("refusals before any mutation", () => {
@@ -611,7 +677,7 @@ describe("refusals before any mutation", () => {
     await write(fx.source, { "apps/desktop/node_modules/electron/index.js": "" });
     await refusal(fx, {}, /source already contains apps\/desktop\/node_modules/, { beforeMutation: true });
     await rm(path.join(fx.source, "apps/desktop/node_modules"), { recursive: true });
-    assert.deepEqual(fx.calls, [], "refused before any command ran");
+    assert.ok(fx.calls.every((c) => c.command === "git" || (c.command === "pnpm" && c.args[0] === "--version")), "only verification commands ran");
     await rejects(() => build(fx, {}, { destination: path.join(fx.source, "out") }), /must be disjoint/);
     await rejects(() => build(fx, {}, { tmpRoot: fx.source }), /must be disjoint/);
     await assertNothingPublished(fx);

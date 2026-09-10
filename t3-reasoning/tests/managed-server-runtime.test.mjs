@@ -179,7 +179,7 @@ function serverManifest(extra = {}) {
 // A prepared tree of one exact variant (managed-nightly by default): upstream
 // commit, that variant's ordered patches applied to the working tree,
 // provenance next to the git metadata, and a lock beside it.
-async function makeFixture({ target = "darwin-arm64", variant = "managed-nightly", worktree = false, serverExtra = {}, lockMutate = (l) => l } = {}) {
+async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, target = "darwin-arm64", variant = "managed-nightly", worktree = false, serverExtra = {}, lockMutate = (l) => l } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "t3-server-builder-")));
   const lockDir = path.join(root, "lock");
   const patches = [];
@@ -207,6 +207,12 @@ async function makeFixture({ target = "darwin-arm64", variant = "managed-nightly
   });
   await git(upstream, ["init", "-q", "-b", "main"]);
   await git(upstream, ["add", "-A"]);
+  if (trackedFixture) {
+    const fixtureFile = `${typeof trackedFixture === "string" ? trackedFixture : "vendor/compiler/cases/node_modules"}/example/index.js`;
+    await write(upstream, { [fixtureFile]: "export default 42;\n" });
+    await chmod(path.join(upstream, fixtureFile), fixtureMode);
+    await git(upstream, ["add", "-f", fixtureFile]);
+  }
   await git(upstream, ["commit", "-q", "-m", "upstream"]);
   const commit = (await git(upstream, ["rev-parse", "HEAD"])).stdout.trim();
 
@@ -715,7 +721,7 @@ describe("buildManagedServerRuntime", () => {
     await writeFile(path.join(destination, "keep.txt"), "kept\n");
     await rejects(() => build(fx), /already exists/);
     assert.deepEqual(await readdir(destination), ["keep.txt"]);
-    assert.deepEqual(fx.calls, [], "refused before any command ran");
+    assert.ok(fx.calls.every((c) => c.command === "git" || (c.command === "pnpm" && c.args[0] === "--version")), "only verification commands ran");
     await rm(destination, { recursive: true });
     await mkdir(`${destination}.lock`);
     await rejects(() => build(fx), /another publisher holds/);
@@ -733,6 +739,66 @@ describe("buildManagedServerRuntime", () => {
     assert.doesNotMatch(error.message, /fixture|other\.invalid|pk_test/);
     await rm(fx.root, { recursive: true, force: true });
   });
+});
+
+describe("tracked dependency fixtures", () => {
+  for (const variant of ["managed-nightly"]) {
+    for (const fixtureMode of [0o644, 0o755]) {
+      it(`accepts a pristine tracked node_modules fixture mode ${fixtureMode.toString(8)} for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture: true, fixtureMode, variant });
+        try {
+          await build(fx);
+          assert.ok(fx.calls.some((call) => call.command === "pnpm" && call.args[0] === "install"));
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    for (const trackedFixture of ["node_modules", "apps/server/node_modules", "apps/desktop/node_modules", "packages/contracts/node_modules"]) {
+      it(`rejects tracked installation ${trackedFixture} for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture, variant });
+        try {
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    for (const fixtureMode of [0o644, 0o755]) {
+      it(`rejects tracked fixture mode ${fixtureMode.toString(8)} drift with core.filemode=false for ${variant}`, async () => {
+        const fx = await makeFixture({ trackedFixture: true, fixtureMode, variant });
+        try {
+          await git(fx.source, ["config", "core.filemode", "false"]);
+          const file = path.join(fx.source, "vendor/compiler/cases/node_modules/example/index.js");
+          const changedMode = fixtureMode === 0o644 ? 0o755 : 0o644;
+          await chmod(file, changedMode);
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+          assert.equal((await lstat(file)).mode & 0o777, changedMode, "the rejected mode remains untouched");
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      });
+    }
+
+    it(`rejects stale additions inside a tracked node_modules fixture for ${variant}`, async () => {
+      for (const addition of ["example/stale.js", "empty-directory", "external-link", "dangling-link"]) {
+        const fx = await makeFixture({ trackedFixture: true, variant });
+        const relative = `vendor/compiler/cases/node_modules/${addition}`;
+        try {
+          if (addition === "empty-directory") await mkdir(path.join(fx.source, relative));
+          else if (addition === "external-link") await symlink(fx.lockDir, path.join(fx.source, relative));
+          else if (addition === "dangling-link") await symlink("missing", path.join(fx.source, relative));
+          else await write(fx.source, { [relative]: "stale bytes\n" });
+          await refusal(fx, {}, /source already contains .*node_modules/, { beforeMutation: true });
+          assert.ok(await lstat(path.join(fx.source, relative)), "the rejected entry remains untouched");
+        } finally {
+          await rm(fx.root, { recursive: true, force: true });
+        }
+      }
+    });
+  }
 });
 
 describe("refusals before any mutation", () => {
@@ -894,16 +960,16 @@ describe("refusals before any mutation", () => {
   });
 
   it("a prepared tree that already carries installed dependencies or the monitor's Cargo target", async () => {
-    // Each case: refused before any command runs, the offending entry and
+    // Each case: refused before any build command runs, the offending entry and
     // its bytes or link target are untouched, nothing stamped or written.
     const priorState = async (relative, setup, expectedPath = relative) => {
       const fx = await makeFixture();
       const external = path.join(fx.root, "external");
       await write(external, { "sentinel.txt": "external bytes\n" });
       const snapshot = await setup(fx, external);
-      const pattern = new RegExp(`source already contains ${expectedPath.replace(/[/.]/g, "\\$&")}; a fresh prepared source tree without installed dependencies or native build output is required`);
+      const pattern = expectedPath instanceof RegExp ? expectedPath : new RegExp(`source already contains ${expectedPath.replace(/[/.]/g, "\\$&")}; a fresh prepared source tree without installed dependencies or native build output is required`);
       await refusal(fx, {}, pattern, { beforeMutation: true });
-      assert.deepEqual(fx.calls, [], `${relative}: refused before pnpm, git, or cargo ran`);
+      assert.ok(fx.calls.every((c) => c.command === "git" || (c.command === "pnpm" && c.args[0] === "--version")), `${relative}: only verification commands ran`);
       assert.deepEqual(await snapshot(), await snapshot.expected, `${relative}: prior entry is preserved`);
       assert.equal(await readFile(path.join(external, "sentinel.txt"), "utf8"), "external bytes\n", `${relative}: link targets are never followed`);
       await rm(fx.root, { recursive: true, force: true });
@@ -961,7 +1027,7 @@ describe("refusals before any mutation", () => {
     await priorState("native/resource-monitor/target", async (fx, external) => {
       await symlink(external, path.join(fx.source, "native/resource-monitor/target"));
       return linkSnapshot(fx, "native/resource-monitor/target", external);
-    });
+    }, /prepared source content differs from .* A\tnative\/resource-monitor\/target/);
   });
 });
 
