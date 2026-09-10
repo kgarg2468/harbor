@@ -1,0 +1,720 @@
+diff --git a/apps/server/src/cloud/selfUpdate.test.ts b/apps/server/src/cloud/selfUpdate.test.ts
+index 5611124a25086b78af83b7243bfe38275a65b96b..3af32e73df1084c0780daf283ea6b8b560915389 100644
+--- a/apps/server/src/cloud/selfUpdate.test.ts
++++ b/apps/server/src/cloud/selfUpdate.test.ts
+@@ -385,10 +385,10 @@ it.layer(NodeServices.layer)("server self update", (it) => {
+         mode: "desktop",
+         desktopAppUpdate: {
+           available: true,
+-          run: (reportProgress) =>
++          run: (targetVersion, reportProgress) =>
+             reportProgress("downloading").pipe(
+               Effect.andThen(reportProgress("installing")),
+-              Effect.as({ targetVersion: "1.2.0", method: "desktop-app" as const }),
++              Effect.as({ targetVersion, method: "desktop-app" as const }),
+             ),
+           commit: () => Effect.never,
+         },
+@@ -396,7 +396,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
+       const result = yield* selfUpdate.update({ targetVersion: "1.1.0" }, (stage) =>
+         Effect.sync(() => void stages.push(stage)),
+       );
+-      expect(result).toEqual({ targetVersion: "1.2.0", method: "desktop-app" });
++      expect(result).toEqual({ targetVersion: "1.1.0", method: "desktop-app" });
+       expect(stages).toEqual(["downloading", "installing"]);
+       // The launcher staging path must not run on the desktop path.
+       expect(order).toEqual([]);
+diff --git a/apps/server/src/cloud/selfUpdate.ts b/apps/server/src/cloud/selfUpdate.ts
+index 382f168fc04a489f15f254cf737be1d1cee35e01..3d2b7bc8777fe33612b27f71306b6545322e3e77 100644
+--- a/apps/server/src/cloud/selfUpdate.ts
++++ b/apps/server/src/cloud/selfUpdate.ts
+@@ -189,11 +189,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* (option
+     "cloud.server_self_update.update",
+   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
+     if (capability === "desktop-managed") {
+-      // input.targetVersion is meaningless here: the desktop app's own
+-      // update feed decides what it downloads, and the result carries what
+-      // it actually got.
+       if (desktopAppUpdate.available) {
+-        return yield* desktopAppUpdate.run(reportProgress);
++        return yield* desktopAppUpdate.run(input.targetVersion, reportProgress);
+       }
+       return yield* failWith(
+         "This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it.",
+diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
+index ab8eb92fb93dbb0b8441d928850d630571422881..a55f70ff6c9f45c7d4490beb3ff99f1169291cba 100644
+--- a/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
++++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
+@@ -9,12 +9,154 @@ import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Stream from "effect/Stream";
++import { FetchHttpClient } from "effect/unstable/http";
++import { MANAGED_RELEASE_REPOSITORY } from "../cloud/managedReleaseSource.ts";
++import type { ManagedDesktopArtifactDescriptor } from "@t3tools/contracts";
+ import * as TestClock from "effect/testing/TestClock";
+ 
+ import * as ServerConfig from "../config.ts";
+ import * as DesktopTelemetryReceiver from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
+ import * as DesktopAppUpdate from "./DesktopAppUpdate.ts";
+ 
++const GOLDEN_VERSION = "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a";
++const GOLDEN_MANIFEST = `{
++  "artifacts": [
++    {
++      "arch": "arm64",
++      "bundleId": "com.t3tools.t3code",
++      "bytes": 12,
++      "embeddedServerVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++      "file": "nightly.zip",
++      "format": "zip",
++      "id": "managed-nightly-darwin-arm64",
++      "kind": "desktop",
++      "platform": "darwin",
++      "presentationVariant": "managed-nightly",
++      "productName": "T3 Code (Nightly)",
++      "sha256": "bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e",
++      "urlSchemes": [
++        "t3code",
++        "t3code-dev"
++      ],
++      "variant": "managed-nightly",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "arm64",
++      "bundleId": "com.t3tools.t3code.reasoning",
++      "bytes": 14,
++      "embeddedServerVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++      "file": "reasoning.zip",
++      "format": "zip",
++      "id": "reasoning-darwin-arm64",
++      "kind": "desktop",
++      "platform": "darwin",
++      "presentationVariant": "reasoning",
++      "productName": "T3 Code (Reasoning)",
++      "sha256": "a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20",
++      "urlSchemes": [
++        "t3code-reasoning"
++      ],
++      "variant": "reasoning",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "arm64",
++      "bytes": 14,
++      "entry": "node_modules/t3/dist/bin.mjs",
++      "file": "server-darwin-arm64.tar.gz",
++      "format": "tar.gz",
++      "id": "managed-server-darwin-arm64",
++      "kind": "server",
++      "launcherProtocol": 2,
++      "platform": "darwin",
++      "sha256": "416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492",
++      "variant": "common",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    },
++    {
++      "arch": "x64",
++      "bytes": 13,
++      "entry": "node_modules/t3/dist/bin.mjs",
++      "file": "server-linux-x64.tar.gz",
++      "format": "tar.gz",
++      "id": "managed-server-linux-x64",
++      "kind": "server",
++      "launcherProtocol": 2,
++      "platform": "linux",
++      "sha256": "9d05e7ed6624ed87a42f2ec049544d34fa31341804ad2ab11846b1df5500e6b0",
++      "variant": "common",
++      "version": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a"
++    }
++  ],
++  "builderRevision": "fedcba9876543210fedcba9876543210fedcba98",
++  "presentationVariants": {
++    "managed-nightly": "managed-nightly",
++    "reasoning": "reasoning"
++  },
++  "publicConfigKeys": [
++    "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
++    "T3CODE_CLERK_JWT_TEMPLATE",
++    "T3CODE_CLERK_PUBLISHABLE_KEY",
++    "T3CODE_RELAY_URL"
++  ],
++  "publicConfigSha256": "2cee922b77e095709737110ab244615e0fe4230ace80231198c01a2cfb9b377e",
++  "releaseCounter": 1,
++  "releaseInputSha256": "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++  "releaseVersion": "0.0.38-nightly.20260905.3.managed.1.p6d1933416d7a",
++  "schemaVersion": 1,
++  "upstreamCommit": "0123456789abcdef0123456789abcdef01234567",
++  "upstreamRepository": "https://github.com/pingdotgg/t3code",
++  "upstreamVersion": "0.0.38-nightly.20260905.3",
++  "variants": {
++    "managed-nightly": {
++      "patches": [
++        {
++          "id": "common-one",
++          "sha256": "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a"
++        },
++        {
++          "id": "common-two",
++          "sha256": "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79"
++        }
++      ]
++    },
++    "reasoning": {
++      "patches": [
++        {
++          "id": "common-one",
++          "sha256": "ec4eae78c5356aac8690e7c20970bd98284f4fbe4b54eb24933c7acf2a7b9e8a"
++        },
++        {
++          "id": "common-two",
++          "sha256": "ef37b0ce27427eb806b90275402cee27f4200619d6ca44a860623a455d8f7f79"
++        },
++        {
++          "id": "reasoning-identity",
++          "sha256": "3f72debee6fc10edb75cf331347684c769d350ace0d667d7ff1246ef5c1de450"
++        }
++      ]
++    }
++  }
++}
++`;
++const GOLDEN_SUMS = `bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51  managed-release.json
++bb2c21f987ec4d71b25daa099b33cea22a22f65ffb09de1fcc9a9609fa75119e  nightly.zip
++a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20  reasoning.zip
++416e1222aee811facee745161a0e9553cf13764088b2d2c9d3648b9a9299d492  server-darwin-arm64.tar.gz
++9d05e7ed6624ed87a42f2ec049544d34fa31341804ad2ab11846b1df5500e6b0  server-linux-x64.tar.gz
++`;
++const artifact: ManagedDesktopArtifactDescriptor = {
++  schemaVersion: 1,
++  targetVersion: GOLDEN_VERSION,
++  presentationVariant: "reasoning",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  bytes: 14,
++  sha256: "a281fd08f7099cf81a3771604adbbcdd249bd7151ffa70deaad7815918d73c20",
++  manifestSha256: "bfe95af71fc00d76aa6d3587bc23f1ca91ad10b8b035cce8e42d948a02a93e51",
++  releaseInputSha256: "6d1933416d7a35cfa4e8b130a6c6a7a47b58ce4301400ed841607e47515df18a",
++};
++
+ function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateState {
+   return {
+     enabled: true,
+@@ -57,6 +199,9 @@ function report(
+     ...(terminal?.commitDisposition === undefined
+       ? {}
+       : { commitDisposition: terminal.commitDisposition }),
++    ...(terminal?.outcome === "ready-to-install"
++      ? { targetVersion: GOLDEN_VERSION, artifact }
++      : {}),
+     state,
+   };
+ }
+@@ -64,6 +209,9 @@ function report(
+ const downloaded = makeState({ status: "downloaded", downloadedVersion: "1.2.4" });
+ 
+ interface HarnessOptions {
++  readonly missingCapability?: "presentation" | "helper";
++  readonly dispatchWait?: (requestId: string) => Effect.Effect<void>;
++  readonly stageWait?: Effect.Effect<void>;
+   readonly mode?: "web" | "desktop";
+   readonly controlFd?: number | undefined;
+   /** Reports emitted for the first run, given the requestId the service
+@@ -96,6 +244,10 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function*
+   );
+   const config: ServerConfig.ServerConfig["Service"] = {
+     ...baseConfig,
++    managedDesktopPresentationVariant:
++      options.missingCapability === "presentation" ? undefined : "reasoning",
++    managedDesktopArtifactHelperPath:
++      options.missingCapability === "helper" ? undefined : "/bundled/helper",
+     mode: options.mode ?? "desktop",
+     ...("controlFd" in options
+       ? { desktopTelemetryControlFd: options.controlFd }
+@@ -121,15 +273,67 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function*
+       acceptances.push(label);
+     });
+ 
+-  const service = yield* DesktopAppUpdate.make().pipe(
++  const cancelled: string[] = [];
++  const order: string[] = [];
++  const service = yield* DesktopAppUpdate.make({
++    feed: {
++      resolveDesktop: (version, variant) =>
++        Effect.sync(() => {
++          expect(version).toBe(GOLDEN_VERSION);
++          expect(variant).toBe("reasoning");
++          order.push("resolve");
++          return {
++            repository: MANAGED_RELEASE_REPOSITORY,
++            releaseId: 1,
++            tag: `v${version}`,
++            version,
++            publishedAt: "2026-09-05T00:00:00Z",
++            githubImmutable: true,
++            manifestSha256: artifact.manifestSha256,
++            releaseInputSha256: artifact.releaseInputSha256,
++            artifactId: "reasoning-darwin-arm64@sha256:" + artifact.sha256,
++            presentationVariant: variant,
++            source: {
++              readDocuments: () =>
++                Effect.succeed({
++                  manifestBytes: new TextEncoder().encode(GOLDEN_MANIFEST),
++                  sumsBytes: new TextEncoder().encode(GOLDEN_SUMS),
++                }),
++              openArchive: () => Effect.succeed(Stream.empty),
++            },
++          };
++        }),
++    },
++    stage: (input) =>
++      Effect.gen(function* () {
++        expect(input.asset.version).toBe(GOLDEN_VERSION);
++        expect(input.asset.releaseInputSha256).toBe(artifact.releaseInputSha256);
++        expect(input.asset.sha256).toBe(artifact.sha256);
++        expect(input.asset.manifestSha256).toBe(artifact.manifestSha256);
++        expect(input.asset.presentationVariant).toBe("reasoning");
++        expect(input.helperPath).toBe("/bundled/helper");
++        order.push("stage");
++        yield* options.stageWait ?? Effect.void;
++        return artifact;
++      }),
++  }).pipe(
+     Effect.provide(
+       Layer.mergeAll(
+         DesktopTelemetryReceiver.layerTest({
+-          requestDesktopUpdate: (requestId) =>
++          requestDesktopUpdate: (requestId, targetVersion, staged) =>
+             Effect.suspend(() => {
++              expect(targetVersion).toBe(GOLDEN_VERSION);
++              expect(staged).toEqual(artifact);
++              order.push("request");
+               const reports = runReportsDelivered ? [] : (options.reports?.(requestId) ?? []);
+               runReportsDelivered = true;
+-              return deliver(reports);
++              return deliver(reports).pipe(
++                Effect.andThen(options.dispatchWait?.(requestId) ?? Effect.void),
++              );
++            }),
++          cancelDesktopUpdate: (requestId) =>
++            Effect.sync(() => {
++              cancelled.push(requestId);
+             }),
+           commitDesktopUpdate: (requestId) =>
+             options.commitWriteFails
+@@ -153,10 +357,11 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function*
+             Effect.succeed(committed.has(attemptId)),
+         }),
+         ServerConfig.layer(config),
++        FetchHttpClient.layer,
+       ),
+     ),
+   );
+-  return { service, acceptances, onHandoffAccepted };
++  return { service, acceptances, onHandoffAccepted, order, cancelled };
+ });
+ 
+ const isSettled = (fiber: Fiber.Fiber<unknown, unknown>) =>
+@@ -169,14 +374,136 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+       expect(web.service.available).toBe(false);
+       const noFd = yield* makeHarness({ controlFd: undefined });
+       expect(noFd.service.available).toBe(false);
+-      expect((yield* noFd.service.run(() => Effect.void).pipe(Effect.flip)).reason).toContain(
+-        "not started by the T3 Code desktop app",
+-      );
++      expect(
++        (yield* noFd.service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason,
++      ).toContain("not started by the T3 Code desktop app");
+       const desktop = yield* makeHarness();
+       expect(desktop.service.available).toBe(true);
+     }),
+   );
+ 
++  it.effect("requires both bootstrapped capabilities before resolving or sending", () =>
++    Effect.gen(function* () {
++      for (const missingCapability of ["presentation", "helper"] as const) {
++        const { service, order } = yield* makeHarness({ missingCapability });
++        expect(
++          (yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason,
++        ).toContain("bundled artifact helper");
++        expect(order).toEqual([]);
++      }
++    }),
++  );
++
++  it.effect("closes interrupted staging and sends no request before staging settles", () =>
++    Effect.gen(function* () {
++      const started = yield* Deferred.make<void>();
++      let closed = 0;
++      const { service, order, cancelled } = yield* makeHarness({
++        stageWait: Effect.scoped(
++          Effect.gen(function* () {
++            yield* Effect.addFinalizer(() =>
++              Effect.sync(() => {
++                closed++;
++              }),
++            );
++            yield* Deferred.succeed(started, undefined);
++            return yield* Effect.never;
++          }),
++        ),
++      });
++      const run = yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.forkChild);
++      yield* Deferred.await(started);
++      expect(order).toEqual(["resolve", "stage"]);
++      yield* Fiber.interrupt(run);
++      expect(closed).toBe(1);
++      expect(order).toEqual(["resolve", "stage"]);
++      const retry = yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      expect(order).toEqual(["resolve", "stage", "resolve", "stage"]);
++      yield* Fiber.interrupt(retry);
++      expect(closed).toBe(2);
++      expect(cancelled).toEqual([]);
++    }),
++  );
++
++  it.effect("cancels once when interrupted after delivery but before dispatch settles", () =>
++    Effect.gen(function* () {
++      const delivered = yield* Deferred.make<string>();
++      const settle = yield* Deferred.make<void>();
++      const { service, cancelled } = yield* makeHarness({
++        dispatchWait: (requestId) =>
++          Deferred.succeed(delivered, requestId).pipe(Effect.andThen(Deferred.await(settle))),
++        reports: (requestId) => [report(requestId, downloaded, { outcome: "ready-to-install" })],
++      });
++      let succeeded = false;
++      const stages: string[] = [];
++      const run = yield* service
++        .run(GOLDEN_VERSION, (stage) =>
++          Effect.sync(() => {
++            stages.push(stage);
++          }),
++        )
++        .pipe(
++          Effect.tap(() =>
++            Effect.sync(() => {
++              succeeded = true;
++            }),
++          ),
++          Effect.forkChild,
++        );
++      const requestId = yield* Deferred.await(delivered);
++      const interruption = yield* Fiber.interrupt(run).pipe(Effect.forkChild);
++      yield* Effect.yieldNow;
++      expect(yield* isSettled(run)).toBe(false);
++      expect(cancelled).toEqual([]);
++      yield* Deferred.succeed(settle, undefined);
++      yield* Fiber.join(interruption);
++      expect(cancelled).toEqual([requestId]);
++      expect(succeeded).toBe(false);
++      expect(stages).toEqual(["downloading"]);
++      const retry = yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip);
++      expect(retry.reason).not.toBe("A desktop app update is already in progress.");
++      expect(cancelled).toEqual([requestId]);
++    }),
++  );
++
++  it.effect(
++    "never accepts a stale request, missing identity or any mismatched artifact field",
++    () =>
++      Effect.gen(function* () {
++        const mismatches: Array<Partial<DesktopUpdateStatusReport> | "targetVersion" | "artifact"> =
++          [
++            { requestId: "stale-request" },
++            "targetVersion",
++            { targetVersion: GOLDEN_VERSION.replace(".3.managed", ".4.managed") },
++            "artifact",
++            ...Object.keys(artifact).map((key) => ({
++              artifact: {
++                ...artifact,
++                [key]: key === "bytes" || key === "schemaVersion" ? 2 : "different",
++              },
++            })),
++          ];
++        for (const mismatch of mismatches) {
++          const { service, order, acceptances } = yield* makeHarness({
++            reports: (requestId) => {
++              const ready = report(requestId, downloaded, { outcome: "ready-to-install" });
++              if (typeof mismatch === "string") {
++                const missing = { ...ready };
++                delete missing[mismatch];
++                return [missing];
++              }
++              return [{ ...ready, ...mismatch }];
++            },
++          });
++          const error = yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip);
++          expect(error.reason).toMatch(/different prepared update artifact|stopped reporting/);
++          expect(order).toEqual(["resolve", "stage", "request"]);
++          expect(acceptances).toEqual([]);
++        }
++      }),
++  );
++
+   it.effect("collapses state reports into progress stages and succeeds on installing", () =>
+     Effect.gen(function* () {
+       const { service } = yield* makeHarness({
+@@ -190,9 +517,11 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+         ],
+       });
+       const stages: string[] = [];
+-      const result = yield* service.run((stage) => Effect.sync(() => void stages.push(stage)));
++      const result = yield* service.run(GOLDEN_VERSION, (stage) =>
++        Effect.sync(() => void stages.push(stage)),
++      );
+       expect(result).toEqual({
+-        targetVersion: "1.2.4",
++        targetVersion: GOLDEN_VERSION,
+         method: "desktop-app",
+         desktopUpdateToken: expect.any(String),
+       });
+@@ -203,7 +532,7 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+       // install after reporting, the server must accept a retry instead of
+       // refusing until restart. (The second run fails differently because
+       // the stub report stream is exhausted.)
+-      const retry = yield* service.run(() => Effect.void).pipe(Effect.flip);
++      const retry = yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip);
+       expect(retry.reason).not.toBe("A desktop app update is already in progress.");
+     }),
+   );
+@@ -215,9 +544,9 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+           report(requestId, makeState({ status: "up-to-date" }), { outcome: "up-to-date" }),
+         ],
+       });
+-      expect((yield* upToDate.service.run(() => Effect.void).pipe(Effect.flip)).reason).toBe(
+-        "The T3 Code desktop app on this machine is already up to date on 1.2.3.",
+-      );
++      expect(
++        (yield* upToDate.service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason,
++      ).toBe("The T3 Code desktop app on this machine is already up to date on 1.2.3.");
+ 
+       const failed = yield* makeHarness({
+         reports: (requestId) => [
+@@ -227,9 +556,9 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+           }),
+         ],
+       });
+-      expect((yield* failed.service.run(() => Effect.void).pipe(Effect.flip)).reason).toBe(
+-        "feed unreachable",
+-      );
++      expect(
++        (yield* failed.service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason,
++      ).toBe("feed unreachable");
+     }),
+   );
+ 
+@@ -238,7 +567,7 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+       const { service } = yield* makeHarness({
+         reports: (requestId) => [report(requestId, makeState({ status: "checking" }))],
+       });
+-      expect((yield* service.run(() => Effect.void).pipe(Effect.flip)).reason).toBe(
++      expect((yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason).toBe(
+         "The desktop app stopped reporting its update.",
+       );
+     }),
+@@ -248,24 +577,24 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+     Effect.gen(function* () {
+       const { service } = yield* makeHarness({ reports: () => [], keepOpen: true });
+       const first = yield* Effect.forkChild(
+-        service.run(() => Effect.void),
++        service.run(GOLDEN_VERSION, () => Effect.void),
+         {
+           startImmediately: true,
+         },
+       );
+-      expect((yield* service.run(() => Effect.void).pipe(Effect.flip)).reason).toBe(
++      expect((yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason).toBe(
+         "A desktop app update is already in progress.",
+       );
+       yield* Fiber.interrupt(first);
+ 
+       const retry = yield* Effect.forkChild(
+-        service.run(() => Effect.void),
++        service.run(GOLDEN_VERSION, () => Effect.void),
+         {
+           startImmediately: true,
+         },
+       );
+       yield* Effect.yieldNow;
+-      expect((yield* service.run(() => Effect.void).pipe(Effect.flip)).reason).toBe(
++      expect((yield* service.run(GOLDEN_VERSION, () => Effect.void).pipe(Effect.flip)).reason).toBe(
+         "A desktop app update is already in progress.",
+       );
+       yield* Fiber.interrupt(retry);
+@@ -455,7 +784,7 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
+           }),
+         ],
+       });
+-      const prepared = yield* service.run(() => Effect.void);
++      const prepared = yield* service.run(GOLDEN_VERSION, () => Effect.void);
+ 
+       const error = yield* service
+         .commit(prepared.desktopUpdateToken ?? "missing", onHandoffAccepted)
+diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
+index b7dd7080dc28356935bf1f449cb43ab73caacf62..51c567175c482b0c52030966951614bc56bd68fe 100644
+--- a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
++++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
+@@ -1,6 +1,7 @@
+ import {
+   ServerSelfUpdateError,
+   type DesktopUpdateState,
++  type ManagedDesktopArtifactDescriptor,
+   type DesktopUpdateStatusReport,
+   type ServerSelfUpdateProgressStage,
+   type ServerSelfUpdateResult,
+@@ -15,6 +16,13 @@ import * as Ref from "effect/Ref";
+ import * as Result from "effect/Result";
+ import * as Stream from "effect/Stream";
+ 
++import {
++  makeGitHubManagedReleaseFeed,
++  type ManagedReleaseFeed,
++} from "../cloud/managedReleaseSource.ts";
++import { verifyManagedDesktopReleaseDocuments } from "../cloud/managedRelease.ts";
++import { stageManagedDesktopArtifact } from "../cloud/managedDesktopArtifact.ts";
++
+ import { ServerConfig } from "../config.ts";
+ import * as DesktopTelemetryReceiver from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
+ 
+@@ -46,9 +54,10 @@ export class DesktopAppUpdate extends Context.Service<
+     /** True when this server was spawned by a desktop app that can be
+         driven over the telemetry control channel. */
+     readonly available: boolean;
+-    /** Checks and downloads through the desktop app, then returns a token
+-        while this server is still connected. `commit` starts installation. */
++    /** Resolves and stages the exact managed artifact, then asks the desktop
++        to prepare it and returns a token while this server remains connected. */
+     readonly run: (
++      targetVersion: string,
+       reportProgress: (
+         stage: ServerSelfUpdateProgressStage,
+       ) => Effect.Effect<void, ServerSelfUpdateError>,
+@@ -65,10 +74,17 @@ export class DesktopAppUpdate extends Context.Service<
+   }
+ >()("t3/desktopUpdate/DesktopAppUpdate") {}
+ 
+-export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* () {
++export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (options?: {
++  readonly feed?: Pick<ManagedReleaseFeed, "resolveDesktop">;
++  readonly stage?: typeof stageManagedDesktopArtifact;
++}) {
+   const config = yield* ServerConfig;
+   const crypto = yield* Crypto.Crypto;
+   const receiver = yield* DesktopTelemetryReceiver.DesktopTelemetryReceiver;
++  const feed =
++    options?.feed ??
++    (yield* makeGitHubManagedReleaseFeed({ hostTarget: { platform: "darwin", arch: "arm64" } }));
++  const stage = options?.stage ?? stageManagedDesktopArtifact;
+   const inFlight = yield* Ref.make(false);
+ 
+   const available = config.mode === "desktop" && config.desktopTelemetryControlFd !== undefined;
+@@ -79,13 +95,15 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
+ 
+   const consumeReports = (
+     requestId: string,
++    targetVersion: string,
++    artifact: ManagedDesktopArtifactDescriptor,
+     changes: Stream.Stream<DesktopUpdateStatusReport>,
+     reportProgress: (
+       stage: ServerSelfUpdateProgressStage,
+     ) => Effect.Effect<void, ServerSelfUpdateError>,
+   ) =>
+     Effect.gen(function* () {
+-      const lastStage = yield* Ref.make<ServerSelfUpdateProgressStage | null>(null);
++      const lastStage = yield* Ref.make<ServerSelfUpdateProgressStage | null>("downloading");
+       const emitStage = (
+         stage: ServerSelfUpdateProgressStage | null,
+       ): Effect.Effect<void, ServerSelfUpdateError> =>
+@@ -125,11 +143,17 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
+ 
+       const report = terminal.value;
+       if (report.outcome === "ready-to-install") {
++        if (
++          report.targetVersion !== targetVersion ||
++          report.artifact === undefined ||
++          !Object.entries(artifact).every(
++            ([key, value]) =>
++              report.artifact?.[key as keyof ManagedDesktopArtifactDescriptor] === value,
++          )
++        ) {
++          return yield* failWith("The desktop app reported a different prepared update artifact.");
++        }
+         yield* emitStage("installing");
+-        const targetVersion =
+-          report.state.downloadedVersion ??
+-          report.state.availableVersion ??
+-          report.state.currentVersion;
+         yield* Effect.logInfo("Desktop app update prepared for install.", {
+           targetVersion,
+         });
+@@ -147,12 +171,19 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
+     });
+ 
+   const run: DesktopAppUpdate["Service"]["run"] = Effect.fn("desktopUpdate.desktopAppUpdate.run")(
+-    function* (reportProgress) {
++    function* (targetVersion, reportProgress) {
+       if (!available) {
+         return yield* failWith(
+           "This server was not started by the T3 Code desktop app, so it cannot drive a desktop update.",
+         );
+       }
++      const presentationVariant = config.managedDesktopPresentationVariant;
++      const helperPath = config.managedDesktopArtifactHelperPath;
++      if (presentationVariant === undefined || helperPath === undefined) {
++        return yield* failWith(
++          "Managed desktop updates require the bootstrapped presentation and bundled artifact helper.",
++        );
++      }
+       if (yield* Ref.getAndSet(inFlight, true)) {
+         return yield* failWith("A desktop app update is already in progress.");
+       }
+@@ -164,17 +195,43 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
+               failWith("Could not generate a desktop update request id.", error),
+             ),
+           );
++          yield* reportProgress("downloading");
++          const artifact = yield* Effect.gen(function* () {
++            const selection = yield* feed.resolveDesktop(targetVersion, presentationVariant);
++            const documents = yield* selection.source.readDocuments(targetVersion);
++            const asset = yield* verifyManagedDesktopReleaseDocuments({
++              ...documents,
++              targetVersion,
++              presentationVariant,
++            });
++            return yield* stage({
++              baseDir: config.baseDir,
++              helperPath,
++              asset,
++              source: selection.source,
++            });
++          }).pipe(
++            Effect.mapError((error) =>
++              failWith("Could not prepare the exact managed desktop artifact.", error),
++            ),
++          );
+           // Subscribe before sending the request so a fast first report
+           // cannot be missed.
+           const { changes } = yield* receiver.desktopUpdates;
+-          yield* receiver
+-            .requestDesktopUpdate(requestId)
+-            .pipe(
++          // A write can deliver bytes before its callback settles. Keep dispatch
++          // and its cancellation handler together until report consumption resumes.
++          return yield* Effect.uninterruptibleMask((restore) =>
++            receiver.requestDesktopUpdate(requestId, targetVersion, artifact).pipe(
+               Effect.mapError((error) =>
+                 failWith("Could not reach the T3 Code desktop app on this machine.", error),
+               ),
+-            );
+-          return yield* consumeReports(requestId, changes, reportProgress).pipe(
++              Effect.andThen(
++                restore(
++                  consumeReports(requestId, targetVersion, artifact, changes, reportProgress),
++                ),
++              ),
++            ),
++          ).pipe(
+             Effect.onInterrupt(() => receiver.cancelDesktopUpdate(requestId).pipe(Effect.ignore)),
+           );
+         }),

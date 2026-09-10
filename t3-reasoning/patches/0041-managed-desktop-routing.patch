@@ -1,0 +1,3040 @@
+diff --git a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
+index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351fae3678ca 100644
+--- a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
++++ b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
+@@ -1,36 +1,32 @@
++// @effect-diagnostics globalTimers:off -- Realistic preparer expiry regression uses controlled native timers.
+ import { assert, describe, it } from "@effect/vitest";
+-import type {
+-  DesktopTelemetryRequestDesktopUpdate,
+-  DesktopTelemetryCommitDesktopUpdate,
+-  DesktopTelemetryCancelDesktopUpdate,
++import { vi } from "vite-plus/test";
++import {
+   DesktopUpdateStatusReport,
++  type DesktopTelemetryRequestDesktopUpdate,
++  type DesktopTelemetryCommitDesktopUpdate,
++  type DesktopTelemetryCancelDesktopUpdate,
+ } from "@t3tools/contracts";
+ import * as Deferred from "effect/Deferred";
+-import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as Fiber from "effect/Fiber";
+-import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import { BackendInstanceId } from "../backend/DesktopBackendManager.ts";
+ import * as Queue from "effect/Queue";
+-import * as Ref from "effect/Ref";
++import * as Schema from "effect/Schema";
+ import * as Stream from "effect/Stream";
+ import * as TestClock from "effect/testing/TestClock";
+-
+-import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
++import * as Exit from "effect/Exit";
++import * as Scope from "effect/Scope";
+ import * as DesktopState from "../app/DesktopState.ts";
++import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
++import * as DesktopUpdateLifecycle from "../backend/desktopUpdateLifecycle.ts";
+ import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
+ import * as DesktopRemoteUpdates from "./DesktopRemoteUpdates.ts";
+ import * as DesktopUpdates from "./DesktopUpdates.ts";
+-import { makeHarness } from "./updatesTestHarness.ts";
+-
+-// The remote flow hops between the test runtime's fibers and the updater's
+-// runPromise-driven event handlers, so settling needs real microtask turns,
+-// not just fiber yields.
+-const settle = Effect.gen(function* () {
+-  for (let i = 0; i < 20; i += 1) {
+-    yield* Effect.yieldNow;
+-    yield* Effect.promise(() => Promise.resolve());
+-  }
+-});
++import type { PreparedManagedDesktopArtifact } from "./ManagedDesktopArtifact.ts";
++import type { DesktopUpdateFreezeResult } from "./desktopUpdateReservation.ts";
++import { makeHarness, type UpdatesHarnessOptions } from "./updatesTestHarness.ts";
+ 
+ const artifact = {
+   schemaVersion: 1,
+@@ -42,30 +38,111 @@ const artifact = {
+   manifestSha256: "c".repeat(64),
+   releaseInputSha256: "a".repeat(64),
+ } as const;
+-
+-const request = (requestId: string): DesktopTelemetryRequestDesktopUpdate => ({
++const request = (requestId = "req-1"): DesktopTelemetryRequestDesktopUpdate => ({
+   version: 1,
+   type: "requestDesktopUpdate",
+   requestId,
+   targetVersion: artifact.targetVersion,
+   artifact,
+ });
++const run = { instanceId: DesktopBackendPool.PRIMARY_INSTANCE_ID, runId: 3 };
++const settle = Effect.gen(function* () {
++  for (let i = 0; i < 50; i++) {
++    yield* Effect.yieldNow;
++    yield* Effect.promise(() => Promise.resolve());
++  }
++});
+ 
+-function runRemoteUpdatesTest(
+-  harness: ReturnType<typeof makeHarness>,
++interface Options {
++  readonly extraRun?: boolean;
++  readonly harness?: UpdatesHarnessOptions;
++  readonly freeze?: Exclude<DesktopUpdateFreezeResult, { _tag: "frozen" }>;
++  readonly prepare?: DesktopRemoteUpdates.ManagedDesktopAdapters["prepare"];
++  readonly cancel?: DesktopRemoteUpdates.ManagedDesktopAdapters["cancel"];
++  readonly helperReady?: Promise<void>;
++  readonly helperFailure?: "READY" | "COMMIT" | "ARMED";
++  readonly ack?: Effect.Effect<
++    void,
++    DesktopTelemetryPublisher.DesktopUpdateReportAcknowledgementFailed
++  >;
++  readonly reply?: "busy" | "unanswered-reserve" | "unanswered-commit";
++}
++function testFlow(
++  options: Options,
+   body: (context: {
+-    readonly reports: DesktopUpdateStatusReport[];
+-    readonly requests: Queue.Queue<DesktopTelemetryRequestDesktopUpdate>;
+-    readonly commits: Queue.Queue<DesktopTelemetryCommitDesktopUpdate>;
+-    readonly cancellations: Queue.Queue<DesktopTelemetryCancelDesktopUpdate>;
+-  }) => Effect.Effect<void, never, DesktopUpdates.DesktopUpdates | DesktopState.DesktopState>,
++    reports: DesktopUpdateStatusReport[];
++    events: string[];
++    prepared: DesktopTelemetryRequestDesktopUpdate[];
++    cancelledTokens: PreparedManagedDesktopArtifact[];
++    send: (req?: DesktopTelemetryRequestDesktopUpdate) => Effect.Effect<void>;
++    commit: (id?: string) => Effect.Effect<void>;
++    cancel: (id?: string) => Effect.Effect<void>;
++    updates: DesktopUpdates.DesktopUpdates["Service"];
++    lifecycle: DesktopUpdateLifecycle.DesktopUpdateLifecycle["Service"];
++    harness: ReturnType<typeof makeHarness>;
++    interrupt: Effect.Effect<void>;
++  }) => Effect.Effect<void, never, Scope.Scope | DesktopState.DesktopState>,
+ ) {
++  const events: string[] = [];
++  const harness = makeHarness({
++    generationSnapshot: Effect.succeed({ _tag: "supported", run }),
++    stopBackend: Effect.sync(() => {
++      events.push("stop exact");
++    }),
++    ...options.harness,
++  });
+   return Effect.scoped(
+     Effect.gen(function* () {
++      const updates = yield* DesktopUpdates.DesktopUpdates;
++      const lifecycle = yield* DesktopUpdateLifecycle.make;
++      const removeOwner = yield* lifecycle.addOwner(Effect.succeed({ _tag: "supported", run }));
++      yield* Effect.addFinalizer(() => removeOwner);
++      const pool = yield* DesktopBackendPool.DesktopBackendPool;
++      const extraRun = { instanceId: BackendInstanceId("secondary"), runId: 7 };
++      if (options.extraRun) {
++        const removeExtra = yield* lifecycle.addOwner(
++          Effect.succeed({ _tag: "supported", run: extraRun }),
++        );
++        yield* Effect.addFinalizer(() => removeExtra);
++      }
++      const routePool = {
++        ...pool,
++        get: (id: BackendInstanceId) =>
++          id === extraRun.instanceId
++            ? pool.get(run.instanceId).pipe(
++                Effect.map(
++                  Option.map((instance) => ({
++                    ...instance,
++                    id,
++                    generationSnapshot: Effect.succeed({
++                      _tag: "supported" as const,
++                      run: extraRun,
++                    }),
++                    stop: () =>
++                      Effect.sync(() => {
++                        events.push("stop secondary exact");
++                      }),
++                  })),
++                ),
++              )
++            : pool.get(id),
++      };
+       const requests = yield* Queue.unbounded<DesktopTelemetryRequestDesktopUpdate>();
+       const commits = yield* Queue.unbounded<DesktopTelemetryCommitDesktopUpdate>();
+       const cancellations = yield* Queue.unbounded<DesktopTelemetryCancelDesktopUpdate>();
+       const reports: DesktopUpdateStatusReport[] = [];
++      const prepared: DesktopTelemetryRequestDesktopUpdate[] = [];
++      const cancelledTokens: PreparedManagedDesktopArtifact[] = [];
++      const publish = (report: DesktopUpdateStatusReport) =>
++        Schema.decodeUnknownEffect(DesktopUpdateStatusReport)(report).pipe(
++          Effect.orDie,
++          Effect.andThen(
++            Effect.sync(() => {
++              reports.push(report);
++              if (report.outcome === "ready-to-install") events.push("bound ready");
++            }),
++          ),
++        );
+       const publisher = DesktopTelemetryPublisher.DesktopTelemetryPublisher.of({
+         latest: Effect.succeedNone,
+         changes: Stream.empty,
+@@ -73,803 +150,774 @@ function runRemoteUpdatesTest(
+         handleControl: () => Effect.void,
+         handleControlForSource: () => Effect.void,
+         removeControlSource: () => Effect.void,
+-        publishUpdateReportAcknowledged: () =>
+-          Effect.fail(
+-            new DesktopTelemetryPublisher.DesktopUpdateReportAcknowledgementFailed({
+-              message: "report acknowledgement unused by fixture",
+-            }),
+-          ),
+-        publishUpdateReport: (report) =>
+-          Effect.sync(() => {
+-            reports.push(report);
++        publishUpdateReport: publish,
++        publishUpdateReportAcknowledged: (runs, report) =>
++          Effect.gen(function* () {
++            assert.deepEqual(runs, options.extraRun ? [run, extraRun] : [run]);
++            assert.deepEqual(report.artifact, artifact);
++            assert.equal(report.requestId, "req-1");
++            assert.equal(report.targetVersion, artifact.targetVersion);
++            yield* publish(report);
++            events.push("accepted sent");
++            yield* options.ack ?? Effect.void;
++            events.push("every-run accepted ack");
+           }),
+         updateRequests: Stream.fromQueue(requests),
+         updateCommits: Stream.fromQueue(commits),
+         updateCancellations: Stream.fromQueue(cancellations),
+-        // The remote flow never spawns a run, so no exchange can be answered.
+         reservationTransport: {
+-          openRun: () =>
+-            Effect.succeed({
+-              encoded: Stream.empty,
+-              handleControl: () => Effect.void,
+-              close: () => Effect.void,
+-            }),
+-          exchange: () =>
+-            Effect.succeed({
+-              _tag: "unanswered",
+-              reason: "reservation transport unused by fixture",
++          openRun: () => Effect.die("unused"),
++          exchange: (addressed, command) =>
++            Effect.sync(() => {
++              assert.ok(addressed === run || (options.extraRun && addressed === extraRun));
++              events.push(command.action);
++              if (options.reply === `unanswered-${command.action}`)
++                return { _tag: "unanswered" as const, reason: "lost" };
++              return {
++                _tag: "reply" as const,
++                run: addressed,
++                reply: {
++                  version: 1 as const,
++                  type: "desktopUpdateReservationReply" as const,
++                  attemptId: command.attemptId,
++                  status:
++                    command.action === "reserve"
++                      ? options.reply === "busy"
++                        ? ("busy" as const)
++                        : ("ready" as const)
++                      : command.action === "commit"
++                        ? ("committed" as const)
++                        : ("aborted" as const),
++                },
++              };
+             }),
+         },
+       });
+-
+-      const updates = yield* DesktopUpdates.DesktopUpdates;
+-      yield* updates.configure;
+-      yield* DesktopRemoteUpdates.listen.pipe(
++      const adapters: DesktopRemoteUpdates.ManagedDesktopAdapters = {
++        prepare: async (req, signal, backstopTtlMs) => {
++          events.push("prepare");
++          prepared.push(req);
++          return options.prepare
++            ? options.prepare(req, signal, backstopTtlMs)
++            : (Object.freeze({}) as PreparedManagedDesktopArtifact);
++        },
++        cancel: async (token) => {
++          if (!cancelledTokens.includes(token)) cancelledTokens.push(token);
++          events.push("cancel staging");
++          await options.cancel?.(token);
++        },
++        prepareInstall: async () => {
++          events.push("launch helper");
++          if (options.helperReady) await options.helperReady;
++          if (options.helperFailure === "READY") throw new Error("helper READY failed");
++          events.push("helper READY");
++          let stopping = false;
++          return {
++            cancel: async () => {
++              if (!stopping) events.push("cancel helper");
++            },
++            stopAndInstall: async (stop) => {
++              stopping = true;
++              await stop();
++              events.push("helper COMMIT");
++              if (options.helperFailure === "COMMIT") throw new Error("helper COMMIT failed");
++              events.push("ARMED");
++              if (options.helperFailure === "ARMED") throw new Error("quit failed");
++              events.push("Electron quit");
++            },
++          };
++        },
++      };
++      const listenerScope = yield* Scope.make();
++      yield* DesktopRemoteUpdates.listenWithAdapters(adapters).pipe(
+         Effect.provideService(DesktopTelemetryPublisher.DesktopTelemetryPublisher, publisher),
++        Effect.provideService(DesktopBackendPool.DesktopBackendPool, routePool),
++        Effect.provideService(DesktopUpdateLifecycle.DesktopUpdateLifecycle, {
++          ...lifecycle,
++          tryFreeze: Effect.sync(() => {
++            events.push("freeze");
++          }).pipe(
++            Effect.andThen(options.freeze ? Effect.succeed(options.freeze) : lifecycle.tryFreeze),
++          ),
++        }),
++        Effect.provideService(Scope.Scope, listenerScope),
+       );
++      yield* Effect.addFinalizer(() => Scope.close(listenerScope, Exit.void));
+       yield* settle;
+-      yield* body({ reports, requests, commits, cancellations });
++      yield* body({
++        reports,
++        events,
++        prepared,
++        cancelledTokens,
++        updates,
++        lifecycle,
++        harness,
++        send: (req = request()) => Queue.offer(requests, req).pipe(Effect.andThen(settle)),
++        commit: (id = "req-1") =>
++          Effect.sync(() => {
++            events.push("explicit commit");
++          }).pipe(
++            Effect.andThen(
++              Queue.offer(commits, { version: 1, type: "commitDesktopUpdate", requestId: id }),
++            ),
++            Effect.andThen(settle),
++          ),
++        cancel: (id = "req-1") =>
++          Queue.offer(cancellations, {
++            version: 1,
++            type: "cancelDesktopUpdate",
++            requestId: id,
++          }).pipe(Effect.andThen(settle)),
++        interrupt: Scope.close(listenerScope, Exit.void),
++      });
+     }),
+-  ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+-}
+-
+-function terminalReports(reports: DesktopUpdateStatusReport[]): DesktopUpdateStatusReport[] {
+-  return reports.filter((report) => report.outcome !== undefined);
++  ).pipe(Effect.provide(harness.layer));
+ }
+ 
+-describe("DesktopRemoteUpdates", () => {
+-  it.effect("drives check, download, and install with no local confirmation", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-1"));
+-        yield* settle;
+-        assert.equal(harness.checkCount(), 1);
+-
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        const terminals = terminalReports(reports);
+-        assert.equal(terminals.length, 1);
+-        assert.equal(terminals[0]?.outcome, "ready-to-install");
+-        assert.equal(terminals[0]?.requestId, "req-1");
+-        assert.equal(harness.quitAndInstalls(), 0);
+-
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-1",
+-        });
+-        yield* settle;
+-        assert.equal(harness.quitAndInstalls(), 1);
+-
+-        // The mirror stamped the in-run state changes with the request id.
+-        const statuses = reports
+-          .filter((report) => report.requestId === "req-1")
+-          .map((report) => report.state.status);
+-        assert.include(statuses, "available");
+-        assert.include(statuses, "downloaded");
+-      }),
+-    );
+-  });
+-
+-  it.effect("reports a failed outcome when quitAndInstall fails", () => {
+-    const harness = makeHarness({
+-      quitAndInstall: Effect.fail(
+-        new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
+-          channel: "latest",
+-          isSilent: true,
+-          isForceRunAfter: true,
+-          cause: new Error("spawn failed"),
++describe("managed remote desktop updates", () => {
++  it.effect(
++    "prepares exact content and orders acknowledged acceptance before exact stop, helper arm and quit",
++    () =>
++      testFlow({}, ({ send, commit, reports, events, harness, lifecycle }) =>
++        Effect.gen(function* () {
++          yield* send();
++          assert.deepEqual(events, ["prepare", "bound ready"]);
++          assert.deepEqual(reports.at(-1)?.artifact, artifact);
++          yield* commit();
++          assert.deepEqual(events, [
++            "prepare",
++            "bound ready",
++            "explicit commit",
++            "launch helper",
++            "helper READY",
++            "freeze",
++            "reserve",
++            "commit",
++            "accepted sent",
++            "every-run accepted ack",
++            "stop exact",
++            "helper COMMIT",
++            "ARMED",
++            "Electron quit",
++          ]);
++          assert.equal(yield* lifecycle.isRetained, true);
++          assert.equal(harness.checkCount(), 0);
++          assert.equal(harness.downloadCount(), 0);
++          assert.equal(harness.quitAndInstalls(), 0);
+         }),
+       ),
+-    });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-4"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-4",
+-        });
+-        yield* settle;
+-
+-        // Install failures reduce to status "downloaded" + errorContext
+-        // "install"; the prepared result is followed by the commit failure.
+-        const terminals = terminalReports(reports);
+-        assert.deepEqual(
+-          terminals.map((report) => report.outcome),
+-          ["ready-to-install", "failed"],
+-        );
+-        assert.equal(terminals[1]?.state.errorContext, "install");
+-      }),
+-    );
+-  });
+-
+-  it.effect("joins an in-progress install on commit instead of failing the token", () => {
+-    const installStarted = Deferred.makeUnsafe<void>();
+-    const releaseInstall = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({
+-      stopBackend: Deferred.succeed(installStarted, undefined).pipe(
+-        Effect.andThen(Deferred.await(releaseInstall)),
++  );
++
++  it.effect(
++    "does not require updater feed configuration, and excludes every local action through prepared ownership",
++    () =>
++      testFlow(
++        { harness: { env: { T3CODE_DESKTOP_MOCK_UPDATES: "false" } } },
++        ({ send, cancel, updates }) =>
++          Effect.gen(function* () {
++            yield* send();
++            assert.equal(yield* updates.isActionActive, true);
++            assert.equal((yield* updates.check("local")).checked, false);
++            assert.equal((yield* updates.download).accepted, false);
++            assert.equal((yield* updates.install).accepted, false);
++            const channel = yield* updates.setChannel("nightly").pipe(Effect.exit);
++            assert.equal(Exit.isFailure(channel), true);
++            yield* cancel();
++            assert.equal(yield* updates.isActionActive, false);
++          }),
+       ),
+-    });
++  );
+ 
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
++  it.effect("does not overlap a local action", () =>
++    testFlow({}, ({ send, reports, prepared, updates }) =>
+       Effect.gen(function* () {
+-        const updates = yield* DesktopUpdates.DesktopUpdates;
+-        yield* Queue.offer(requests, request("req-join-commit"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        assert.deepEqual(
+-          terminalReports(reports).map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-
+-        // A local install takes the updater reservation and starts shutdown.
+-        const localInstall = yield* updates.install.pipe(Effect.forkChild);
+-        yield* Deferred.await(installStarted);
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-join-commit",
+-        });
+-        yield* settle;
+-
+-        // No "failed" marker: that install relaunches the app and the
+-        // client proves the handoff by reconnecting on the target version.
+-        assert.deepEqual(
+-          terminalReports(reports).map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-        assert.equal(harness.quitAndInstalls(), 0);
+-
+-        yield* Deferred.succeed(releaseInstall, undefined);
+-        yield* Fiber.join(localInstall);
++        assert.equal(yield* updates.beginManagedAction!, true);
++        yield* send();
++        assert.equal(prepared.length, 0);
++        assert.match(reports.at(-1)?.reason ?? "", /Another desktop update action/);
++        yield* updates.finishManagedAction!;
+       }),
+-    );
+-  });
++    ),
++  );
+ 
+-  it.effect("does not join a normal app quit as an update install", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
++  it.effect("duplicates prepare once and descriptor conflicts never join equal versions", () =>
++    testFlow({}, ({ send, commit, prepared, events, reports }) =>
+       Effect.gen(function* () {
+-        const desktopState = yield* DesktopState.DesktopState;
+-        yield* Queue.offer(requests, request("req-normal-quit"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        yield* Ref.set(desktopState.quitting, true);
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-normal-quit",
+-        });
+-        yield* settle;
+-
+-        assert.deepEqual(
+-          terminalReports(reports).map((report) => report.outcome),
+-          ["ready-to-install", "failed"],
+-        );
+-        assert.equal(harness.quitAndInstalls(), 0);
++        yield* send();
++        yield* send();
++        yield* send({ ...request(), artifact: { ...artifact, sha256: "d".repeat(64) } });
++        assert.equal(prepared.length, 1);
++        assert.match(reports.at(-1)?.reason ?? "", /different managed artifact/);
++        yield* commit();
++        yield* commit();
++        assert.equal(events.filter((event) => event === "launch helper").length, 1);
++        assert.equal(events.filter((event) => event === "Electron quit").length, 1);
+       }),
+-    );
+-  });
++    ),
++  );
+ 
+-  it.effect("does not misread a lingering install error as a failed retry", () => {
+-    let installAttempts = 0;
+-    const harness = makeHarness({
+-      quitAndInstall: Effect.suspend(() => {
+-        installAttempts += 1;
+-        return installAttempts === 1
+-          ? Effect.fail(
+-              new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
+-                channel: "latest",
+-                isSilent: true,
+-                isForceRunAfter: true,
+-                cause: new Error("first attempt failed"),
+-              }),
+-            )
+-          : Effect.void;
+-      }),
+-    });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
++  it.effect("cancellation before start prevents preparation", () =>
++    testFlow({}, ({ cancel, send, prepared }) =>
+       Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-5"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-5",
+-        });
+-        yield* settle;
+-        // First run failed; state is "downloaded" with a lingering
+-        // errorContext "install". The retry succeeds and must not report
+-        // that leftover as a fresh failure.
+-        yield* Queue.offer(requests, request("req-6"));
+-        yield* settle;
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-6",
+-        });
+-        yield* settle;
+-
+-        const retryTerminals = terminalReports(reports).filter(
+-          (report) => report.requestId === "req-6",
+-        );
+-        assert.deepEqual(
+-          retryTerminals.map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-        assert.equal(harness.quitAndInstalls(), 2);
++        yield* cancel();
++        yield* send();
++        assert.equal(prepared.length, 0);
+       }),
++    ),
++  );
++
++  it.effect("cancellation during preparation aborts its staging and never reports ready", () => {
++    let aborted = false;
++    return testFlow(
++      {
++        prepare: (_request, signal) =>
++          new Promise((_, reject) =>
++            signal.addEventListener(
++              "abort",
++              () => {
++                aborted = true;
++                reject(new Error("aborted"));
++              },
++              { once: true },
++            ),
++          ),
++      },
++      ({ send, cancel, reports, updates }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* cancel();
++          assert.equal(aborted, true);
++          assert.equal(
++            reports.some((report) => report.outcome === "ready-to-install"),
++            false,
++          );
++          assert.equal(yield* updates.isActionActive, false);
++        }),
+     );
+   });
+ 
+-  it.effect("ignores an unrelated updater event while an install is starting", () => {
+-    const stopStarted = Deferred.makeUnsafe<void>();
+-    const releaseStop = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({
+-      stopBackend: Deferred.succeed(stopStarted, undefined).pipe(
+-        Effect.andThen(Deferred.await(releaseStop)),
++  it.effect(
++    "cancellation after ready releases only its token, and duplicate cancellation cannot disarm another request",
++    () =>
++      testFlow({}, ({ send, cancel, commit, cancelledTokens, events }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* cancel();
++          yield* cancel();
++          yield* send(request("req-2"));
++          yield* cancel();
++          assert.equal(cancelledTokens.length, 1);
++          yield* commit();
++          assert.equal(events.includes("launch helper"), false);
++        }),
+       ),
+-    });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-late-event"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-late-event",
+-        });
+-        yield* Deferred.await(stopStarted);
+-        harness.emit("download-progress", { percent: 90 });
+-        yield* settle;
+-        yield* Deferred.succeed(releaseStop, undefined);
+-        yield* settle;
+-
+-        assert.deepEqual(
+-          terminalReports(reports)
+-            .filter((report) => report.requestId === "req-late-event")
+-            .map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-      }),
+-    );
+-  });
+-
+-  it.effect("retries a download refused while the check still holds the reservation", () => {
+-    // electron-updater emits update-available from inside checkForUpdates,
+-    // before the check action releases its reservation. The download the
+-    // remote flow forks in response is refused and must be retried once the
+-    // reservation frees up, without burning a download attempt.
+-    const releaseCheck = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({ checkForUpdates: Deferred.await(releaseCheck) });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-8"));
+-        yield* settle;
+-        assert.equal(harness.checkCount(), 1);
+-
+-        // Fire "available" while the check reservation is still held.
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        assert.equal(harness.downloadCount(), 0);
+-
+-        yield* Deferred.succeed(releaseCheck, undefined);
+-        yield* settle;
+-        yield* TestClock.adjust(Duration.millis(300));
+-        yield* settle;
+-        assert.equal(harness.downloadCount(), 1);
+-
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        assert.deepEqual(
+-          terminalReports(reports).map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-        assert.equal(harness.quitAndInstalls(), 0);
+-      }),
+-    );
+-  });
+-
+-  it.effect("waits for the download reservation before reporting prepared", () => {
+-    // update-downloaded fires from inside downloadUpdate. If the flow
+-    // reported "installing" right then, install would be refused for the
+-    // held reservation after the irrevocable terminal already went out.
+-    const releaseDownload = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({ downloadUpdate: Deferred.await(releaseDownload) });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-10"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        assert.deepEqual(terminalReports(reports), []);
+-        assert.equal(harness.quitAndInstalls(), 0);
+-
+-        yield* Deferred.succeed(releaseDownload, undefined);
+-        yield* settle;
+-        yield* TestClock.adjust(Duration.millis(300));
+-        yield* settle;
+-        assert.deepEqual(
+-          terminalReports(reports).map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-        assert.equal(harness.quitAndInstalls(), 0);
+-      }),
+-    );
+-  });
+-
+-  it.effect("joins an install that is already tearing the app down", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+-      Effect.gen(function* () {
+-        const desktopState = yield* DesktopState.DesktopState;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        // Another install already owns the shutdown.
+-        yield* Ref.set(desktopState.quitting, true);
+-
+-        yield* Queue.offer(requests, request("req-9"));
+-        yield* settle;
+-
+-        // Report "installing" once, no "failed" after the refusal: that
+-        // install will relaunch the app and this request rides along.
+-        assert.deepEqual(
+-          terminalReports(reports).map((report) => report.outcome),
+-          ["ready-to-install"],
+-        );
+-        assert.equal(harness.quitAndInstalls(), 0);
+-      }),
+-    );
+-  });
+-
+-  it.effect("does not run the installer twice for a repeated commit", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ requests, commits }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-repeat"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        const commit = {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-repeat",
+-        } as const;
+-        yield* Queue.offer(commits, commit);
+-        yield* settle;
+-        yield* Queue.offer(commits, commit);
+-        yield* settle;
+-
+-        assert.equal(harness.quitAndInstalls(), 1);
+-      }),
+-    );
+-  });
+-
+-  it.effect("waits for a background check before installing a prepared update", () => {
+-    const backgroundCheckStarted = Deferred.makeUnsafe<void>();
+-    const releaseBackgroundCheck = Deferred.makeUnsafe<void>();
+-    let checks = 0;
+-    const harness = makeHarness({
+-      checkForUpdates: Effect.suspend(() => {
+-        checks += 1;
+-        return checks === 2
+-          ? Deferred.succeed(backgroundCheckStarted, undefined).pipe(
+-              Effect.andThen(Deferred.await(releaseBackgroundCheck)),
+-            )
+-          : Effect.void;
+-      }),
+-    });
++  );
++
++  it.effect(
++    "replacement with equal version and different content cleans the first owned staging",
++    () =>
++      testFlow({}, ({ send, prepared, cancelledTokens, reports }) =>
++        Effect.gen(function* () {
++          yield* send();
++          const next = { ...request("req-2"), artifact: { ...artifact, sha256: "d".repeat(64) } };
++          yield* send(next);
++          assert.equal(cancelledTokens.length, 1);
++          assert.deepEqual(prepared, [request(), next]);
++          assert.deepEqual(reports.at(-1)?.artifact, next.artifact);
++        }),
++      ),
++  );
+ 
+-    return runRemoteUpdatesTest(harness, ({ requests, commits }) =>
++  it.effect("TTL releases staging and admission, and stale commit cannot launch", () =>
++    testFlow({}, ({ send, commit, cancelledTokens, updates, events }) =>
+       Effect.gen(function* () {
+-        const updates = yield* DesktopUpdates.DesktopUpdates;
+-        yield* Queue.offer(requests, request("req-background-check"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        const backgroundCheck = yield* updates.check("poll").pipe(Effect.forkChild);
+-        yield* Deferred.await(backgroundCheckStarted);
+-        assert.equal((yield* updates.getState).status, "checking");
+-
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-background-check",
+-        });
+-        yield* settle;
+-        assert.equal(harness.quitAndInstalls(), 0);
+-
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* Deferred.succeed(releaseBackgroundCheck, undefined);
+-        yield* Fiber.join(backgroundCheck);
++        yield* send();
++        yield* TestClock.adjust("5 minutes");
+         yield* settle;
+-        assert.equal(harness.quitAndInstalls(), 1);
++        assert.equal(cancelledTokens.length, 1);
++        assert.equal(yield* updates.isActionActive, false);
++        yield* commit();
++        assert.equal(events.includes("launch helper"), false);
+       }),
++    ),
++  );
++
++  for (const freeze of [
++    { _tag: "busy", reason: "lifecycle mutation" },
++    { _tag: "unsupported", reason: "WSL owner" },
++  ] as const) {
++    it.effect(
++      `helper READY precedes ${freeze._tag} rejection, which cleans unarmed work without stopping`,
++      () =>
++        testFlow({ freeze }, ({ send, commit, events, updates }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* commit();
++            assert.ok(events.indexOf("helper READY") < events.indexOf("freeze"));
++            assert.equal(events.includes("stop exact"), false);
++            assert.equal(events.includes("cancel helper"), true);
++            assert.equal(yield* updates.isActionActive, false);
++          }),
++        ),
+     );
+-  });
+-
+-  it.effect("fails a prepared install when its background check stays blocked", () => {
+-    const backgroundCheckStarted = Deferred.makeUnsafe<void>();
+-    const releaseBackgroundCheck = Deferred.makeUnsafe<void>();
+-    let checks = 0;
+-    const harness = makeHarness({
+-      checkForUpdates: Effect.suspend(() => {
+-        checks += 1;
+-        return checks === 2
+-          ? Deferred.succeed(backgroundCheckStarted, undefined).pipe(
+-              Effect.andThen(Deferred.await(releaseBackgroundCheck)),
+-            )
+-          : Effect.void;
+-      }),
+-    });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+-      Effect.gen(function* () {
+-        const updates = yield* DesktopUpdates.DesktopUpdates;
+-        yield* Queue.offer(requests, request("req-blocked-background-check"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        const backgroundCheck = yield* updates.check("poll").pipe(Effect.forkChild);
+-        yield* Deferred.await(backgroundCheckStarted);
+-        const commit = {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-blocked-background-check",
+-        } as const;
+-        yield* Queue.offer(commits, commit);
+-        yield* settle;
+-        yield* TestClock.adjust(Duration.seconds(91));
+-        yield* settle;
+-
+-        assert.equal(harness.quitAndInstalls(), 0);
+-        assert.deepEqual(
+-          terminalReports(reports)
+-            .filter((report) => report.requestId === "req-blocked-background-check")
+-            .map((report) => report.outcome),
+-          ["ready-to-install", "failed"],
+-        );
+-
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* Deferred.succeed(releaseBackgroundCheck, undefined);
+-        yield* Fiber.join(backgroundCheck);
+-        yield* settle;
+-        assert.equal(harness.quitAndInstalls(), 0);
+-
+-        yield* Queue.offer(commits, commit);
+-        yield* settle;
+-        assert.deepEqual(
+-          terminalReports(reports)
+-            .filter((report) => report.requestId === "req-blocked-background-check")
+-            .map((report) => report.outcome),
+-          ["ready-to-install", "failed", "failed"],
+-        );
+-      }),
++  }
++  for (const reply of ["busy", "unanswered-reserve", "unanswered-commit"] as const) {
++    it.effect(`${reply} never stops or quits`, () =>
++      testFlow({ reply }, ({ send, commit, events, lifecycle, updates }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* commit();
++          assert.equal(events.includes("stop exact"), false);
++          assert.equal(events.includes("Electron quit"), false);
++          assert.equal(events.includes("cancel helper"), true);
++          assert.equal(yield* lifecycle.isRetained, reply === "unanswered-commit");
++          assert.equal(yield* updates.isActionActive, reply === "unanswered-commit");
++        }),
++      ),
+     );
+-  });
++  }
+ 
+-  it.effect("rejects a new preparation while an install commit is active", () => {
+-    const installStarted = Deferred.makeUnsafe<void>();
+-    const releaseInstall = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({
+-      quitAndInstall: Deferred.succeed(installStarted, undefined).pipe(
+-        Effect.andThen(Deferred.await(releaseInstall)),
+-        Effect.andThen(
+-          Effect.fail(
+-            new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
+-              channel: "latest",
+-              isSilent: true,
+-              isForceRunAfter: true,
+-              cause: new Error("installer refused"),
++  it.effect(
++    "lost acceptance acknowledgement retains lifecycle and action ownership without any stop",
++    () =>
++      testFlow(
++        {
++          ack: Effect.fail(
++            new DesktopTelemetryPublisher.DesktopUpdateReportAcknowledgementFailed({
++              message: "ack lost",
+             }),
+           ),
+-        ),
++        },
++        ({ send, commit, cancel, events, updates, lifecycle }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* commit();
++            yield* cancel();
++            yield* commit();
++            assert.equal(events.includes("stop exact"), false);
++            assert.equal(events.includes("cancel helper"), true);
++            assert.equal(events.filter((event) => event === "launch helper").length, 1);
++            assert.equal(yield* lifecycle.isRetained, true);
++            assert.equal(yield* updates.isActionActive, true);
++          }),
+       ),
+-    });
++  );
+ 
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-active"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-active",
+-        });
+-        yield* Deferred.await(installStarted);
+-
+-        yield* Queue.offer(requests, request("req-overlap"));
+-        yield* settle;
+-        const overlap = terminalReports(reports).find(
+-          (report) => report.requestId === "req-overlap",
+-        );
+-        assert.equal(overlap?.outcome, "failed");
+-        assert.equal(overlap?.reason, "A prepared desktop update is already in progress.");
+-
+-        yield* Deferred.succeed(releaseInstall, undefined);
+-        yield* settle;
+-      }),
++  it.effect("waits for accepted acknowledgement before stopping", () =>
++    Effect.gen(function* () {
++      const ack = yield* Deferred.make<void>();
++      yield* testFlow({ ack: Deferred.await(ack) }, ({ send, commit, events }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* commit();
++          assert.equal(events.includes("accepted sent"), true);
++          assert.equal(events.includes("stop exact"), false);
++          yield* Deferred.succeed(ack, undefined);
++          yield* settle;
++          assert.equal(events.includes("Electron quit"), true);
++        }),
++      );
++    }),
++  );
++
++  for (const snapshot of [
++    undefined,
++    { _tag: "supported", run: { ...run, runId: 4 } },
++    { _tag: "unsupported", reason: "WSL" },
++  ] as const) {
++    it.effect(`fails closed on ${snapshot?._tag ?? "missing"} exact generation evidence`, () =>
++      testFlow(
++        {
++          harness: {
++            generationSnapshot: snapshot === undefined ? undefined : Effect.succeed(snapshot),
++          },
++        },
++        ({ send, commit, events, lifecycle, harness }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* commit();
++            assert.equal(events.includes("stop exact"), false);
++            assert.equal(events.includes("Electron quit"), false);
++            assert.equal(yield* lifecycle.isRetained, true);
++            assert.equal(harness.installSteps.includes("startBackend"), false);
++          }),
++      ),
+     );
+-  });
+-
+-  it.effect("cancels an active preparation so the next request can run", () => {
+-    const releaseCheck = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({ checkForUpdates: Deferred.await(releaseCheck) });
+-
+-    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-cancel"));
+-        yield* settle;
+-        yield* Queue.offer(cancellations, {
+-          version: 1,
+-          type: "cancelDesktopUpdate",
+-          requestId: "req-cancel",
+-        });
+-        yield* settle;
+-        yield* Deferred.succeed(releaseCheck, undefined);
+-        yield* Queue.offer(requests, request("req-next"));
+-        yield* settle;
++  }
+ 
+-        assert.equal(harness.checkCount(), 2);
+-      }),
++  it.effect("an exact generation already stopped after reservation needs no second stop", () =>
++    testFlow(
++      { harness: { generationSnapshot: Effect.succeed({ _tag: "stopped" }) } },
++      ({ send, commit, events }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* commit();
++          assert.equal(events.includes("stop exact"), false);
++          assert.equal(events.includes("Electron quit"), true);
++        }),
++    ),
++  );
++
++  for (const helperFailure of ["READY", "COMMIT", "ARMED"] as const) {
++    it.effect(`helper ${helperFailure} failure does not quit or invoke Electron recovery`, () =>
++      testFlow({ helperFailure }, ({ send, commit, events, lifecycle, harness }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* commit();
++          assert.equal(events.includes("Electron quit"), false);
++          assert.equal(yield* lifecycle.isRetained, helperFailure !== "READY");
++          assert.equal(harness.quitAndInstalls(), 0);
++          assert.equal(harness.installSteps.includes("startBackend"), false);
++        }),
++      ),
+     );
+-  });
++  }
+ 
+-  it.effect("remembers a cancellation that arrives before its request starts", () => {
+-    const harness = makeHarness();
++  it.effect(
++    "cancellation and duplicate commit while helper READY is pending cannot disarm or launch twice",
++    () => {
++      let ready!: () => void;
++      const helperReady = new Promise<void>((resolve) => {
++        ready = resolve;
++      });
++      return testFlow({ helperReady }, ({ send, commit, cancel, events }) =>
++        Effect.gen(function* () {
++          yield* send();
++          yield* commit();
++          yield* cancel();
++          yield* commit();
++          assert.equal(events.includes("freeze"), false);
++          ready();
++          yield* settle;
++          assert.equal(events.filter((event) => event === "launch helper").length, 1);
++          assert.equal(events.includes("Electron quit"), true);
++        }),
++      );
++    },
++  );
++
++  it.effect(
++    "replacement aborts preparation and waits for owned cleanup before preparing different content",
++    () => {
++      let rejectFirst!: (error: Error) => void;
++      let wasAborted = false;
++      return testFlow(
++        {
++          prepare: (request, signal) =>
++            request.requestId === "req-1"
++              ? new Promise((_, reject) => {
++                  rejectFirst = reject;
++                  signal.addEventListener("abort", () => {
++                    wasAborted = true;
++                  });
++                })
++              : Promise.resolve(Object.freeze({}) as PreparedManagedDesktopArtifact),
++        },
++        ({ send, prepared, updates, reports }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* send({ ...request("req-2"), artifact: { ...artifact, sha256: "d".repeat(64) } });
++            assert.equal(wasAborted, true);
++            assert.equal(prepared.length, 1);
++            assert.equal(yield* updates.isActionActive, true);
++            rejectFirst(new Error("owned staging cleanup complete"));
++            yield* settle;
++            assert.equal(prepared.length, 2);
++            assert.equal(reports.at(-1)?.requestId, "req-2");
++            assert.equal(reports.at(-1)?.outcome, "ready-to-install");
++          }),
++      );
++    },
++  );
++
++  it.effect(
++    "a token arriving after cancellation is cleaned without readiness or released admission during preparation",
++    () => {
++      let resolvePreparation!: (token: PreparedManagedDesktopArtifact) => void;
++      return testFlow(
++        {
++          prepare: () =>
++            new Promise((resolve) => {
++              resolvePreparation = resolve;
++            }),
++        },
++        ({ send, cancel, updates, cancelledTokens, reports }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* cancel();
++            assert.equal(yield* updates.isActionActive, true);
++            const token = Object.freeze({}) as PreparedManagedDesktopArtifact;
++            resolvePreparation(token);
++            yield* settle;
++            assert.deepEqual(cancelledTokens, [token]);
++            assert.equal(yield* updates.isActionActive, false);
++            assert.equal(
++              reports.some((report) => report.outcome === "ready-to-install"),
++              false,
++            );
++          }),
++      );
++    },
++  );
++
++  it.effect("preparation failure reports the exact descriptor and releases local admission", () =>
++    testFlow(
++      {
++        prepare: async () => {
++          throw new Error("digest mismatch");
++        },
++      },
++      ({ send, reports, updates, events }) =>
++        Effect.gen(function* () {
++          yield* send();
++          assert.equal(reports.at(-1)?.outcome, "failed");
++          assert.deepEqual(reports.at(-1)?.artifact, artifact);
++          assert.match(reports.at(-1)?.reason ?? "", /digest mismatch/);
++          assert.equal(yield* updates.isActionActive, false);
++          assert.equal(events.includes("bound ready"), false);
++        }),
++    ),
++  );
+ 
+-    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
++  it.effect("every frozen generation is acknowledged and stopped before helper COMMIT", () =>
++    testFlow({ extraRun: true }, ({ send, commit, events }) =>
+       Effect.gen(function* () {
+-        yield* Queue.offer(cancellations, {
+-          version: 1,
+-          type: "cancelDesktopUpdate",
+-          requestId: "req-early-cancel",
+-        });
+-        yield* Queue.offer(requests, request("req-early-cancel"));
+-        yield* settle;
+-
+-        assert.equal(harness.checkCount(), 0);
+-
+-        yield* Queue.offer(requests, request("req-after-early-cancel"));
+-        yield* settle;
+-        assert.equal(harness.checkCount(), 1);
++        yield* send();
++        yield* commit();
++        assert.equal(events.filter((event) => event === "reserve").length, 2);
++        assert.equal(events.filter((event) => event === "commit").length, 2);
++        assert.ok(events.indexOf("every-run accepted ack") < events.indexOf("stop exact"));
++        assert.ok(events.indexOf("stop exact") < events.indexOf("stop secondary exact"));
++        assert.ok(events.indexOf("stop secondary exact") < events.indexOf("helper COMMIT"));
++        assert.equal(events.includes("Electron quit"), true);
+       }),
+-    );
+-  });
+-
+-  it.effect("keeps every queued cancellation until its request starts", () => {
+-    const harness = makeHarness();
++    ),
++  );
+ 
+-    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
++  it.effect("a fresh helper after a rejected attempt gets a distinct reservation identity", () =>
++    testFlow({ freeze: { _tag: "busy", reason: "busy" } }, ({ send, commit, reports }) =>
+       Effect.gen(function* () {
+-        for (let index = 0; index < 40; index += 1) {
+-          yield* Queue.offer(cancellations, {
+-            version: 1,
+-            type: "cancelDesktopUpdate",
+-            requestId: `req-queued-cancel-${index}`,
+-          });
+-        }
+-        yield* settle;
+-        for (let index = 0; index < 40; index += 1) {
+-          yield* Queue.offer(requests, request(`req-queued-cancel-${index}`));
+-        }
+-        yield* settle;
+-        assert.equal(harness.checkCount(), 0);
+-
+-        yield* Queue.offer(requests, request("req-after-queued-cancels"));
+-        yield* settle;
+-        assert.equal(harness.checkCount(), 1);
++        yield* send();
++        yield* commit();
++        yield* send();
++        yield* commit();
++        const attempts = reports
++          .filter((report) => report.commitDisposition === "rejected")
++          .map((report) => report.attemptId);
++        assert.equal(attempts.length, 2);
++        assert.notEqual(attempts[0], attempts[1]);
+       }),
+-    );
+-  });
++    ),
++  );
+ 
+-  it.effect("does not install after cancellation wins the commit claim", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits, cancellations }) =>
++  it.effect(
++    "pending scope interruption at accepted acknowledgement cannot skip the owned helper handoff",
++    () =>
+       Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-cancel-before-commit"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        yield* Queue.offer(cancellations, {
+-          version: 1,
+-          type: "cancelDesktopUpdate",
+-          requestId: "req-cancel-before-commit",
+-        });
+-        yield* settle;
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-cancel-before-commit",
+-        });
+-        yield* settle;
+-
+-        assert.equal(harness.quitAndInstalls(), 0);
+-        assert.deepEqual(
+-          terminalReports(reports)
+-            .filter((report) => report.requestId === "req-cancel-before-commit")
+-            .map((report) => report.outcome),
+-          ["ready-to-install", "failed"],
++        const ack = yield* Deferred.make<void>();
++        yield* testFlow(
++          { ack: Deferred.await(ack) },
++          ({ send, commit, interrupt, events, cancelledTokens }) =>
++            Effect.gen(function* () {
++              yield* send();
++              yield* commit();
++              assert.equal(events.includes("accepted sent"), true);
++              assert.equal(events.includes("stop exact"), false);
++              const closing = yield* interrupt.pipe(Effect.forkChild);
++              yield* settle;
++              assert.equal(events.includes("cancel helper"), false);
++              yield* Deferred.succeed(ack, undefined);
++              yield* Fiber.join(closing);
++              assert.equal(events.includes("stop exact"), true);
++              assert.equal(events.includes("helper COMMIT"), true);
++              assert.equal(events.includes("ARMED"), true);
++              assert.equal(events.includes("Electron quit"), true);
++              assert.equal(events.includes("cancel helper"), false);
++              assert.deepEqual(cancelledTokens, []);
++            }),
+         );
+       }),
+-    );
+-  });
+-
+-  it.effect("retains an install failure after cancellation loses the commit claim", () => {
+-    const installStarted = Deferred.makeUnsafe<void>();
+-    const releaseInstall = Deferred.makeUnsafe<void>();
+-    const harness = makeHarness({
+-      quitAndInstall: Deferred.succeed(installStarted, undefined).pipe(
+-        Effect.andThen(Deferred.await(releaseInstall)),
++  );
++
++  it.effect(
++    "prepared token cancellation waits for authenticated cleanup before abort, replacement or local admission",
++    () => {
++      let finishCleanup!: () => void;
++      const cleanup = new Promise<void>((resolve) => {
++        finishCleanup = resolve;
++      });
++      const owned = new Set<PreparedManagedDesktopArtifact>();
++      let first: PreparedManagedDesktopArtifact | undefined;
++      let abortedFirst = false;
++      let cleanups = 0;
++      const deleteOwned = (token: PreparedManagedDesktopArtifact) => {
++        if (!owned.delete(token)) return Promise.resolve();
++        if (token !== first) return Promise.resolve();
++        cleanups++;
++        return cleanup;
++      };
++      return testFlow(
++        {
++          prepare: async (_request, signal) => {
++            const token = Object.freeze({}) as PreparedManagedDesktopArtifact;
++            first ??= token;
++            owned.add(token);
++            // Mirrors the real preparer: abort removes token ownership synchronously
++            // and starts deletion without awaiting its completion.
++            signal.addEventListener(
++              "abort",
++              () => {
++                if (token === first) abortedFirst = true;
++                void deleteOwned(token);
++              },
++              { once: true },
++            );
++            return token;
++          },
++          cancel: deleteOwned,
++        },
++        ({ send, prepared, updates, events }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* send(request("req-2"));
++            assert.equal(cleanups, 1);
++            assert.equal(abortedFirst, false);
++            assert.equal(prepared.length, 1);
++            assert.equal(yield* updates.beginManagedAction!, false);
++            assert.equal(events.filter((event) => event === "cancel staging").length, 1);
++            finishCleanup();
++            yield* settle;
++            assert.equal(abortedFirst, true);
++            assert.equal(prepared.length, 2);
++            assert.equal(cleanups, 1);
++          }),
++      );
++    },
++  );
++
++  it.effect(
++    "concurrent replacement, cancellation, TTL and finalization share one cleanup completion",
++    () => {
++      let finishCleanup!: () => void;
++      const cleanup = new Promise<void>((resolve) => {
++        finishCleanup = resolve;
++      });
++      let cancelCalls = 0;
++      return testFlow(
++        {
++          cancel: async () => {
++            cancelCalls++;
++            await cleanup;
++          },
++        },
++        ({ send, cancel, interrupt, updates, prepared }) =>
++          Effect.gen(function* () {
++            yield* send();
++            yield* send(request("req-2"));
++            yield* cancel();
++            yield* TestClock.adjust("5 minutes");
++            yield* settle;
++            const closing = yield* interrupt.pipe(Effect.forkChild);
++            yield* settle;
++            assert.equal(cancelCalls, 1);
++            assert.equal(prepared.length, 1);
++            assert.equal(yield* updates.beginManagedAction!, false);
++            finishCleanup();
++            yield* Fiber.join(closing);
++            assert.equal(cancelCalls, 1);
++            assert.equal(yield* updates.isActionActive, false);
++          }),
++      );
++    },
++  );
++
++  it.effect(
++    "route TTL owns and awaits token cleanup before the later native preparer backstop",
++    () => {
++      let finishCleanup!: () => void;
++      const cleanup = new Promise<void>((resolve) => {
++        finishCleanup = resolve;
++      });
++      const owned = new Map<PreparedManagedDesktopArtifact, ReturnType<typeof setTimeout>>();
++      let first: PreparedManagedDesktopArtifact | undefined;
++      let backstopTtlMs = 0;
++      let backstopFired = false;
++      let cleanupOwner: "route" | "backstop" | undefined;
++      let cleanupCalls = 0;
++      const deleteOwned = (token: PreparedManagedDesktopArtifact, owner: "route" | "backstop") => {
++        const timer = owned.get(token);
++        if (timer === undefined) return Promise.resolve();
++        owned.delete(token);
++        clearTimeout(timer);
++        if (token !== first) return Promise.resolve();
++        cleanupOwner = owner;
++        cleanupCalls++;
++        return cleanup;
++      };
++      return Effect.sync(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })).pipe(
+         Effect.andThen(
+-          Effect.fail(
+-            new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
+-              channel: "latest",
+-              isSilent: true,
+-              isForceRunAfter: true,
+-              cause: new Error("installer refused"),
+-            }),
++          testFlow(
++            {
++              prepare: async (_request, _signal, ttlMs) => {
++                const token = Object.freeze({}) as PreparedManagedDesktopArtifact;
++                first ??= token;
++                backstopTtlMs = ttlMs;
++                // The native timer is armed before prepare returns, just like the real
++                // adapter, and consumes ownership before asynchronous deletion finishes.
++                owned.set(
++                  token,
++                  setTimeout(() => {
++                    backstopFired = true;
++                    void deleteOwned(token, "backstop");
++                  }, ttlMs),
++                );
++                return token;
++              },
++              cancel: (token) => deleteOwned(token, "route"),
++            },
++            ({ send, prepared, updates }) =>
++              Effect.gen(function* () {
++                yield* send();
++                assert.equal(backstopTtlMs, 10 * 60 * 1000);
++                // Advance the preparer's clock first: its earlier-armed timer must not
++                // consume the token at the route's natural five-minute deadline.
++                yield* Effect.promise(() => vi.advanceTimersByTimeAsync(5 * 60 * 1000));
++                assert.equal(backstopFired, false);
++                yield* TestClock.adjust("5 minutes");
++                yield* settle;
++                assert.equal(cleanupOwner, "route");
++                assert.equal(cleanupCalls, 1);
++                assert.equal(yield* updates.beginManagedAction!, false);
++                yield* send(request("req-2"));
++                assert.equal(prepared.length, 1);
++                yield* Effect.promise(() => vi.advanceTimersByTimeAsync(backstopTtlMs));
++                assert.equal(backstopFired, false);
++                assert.equal(yield* updates.beginManagedAction!, false);
++                finishCleanup();
++                yield* settle;
++                assert.equal(prepared.length, 2);
++                assert.equal(cleanupCalls, 1);
++              }).pipe(Effect.ensuring(Effect.sync(() => finishCleanup()))),
+           ),
+         ),
+-      ),
+-    });
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits, cancellations }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-cancel-after-commit"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-        const commit = {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-cancel-after-commit",
+-        } as const;
+-        yield* Queue.offer(commits, commit);
+-        yield* Deferred.await(installStarted);
+-        yield* Queue.offer(cancellations, {
+-          version: 1,
+-          type: "cancelDesktopUpdate",
+-          requestId: "req-cancel-after-commit",
+-        });
+-        yield* settle;
+-        yield* Deferred.succeed(releaseInstall, undefined);
+-        yield* settle;
+-        yield* Queue.offer(commits, commit);
+-        yield* settle;
+-
+-        assert.deepEqual(
+-          terminalReports(reports)
+-            .filter((report) => report.requestId === "req-cancel-after-commit")
+-            .map((report) => report.outcome),
+-          ["ready-to-install", "failed", "failed"],
+-        );
+-      }),
+-    );
+-  });
+-
+-  it.effect("expires an uncommitted preparation", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-stale"));
+-        yield* settle;
+-        harness.emit("update-available", { version: "1.2.4" });
+-        yield* settle;
+-        harness.emit("update-downloaded", { version: "1.2.4" });
+-        yield* settle;
+-
+-        yield* TestClock.setTime(Duration.toMillis(Duration.minutes(6)));
+-        yield* Queue.offer(commits, {
+-          version: 1,
+-          type: "commitDesktopUpdate",
+-          requestId: "req-stale",
+-        });
+-        yield* settle;
+-
+-        const outcomes = terminalReports(reports)
+-          .filter((report) => report.requestId === "req-stale")
+-          .map((report) => report.outcome);
+-        assert.deepEqual(outcomes, ["ready-to-install", "failed"]);
+-      }),
+-    );
+-  });
+-
+-  it.effect("reports up-to-date without installing when there is no update", () => {
+-    const harness = makeHarness();
+-
+-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+-      Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-2"));
+-        yield* settle;
+-        harness.emit("update-not-available");
+-        yield* settle;
+-
+-        const terminals = terminalReports(reports);
+-        assert.equal(terminals.length, 1);
+-        assert.equal(terminals[0]?.outcome, "up-to-date");
+-        assert.equal(terminals[0]?.requestId, "req-2");
+-        assert.equal(harness.quitAndInstalls(), 0);
+-      }),
+-    );
+-  });
+-
+-  it.effect("fails fast with the disabled reason when updates are off", () => {
+-    const harness = makeHarness({ env: { T3CODE_DISABLE_AUTO_UPDATE: "true" } });
++        Effect.ensuring(
++          Effect.sync(() => {
++            vi.clearAllTimers();
++            vi.useRealTimers();
++          }),
++        ),
++      );
++    },
++  );
+ 
+-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
++  it.effect("scope interruption after preparation cleans owned staging", () =>
++    testFlow({}, ({ send, interrupt, cancelledTokens, updates }) =>
+       Effect.gen(function* () {
+-        yield* Queue.offer(requests, request("req-3"));
+-        yield* settle;
+-
+-        const terminals = terminalReports(reports);
+-        assert.equal(terminals.length, 1);
+-        assert.equal(terminals[0]?.outcome, "failed");
+-        assert.equal(
+-          terminals[0]?.reason,
+-          "Automatic updates are disabled by the T3CODE_DISABLE_AUTO_UPDATE setting.",
+-        );
+-        assert.equal(harness.quitAndInstalls(), 0);
++        yield* send();
++        yield* interrupt;
++        assert.equal(cancelledTokens.length, 1);
++        assert.equal(yield* updates.isActionActive, false);
+       }),
+-    );
+-  });
++    ),
++  );
+ });
+diff --git a/apps/desktop/src/updates/DesktopRemoteUpdates.ts b/apps/desktop/src/updates/DesktopRemoteUpdates.ts
+index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace51bfc486b 100644
+--- a/apps/desktop/src/updates/DesktopRemoteUpdates.ts
++++ b/apps/desktop/src/updates/DesktopRemoteUpdates.ts
+@@ -1,461 +1,478 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Native installer path configuration.
++import path from "node:path";
++import { randomUUID } from "node:crypto";
+ import type {
+   DesktopTelemetryRequestDesktopUpdate,
+-  DesktopUpdateRemoteOutcome,
+-  DesktopUpdateState,
++  DesktopUpdateStatusReport,
+ } from "@t3tools/contracts";
+-import * as Duration from "effect/Duration";
++import * as Schema from "effect/Schema";
++import { BackendInstanceId } from "../backend/DesktopBackendManager.ts";
++import * as Cause from "effect/Cause";
+ import * as Clock from "effect/Clock";
+-import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
++import * as Exit from "effect/Exit";
+ import * as Option from "effect/Option";
+-import * as Queue from "effect/Queue";
+ import * as Ref from "effect/Ref";
+-import type * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
++import * as Duration from "effect/Duration";
+ 
+-import * as DesktopObservability from "../app/DesktopObservability.ts";
++import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
++import * as DesktopState from "../app/DesktopState.ts";
++import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
++import * as DesktopUpdateLifecycle from "../backend/desktopUpdateLifecycle.ts";
++import * as ElectronApp from "../electron/ElectronApp.ts";
+ import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
+ import * as DesktopUpdates from "./DesktopUpdates.ts";
+ import {
+-  nextRemoteDesktopUpdateStep,
+-  normalizeRemoteUpdateReason,
+-  type RemoteDesktopUpdateAttempts,
+-} from "./remoteUpdateFlow.ts";
++  createManagedDesktopArtifactPreparer,
++  type PreparedManagedDesktopArtifact,
++} from "./ManagedDesktopArtifact.ts";
++import { createManagedDesktopInstaller } from "./ManagedDesktopInstaller.ts";
++import {
++  make as makeReservation,
++  sameManagedArtifact,
++  type OwnedBackendRun,
++} from "./desktopUpdateReservation.ts";
+ 
+-const { logInfo, logError } = DesktopObservability.makeComponentLogger("desktop-remote-updates");
++class ManagedDesktopUpdateFailure extends Schema.TaggedErrorClass<ManagedDesktopUpdateFailure>()(
++  "ManagedDesktopUpdateFailure",
++  { message: Schema.String },
++) {}
+ 
+-/** Pause before retrying an action the updater refused for a held reservation. */
+-const ACTION_RETRY_DELAY = Duration.millis(250);
+-const PREPARED_UPDATE_TTL = Duration.minutes(5);
++const PREPARED_UPDATE_TTL_MS = 5 * 60 * 1000;
++// Normal expiry belongs to the route, which awaits authenticated deletion before
++// reopening admission. The preparer's fire-and-forget timer is only a later,
++// bounded backstop for abandoned tokens, never the normal five-minute expiry.
++const PREPARER_BACKSTOP_TTL_MS = 2 * PREPARED_UPDATE_TTL_MS;
+ 
+-interface PreparedUpdate {
+-  readonly requestId: string;
+-  readonly downloadedVersion: string;
+-  readonly status: "prepared" | "committing" | "failed";
+-  readonly failureReason?: string;
+-  readonly expiresAt: number;
++export interface ManagedDesktopAdapters {
++  readonly prepare: (
++    request: DesktopTelemetryRequestDesktopUpdate,
++    signal: AbortSignal,
++    backstopTtlMs: number,
++  ) => Promise<PreparedManagedDesktopArtifact>;
++  readonly cancel: (token: PreparedManagedDesktopArtifact) => Promise<void>;
++  readonly prepareInstall: ReturnType<typeof createManagedDesktopInstaller>["prepareInstall"];
+ }
+ 
+-type CommitClaim =
+-  | { readonly _tag: "invalid" }
+-  | { readonly _tag: "failed"; readonly prepared: PreparedUpdate }
+-  | { readonly _tag: "committing" }
+-  | { readonly _tag: "claimed"; readonly prepared: PreparedUpdate };
++interface PreparedUpdate {
++  readonly request: DesktopTelemetryRequestDesktopUpdate;
++  readonly abort: AbortController;
++  status: "preparing" | "prepared" | "releasing" | "committing" | "retained" | "failed";
++  token?: PreparedManagedDesktopArtifact;
++  preparation?: Promise<PreparedManagedDesktopArtifact>;
++  cleanup?: Promise<void>;
++  expiresAt: number;
++}
+ 
+-/**
+- * Server-triggered desktop updates. Mirrors updater state, prepares downloads,
+- * cancels abandoned preparations, and commits installs after the remote client
+- * confirms that it received the preparation token.
+- */
+-export const listen: Effect.Effect<
+-  void,
+-  never,
+-  DesktopUpdates.DesktopUpdates | DesktopTelemetryPublisher.DesktopTelemetryPublisher | Scope.Scope
+-> = Effect.gen(function* () {
+-  const updates = yield* DesktopUpdates.DesktopUpdates;
+-  const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
+-  const activeRequestIdRef = yield* Ref.make(Option.none<string>());
+-  const requestControlRef = yield* Ref.make<{
+-    readonly active: Option.Option<{
+-      readonly requestId: string;
+-      readonly signal: Deferred.Deferred<void>;
+-    }>;
+-    readonly cancelledBeforeStart: ReadonlyArray<string>;
+-  }>({ active: Option.none(), cancelledBeforeStart: [] });
+-  const preparedUpdateRef = yield* Ref.make(Option.none<PreparedUpdate>());
++/** Managed requests own the same action admission as local updates, but never
++ * consume Electron download state or call Electron's installer. */
++export const listenWithAdapters = (adapters: ManagedDesktopAdapters) =>
++  Effect.gen(function* () {
++    const updates = yield* DesktopUpdates.DesktopUpdates;
++    const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
++    const lifecycle = yield* DesktopUpdateLifecycle.DesktopUpdateLifecycle;
++    const pool = yield* DesktopBackendPool.DesktopBackendPool;
++    const desktopState = yield* DesktopState.DesktopState;
++    let current: PreparedUpdate | undefined;
++    const cancelled = new Set<string>();
++    // Preserve immutable request identity even after cancellation, expiry or failure.
++    const identities = new Map<string, DesktopTelemetryRequestDesktopUpdate>();
+ 
+-  const publishReport = (
+-    state: DesktopUpdateState,
+-    terminal?: { readonly outcome: DesktopUpdateRemoteOutcome; readonly reason?: string },
+-    explicitRequestId?: string,
+-  ): Effect.Effect<void> => {
+-    const reason = normalizeRemoteUpdateReason(terminal?.reason);
+-    return Ref.get(activeRequestIdRef).pipe(
+-      Effect.flatMap((requestId) =>
+-        publisher.publishUpdateReport({
++    const report = (
++      request: DesktopTelemetryRequestDesktopUpdate,
++      outcome: "ready-to-install" | "failed",
++      reason?: string,
++    ) =>
++      Effect.gen(function* () {
++        const state = yield* updates.getState;
++        yield* publisher.publishUpdateReport({
+           version: 1,
+           type: "desktopUpdateStatus",
+-          ...(explicitRequestId !== undefined
+-            ? { requestId: explicitRequestId }
+-            : Option.isSome(requestId)
+-              ? { requestId: requestId.value }
+-              : {}),
+-          ...(terminal === undefined ? {} : { outcome: terminal.outcome }),
+-          ...(reason ? { reason } : {}),
+-          state,
++          requestId: request.requestId,
++          targetVersion: request.targetVersion,
++          artifact: request.artifact,
++          outcome,
++          ...(reason === undefined ? {} : { reason }),
++          state:
++            outcome === "ready-to-install"
++              ? {
++                  ...state,
++                  enabled: true,
++                  status: "downloaded",
++                  availableVersion: request.targetVersion,
++                  downloadedVersion: request.targetVersion,
++                  downloadPercent: 100,
++                  message: null,
++                  errorContext: null,
++                  canRetry: false,
++                }
++              : {
++                  ...state,
++                  status: "error",
++                  message: reason ?? "Managed desktop update failed.",
++                  errorContext: "install",
++                  canRetry: false,
++                },
++        });
++      });
++
++    const release = (entry: PreparedUpdate) =>
++      Effect.uninterruptible(
++        Effect.gen(function* () {
++          if (entry.status === "committing" || entry.status === "retained") return;
++          entry.status = "releasing";
++          // Claim one cleanup completion before yielding. Replacement, cancellation,
++          // expiry and scope finalization must all await the same owned deletion.
++          entry.cleanup ??= (async () => {
++            if (entry.token) {
++              // The preparer's abort listener consumes its token and starts deletion
++              // asynchronously. Cancel through the authenticated token first, while
++              // its cleanup promise is still available to await.
++              await adapters.cancel(entry.token);
++              entry.abort.abort();
++            } else {
++              entry.abort.abort();
++              try {
++                await entry.preparation;
++              } catch {
++                /* Preparation owns failure cleanup. */
++              }
++              // An abort-aware preparation can still return a token at the boundary.
++              if (entry.token) await adapters.cancel(entry.token);
++            }
++          })();
++          yield* Effect.promise(() => entry.cleanup!);
++          if (current === entry) {
++            current = undefined;
++            yield* updates.finishManagedAction ?? Effect.void;
++          }
+         }),
+-      ),
+-    );
+-  };
++      );
+ 
+-  const recordPreparedFailure = (requestId: string, reason: string) =>
+-    Ref.modify(preparedUpdateRef, (prepared) => {
+-      if (
+-        Option.isNone(prepared) ||
+-        prepared.value.requestId !== requestId ||
+-        prepared.value.status === "failed"
+-      ) {
+-        return [false, prepared] as const;
+-      }
+-      return [
+-        true,
+-        Option.some({ ...prepared.value, status: "failed" as const, failureReason: reason }),
+-      ] as const;
+-    });
++    // Local updater broadcasts stay unbound; managed readiness only comes from an
++    // authenticated preparation token and its original full request descriptor.
++    yield* Effect.scoped(
++      Effect.gen(function* () {
++        const { latest, changes } = yield* updates.subscribe;
++        const publish = (state: typeof latest) =>
++          publisher.publishUpdateReport({ version: 1, type: "desktopUpdateStatus", state });
++        yield* publish(latest);
++        yield* Stream.runForEach(changes, publish);
++      }),
++    ).pipe(Effect.forkScoped);
+ 
+-  const clearActiveRequest = (requestId: string) =>
+-    Ref.update(activeRequestIdRef, (active) =>
+-      Option.isSome(active) && active.value === requestId ? Option.none() : active,
+-    );
++    yield* Effect.addFinalizer(() => (current === undefined ? Effect.void : release(current)));
+ 
+-  yield* Effect.scoped(
+-    Effect.gen(function* () {
+-      const { latest, changes } = yield* updates.subscribe;
+-      yield* publishReport(latest);
+-      yield* Stream.runForEach(changes, (state) =>
++    const handleRequest = (input: DesktopTelemetryRequestDesktopUpdate) =>
++      Effect.uninterruptibleMask((restore) =>
+         Effect.gen(function* () {
+-          yield* publishReport(state);
+-          const prepared = yield* Ref.get(preparedUpdateRef);
++          const request = Object.freeze({
++            ...input,
++            artifact: Object.freeze({ ...input.artifact }),
++          });
++          const previous = identities.get(request.requestId);
+           if (
+-            Option.isSome(prepared) &&
+-            prepared.value.status === "committing" &&
+-            state.errorContext === "install"
++            previous &&
++            (previous.targetVersion !== request.targetVersion ||
++              !sameManagedArtifact(previous.artifact, request.artifact))
+           ) {
+-            const reason = state.message ?? "The desktop app failed to install the update.";
+-            if (yield* recordPreparedFailure(prepared.value.requestId, reason)) {
+-              yield* publishReport(state, { outcome: "failed", reason }, prepared.value.requestId);
++            yield* report(
++              request,
++              "failed",
++              "This request ID already names a different managed artifact.",
++            );
++            return;
++          }
++          identities.set(request.requestId, request);
++          if (cancelled.has(request.requestId)) return;
++          if (current?.request.requestId === request.requestId) {
++            if (current.status === "prepared") yield* report(current.request, "ready-to-install");
++            return;
++          }
++          if (current) {
++            if (current.status === "committing" || current.status === "retained") {
++              yield* report(request, "failed", "A managed desktop update is already in progress.");
++              return;
+             }
++            yield* release(current);
++          }
++          if (!(yield* updates.beginManagedAction ?? Effect.succeed(false))) {
++            yield* report(request, "failed", "Another desktop update action is in progress.");
++            return;
+           }
++          const entry: PreparedUpdate = {
++            request,
++            abort: new AbortController(),
++            status: "preparing",
++            expiresAt: Infinity,
++          };
++          current = entry;
++          yield* restore(
++            Effect.gen(function* () {
++              const token = yield* Effect.tryPromise({
++                try: () => {
++                  entry.preparation = adapters
++                    .prepare(request, entry.abort.signal, PREPARER_BACKSTOP_TTL_MS)
++                    .then((token) => {
++                      entry.token = token;
++                      return token;
++                    });
++                  return entry.preparation;
++                },
++                catch: (error) => new ManagedDesktopUpdateFailure({ message: String(error) }),
++              });
++              entry.token = token;
++              if (entry.cleanup !== undefined || entry.abort.signal.aborted || current !== entry) {
++                entry.status = "failed";
++                yield* release(entry);
++                return;
++              }
++              entry.status = "prepared";
++              entry.expiresAt = (yield* Clock.currentTimeMillis) + PREPARED_UPDATE_TTL_MS;
++              yield* report(request, "ready-to-install");
++              yield* Effect.sleep(Duration.millis(PREPARED_UPDATE_TTL_MS)).pipe(
++                Effect.andThen(
++                  Effect.suspend(() =>
++                    entry.status === "prepared" ? release(entry) : Effect.void,
++                  ),
++                ),
++                Effect.forkScoped,
++              );
++            }),
++          ).pipe(
++            Effect.catchCause((cause) =>
++              Effect.gen(function* () {
++                if (!entry.abort.signal.aborted && !Cause.hasInterruptsOnly(cause)) {
++                  yield* report(request, "failed", Cause.pretty(cause));
++                }
++                entry.status = "failed";
++                yield* release(entry);
++              }),
++            ),
++          );
+         }),
+       );
+-    }),
+-  ).pipe(Effect.forkScoped);
+ 
+-  const handleRequest = (request: DesktopTelemetryRequestDesktopUpdate): Effect.Effect<void> =>
+-    Effect.scoped(
++    // Preparation runs separately so cancellations and new requests remain live.
++    yield* Stream.runForEach(publisher.updateRequests, (request) =>
++      handleRequest(request).pipe(Effect.forkScoped, Effect.asVoid),
++    ).pipe(Effect.forkScoped);
++    yield* Stream.runForEach(publisher.updateCancellations, (cancellation) =>
+       Effect.gen(function* () {
+-        const cancellation = yield* Deferred.make<void>();
+-        const shouldStart = yield* Ref.modify(requestControlRef, (control) => {
+-          if (control.cancelledBeforeStart.includes(request.requestId)) {
+-            return [
+-              false,
+-              {
+-                ...control,
+-                cancelledBeforeStart: control.cancelledBeforeStart.filter(
+-                  (requestId) => requestId !== request.requestId,
+-                ),
+-              },
+-            ] as const;
+-          }
+-          return [
+-            true,
+-            {
+-              ...control,
+-              active: Option.some({ requestId: request.requestId, signal: cancellation }),
+-            },
+-          ] as const;
+-        });
+-        if (!shouldStart) return;
+-
+-        const now = yield* Clock.currentTimeMillis;
+-        const prepared = yield* Ref.modify(preparedUpdateRef, (current) =>
+-          Option.isSome(current) &&
+-          current.value.status === "prepared" &&
+-          current.value.expiresAt <= now
+-            ? ([Option.none<typeof current.value>(), Option.none()] as const)
+-            : ([current, current] as const),
+-        );
+-        if (Option.isSome(prepared) && prepared.value.status !== "failed") {
+-          yield* publishReport(
+-            yield* updates.getState,
+-            {
+-              outcome: "failed",
+-              reason: "A prepared desktop update is already in progress.",
+-            },
+-            request.requestId,
+-          );
+-          return;
++        const entry = current;
++        if (entry?.request.requestId === cancellation.requestId) {
++          if (entry.status === "committing" || entry.status === "retained") return;
++          cancelled.add(cancellation.requestId);
++          // Keep preparation's admission until its abort-aware adapter has finished
++          // removing staging. Releasing earlier would overlap a new action with it.
++          yield* release(entry);
++        } else {
++          cancelled.add(cancellation.requestId);
+         }
+-        yield* Ref.set(activeRequestIdRef, Option.some(request.requestId));
+-        yield* logInfo("remote update requested", { requestId: request.requestId });
+-        const { latest, changes } = yield* updates.subscribe;
+-        const disabledReason = Option.getOrNull(yield* updates.disabledReason);
+-        let attempts: RemoteDesktopUpdateAttempts = { checks: 0, downloads: 0 };
+-        // The updater admits one action at a time. A state event can land
+-        // while the action that produced it still holds the reservation
+-        // (e.g. "available" before the check releases), so a forked action
+-        // can be refused with no later state event to retry on. Rejected
+-        // actions re-enqueue their state here after a short pause so the
+-        // step runs again once the reservation is free.
+-        const retries = yield* Queue.unbounded<DesktopUpdateState>();
+-        const retryLater = (state: DesktopUpdateState) =>
+-          Effect.sleep(ACTION_RETRY_DELAY).pipe(
+-            Effect.andThen(Queue.offer(retries, state)),
+-            Effect.asVoid,
+-            Effect.forkScoped,
+-          );
+-
+-        // Returns true when the run reached a terminal outcome.
+-        const step = (state: DesktopUpdateState): Effect.Effect<boolean, never, Scope.Scope> =>
+-          Effect.gen(function* () {
+-            const next = nextRemoteDesktopUpdateStep(state, attempts, disabledReason);
+-            switch (next.action) {
+-              case "wait":
+-                return false;
+-              // Counters increment before the action so the state event the
+-              // action produces already sees it; a refusal for a held
+-              // reservation rolls the count back, since it was not a try.
+-              case "check":
+-                attempts = { ...attempts, checks: attempts.checks + 1 };
+-                yield* updates.check("remote-update").pipe(
+-                  Effect.flatMap((result) => {
+-                    if (result.checked) return Effect.void;
+-                    attempts = { ...attempts, checks: attempts.checks - 1 };
+-                    return retryLater(state);
+-                  }),
+-                  Effect.forkScoped,
+-                );
+-                return false;
+-              case "download":
+-                attempts = { ...attempts, downloads: attempts.downloads + 1 };
+-                yield* updates.download.pipe(
+-                  Effect.flatMap((result) => {
+-                    if (result.accepted) return Effect.void;
+-                    attempts = { ...attempts, downloads: attempts.downloads - 1 };
+-                    return retryLater(state);
+-                  }),
+-                  Effect.forkScoped,
+-                );
+-                return false;
+-              case "install": {
+-                // The download event fires before its action releases the
+-                // updater reservation. Wait until the prepared install can
+-                // be committed by the client in a separate RPC.
+-                if (yield* updates.isActionActive) {
+-                  yield* retryLater(state);
+-                  return false;
+-                }
+-                if (state.downloadedVersion === null) {
+-                  yield* publishReport(
+-                    state,
+-                    {
+-                      outcome: "failed",
+-                      reason: "The desktop app lost the downloaded update.",
+-                    },
+-                    request.requestId,
+-                  );
+-                  return true;
+-                }
+-                yield* Ref.set(
+-                  preparedUpdateRef,
+-                  Option.some({
+-                    requestId: request.requestId,
+-                    downloadedVersion: state.downloadedVersion,
+-                    status: "prepared",
+-                    expiresAt:
+-                      (yield* Clock.currentTimeMillis) + Duration.toMillis(PREPARED_UPDATE_TTL),
+-                  }),
+-                );
+-                yield* publishReport(state, { outcome: "ready-to-install" }, request.requestId);
+-                yield* logInfo("remote update prepared", { requestId: request.requestId });
+-                return true;
+-              }
+-              case "done":
+-                yield* publishReport(
+-                  state,
+-                  {
+-                    outcome: next.outcome,
+-                    ...(next.reason === undefined ? {} : { reason: next.reason }),
+-                  },
+-                  request.requestId,
+-                );
+-                yield* logInfo("remote update finished", {
+-                  requestId: request.requestId,
+-                  outcome: next.outcome,
+-                  reason: next.reason ?? null,
+-                });
+-                return true;
+-            }
+-          });
+-
+-        yield* Effect.raceFirst(
+-          Effect.gen(function* () {
+-            if (yield* step(latest)) return;
+-            yield* Stream.merge(changes, Stream.fromQueue(retries)).pipe(
+-              Stream.mapEffect(step),
+-              Stream.takeUntil((done) => done),
+-              Stream.runDrain,
+-            );
+-          }),
+-          Deferred.await(cancellation),
+-        );
+       }),
+-    ).pipe(
+-      Effect.ensuring(
+-        Effect.all(
+-          [
+-            clearActiveRequest(request.requestId),
+-            Ref.update(requestControlRef, (control) => ({
+-              ...control,
+-              active:
+-                Option.isSome(control.active) &&
+-                control.active.value.requestId === request.requestId
+-                  ? Option.none()
+-                  : control.active,
+-            })),
+-          ],
+-          { discard: true },
+-        ),
+-      ),
+-      Effect.catchCause((cause) =>
+-        logError("remote update request failed unexpectedly", {
+-          requestId: request.requestId,
+-          cause: String(cause),
+-        }),
+-      ),
+-    );
+-
+-  // Sequential by construction: a second remote request queued mid-run is
+-  // handled after the current one, when the state machine resolves it fast.
+-  yield* Stream.runForEach(publisher.updateRequests, handleRequest).pipe(Effect.forkScoped);
++    ).pipe(Effect.forkScoped);
+ 
+-  yield* Stream.runForEach(publisher.updateCancellations, (cancellation) =>
+-    Effect.gen(function* () {
+-      const activeSignal = yield* Ref.modify(requestControlRef, (control) => {
+-        if (
+-          Option.isSome(control.active) &&
+-          control.active.value.requestId === cancellation.requestId
+-        ) {
+-          return [Option.some(control.active.value.signal), control] as const;
+-        }
+-        return [
+-          Option.none<Deferred.Deferred<void>>(),
+-          {
+-            ...control,
+-            cancelledBeforeStart: [
+-              ...control.cancelledBeforeStart.filter(
+-                (requestId) => requestId !== cancellation.requestId,
+-              ),
+-              cancellation.requestId,
+-            ],
+-          },
+-        ] as const;
+-      });
+-      if (Option.isSome(activeSignal)) {
+-        yield* Deferred.succeed(activeSignal.value, undefined);
+-      }
+-      const matchedPrepared = yield* Ref.modify(preparedUpdateRef, (prepared) => {
+-        if (Option.isNone(prepared) || prepared.value.requestId !== cancellation.requestId) {
+-          return [false, prepared] as const;
++    const stopExact = (runs: ReadonlyArray<OwnedBackendRun>) =>
++      Effect.gen(function* () {
++        // Validate the complete inventory before issuing any stop.
++        const instances = [];
++        for (const run of runs) {
++          const instance = yield* pool.get(BackendInstanceId(run.instanceId));
++          if (Option.isNone(instance) || !instance.value.generationSnapshot) {
++            return yield* new ManagedDesktopUpdateFailure({
++              message: `Reserved backend ${run.instanceId} is unavailable.`,
++            });
++          }
++          const snapshot = yield* instance.value.generationSnapshot;
++          if (snapshot._tag === "stopped") continue;
++          if (
++            snapshot._tag !== "supported" ||
++            snapshot.run.instanceId !== run.instanceId ||
++            snapshot.run.runId !== run.runId
++          ) {
++            return yield* new ManagedDesktopUpdateFailure({
++              message: `Reserved backend generation ${run.instanceId}#${run.runId} changed.`,
++            });
++          }
++          instances.push(instance.value);
+         }
+-        return [true, prepared.value.status === "prepared" ? Option.none() : prepared] as const;
++        yield* Ref.set(desktopState.quitting, true);
++        for (const instance of instances) yield* instance.stop({ timeout: Duration.seconds(5) });
+       });
+-      if (matchedPrepared) {
+-        yield* Ref.update(requestControlRef, (control) => {
+-          return {
+-            ...control,
+-            cancelledBeforeStart: control.cancelledBeforeStart.filter(
+-              (requestId) => requestId !== cancellation.requestId,
+-            ),
+-          };
+-        });
+-      }
+-    }),
+-  ).pipe(Effect.forkScoped);
+ 
+-  yield* Stream.runForEach(publisher.updateCommits, (commit) =>
+-    Effect.gen(function* () {
+-      const current = yield* updates.getState;
+-      const now = yield* Clock.currentTimeMillis;
+-      const claim = yield* Ref.modify(
+-        preparedUpdateRef,
+-        (prepared): readonly [CommitClaim, Option.Option<PreparedUpdate>] => {
++    yield* Stream.runForEach(publisher.updateCommits, (commit) =>
++      Effect.uninterruptibleMask((restore) =>
++        Effect.gen(function* () {
++          const entry = current;
++          if (!entry || entry.request.requestId !== commit.requestId) {
++            const request = identities.get(commit.requestId);
++            if (request)
++              yield* report(
++                request,
++                "failed",
++                "This managed desktop update is no longer prepared.",
++              );
++            return;
++          }
++          if (entry.status === "committing" || entry.status === "retained") return;
+           if (
+-            Option.isNone(prepared) ||
+-            prepared.value.requestId !== commit.requestId ||
+-            (prepared.value.status === "prepared" && prepared.value.expiresAt <= now)
++            entry.status !== "prepared" ||
++            !entry.token ||
++            entry.expiresAt <= (yield* Clock.currentTimeMillis)
+           ) {
+-            return [{ _tag: "invalid" as const }, prepared] as const;
++            yield* report(
++              entry.request,
++              "failed",
++              "This managed desktop update is no longer prepared.",
++            );
++            yield* release(entry);
++            return;
+           }
+-          if (prepared.value.status === "failed") {
+-            return [{ _tag: "failed" as const, prepared: prepared.value }, prepared] as const;
++          // Atomic ownership transfer: cancellation and duplicate commits cannot act
++          // on this token after this point, including while helper READY is pending.
++          entry.status = "committing";
++          let retained = false;
++          let helper: Awaited<ReturnType<ManagedDesktopAdapters["prepareInstall"]>> | undefined;
++          let helperPreparation: ReturnType<ManagedDesktopAdapters["prepareInstall"]> | undefined;
++          const result = yield* restore(
++            Effect.gen(function* () {
++              helper = yield* Effect.tryPromise({
++                try: (signal) => {
++                  helperPreparation = adapters
++                    .prepareInstall(entry.token!, { signal })
++                    .then((prepared) => {
++                      helper = prepared;
++                      return prepared;
++                    });
++                  return helperPreparation;
++                },
++                catch: (error) => new ManagedDesktopUpdateFailure({ message: String(error) }),
++              });
++              const controller = yield* makeReservation<ManagedDesktopUpdateFailure>(
++                {
++                  tryFreeze: lifecycle.tryFreeze.pipe(
++                    Effect.map((freeze) =>
++                      freeze._tag !== "frozen"
++                        ? freeze
++                        : {
++                            ...freeze,
++                            backends: {
++                              ...freeze.backends,
++                              retainUntilProcessExit: () => {
++                                retained = true;
++                                entry.status = "retained";
++                                freeze.backends.retainUntilProcessExit();
++                              },
++                            },
++                          },
++                    ),
++                  ),
++                  exchange: publisher.reservationTransport.exchange,
++                  publishDisposition: (disposition, runs) =>
++                    Effect.gen(function* () {
++                      const state = yield* updates.getState;
++                      const status: DesktopUpdateStatusReport = {
++                        version: 1,
++                        type: "desktopUpdateStatus",
++                        requestId: entry.request.requestId,
++                        artifact: disposition.artifact,
++                        targetVersion: disposition.targetVersion,
++                        attemptId: disposition.attemptId,
++                        commitDisposition: disposition.disposition,
++                        ...(disposition.reason === undefined ? {} : { reason: disposition.reason }),
++                        state: {
++                          ...state,
++                          enabled: true,
++                          status: "downloaded",
++                          availableVersion: disposition.targetVersion,
++                          downloadedVersion: disposition.targetVersion,
++                          downloadPercent: 100,
++                          message: null,
++                          errorContext: null,
++                          canRetry: false,
++                        },
++                      };
++                      if (disposition.disposition === "accepted") {
++                        yield* publisher
++                          .publishUpdateReportAcknowledged(runs, status)
++                          .pipe(Effect.orDie);
++                      } else yield* publisher.publishUpdateReport(status);
++                    }),
++                  stopAndInstall: (runs) =>
++                    Effect.tryPromise({
++                      try: () => helper!.stopAndInstall(() => Effect.runPromise(stopExact(runs))),
++                      catch: (error) => new ManagedDesktopUpdateFailure({ message: String(error) }),
++                    }),
++                },
++                { attemptIdPrefix: `managed-desktop-${randomUUID()}` },
++              );
++              const disposition = yield* controller.tryInstall(entry.request);
++              if (disposition._tag === "rejected")
++                yield* report(entry.request, "failed", disposition.rejection.reason);
++              if (disposition._tag === "uncertain")
++                yield* report(
++                  entry.request,
++                  "failed",
++                  "Managed update acceptance is uncertain; no backend was stopped.",
++                );
++              if (disposition._tag === "install-failed")
++                yield* report(entry.request, "failed", disposition.error.message);
++            }),
++          ).pipe(Effect.exit);
++          if (helperPreparation)
++            yield* Effect.promise(async () => {
++              try {
++                await helperPreparation;
++              } catch {
++                /* Installer owns failed preparation cleanup. */
++              }
++            });
++          // cancel is a no-op once the helper has entered its accepted stop phase.
++          if (helper) yield* Effect.promise(() => helper!.cancel());
++          if (!retained) {
++            entry.status = "failed";
++            yield* release(entry);
+           }
+-          if (prepared.value.status === "committing") {
+-            return [{ _tag: "committing" as const }, prepared] as const;
++          if (Exit.isFailure(result) && !Cause.hasInterruptsOnly(result.cause)) {
++            yield* report(entry.request, "failed", Cause.pretty(result.cause));
+           }
+-          return [
+-            { _tag: "claimed" as const, prepared: prepared.value },
+-            Option.some({ ...prepared.value, status: "committing" as const }),
+-          ] as const;
+-        },
+-      );
+-      if (claim._tag === "invalid") {
+-        yield* publishReport(
+-          yield* updates.getState,
+-          {
+-            outcome: "failed",
+-            reason: "This desktop update is no longer prepared.",
+-          },
+-          commit.requestId,
+-        );
+-        return;
+-      }
+-      if (claim._tag === "failed") {
+-        yield* publishReport(
+-          current,
+-          {
+-            outcome: "failed",
+-            reason: claim.prepared.failureReason ?? "The desktop app failed to install the update.",
+-          },
+-          commit.requestId,
+-        );
+-        return;
+-      }
+-      if (claim._tag === "committing") {
+-        return;
+-      }
+-      yield* Ref.set(activeRequestIdRef, Option.some(commit.requestId));
+-      if (current.downloadedVersion !== claim.prepared.downloadedVersion) {
+-        const reason = "This desktop update is no longer prepared.";
+-        if (yield* recordPreparedFailure(commit.requestId, reason)) {
+-          yield* publishReport(current, { outcome: "failed", reason }, commit.requestId);
+-        }
+-        return;
+-      }
+-      const result = yield* updates.installPrepared(claim.prepared.downloadedVersion);
+-      if (
+-        !result.accepted &&
+-        result.state.downloadedVersion === claim.prepared.downloadedVersion &&
+-        (yield* updates.isInstallActive)
+-      ) {
+-        // Another install (local, or an earlier remote request) already owns
+-        // the shutdown and will relaunch the app on the same downloaded
+-        // version. This commit joins it: no failure marker, and the client
+-        // proves the handoff the same way, by transport loss then the
+-        // target version on reconnect.
+-        yield* logInfo("remote update commit joining an in-progress install", {
+-          requestId: commit.requestId,
+-        });
+-        return;
+-      }
+-      if (!result.accepted || result.failed) {
+-        const reason = result.state.message ?? "The desktop app could not start the install.";
+-        if (yield* recordPreparedFailure(commit.requestId, reason)) {
+-          yield* publishReport(result.state, { outcome: "failed", reason }, commit.requestId);
+-        }
+-        return;
+-      }
+-      // A successful install tears down this backend. Do not send a success
+-      // marker from the old process: transport loss followed by the target
+-      // version is the only proof that the handoff succeeded.
+-    }).pipe(
+-      Effect.ensuring(clearActiveRequest(commit.requestId)),
+-      Effect.catchCause((cause) =>
+-        logError("remote update commit failed unexpectedly", {
+-          requestId: commit.requestId,
+-          cause: String(cause),
+         }),
+       ),
+-    ),
+-  ).pipe(Effect.forkScoped);
++    ).pipe(Effect.forkScoped);
++  });
++
++export const listen = Effect.gen(function* () {
++  const environment = yield* DesktopEnvironment.DesktopEnvironment;
++  const app = yield* ElectronApp.ElectronApp;
++  const identity = environment.managedPresentationIdentity;
++  if (!identity) {
++    const unavailable = async (): Promise<never> => {
++      throw new Error("This desktop build has no immutable managed presentation identity.");
++    };
++    return yield* listenWithAdapters({
++      prepare: unavailable,
++      cancel: async () => {},
++      prepareInstall: unavailable,
++    });
++  }
++  const preparer = createManagedDesktopArtifactPreparer({
++    baseDir: environment.baseDir,
++    resourcesPath: environment.resourcesPath,
++    isPackaged: environment.isPackaged,
++    platform: environment.platform,
++    managedPresentationIdentity: identity,
++  });
++  const installer = createManagedDesktopInstaller({
++    preparer,
++    stateDir: path.join(environment.stateDir, "managed-desktop-installer"),
++    helperPath: path.join(environment.dirname, "managedDesktopInstallHelper.cjs"),
++    quit: () => Effect.runSync(app.quit),
++  });
++  yield* listenWithAdapters({
++    prepare: (request, signal, backstopTtlMs) =>
++      preparer.prepare(request.artifact, { signal, ttlMs: backstopTtlMs }),
++    cancel: preparer.cancel,
++    prepareInstall: installer.prepareInstall,
++  });
+ });
+diff --git a/apps/desktop/src/updates/DesktopUpdates.ts b/apps/desktop/src/updates/DesktopUpdates.ts
+index 344d135a10247af394d0eb395ce4802d507ef145..1cd19550268a791e20f07f20cf7cf402b0e7e7a6 100644
+--- a/apps/desktop/src/updates/DesktopUpdates.ts
++++ b/apps/desktop/src/updates/DesktopUpdates.ts
+@@ -50,7 +50,7 @@ const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
+ const AUTO_UPDATE_POLL_INTERVAL = "4 minutes";
+ const PREPARED_INSTALL_CHECK_WAIT = Duration.seconds(90);
+ 
+-type UpdateAction = "check" | "download" | "install" | "install-recovery" | "channel";
++type UpdateAction = "check" | "download" | "install" | "install-recovery" | "channel" | "managed";
+ 
+ interface DesktopPreparedUpdateInstallResult extends DesktopUpdateActionResult {
+   readonly failed: boolean;
+@@ -159,6 +159,8 @@ export type DesktopUpdateSetChannelError = typeof DesktopUpdateSetChannelError.T
+ export class DesktopUpdates extends Context.Service<
+   DesktopUpdates,
+   {
++    readonly beginManagedAction?: Effect.Effect<boolean>;
++    readonly finishManagedAction?: Effect.Effect<void>;
+     readonly getState: Effect.Effect<DesktopUpdateState>;
+     /** True while a check, download, install, or channel change holds the
+         updater's single action reservation. */
+@@ -756,7 +758,8 @@ export const make = Effect.gen(function* () {
+     const error = new DesktopUpdaterReportedError({
+       operation: Option.match(activeAction, {
+         onNone: () => "background" as const,
+-        onSome: (action) => (action === "install-recovery" ? "install" : action),
++        onSome: (action) =>
++          action === "install-recovery" || action === "managed" ? "install" : action,
+       }),
+       cause,
+     });
+@@ -845,6 +848,12 @@ export const make = Effect.gen(function* () {
+   });
+ 
+   return DesktopUpdates.of({
++    beginManagedAction: Ref.get(desktopState.quitting).pipe(
++      Effect.flatMap((quitting) =>
++        quitting ? Effect.succeed(false) : tryStartUpdateAction("managed"),
++      ),
++    ),
++    finishManagedAction: finishUpdateAction("managed"),
+     getState: Ref.get(updateStateRef),
+     isActionActive: activeUpdateAction.pipe(Effect.map(Option.isSome)),
+     isInstallActive: activeUpdateAction.pipe(
+@@ -928,7 +937,10 @@ export const make = Effect.gen(function* () {
+       const activeAction = yield* tryStartChannelChange;
+       if (Option.isSome(activeAction)) {
+         return yield* new DesktopUpdateActionInProgressError({
+-          action: activeAction.value === "install-recovery" ? "install" : activeAction.value,
++          action:
++            activeAction.value === "install-recovery" || activeAction.value === "managed"
++              ? "install"
++              : activeAction.value,
+           requestedChannel: nextChannel,
+         });
+       }
+diff --git a/apps/desktop/src/updates/desktopUpdateReservation.test.ts b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
+index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb5be7b7fe 100644
+--- a/apps/desktop/src/updates/desktopUpdateReservation.test.ts
++++ b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
+@@ -149,7 +149,17 @@ const makeFake = (options: FakeOptions = {}) =>
+     return { controller, log, sent, dispositions };
+   });
+ 
+-const input = { requestId: "req-1", targetVersion: "1.2.4" };
++const artifact = {
++  schemaVersion: 1,
++  targetVersion: "1.2.4",
++  releaseArtifactId: "reasoning-darwin-arm64",
++  presentationVariant: "reasoning",
++  bytes: 1234,
++  sha256: "b".repeat(64),
++  manifestSha256: "c".repeat(64),
++  releaseInputSha256: "a".repeat(64),
++} as const;
++const input = { requestId: "req-1", targetVersion: "1.2.4", artifact };
+ 
+ describe("desktopUpdateReservation", () => {
+   it.effect("defers without touching any backend while lifecycle work is executing", () =>
+@@ -172,6 +182,7 @@ describe("desktopUpdateReservation", () => {
+           requestId: "req-1",
+           attemptId: "test-1",
+           targetVersion: "1.2.4",
++          artifact,
+           disposition: "rejected",
+           reason: "wsl:ubuntu is restarting",
+         },
+@@ -351,6 +362,7 @@ describe("desktopUpdateReservation", () => {
+           requestId: "req-1",
+           attemptId: "test-1",
+           targetVersion: "1.2.4",
++          artifact,
+           disposition: "accepted",
+           reason: undefined,
+         },
+@@ -400,6 +412,7 @@ describe("desktopUpdateReservation", () => {
+         const other = yield* fake.controller.tryInstall({
+           requestId: "req-2",
+           targetVersion: "1.2.4",
++          artifact,
+         });
+         assert.equal(other.attemptId, "test-2");
+       }),
+@@ -453,7 +466,11 @@ describe("desktopUpdateReservation", () => {
+           ),
+         ),
+       });
+-      const retargeted = { requestId: "req-1", targetVersion: "1.2.5" };
++      const retargeted = {
++        requestId: "req-1",
++        targetVersion: "1.2.5",
++        artifact: { ...artifact, targetVersion: "1.2.5" },
++      };
+ 
+       const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
+       yield* Deferred.await(reserveReached);
+@@ -628,15 +645,20 @@ describe("desktopUpdateReservation", () => {
+     () =>
+       Effect.gen(function* () {
+         const installReached = yield* Deferred.make<void>();
++        const installFinished = yield* Deferred.make<void>();
+         const fake = yield* makeFake({
+-          // The process never confirms exit; the observer must not wait on it.
+           install: () =>
+-            Deferred.succeed(installReached, undefined).pipe(Effect.andThen(Effect.never)),
++            Deferred.succeed(installReached, undefined).pipe(
++              Effect.andThen(Deferred.await(installFinished)),
++            ),
+         });
+ 
+         const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
+         yield* Deferred.await(installReached);
+-        yield* Fiber.interrupt(attempt);
++        const interrupt = yield* Fiber.interrupt(attempt).pipe(Effect.forkChild);
++        yield* Effect.yieldNow;
++        yield* Deferred.succeed(installFinished, undefined);
++        yield* Fiber.join(interrupt);
+         const exit = yield* Fiber.await(attempt);
+ 
+         assert.isTrue(Exit.isFailure(exit));
+@@ -882,7 +904,7 @@ describe("desktopUpdateReservation", () => {
+   it.effect("accepts an empty owned set without any exchange", () =>
+     Effect.gen(function* () {
+       const fake = yield* makeFake({ runs: [] });
+-      const result = yield* fake.controller.tryInstall({ targetVersion: "1.2.4" });
++      const result = yield* fake.controller.tryInstall({ targetVersion: "1.2.4", artifact });
+ 
+       assert.equal(result._tag, "accepted");
+       assert.deepEqual(fake.log, ["retain", "publish accepted", "install "]);
+@@ -890,3 +912,75 @@ describe("desktopUpdateReservation", () => {
+     }),
+   );
+ });
++
++describe("descriptor-bound reservation ownership", () => {
++  for (const replacement of [
++    { ...artifact, sha256: "d".repeat(64) },
++    { ...artifact, manifestSha256: "d".repeat(64) },
++    { ...artifact, bytes: artifact.bytes + 1 },
++    { ...artifact, releaseInputSha256: "d".repeat(64) },
++  ]) {
++    it.effect(
++      `conflicts on changed descriptor ${JSON.stringify(replacement)} during flight and after decision`,
++      () =>
++        Effect.gen(function* () {
++          const reached = yield* Deferred.make<void>();
++          const answer = yield* Deferred.make<DesktopUpdateReservationExchange>();
++          const fake = yield* makeFake({
++            answer: except({ run: primary, action: "reserve" }, () =>
++              Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(answer))),
++            ),
++          });
++          const owner = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
++          yield* Deferred.await(reached);
++          const conflict = { ...input, artifact: replacement };
++          const early = yield* fake.controller.tryInstall(conflict);
++          assert.equal(early._tag, "rejected");
++          if (early._tag === "rejected") assert.equal(early.rejection.kind, "request-conflict");
++          assert.equal(fake.sent.length, 1);
++          yield* Deferred.succeed(answer, reply(primary, "test-1", "ready"));
++          const accepted = yield* Fiber.join(owner);
++          assert.equal(accepted._tag, "accepted");
++          const late = yield* fake.controller.tryInstall(conflict);
++          assert.equal(late._tag, "rejected");
++          assert.deepEqual(yield* fake.controller.tryInstall(input), accepted);
++          assert.equal(fake.sent.length, 2);
++        }),
++    );
++  }
++
++  it.effect(
++    "passes the exact frozen run array to acknowledged acceptance and cannot stop before it completes",
++    () =>
++      Effect.gen(function* () {
++        const runs = Object.freeze([Object.freeze(primary), Object.freeze(secondary)]);
++        const reached = yield* Deferred.make<void>();
++        const ack = yield* Deferred.make<void>();
++        let stopped = false;
++        const controller = yield* make({
++          tryFreeze: Effect.succeed({
++            _tag: "frozen",
++            backends: { runs, release: Effect.void, retainUntilProcessExit: () => {} },
++          }),
++          exchange: (run, command) => cooperative({ run, command }),
++          publishDisposition: (report, acceptedRuns) =>
++            Effect.gen(function* () {
++              assert.strictEqual(acceptedRuns, runs);
++              assert.deepEqual(report.artifact, artifact);
++              yield* Deferred.succeed(reached, undefined);
++              yield* Deferred.await(ack);
++            }),
++          stopAndInstall: () =>
++            Effect.sync(() => {
++              stopped = true;
++            }),
++        });
++        const attempt = yield* controller.tryInstall(input).pipe(Effect.forkChild);
++        yield* Deferred.await(reached);
++        assert.equal(stopped, false);
++        yield* Deferred.succeed(ack, undefined);
++        assert.equal((yield* Fiber.join(attempt))._tag, "accepted");
++        assert.equal(stopped, true);
++      }),
++  );
++});
+diff --git a/apps/desktop/src/updates/desktopUpdateReservation.ts b/apps/desktop/src/updates/desktopUpdateReservation.ts
+index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b30af1c54b 100644
+--- a/apps/desktop/src/updates/desktopUpdateReservation.ts
++++ b/apps/desktop/src/updates/desktopUpdateReservation.ts
+@@ -1,4 +1,5 @@
+ import type {
++  ManagedDesktopArtifactDescriptor,
+   DesktopUpdateCommitDisposition,
+   DesktopUpdateReservationCommand,
+   DesktopUpdateReservationReply,
+@@ -71,6 +72,7 @@ export interface DesktopUpdateDispositionReport {
+   readonly requestId: string | undefined;
+   readonly attemptId: string;
+   readonly targetVersion: string;
++  readonly artifact: ManagedDesktopArtifactDescriptor;
+   readonly disposition: DesktopUpdateCommitDisposition;
+   readonly reason: string | undefined;
+ }
+@@ -84,7 +86,10 @@ export interface DesktopUpdateReservationDependencies<InstallError> {
+     command: DesktopUpdateReservationCommand,
+   ) => Effect.Effect<DesktopUpdateReservationExchange>;
+   /** Report the definitive pre-stop disposition for the originating request. */
+-  readonly publishDisposition: (report: DesktopUpdateDispositionReport) => Effect.Effect<void>;
++  readonly publishDisposition: (
++    report: DesktopUpdateDispositionReport,
++    runs: ReadonlyArray<OwnedBackendRun>,
++  ) => Effect.Effect<void>;
+   /** Stop exactly the reserved generations and hand over to the installer. */
+   readonly stopAndInstall: (
+     runs: ReadonlyArray<OwnedBackendRun>,
+@@ -95,6 +100,7 @@ export interface DesktopUpdateInstallInput {
+   /** Prepared-download request that initiated this attempt, if any. */
+   readonly requestId?: string;
+   readonly targetVersion: string;
++  readonly artifact: ManagedDesktopArtifactDescriptor;
+ }
+ 
+ export type DesktopUpdateRejection =
+@@ -153,7 +159,9 @@ export interface DesktopUpdateReservationController<InstallError> {
+    * Interrupting the caller before the commit decision aborts the attempt.
+    * Interrupting it afterwards only stops observing: the decision, the fence
+    * and every gate stay retained, the recorded disposition stays truthful,
+-   * and whoever owns the process lifetime remains responsible for it.
++   * and whoever owns the process lifetime remains responsible for it. Once
++   * accepted, the bounded stop/install handoff completes before interruption
++   * can be observed, so accepted work cannot lose its installer owner.
+    */
+   readonly tryInstall: (
+     input: DesktopUpdateInstallInput,
+@@ -165,6 +173,19 @@ export interface DesktopUpdateReservationOptions {
+   readonly attemptIdPrefix?: string;
+ }
+ 
++export const sameManagedArtifact = (
++  left: ManagedDesktopArtifactDescriptor,
++  right: ManagedDesktopArtifactDescriptor,
++): boolean =>
++  left.schemaVersion === right.schemaVersion &&
++  left.targetVersion === right.targetVersion &&
++  left.releaseArtifactId === right.releaseArtifactId &&
++  left.presentationVariant === right.presentationVariant &&
++  left.bytes === right.bytes &&
++  left.sha256 === right.sha256 &&
++  left.manifestSha256 === right.manifestSha256 &&
++  left.releaseInputSha256 === right.releaseInputSha256;
++
+ const sameRun = (left: OwnedBackendRun, right: OwnedBackendRun) =>
+   left.instanceId === right.instanceId && left.runId === right.runId;
+ 
+@@ -189,6 +210,7 @@ export const make = <InstallError>(
+      */
+     interface RequestEntry {
+       readonly targetVersion: string;
++      readonly artifact: ManagedDesktopArtifactDescriptor;
+       readonly record?: Deferred.Deferred<Result>;
+     }
+     const attemptsByRequest = yield* Ref.make(new Map<string, RequestEntry>());
+@@ -226,14 +248,22 @@ export const make = <InstallError>(
+             exchange.reply.attemptId === attemptId &&
+             exchange.reply.status === status;
+ 
+-          const publish = (disposition: DesktopUpdateCommitDisposition, reason?: string) =>
+-            deps.publishDisposition({
+-              requestId: input.requestId,
+-              attemptId,
+-              targetVersion: input.targetVersion,
+-              disposition,
+-              reason,
+-            });
++          const publish = (
++            disposition: DesktopUpdateCommitDisposition,
++            reason?: string,
++            runs: ReadonlyArray<OwnedBackendRun> = [],
++          ) =>
++            deps.publishDisposition(
++              {
++                requestId: input.requestId,
++                attemptId,
++                targetVersion: input.targetVersion,
++                artifact: input.artifact,
++                disposition,
++                reason,
++              },
++              runs,
++            );
+ 
+           const finish = (result: Result) =>
+             Deferred.succeed(record, result).pipe(Effect.as(result));
+@@ -339,19 +369,14 @@ export const make = <InstallError>(
+             }
+             if (committed.length !== backends.runs.length) return yield* finish(retained());
+ 
+-            // Acceptance is recorded before the first stop and is never
+-            // inferred from the stop or install having happened. An owner
+-            // interrupted while the stop or install is pending keeps the
+-            // accepted disposition and every retained gate; the process
+-            // owner, not this observer, is responsible for the lifetime of
+-            // the child. A report that fails leaves every gate committed but
+-            // nothing accepted: the attempt stays uncertain and no stop is
+-            // issued.
+-            yield* publish("accepted");
++            // An acknowledged acceptance transfers installer ownership. Keep the
++            // bounded stop/install handoff masked: a pending interruption must
++            // not skip its first instruction and leave an accepted helper unarmed.
++            // A failed acknowledgement leaves the attempt uncertain and never
++            // enters this handoff.
++            yield* publish("accepted", undefined, backends.runs);
+             accepted = true;
+-            const installExit = yield* restore(deps.stopAndInstall(backends.runs)).pipe(
+-              Effect.exit,
+-            );
++            const installExit = yield* deps.stopAndInstall(backends.runs).pipe(Effect.exit);
+             if (Exit.isSuccess(installExit)) return yield* finish(retained());
+             const failure = Cause.findError(installExit.cause);
+             if (Result.isSuccess(failure)) {
+@@ -401,7 +426,10 @@ export const make = <InstallError>(
+         yield* Ref.update(attemptsByRequest, (attempts) => {
+           const entry = attempts.get(requestId);
+           if (entry === undefined || entry.record !== record) return attempts;
+-          return new Map(attempts).set(requestId, { targetVersion: entry.targetVersion });
++          return new Map(attempts).set(requestId, {
++            targetVersion: entry.targetVersion,
++            artifact: entry.artifact,
++          });
+         });
+       });
+ 
+@@ -410,11 +438,17 @@ export const make = <InstallError>(
+       | { readonly _tag: "join"; readonly record: Deferred.Deferred<Result> }
+       | { readonly _tag: "conflict"; readonly targetVersion: string };
+ 
+-    const tryInstall: DesktopUpdateReservationController<InstallError>["tryInstall"] = (input) =>
++    const tryInstall: DesktopUpdateReservationController<InstallError>["tryInstall"] = (
++      requestedInput,
++    ) => {
++      const input = Object.freeze({
++        ...requestedInput,
++        artifact: Object.freeze({ ...requestedInput.artifact }),
++      });
+       // The claim, the attempt id and the completion finalizer are installed
+       // as one step: a record that joined callers can see must always have
+       // an owner that will settle it, even if interruption is already pending.
+-      Effect.uninterruptibleMask((restore) =>
++      return Effect.uninterruptibleMask((restore) =>
+         Effect.gen(function* () {
+           const record = yield* Deferred.make<Result>();
+           const requestId = input.requestId;
+@@ -425,7 +459,11 @@ export const make = <InstallError>(
+                   attemptsByRequest,
+                   (attempts): readonly [Claim, Map<string, RequestEntry>] => {
+                     const existing = attempts.get(requestId);
+-                    if (existing !== undefined && existing.targetVersion !== input.targetVersion) {
++                    if (
++                      existing !== undefined &&
++                      (existing.targetVersion !== input.targetVersion ||
++                        !sameManagedArtifact(existing.artifact, input.artifact))
++                    ) {
+                       return [
+                         { _tag: "conflict", targetVersion: existing.targetVersion },
+                         attempts,
+@@ -438,6 +476,7 @@ export const make = <InstallError>(
+                       { _tag: "own" },
+                       new Map(attempts).set(requestId, {
+                         targetVersion: input.targetVersion,
++                        artifact: Object.freeze({ ...input.artifact }),
+                         record,
+                       }),
+                     ];
+@@ -453,7 +492,7 @@ export const make = <InstallError>(
+               attemptId,
+               rejection: {
+                 kind: "request-conflict",
+-                reason: `request ${requestId} targets ${claim.targetVersion}, not ${input.targetVersion}`,
++                reason: `request ${requestId} already targets a different version or managed artifact (${claim.targetVersion})`,
+               },
+               unconfirmedAborts: [],
+             } satisfies Result;
+@@ -463,6 +502,7 @@ export const make = <InstallError>(
+           );
+         }),
+       );
++    };
+ 
+     return { tryInstall };
+   });
+diff --git a/apps/desktop/src/updates/updatesTestHarness.ts b/apps/desktop/src/updates/updatesTestHarness.ts
+index 53a6dc97f5a40dafd80d31c92a6fa3d4258be680..8e08f4600497cba0f2bc8ba6638bde2b2189c85a 100644
+--- a/apps/desktop/src/updates/updatesTestHarness.ts
++++ b/apps/desktop/src/updates/updatesTestHarness.ts
+@@ -31,6 +31,7 @@ export interface UpdatesHarnessOptions {
+   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
+   readonly stopBackend?: Effect.Effect<void>;
+   readonly startBackend?: Effect.Effect<void>;
++  readonly generationSnapshot?: DesktopBackendPool.DesktopBackendInstance["generationSnapshot"];
+   readonly env?: Record<string, string | undefined>;
+ }
+ 
+@@ -125,6 +126,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
+   const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
+     id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
+     label: Effect.succeed("Windows"),
++    ...(options.generationSnapshot === undefined
++      ? {}
++      : { generationSnapshot: options.generationSnapshot }),
+     start: Effect.sync(() => {
+       installSteps.push("startBackend");
+     }).pipe(Effect.andThen(options.startBackend ?? Effect.void)),

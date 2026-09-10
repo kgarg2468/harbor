@@ -1,0 +1,893 @@
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f27377f8a54fcc456d0efd88882f655111e53e0
+--- /dev/null
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+@@ -0,0 +1,419 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Tests use isolated fixture trees and fake native process runners.
++import { afterEach, describe, expect, it } from "@effect/vitest";
++import * as fs from "node:fs/promises";
++import path from "node:path";
++import os from "node:os";
++import { createHash } from "node:crypto";
++import { crc32, deflateRawSync } from "node:zlib";
++import type { ManagedDesktopArtifactDescriptor } from "@t3tools/contracts";
++import { managedDesktopArtifactStorageSegments } from "@t3tools/contracts";
++import { createManagedDesktopArtifactPreparer } from "./ManagedDesktopArtifact.ts";
++
++// Minimal stored ZIP; fake ditto uses a fixture, never executes host tools.
++function zip(
++  entries: Array<{
++    name: string;
++    contents?: string;
++    mode?: number;
++    deflate?: boolean;
++    claimedSize?: number;
++  }>,
++): Buffer {
++  const locals: Buffer[] = [];
++  const central: Buffer[] = [];
++  let offset = 0;
++  for (const entry of entries) {
++    const name = Buffer.from(entry.name);
++    const contents = Buffer.from(entry.contents ?? "fixture");
++    const data = entry.deflate ? deflateRawSync(contents) : contents;
++    const size = entry.claimedSize ?? contents.length;
++    const local = Buffer.alloc(30);
++    local.writeUInt32LE(0x04034b50);
++    local.writeUInt32LE(data.length, 18);
++    local.writeUInt16LE(entry.deflate ? 8 : 0, 8);
++    local.writeUInt32LE(crc32(contents), 14);
++    local.writeUInt32LE(size, 22);
++    local.writeUInt16LE(name.length, 26);
++    locals.push(local, name, data);
++    const header = Buffer.alloc(46);
++    header.writeUInt32LE(0x02014b50);
++    header.writeUInt32LE(data.length, 20);
++    header.writeUInt16LE(entry.deflate ? 8 : 0, 10);
++    header.writeUInt32LE(crc32(contents), 16);
++    header.writeUInt32LE(size, 24);
++    header.writeUInt16LE(name.length, 28);
++    header.writeUInt32LE(((entry.mode ?? 0o100644) << 16) >>> 0, 38);
++    header.writeUInt32LE(offset, 42);
++    central.push(header, name);
++    offset += local.length + name.length + data.length;
++  }
++  const directory = Buffer.concat(central);
++  const end = Buffer.alloc(22);
++  end.writeUInt32LE(0x06054b50);
++  end.writeUInt16LE(entries.length, 8);
++  end.writeUInt16LE(entries.length, 10);
++  end.writeUInt32LE(directory.length, 12);
++  end.writeUInt32LE(offset, 16);
++  return Buffer.concat([...locals, directory, end]);
++}
++const roots: string[] = [];
++const cleanups: Array<() => Promise<void>> = [];
++afterEach(async () => {
++  for (const cleanup of cleanups.splice(0)) await cleanup();
++  for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
++});
++async function fixture(archiveBytes = zip([{ name: "Product.app/Contents/Info.plist" }])) {
++  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "artifact-test-")));
++  roots.push(root);
++  const installed = path.join(root, "Applications/Product.app");
++  const source = path.join(root, "fixture/Product.app");
++  await fs.mkdir(path.join(installed, "Contents/Resources"), { recursive: true });
++  await fs.mkdir(path.join(source, "Contents/Resources"), { recursive: true });
++  await fs.mkdir(path.join(source, "Contents/MacOS"));
++  await fs.writeFile(path.join(source, "Contents/Resources/app.asar"), "asar");
++  await fs.writeFile(path.join(source, "Contents/Info.plist"), "fixture plist");
++  await fs.writeFile(path.join(source, "Contents/MacOS/Product"), "fixture arm64", { mode: 0o755 });
++  const descriptor: ManagedDesktopArtifactDescriptor = {
++    schemaVersion: 1,
++    presentationVariant: "reasoning",
++    releaseArtifactId: "reasoning-darwin-arm64",
++    targetVersion: "0.0.39-nightly.20260910.0.managed.1.paaaaaaaaaaaa",
++    bytes: archiveBytes.length,
++    sha256: createHash("sha256").update(archiveBytes).digest("hex"),
++    manifestSha256: "b".repeat(64),
++    releaseInputSha256: "a".repeat(64),
++  };
++  const archive = path.join(root, ...managedDesktopArtifactStorageSegments(descriptor));
++  await fs.mkdir(path.dirname(archive), { recursive: true });
++  await fs.writeFile(archive, archiveBytes);
++  const plist: Record<string, unknown> = {
++    CFBundleIdentifier: "com.example.product",
++    CFBundleName: "Product",
++    CFBundleExecutable: "Product",
++    CFBundleShortVersionString: descriptor.targetVersion,
++    CFBundleVersion: descriptor.targetVersion,
++    CFBundleURLTypes: [{ CFBundleURLSchemes: ["product", "product-dev"] }],
++  };
++  const env = {
++    baseDir: root,
++    resourcesPath: path.join(installed, "Contents/Resources"),
++    isPackaged: true,
++    platform: "darwin",
++    managedPresentationIdentity: {
++      presentationVariant: "reasoning" as const,
++      bundleId: "com.example.product",
++      productName: "Product",
++      urlSchemes: ["product", "product-dev"],
++    },
++  };
++  const calls: Array<[string, readonly string[]]> = [];
++  const behavior = {
++    arch: "arm64",
++    verifyFailures: 0,
++    extraRoot: false,
++  };
++  const run = async (command: string, args: readonly string[]) => {
++    calls.push([command, args]);
++    if (command === "/usr/bin/ditto") {
++      if (args[0] === "-x") {
++        expect(args[2]).not.toBe(archive);
++        await fs.cp(source, path.join(args[3]!, "Product.app"), {
++          recursive: true,
++          verbatimSymlinks: true,
++        });
++        if (behavior.extraRoot) await fs.writeFile(path.join(args[3]!, "extra"), "x");
++      } else await fs.cp(args[0]!, args[1]!, { recursive: true, verbatimSymlinks: true });
++    } else if (command === "/usr/bin/plutil") return JSON.stringify(plist);
++    else if (command === "/usr/bin/lipo") return behavior.arch;
++    else if (command === "/usr/bin/codesign") {
++      if (args[0] === "--verify" && behavior.verifyFailures-- > 0)
++        throw new Error("invalid signature");
++    } else throw new Error("unexpected process");
++    return "";
++  };
++  const seams = { fs, run, temporaryDirectory: root };
++  const make = () => createManagedDesktopArtifactPreparer(env, seams);
++  return { root, source, installed, descriptor, archive, plist, env, behavior, calls, seams, make };
++}
++describe("managed desktop artifact preparation", () => {
++  it("preserves substituted staging paths during cleanup", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    const staged = f.calls.find(
++      ([command, args]) => command.endsWith("/ditto") && args.length === 2,
++    )![1][1]!;
++    await fs.rename(staged, staged + ".original");
++    await fs.mkdir(staged);
++    await fs.writeFile(path.join(staged, "unowned"), "keep");
++    await p.cancel(token);
++    expect(await fs.readFile(path.join(staged, "unowned"), "utf8")).toBe("keep");
++    expect(p.isPrepared(token)).toBe(false);
++  });
++  it("hands authenticated bytes to extraction through stdin despite pathname replacement", async () => {
++    const f = await fixture();
++    const authenticated = await fs.readFile(f.archive);
++    f.seams.fs = {
++      ...fs,
++      mkdir: (async (...args: Parameters<typeof fs.mkdir>) => {
++        const result = await fs.mkdir(...args);
++        if (path.basename(String(args[0])) === "extracted") {
++          await fs.writeFile(
++            path.join(path.dirname(String(args[0])), "archive.zip"),
++            "substituted",
++          );
++          await fs.writeFile(f.archive, "also substituted");
++        }
++        return result;
++      }) as typeof fs.mkdir,
++    };
++    const calls: Buffer[] = [];
++    const original = f.seams.run;
++    const p = createManagedDesktopArtifactPreparer(f.env, {
++      ...f.seams,
++      run: async (command, args, options) => {
++        if (args[0] === "-x") {
++          expect(args[2]).toBe("-");
++          calls.push(options!.input!);
++        }
++        return original(command, args);
++      },
++    });
++    const token = await p.prepare(f.descriptor);
++    expect(calls).toEqual([authenticated]);
++    await p.cancel(token);
++  });
++  it("rejects actual expansion beyond declared size before native extraction", async () => {
++    const f = await fixture(
++      zip([
++        {
++          name: "Product.app/payload",
++          contents: "x".repeat(10 * 1024 * 1024),
++          deflate: true,
++          claimedSize: 1,
++        },
++      ]),
++    );
++    await expect(f.make().prepare(f.descriptor)).rejects.toThrow();
++    expect(f.calls).toEqual([]);
++  });
++  it.each(["descriptor", "zip64", "local-size", "local-crc", "payload-crc", "unsupported-flag"])(
++    "rejects ZIP %s before extraction",
++    async (kind) => {
++      const bytes = zip([{ name: "Product.app/payload" }]);
++      const central = bytes.readUInt32LE(bytes.length - 6);
++      if (kind === "descriptor" || kind === "unsupported-flag") {
++        bytes.writeUInt16LE(kind === "descriptor" ? 8 : 16, 6);
++        bytes.writeUInt16LE(kind === "descriptor" ? 8 : 16, central + 8);
++      }
++      if (kind === "zip64") {
++        bytes.writeUInt32LE(0xffffffff, 22);
++        bytes.writeUInt32LE(0xffffffff, central + 24);
++      }
++      if (kind === "local-size") bytes.writeUInt32LE(123, 22);
++      if (kind === "local-crc") bytes.writeUInt32LE(123, 14);
++      if (kind === "payload-crc") {
++        bytes.writeUInt32LE(123, 14);
++        bytes.writeUInt32LE(123, central + 16);
++      }
++      const f = await fixture(bytes);
++      await expect(f.make().prepare(f.descriptor)).rejects.toThrow();
++      expect(f.calls).toEqual([]);
++    },
++  );
++  it.each(["validation", "extraction", "staging", "signature"])(
++    "stops after abort during %s",
++    async (boundary) => {
++      const f = await fixture();
++      const controller = new AbortController();
++      const original = f.seams.run;
++      let abortedAt = -1;
++      f.seams.run = async (command, args) => {
++        const result = await original(command, args);
++        if (
++          (boundary === "validation" && command.endsWith("/plutil")) ||
++          (boundary === "extraction" && args[0] === "-x") ||
++          (boundary === "staging" && command.endsWith("/ditto") && args.length === 2) ||
++          (boundary === "signature" && command.endsWith("/codesign"))
++        ) {
++          abortedAt = f.calls.length;
++          controller.abort();
++        }
++        return result;
++      };
++      await expect(f.make().prepare(f.descriptor, { signal: controller.signal })).rejects.toThrow(
++        "cancelled",
++      );
++      expect(abortedAt).toBeGreaterThan(0);
++      expect(f.calls.length).toBe(abortedAt);
++      expect(await fs.readdir(path.dirname(f.installed))).toEqual(["Product.app"]);
++    },
++  );
++
++  it("returns an opaque identity-bound token and cancels only owned paths", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    cleanups.push(() => p.cancel(token));
++    expect(Object.keys(token)).toEqual([]);
++    expect(p.isPrepared(token)).toBe(true);
++    expect(f.make().isPrepared(token)).toBe(false);
++    const copy = f.calls.find(
++      ([command, args]) => command === "/usr/bin/ditto" && args.length === 2,
++    )!;
++    expect(path.dirname(copy[1][1]!)).toBe(path.dirname(f.installed));
++    expect(path.basename(copy[1][1]!)).toMatch(/^\.Product\.managed-.+\.app$/);
++    await p.cancel(token);
++    expect(p.isPrepared(token)).toBe(false);
++    expect(await fs.readFile(f.archive)).toBeTruthy();
++    expect(await fs.stat(f.installed)).toBeTruthy();
++    expect(await fs.readdir(path.dirname(f.installed))).toEqual(["Product.app"]);
++    expect(
++      (await fs.readdir(f.root)).filter((name) => name.startsWith("managed-desktop-")),
++    ).toEqual([]);
++  });
++  it.each(["../escape", "/absolute", "Product.app/../escape", "Product.app\\escape"])(
++    "rejects ZIP traversal %s before extraction",
++    async (name) => {
++      const f = await fixture(zip([{ name }]));
++      await expect(f.make().prepare(f.descriptor)).rejects.toThrow("unsafe ZIP path");
++      expect(f.calls).toEqual([]);
++    },
++  );
++  it("rejects ZIP symlink escapes and writes through symlinks", async () => {
++    for (const entries of [
++      [{ name: "Product.app/link", contents: "../../escape", mode: 0o120777 }],
++      [
++        { name: "Product.app/link", contents: "Contents", mode: 0o120777 },
++        { name: "Product.app/link/write" },
++      ],
++    ]) {
++      const f = await fixture(zip(entries));
++      await expect(f.make().prepare(f.descriptor)).rejects.toThrow(/symlink/);
++      expect(f.calls).toEqual([]);
++    }
++  });
++  it("rejects extracted symlinks escaping the app", async () => {
++    const f = await fixture();
++    await fs.symlink(f.root, path.join(f.source, "escape"));
++    await expect(f.make().prepare(f.descriptor)).rejects.toThrow("symlink escape");
++  });
++  it("accepts confined framework-style symlinks", async () => {
++    const f = await fixture();
++    await fs.symlink("Resources", path.join(f.source, "Contents/link"));
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    await p.cancel(token);
++  });
++  it.each(["symlink", "hardlink", "hash", "size", "substitution"])(
++    "rejects archive %s",
++    async (kind) => {
++      const f = await fixture();
++      if (kind === "symlink") {
++        await fs.rename(f.archive, f.archive + ".real");
++        await fs.symlink(f.archive + ".real", f.archive);
++      }
++      if (kind === "hardlink") await fs.link(f.archive, f.archive + ".link");
++      if (kind === "hash") {
++        const bytes = await fs.readFile(f.archive);
++        bytes[0] = 0;
++        await fs.writeFile(f.archive, bytes);
++      }
++      if (kind === "size") await fs.appendFile(f.archive, "x");
++      if (kind === "substitution") {
++        f.seams.fs = {
++          ...fs,
++          open: (async (...args: Parameters<typeof fs.open>) => {
++            const handle = await fs.open(...args);
++            if (args[0] === f.archive) {
++              await fs.rename(f.archive, f.archive + ".old");
++              await fs.copyFile(f.archive + ".old", f.archive);
++            }
++            return handle;
++          }) as typeof fs.open,
++        };
++      }
++      await expect(f.make().prepare(f.descriptor)).rejects.toThrow();
++      expect(f.calls).toEqual([]);
++    },
++  );
++  it.each([
++    "CFBundleIdentifier",
++    "CFBundleName",
++    "CFBundleShortVersionString",
++    "CFBundleVersion",
++    "CFBundleURLTypes",
++  ])("rejects wrong %s", async (field) => {
++    const f = await fixture();
++    f.plist[field] = "wrong";
++    await expect(f.make().prepare(f.descriptor)).rejects.toThrow();
++  });
++  it.each(["x64", "empty-asar", "missing-asar", "app-update.yml", "extra-root"])(
++    "rejects %s",
++    async (kind) => {
++      const f = await fixture();
++      if (kind === "x64") f.behavior.arch = "x86_64";
++      if (kind === "empty-asar")
++        await fs.writeFile(path.join(f.source, "Contents/Resources/app.asar"), "");
++      if (kind === "missing-asar")
++        await fs.unlink(path.join(f.source, "Contents/Resources/app.asar"));
++      if (kind === "app-update.yml")
++        await fs.writeFile(path.join(f.source, "Contents/Resources/app-update.yml"), "x");
++      if (kind === "extra-root") f.behavior.extraRoot = true;
++      await expect(f.make().prepare(f.descriptor)).rejects.toThrow();
++    },
++  );
++  it("rejects invalid resources suffix and parent without write access", async () => {
++    const f = await fixture();
++    f.env.resourcesPath += "/app.asar";
++    await expect(f.make().prepare(f.descriptor)).rejects.toThrow("resources suffix");
++    f.env.resourcesPath = path.join(f.installed, "Contents/Resources");
++    f.seams.fs = {
++      ...fs,
++      access: async () => {
++        throw new Error("EACCES");
++      },
++    };
++    await expect(f.make().prepare(f.descriptor)).rejects.toThrow("EACCES");
++    expect(await fs.readdir(path.dirname(f.installed))).toEqual(["Product.app"]);
++  });
++  it("rejects the first signature failure without repairing the artifact", async () => {
++    const f = await fixture();
++    // A second verification would succeed: the old repair fallback accepted this.
++    f.behavior.verifyFailures = 1;
++    await expect(f.make().prepare(f.descriptor)).rejects.toThrow("invalid signature");
++    expect(f.calls.filter(([command]) => command === "/usr/bin/codesign")).toEqual([
++      ["/usr/bin/codesign", ["--verify", "--deep", "--strict", expect.any(String)]],
++    ]);
++    expect(await fs.readdir(path.dirname(f.installed))).toEqual(["Product.app"]);
++    expect(
++      (await fs.readdir(f.root)).filter((name) => name.startsWith("managed-desktop-")),
++    ).toEqual([]);
++  });
++  it("preserves an already valid custom-build signature", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    expect(p.isPrepared(token)).toBe(true);
++    expect(f.calls.filter(([command]) => command === "/usr/bin/codesign")).toEqual([
++      ["/usr/bin/codesign", ["--verify", "--deep", "--strict", expect.any(String)]],
++    ]);
++    await p.cancel(token);
++  });
++  it("cleans on cancellation and TTL expiry", async () => {
++    const f = await fixture();
++    const p = f.make();
++    const controller = new AbortController();
++    const token = await p.prepare(f.descriptor, { signal: controller.signal });
++    controller.abort();
++    await expect.poll(() => p.isPrepared(token)).toBe(false);
++    const expired = await p.prepare(f.descriptor, { ttlMs: 1 });
++    await expect.poll(() => p.isPrepared(expired)).toBe(false);
++    await expect
++      .poll(async () => await fs.readdir(path.dirname(f.installed)))
++      .toEqual(["Product.app"]);
++    const aborted = new AbortController();
++    aborted.abort();
++    await expect(p.prepare(f.descriptor, { signal: aborted.signal })).rejects.toThrow("cancelled");
++  });
++});
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..04239913b7f5e5e92fd485d6a6b39b8431730ffe
+--- /dev/null
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+@@ -0,0 +1,462 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Native preparation adapter needs no-follow file handles, process tools, and owned token expiry outside Effect.
++import { constants } from "node:fs";
++import * as fs from "node:fs/promises";
++import path from "node:path";
++import os from "node:os";
++import { createHash, randomUUID } from "node:crypto";
++import { execFile } from "node:child_process";
++import { crc32, inflateRawSync } from "node:zlib";
++import {
++  ManagedDesktopArtifactDescriptor,
++  managedDesktopArtifactStorageSegments,
++} from "@t3tools/contracts";
++import * as Schema from "effect/Schema";
++import type { ManagedDesktopPresentationIdentity } from "../app/DesktopEnvironment.ts";
++
++export interface ManagedDesktopArtifactEnvironment {
++  readonly baseDir: string;
++  readonly resourcesPath: string;
++  readonly isPackaged: boolean;
++  readonly platform: string;
++  readonly managedPresentationIdentity: ManagedDesktopPresentationIdentity;
++}
++export interface ManagedDesktopArtifactSeams {
++  readonly fs: typeof fs;
++  readonly run: (
++    command: string,
++    args: readonly string[],
++    options?: { readonly input?: Buffer; readonly signal?: AbortSignal },
++  ) => Promise<string>;
++  readonly temporaryDirectory: string;
++}
++const defaults: ManagedDesktopArtifactSeams = {
++  fs,
++  run: (command, args, options) =>
++    new Promise((resolve, reject) => {
++      let failure: Error | null = null;
++      let output = "";
++      const child = execFile(command, [...args], { signal: options?.signal }, (error, stdout) => {
++        failure = error;
++        output = stdout;
++      });
++      // An abort callback can precede exit; cleanup must await the actual close.
++      child.once("close", () => {
++        if (failure) reject(failure);
++        else resolve(output);
++      });
++      child.stdin?.on("error", () => {});
++      child.stdin?.end(options?.input);
++    }),
++  temporaryDirectory: os.tmpdir(),
++};
++declare const preparedBrand: unique symbol;
++/** Only this preparer's WeakMap can authenticate a token. No filesystem paths are exposed. */
++export interface PreparedManagedDesktopArtifact {
++  readonly [preparedBrand]: true;
++}
++const fail = (message: string): never => {
++  throw new Error(`Managed desktop artifact: ${message}`);
++};
++const inside = (root: string, target: string) =>
++  target === root || target.startsWith(root + path.sep);
++
++/** Preflight before invoking an extractor: reject ZIP ambiguity, traversal and symlink writes. */
++function checkZip(zip: Buffer): void {
++  if (zip.length < 22) fail("invalid ZIP directory");
++  let end = zip.length - 22;
++  while (end >= Math.max(0, zip.length - 65557) && zip.readUInt32LE(end) !== 0x06054b50) end--;
++  if (end < Math.max(0, zip.length - 65557)) fail("invalid ZIP directory");
++  if (
++    end + 22 + zip.readUInt16LE(end + 20) !== zip.length ||
++    zip.readUInt16LE(end + 4) !== 0 ||
++    zip.readUInt16LE(end + 6) !== 0
++  )
++    fail("unsupported ZIP");
++  const count = zip.readUInt16LE(end + 10);
++  let cursor = zip.readUInt32LE(end + 16);
++  if (
++    count === 0 ||
++    count === 65535 ||
++    zip.readUInt16LE(end + 8) !== count ||
++    cursor + zip.readUInt32LE(end + 12) !== end
++  )
++    fail("unsupported ZIP directory");
++  const checkExtras = (start: number, length: number) => {
++    const limit = start + length;
++    for (let position = start; position < limit;) {
++      if (position + 4 > limit) fail("invalid ZIP extra field");
++      const tag = zip.readUInt16LE(position);
++      const size = zip.readUInt16LE(position + 2);
++      // Only timestamp/UID metadata; path overrides, ASi symlinks and ZIP64 are rejected.
++      if (![0x5455, 0x7875, 0x7855, 0x5855, 0x000a].includes(tag) || position + 4 + size > limit)
++        fail("unsupported ZIP extra field");
++      position += 4 + size;
++    }
++  };
++  const names = new Set<string>();
++  const links = new Set<string>();
++  let expanded = 0;
++  let localEnd = 0;
++  for (let i = 0; i < count; i++) {
++    if (cursor + 46 > end || zip.readUInt32LE(cursor) !== 0x02014b50) fail("invalid ZIP entry");
++    const flags = zip.readUInt16LE(cursor + 8);
++    const method = zip.readUInt16LE(cursor + 10);
++    const compressed = zip.readUInt32LE(cursor + 20);
++    const size = zip.readUInt32LE(cursor + 24);
++    const length = zip.readUInt16LE(cursor + 28);
++    const next =
++      cursor + 46 + length + zip.readUInt16LE(cursor + 30) + zip.readUInt16LE(cursor + 32);
++    if (
++      next > end ||
++      (flags & ~0x800) !== 0 ||
++      ![0, 8].includes(method) ||
++      size === 0xffffffff ||
++      compressed === 0xffffffff ||
++      zip.readUInt16LE(cursor + 34) !== 0
++    )
++      fail("unsupported ZIP entry");
++    const rawName = zip.subarray(cursor + 46, cursor + 46 + length);
++    const name = rawName.toString("utf8");
++    if (!Buffer.from(name).equals(rawName)) fail("invalid ZIP filename encoding");
++    const clean = name.endsWith("/") ? name.slice(0, -1) : name;
++    if (
++      !clean ||
++      name.includes("\\") ||
++      name.includes(":") ||
++      name.includes("\0") ||
++      clean.split("/").some((part) => !part || part === "." || part === "..") ||
++      names.has(clean.normalize("NFD").toLowerCase())
++    )
++      fail("unsafe ZIP path");
++    names.add(clean.normalize("NFD").toLowerCase());
++    checkExtras(cursor + 46 + length, zip.readUInt16LE(cursor + 30));
++    const local = zip.readUInt32LE(cursor + 42);
++    if (
++      local !== localEnd ||
++      local + 30 > zip.readUInt32LE(end + 16) ||
++      zip.readUInt32LE(local) !== 0x04034b50 ||
++      zip.readUInt16LE(local + 6) !== flags ||
++      zip.readUInt16LE(local + 8) !== method ||
++      zip.readUInt32LE(local + 14) !== zip.readUInt32LE(cursor + 16) ||
++      zip.readUInt32LE(local + 18) !== compressed ||
++      zip.readUInt32LE(local + 22) !== size
++    )
++      fail("ZIP header mismatch");
++    const localLength = zip.readUInt16LE(local + 26);
++    const data = local + 30 + localLength + zip.readUInt16LE(local + 28);
++    if (
++      !zip.subarray(local + 30, local + 30 + localLength).equals(rawName) ||
++      data + compressed > zip.readUInt32LE(end + 16)
++    )
++      fail("ZIP header mismatch");
++    checkExtras(local + 30 + localLength, zip.readUInt16LE(local + 28));
++    localEnd = data + compressed;
++    const mode = zip.readUInt32LE(cursor + 38) >>> 16;
++    const kind = mode & 0o170000;
++    if (![0, 0o100000, 0o040000, 0o120000].includes(kind)) fail("special ZIP entry");
++    if (kind === 0o120000 && size > 4096) fail("oversized symlink");
++    // Bound actual output, rather than relying on the untrusted directory sizes.
++    const remaining = Math.min(512 * 1024 ** 2, 4 * 1024 ** 3 - expanded);
++    if (size > remaining || remaining <= 0) fail("ZIP expansion limit");
++    const packed = zip.subarray(data, data + compressed);
++    const contents =
++      method === 0
++        ? packed
++        : inflateRawSync(packed, {
++            maxOutputLength: Math.max(1, Math.min(size + 1, remaining)),
++          });
++    if (contents.length !== size || crc32(contents) !== zip.readUInt32LE(cursor + 16))
++      fail("ZIP payload size/CRC mismatch");
++    expanded += contents.length;
++    if (kind === 0o120000) {
++      const target = contents.toString("utf8");
++      if (!Buffer.from(target).equals(contents)) fail("invalid symlink encoding");
++      if (
++        !target ||
++        target.includes("\0") ||
++        target.includes("\\") ||
++        path.isAbsolute(target) ||
++        !inside("/tree", path.resolve("/tree", path.dirname(clean), target))
++      )
++        fail("ZIP symlink escape");
++      links.add(clean.normalize("NFD").toLowerCase());
++    }
++    cursor = next;
++  }
++  if (cursor !== end || localEnd !== zip.readUInt32LE(end + 16)) fail("ZIP directory mismatch");
++  for (const name of names) {
++    for (let slash = name.indexOf("/"); slash !== -1; slash = name.indexOf("/", slash + 1))
++      if (links.has(name.slice(0, slash))) fail("ZIP writes through symlink");
++  }
++}
++
++export function createManagedDesktopArtifactPreparer(
++  environment: ManagedDesktopArtifactEnvironment,
++  seams: ManagedDesktopArtifactSeams = defaults,
++) {
++  const io = seams.fs;
++  const env = {
++    ...environment,
++    managedPresentationIdentity: Object.freeze({
++      ...environment.managedPresentationIdentity,
++      urlSchemes: Object.freeze([...environment.managedPresentationIdentity.urlSchemes]),
++    }),
++  };
++  const identity = env.managedPresentationIdentity;
++  const tokens = new WeakMap<
++    PreparedManagedDesktopArtifact,
++    {
++      descriptor: ManagedDesktopArtifactDescriptor;
++      installedBundle: string;
++      stagedBundle: string;
++      cleanup: () => Promise<void>;
++    }
++  >();
++  async function tree(root: string): Promise<void> {
++    const walk = async (entry: string): Promise<void> => {
++      const stat = await io.lstat(entry);
++      if (!inside(root, await io.realpath(entry))) fail("extracted symlink escape");
++      if (path.basename(entry).toLowerCase() === "app-update.yml")
++        fail("managed bundle contains app-update.yml");
++      if (stat.isSymbolicLink()) return;
++      if (stat.isDirectory()) {
++        for (const name of await io.readdir(entry)) await walk(path.join(entry, name));
++      } else if (!stat.isFile() || stat.nlink !== 1) fail("nonregular bundle entry");
++    };
++    if (!(await io.lstat(root)).isDirectory()) fail("bundle is not a directory");
++    await walk(root);
++  }
++  async function verify(
++    bundle: string,
++    descriptor: ManagedDesktopArtifactDescriptor,
++    run: ManagedDesktopArtifactSeams["run"],
++  ): Promise<void> {
++    await tree(bundle);
++    const plist = JSON.parse(
++      await run("/usr/bin/plutil", [
++        "-convert",
++        "json",
++        "-o",
++        "-",
++        path.join(bundle, "Contents/Info.plist"),
++      ]),
++    ) as Record<string, unknown>;
++    if (
++      plist.CFBundleIdentifier !== identity.bundleId ||
++      plist.CFBundleName !== identity.productName ||
++      (plist.CFBundleDisplayName !== undefined &&
++        plist.CFBundleDisplayName !== identity.productName) ||
++      plist.CFBundleShortVersionString !== descriptor.targetVersion ||
++      plist.CFBundleVersion !== descriptor.targetVersion
++    )
++      fail("bundle identity/version mismatch");
++    const types = plist.CFBundleURLTypes;
++    if (!Array.isArray(types)) fail("URL schemes mismatch");
++    const schemes: unknown[] = (types as Array<{ CFBundleURLSchemes?: unknown }>).flatMap(
++      (value) => (Array.isArray(value?.CFBundleURLSchemes) ? value.CFBundleURLSchemes : [null]),
++    );
++    if (JSON.stringify([...schemes].sort()) !== JSON.stringify([...identity.urlSchemes].sort()))
++      fail("URL schemes mismatch");
++    const executable = plist.CFBundleExecutable;
++    if (
++      typeof executable !== "string" ||
++      !executable ||
++      path.basename(executable) !== executable ||
++      executable === "." ||
++      executable === ".."
++    )
++      fail("invalid executable name");
++    const binary = path.join(bundle, "Contents/MacOS", executable as string);
++    const executableStat = await io.stat(binary);
++    if (
++      !executableStat.isFile() ||
++      (executableStat.mode & 0o111) === 0 ||
++      !(await run("/usr/bin/lipo", ["-archs", binary])).trim().split(/\s+/).includes("arm64")
++    )
++      fail("main executable is not arm64");
++    const asar = await io.stat(path.join(bundle, "Contents/Resources/app.asar"));
++    if (!asar.isFile() || asar.size === 0) fail("missing or empty app.asar");
++  }
++  return {
++    async prepare(
++      input: ManagedDesktopArtifactDescriptor,
++      options: { signal?: AbortSignal; ttlMs?: number } = {},
++    ): Promise<PreparedManagedDesktopArtifact> {
++      const descriptor = Object.freeze(
++        Schema.decodeUnknownSync(ManagedDesktopArtifactDescriptor)(input),
++      );
++      if (
++        !env.isPackaged ||
++        env.platform !== "darwin" ||
++        descriptor.presentationVariant !== identity.presentationVariant ||
++        path.basename(identity.productName) !== identity.productName
++      )
++        fail("unsupported managed environment");
++      const suffix = path.join(`${identity.productName}.app`, "Contents", "Resources");
++      if (
++        !path.isAbsolute(env.resourcesPath) ||
++        !env.resourcesPath.endsWith(path.sep + suffix) ||
++        path.normalize(env.resourcesPath) !== env.resourcesPath
++      )
++        fail("invalid packaged resources suffix");
++      const installedBundle = env.resourcesPath.slice(0, -"/Contents/Resources".length);
++      if (
++        (await io.realpath(installedBundle)) !== installedBundle ||
++        (await io.realpath(env.resourcesPath)) !== env.resourcesPath
++      )
++        fail("installed bundle symlink");
++      const parent = path.dirname(installedBundle);
++      const owned: Array<{ entry: string; dev: number; ino: number; real: string }> = [];
++      const own = async (entry: string) => {
++        const stat = await io.lstat(entry);
++        if (!stat.isDirectory() || stat.isSymbolicLink()) fail("staging directory substituted");
++        owned.push({ entry, dev: stat.dev, ino: stat.ino, real: await io.realpath(entry) });
++      };
++      let timer: ReturnType<typeof setTimeout> | undefined;
++      let token: PreparedManagedDesktopArtifact | undefined;
++      const cleanup = async () => {
++        if (timer) clearTimeout(timer);
++        options.signal?.removeEventListener("abort", onAbort);
++        if (token) tokens.delete(token);
++        for (const owner of owned.splice(0)) {
++          try {
++            const stat = await io.lstat(owner.entry);
++            if (
++              stat.isDirectory() &&
++              !stat.isSymbolicLink() &&
++              stat.dev === owner.dev &&
++              stat.ino === owner.ino &&
++              (await io.realpath(owner.entry)) === owner.real
++            )
++              await io.rm(owner.entry, { recursive: true, force: true });
++          } catch (error) {
++            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
++          }
++        }
++      };
++      const onAbort = () => {
++        void cleanup().catch(() => {});
++      };
++      const cancelled = () => {
++        if (options.signal?.aborted) fail("preparation cancelled");
++      };
++      const run: ManagedDesktopArtifactSeams["run"] = async (command, args, processOptions) => {
++        cancelled();
++        const result = await seams.run(command, args, {
++          ...processOptions,
++          ...(options.signal ? { signal: options.signal } : {}),
++        });
++        cancelled();
++        return result;
++      };
++      try {
++        cancelled();
++        const createdRoot = await io.mkdtemp(
++          path.join(seams.temporaryDirectory, "managed-desktop-"),
++        );
++        await own(createdRoot);
++        cancelled();
++        const root = await io.realpath(createdRoot);
++        cancelled();
++        await io.chmod(root, 0o700);
++        const archive = path.join(
++          env.baseDir,
++          ...managedDesktopArtifactStorageSegments(descriptor),
++        );
++        if ((await io.realpath(archive)) !== archive) fail("archive symlink path");
++        cancelled();
++        const chunks: Buffer[] = [];
++        const source = await io.open(
++          archive,
++          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
++        );
++        try {
++          const before = await source.stat();
++          if (!before.isFile() || before.nlink !== 1 || before.size !== descriptor.bytes)
++            fail("archive size/type mismatch");
++          {
++            const hash = createHash("sha256");
++            const buffer = Buffer.alloc(64 * 1024);
++            let bytes = 0;
++            while (true) {
++              cancelled();
++              const read = await source.read(buffer, 0, buffer.length, null);
++              if (!read.bytesRead) break;
++              bytes += read.bytesRead;
++              if (bytes > descriptor.bytes) fail("archive size mismatch");
++              hash.update(buffer.subarray(0, read.bytesRead));
++              chunks.push(Buffer.from(buffer.subarray(0, read.bytesRead)));
++            }
++            const after = await source.stat();
++            const current = await io.lstat(archive);
++            if (
++              bytes !== descriptor.bytes ||
++              hash.digest("hex") !== descriptor.sha256 ||
++              !current.isFile() ||
++              current.nlink !== 1 ||
++              after.nlink !== 1 ||
++              before.ino !== current.ino ||
++              before.dev !== current.dev ||
++              after.size !== before.size ||
++              after.mtimeMs !== before.mtimeMs ||
++              after.ctimeMs !== before.ctimeMs
++            )
++              fail("archive substituted or digest mismatch");
++          }
++        } finally {
++          await source.close();
++        }
++        const copy = Buffer.concat(chunks);
++        chunks.length = 0;
++        cancelled();
++        checkZip(copy);
++        const extracted = path.join(root, "extracted");
++        cancelled();
++        await io.mkdir(extracted, { mode: 0o700 });
++        await run("/usr/bin/ditto", ["-x", "-k", "-", extracted], { input: copy });
++        cancelled();
++        const entries = await io.readdir(extracted);
++        if (entries.length !== 1 || entries[0] !== `${identity.productName}.app`)
++          fail("expected exactly one product app");
++        const bundle = path.join(extracted, entries[0]!);
++        await verify(bundle, descriptor, run);
++        await io.access(parent, constants.W_OK);
++        cancelled();
++        // The staged app itself is a hidden direct sibling, on the installed volume.
++        const stagedBundle = path.join(
++          parent,
++          `.${identity.productName}.managed-${randomUUID()}.app`,
++        );
++        await io.mkdir(stagedBundle, { mode: 0o700 });
++        await own(stagedBundle);
++        await run("/usr/bin/ditto", [bundle, stagedBundle]);
++        await verify(stagedBundle, descriptor, run);
++        // Custom builds may arrive ad-hoc signed, but their original signature
++        // must verify. Re-signing here would accept a broken artifact seal.
++        await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", stagedBundle]);
++        await verify(stagedBundle, descriptor, run);
++        cancelled();
++        const ttl = options.ttlMs ?? 15 * 60 * 1000;
++        if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > 2 ** 31 - 1)
++          fail("invalid preparation TTL");
++        token = Object.freeze({}) as PreparedManagedDesktopArtifact;
++        tokens.set(token, { descriptor, installedBundle, stagedBundle, cleanup });
++        options.signal?.addEventListener("abort", onAbort, { once: true });
++        timer = setTimeout(() => {
++          void cleanup().catch(() => {});
++        }, ttl);
++        timer.unref();
++        return token;
++      } catch (error) {
++        await cleanup();
++        throw error;
++      }
++    },
++    isPrepared(token: PreparedManagedDesktopArtifact): boolean {
++      return tokens.has(token);
++    },
++    async cancel(token: PreparedManagedDesktopArtifact): Promise<void> {
++      await tokens.get(token)?.cleanup();
++    },
++  };
++}

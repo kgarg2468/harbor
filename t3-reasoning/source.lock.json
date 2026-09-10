@@ -169,6 +169,41 @@
       "sha256": "53173265c37322ab9d40c23d18602928ec3d20a86738e067dcb473a62580aa68"
     },
     {
+      "id": "content-bound-desktop-telemetry",
+      "path": "patches/0036-content-bound-desktop-telemetry.patch",
+      "sha256": "666e90213ad4080a701eb0fd60f0db8373e468bb7e01d2e2b0a9102ad6fc6f23"
+    },
+    {
+      "id": "managed-desktop-update-orchestration",
+      "path": "patches/0037-managed-desktop-update-orchestration.patch",
+      "sha256": "75028a6aaa6ece4f31ca96baf9ef2510c77649ef6a4a2c0b4b89ec9eb1d1bbfc"
+    },
+    {
+      "id": "managed-desktop-artifact-preparation",
+      "path": "patches/0038-managed-desktop-artifact-preparation.patch",
+      "sha256": "f39b1451c5e80d1d3c6b75a1bae13bc725999f848b834b99cae58fc0ddd85354"
+    },
+    {
+      "id": "desktop-update-report-ack",
+      "path": "patches/0039-desktop-update-report-ack.patch",
+      "sha256": "a1a5d14592da020c2fab05f4c9118f53aaa7940ee140ae8af536a7ed96952b59"
+    },
+    {
+      "id": "managed-desktop-installer",
+      "path": "patches/0040-managed-desktop-installer.patch",
+      "sha256": "4ed16a0f29f7f806e123f3a966bfbec1fa7b568da60e0a8d0c3796c12ae2833b"
+    },
+    {
+      "id": "managed-desktop-routing",
+      "path": "patches/0041-managed-desktop-routing.patch",
+      "sha256": "668fd928d14b9ee1bf788d70a5fd2f8067c70f8e9fd496c16482254607fda832"
+    },
+    {
+      "id": "managed-desktop-scheduler",
+      "path": "patches/0042-managed-desktop-scheduler.patch",
+      "sha256": "4258c59d80c8a278cc7892576f2f1a0585fc1a9efb2f87b3712e39d755c10537"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "c1c963771f0548710e339a76ce67fff34d4fb1a5a86e297b1dbf192b7b9f8f13"
@@ -207,7 +242,14 @@
       "desktop-update-lifecycle",
       "desktop-ssh-ownership",
       "managed-desktop-artifact-stager",
-      "managed-desktop-artifact-capability"
+      "managed-desktop-artifact-capability",
+      "content-bound-desktop-telemetry",
+      "managed-desktop-update-orchestration",
+      "managed-desktop-artifact-preparation",
+      "desktop-update-report-ack",
+      "managed-desktop-installer",
+      "managed-desktop-routing",
+      "managed-desktop-scheduler"
     ],
     "reasoning": [
       "reasoning-full",
@@ -242,6 +284,13 @@
       "desktop-ssh-ownership",
       "managed-desktop-artifact-stager",
       "managed-desktop-artifact-capability",
+      "content-bound-desktop-telemetry",
+      "managed-desktop-update-orchestration",
+      "managed-desktop-artifact-preparation",
+      "desktop-update-report-ack",
+      "managed-desktop-installer",
+      "managed-desktop-routing",
+      "managed-desktop-scheduler",
       "reasoning-identity"
     ]
   }
