@@ -1,6 +1,6 @@
 diff --git a/apps/desktop/scripts/build-desktop-artifact-helper.mjs b/apps/desktop/scripts/build-desktop-artifact-helper.mjs
 new file mode 100644
-index 00000000..fd037b0e
+index 0000000000000000000000000000000000000000..fd037b0ee48e4e7c2959070d4e2fc6a766d1f680
 --- /dev/null
 +++ b/apps/desktop/scripts/build-desktop-artifact-helper.mjs
 @@ -0,0 +1,79 @@
@@ -85,7 +85,7 @@ index 00000000..fd037b0e
 +}
 diff --git a/apps/desktop/scripts/build-desktop-artifact-helper.test.mjs b/apps/desktop/scripts/build-desktop-artifact-helper.test.mjs
 new file mode 100644
-index 00000000..8bc7c22f
+index 0000000000000000000000000000000000000000..8bc7c22fe47d0d598a6c172b8903d522fcf2caf6
 --- /dev/null
 +++ b/apps/desktop/scripts/build-desktop-artifact-helper.test.mjs
 @@ -0,0 +1,116 @@
@@ -207,7 +207,7 @@ index 00000000..8bc7c22f
 +);
 diff --git a/apps/server/src/cloud/managedDesktopArtifact.test.ts b/apps/server/src/cloud/managedDesktopArtifact.test.ts
 new file mode 100644
-index 00000000..abcd3211
+index 0000000000000000000000000000000000000000..abcd3211f79084d9c88069f22ce5790353c21234
 --- /dev/null
 +++ b/apps/server/src/cloud/managedDesktopArtifact.test.ts
 @@ -0,0 +1,326 @@
@@ -539,7 +539,7 @@ index 00000000..abcd3211
 +);
 diff --git a/apps/server/src/cloud/managedDesktopArtifact.ts b/apps/server/src/cloud/managedDesktopArtifact.ts
 new file mode 100644
-index 00000000..ca43623a
+index 0000000000000000000000000000000000000000..ca43623a58cec3e09a9683b563438bcd909f1b38
 --- /dev/null
 +++ b/apps/server/src/cloud/managedDesktopArtifact.ts
 @@ -0,0 +1,209 @@
@@ -754,7 +754,7 @@ index 00000000..ca43623a
 +);
 diff --git a/native/desktop-artifact/main.c b/native/desktop-artifact/main.c
 new file mode 100644
-index 00000000..11f4d697
+index 0000000000000000000000000000000000000000..11f4d6973c7544f6c021b94e5b8e61766648b0cf
 --- /dev/null
 +++ b/native/desktop-artifact/main.c
 @@ -0,0 +1,338 @@
@@ -1098,7 +1098,7 @@ index 00000000..11f4d697
 +#endif
 diff --git a/native/desktop-artifact/test.c b/native/desktop-artifact/test.c
 new file mode 100644
-index 00000000..b6895244
+index 0000000000000000000000000000000000000000..b68952442068af79adcfa5b61552a2c861e2bbc4
 --- /dev/null
 +++ b/native/desktop-artifact/test.c
 @@ -0,0 +1,308 @@
@@ -1411,7 +1411,7 @@ index 00000000..b6895244
 +  puts("native desktop artifact tests passed (13 groups)"); return 0;
 +}
 diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
-index 0c191e5b..79f8017a 100644
+index 0c191e5bdc5e1c0e30c5f71a8d9154db749265df..79f8017a723f263897193b742450b141b3ace049 100644
 --- a/packages/contracts/src/index.ts
 +++ b/packages/contracts/src/index.ts
 @@ -40,3 +40,4 @@ export * from "./resourceTelemetry.ts";
@@ -1421,7 +1421,7 @@ index 0c191e5b..79f8017a 100644
 +export * from "./managedDesktopUpdate.ts";
 diff --git a/packages/contracts/src/managedDesktopUpdate.test.ts b/packages/contracts/src/managedDesktopUpdate.test.ts
 new file mode 100644
-index 00000000..46f56f86
+index 0000000000000000000000000000000000000000..46f56f869e8c451c84cd8a2c079286009c2694f3
 --- /dev/null
 +++ b/packages/contracts/src/managedDesktopUpdate.test.ts
 @@ -0,0 +1,73 @@
@@ -1500,7 +1500,7 @@ index 00000000..46f56f86
 +});
 diff --git a/packages/contracts/src/managedDesktopUpdate.ts b/packages/contracts/src/managedDesktopUpdate.ts
 new file mode 100644
-index 00000000..0acf4dd9
+index 0000000000000000000000000000000000000000..0acf4dd91bd99e54af630f6384c2c028df6a4b5a
 --- /dev/null
 +++ b/packages/contracts/src/managedDesktopUpdate.ts
 @@ -0,0 +1,64 @@
@@ -1569,18 +1569,18 @@ index 00000000..0acf4dd9
 +  ];
 +}
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index 9c763407..ce7f0607 100644
+index 5a8cb5084939fa0e577e0aa2185b50b1366f0565..2253f94c920c5d6693df72f4ad7cdc6047b743de 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -24,6 +24,7 @@ import {
-   DESKTOP_ELECTRON_LANGUAGES,
+@@ -27,6 +27,7 @@ import {
    DESKTOP_FILE_EXCLUSIONS,
    DESKTOP_EXTRA_RESOURCES,
+   LINUX_CAPTURE_EXTRA_RESOURCES,
 +  MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES,
    LINUX_BROWSER_SECRET_EXTRA_RESOURCES,
    MAC_FILE_EXCLUSIONS,
    InvalidMacPasskeyRpDomainError,
-@@ -69,6 +70,7 @@ import {
+@@ -73,6 +74,7 @@ import {
    copyDirectoryPreservingSymlinks,
    LinuxBrowserSecretHostError,
    stageBrowserSecret,
@@ -1588,8 +1588,8 @@ index 9c763407..ce7f0607 100644
    validateWindowsPackagedPayload,
    WindowsPrimaryNativeProbeError,
    WindowsDesktopBuildPrerequisitesMissingError,
-@@ -715,6 +717,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
- 
+@@ -719,6 +721,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+
      assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
        "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
 +      "!apps/desktop/resources/desktop-artifact",
@@ -1599,7 +1599,7 @@ index 9c763407..ce7f0607 100644
        "!apps/desktop/resources/browser-secret",
        "!apps/desktop/resources/browser-secret/**/*",
        "!apps/desktop/prod-resources/browser-secret",
-@@ -2407,3 +2413,72 @@ it("ignores trailing separators", () => {
+@@ -2511,3 +2517,72 @@ it("ignores trailing separators", () => {
      ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
    );
  });
@@ -1673,10 +1673,10 @@ index 9c763407..ce7f0607 100644
 +  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, spawner)));
 +});
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index cfa6bfdf..a0d94205 100644
+index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f939e2f8da8 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -958,6 +958,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
+@@ -959,6 +959,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
    // so the SDK's optional platform packages (each a ~200MB bundled executable)
    // are dead weight. The trailing dash keeps the SDK's own JS package.
    "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
@@ -1687,8 +1687,8 @@ index cfa6bfdf..a0d94205 100644
    "!apps/desktop/resources/browser-secret",
    "!apps/desktop/resources/browser-secret/**/*",
    "!apps/desktop/prod-resources/browser-secret",
-@@ -1092,6 +1096,9 @@ export const DESKTOP_EXTRA_RESOURCES = [
-     to: "resource-monitor",
+@@ -1110,6 +1114,9 @@ export const LINUX_CAPTURE_EXTRA_RESOURCES = [
+     filter: gnomeCaptureBundle.files,
    },
  ] as const;
 +export const MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES = [
@@ -1697,10 +1697,10 @@ index cfa6bfdf..a0d94205 100644
  export const LINUX_BROWSER_SECRET_EXTRA_RESOURCES = [
    { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
  ] as const;
-@@ -2221,6 +2228,39 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function*
+@@ -2305,6 +2312,39 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function*
    }
  });
- 
+
 +export const stageDesktopArtifactHelper = Effect.fn("stageDesktopArtifactHelper")(
 +  function* (input: {
 +    readonly repoRoot: string;
@@ -1737,20 +1737,20 @@ index cfa6bfdf..a0d94205 100644
  export const stageBrowserSecret = Effect.fn("stageBrowserSecret")(function* (input: {
    readonly repoRoot: string;
    readonly stageResourcesDir: string;
-@@ -2623,6 +2663,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
-     // hand-packed server.asar sidecar (see WINDOWS_SERVER_ASAR_RESOURCE).
+@@ -2710,6 +2750,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      extraResources: [
        ...DESKTOP_EXTRA_RESOURCES,
+       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
 +      ...(platform === "mac" && arch === "arm64" && isManagedDesktopVersion(version)
 +        ? MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES
 +        : []),
        ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
        ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
        ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
-@@ -3603,6 +3646,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
-     arch: options.arch,
-     verbose: options.verbose,
-   });
+@@ -3713,6 +3756,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+         verbose: options.verbose,
+       });
+   }
 +  yield* stageDesktopArtifactHelper({
 +    repoRoot,
 +    stageResourcesDir,

@@ -1,128 +1,6 @@
-diff --git a/apps/server/src/updateAdmission.ts b/apps/server/src/updateAdmission.ts
-new file mode 100644
-index 000000000..0995e87c8
---- /dev/null
-+++ b/apps/server/src/updateAdmission.ts
-@@ -0,0 +1,116 @@
-+import * as Context from "effect/Context";
-+import * as Deferred from "effect/Deferred";
-+import * as Effect from "effect/Effect";
-+import * as Layer from "effect/Layer";
-+import * as Schema from "effect/Schema";
-+import * as Semaphore from "effect/Semaphore";
-+
-+/**
-+ * Raised for a client command that arrives while the server is closed for
-+ * maintenance (self-update). Retryable: the gate reopens once maintenance ends.
-+ */
-+export class UpdateAdmissionClosedError extends Schema.TaggedErrorClass<UpdateAdmissionClosedError>()(
-+  "UpdateAdmissionClosedError",
-+  {},
-+) {
-+  readonly retryable = true;
-+
-+  override get message(): string {
-+    return "Server is closed for maintenance; retry the command shortly";
-+  }
-+}
-+
-+export interface UpdateAdmissionState {
-+  readonly phase: "open" | "maintenance";
-+  readonly inFlight: number;
-+}
-+
-+export interface UpdateAdmissionShape {
-+  /**
-+   * Counts `effect` as an in-flight client command for its whole lifetime.
-+   * Fails with `UpdateAdmissionClosedError` if maintenance has begun closing.
-+   */
-+  readonly withAdmission: <A, E, R>(
-+    effect: Effect.Effect<A, E, R>,
-+  ) => Effect.Effect<A, E | UpdateAdmissionClosedError, R>;
-+  /**
-+   * Closes admissions, waits for every already-admitted command to finish,
-+   * then runs `callback` with the gate still closed. Reopens on every exit.
-+   */
-+  readonly withMaintenance: <A, E, R>(callback: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-+  readonly state: Effect.Effect<UpdateAdmissionState>;
-+}
-+
-+export class UpdateAdmission extends Context.Service<UpdateAdmission, UpdateAdmissionShape>()(
-+  "t3/updateAdmission",
-+) {}
-+
-+export const make = Effect.fn("updateAdmission.make")(function* () {
-+  const ownership = yield* Semaphore.make(1);
-+  // Mutated only inside synchronous blocks, so a fiber can never observe a
-+  // half-applied transition between the gate flag and the counter.
-+  let closed = false;
-+  let inFlight = 0;
-+  let drained: Deferred.Deferred<void> | undefined;
-+
-+  const release = Effect.sync(() => {
-+    inFlight -= 1;
-+    if (inFlight === 0 && drained !== undefined) {
-+      Deferred.doneUnsafe(drained, Effect.void);
-+    }
-+  });
-+
-+  const withAdmission: UpdateAdmissionShape["withAdmission"] = <A, E, R>(
-+    effect: Effect.Effect<A, E, R>,
-+  ) =>
-+    Effect.uninterruptibleMask((restore) =>
-+      Effect.suspend((): Effect.Effect<A, E | UpdateAdmissionClosedError, R> => {
-+        if (closed) {
-+          return Effect.fail(new UpdateAdmissionClosedError());
-+        }
-+        inFlight += 1;
-+        return restore(effect).pipe(Effect.ensuring(release));
-+      }),
-+    );
-+
-+  // Closing and registering the drain waiter happen in one synchronous step,
-+  // so the last command's release cannot slip between them.
-+  const closeAndAwaitDrain = Effect.suspend(() => {
-+    closed = true;
-+    if (inFlight === 0) {
-+      return Effect.void;
-+    }
-+    const waiter = Deferred.makeUnsafe<void>();
-+    drained = waiter;
-+    return Deferred.await(waiter);
-+  });
-+
-+  const reopen = Effect.sync(() => {
-+    closed = false;
-+    drained = undefined;
-+  });
-+
-+  const withMaintenance: UpdateAdmissionShape["withMaintenance"] = (callback) =>
-+    ownership.withPermits(1)(
-+      Effect.uninterruptibleMask((restore) =>
-+        restore(closeAndAwaitDrain).pipe(
-+          Effect.andThen(restore(callback)),
-+          Effect.ensuring(reopen),
-+        ),
-+      ),
-+    );
-+
-+  const state = Effect.sync((): UpdateAdmissionState => ({
-+    phase: closed ? "maintenance" : "open",
-+    inFlight,
-+  }));
-+
-+  // A maintenance waiting for the drain must not outlive the owning scope.
-+  yield* Effect.addFinalizer(() =>
-+    Effect.suspend(() => (drained === undefined ? Effect.void : Deferred.interrupt(drained))),
-+  );
-+
-+  return UpdateAdmission.of({ withAdmission, withMaintenance, state });
-+});
-+
-+export const layer = Layer.effect(UpdateAdmission, make());
 diff --git a/apps/server/src/updateAdmission.test.ts b/apps/server/src/updateAdmission.test.ts
 new file mode 100644
-index 000000000..1d92716f7
+index 0000000000000000000000000000000000000000..1d92716f792395377797c2d6df37226e5df945ab
 --- /dev/null
 +++ b/apps/server/src/updateAdmission.test.ts
 @@ -0,0 +1,212 @@
@@ -338,3 +216,125 @@ index 000000000..1d92716f7
 +    }),
 +  );
 +});
+diff --git a/apps/server/src/updateAdmission.ts b/apps/server/src/updateAdmission.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0392e947be85218b1434b9bc5c2bba7e34cd57a7
+--- /dev/null
++++ b/apps/server/src/updateAdmission.ts
+@@ -0,0 +1,116 @@
++import * as Context from "effect/Context";
++import * as Deferred from "effect/Deferred";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Schema from "effect/Schema";
++import * as Semaphore from "effect/Semaphore";
++
++/**
++ * Raised for a client command that arrives while the server is closed for
++ * maintenance (self-update). Retryable: the gate reopens once maintenance ends.
++ */
++export class UpdateAdmissionClosedError extends Schema.TaggedError<UpdateAdmissionClosedError>()(
++  "UpdateAdmissionClosedError",
++  {},
++) {
++  readonly retryable = true;
++
++  override get message(): string {
++    return "Server is closed for maintenance; retry the command shortly";
++  }
++}
++
++export interface UpdateAdmissionState {
++  readonly phase: "open" | "maintenance";
++  readonly inFlight: number;
++}
++
++export interface UpdateAdmissionShape {
++  /**
++   * Counts `effect` as an in-flight client command for its whole lifetime.
++   * Fails with `UpdateAdmissionClosedError` if maintenance has begun closing.
++   */
++  readonly withAdmission: <A, E, R>(
++    effect: Effect.Effect<A, E, R>,
++  ) => Effect.Effect<A, E | UpdateAdmissionClosedError, R>;
++  /**
++   * Closes admissions, waits for every already-admitted command to finish,
++   * then runs `callback` with the gate still closed. Reopens on every exit.
++   */
++  readonly withMaintenance: <A, E, R>(callback: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
++  readonly state: Effect.Effect<UpdateAdmissionState>;
++}
++
++export class UpdateAdmission extends Context.Service<UpdateAdmission, UpdateAdmissionShape>()(
++  "t3/updateAdmission",
++) {}
++
++export const make = Effect.fn("updateAdmission.make")(function* () {
++  const ownership = yield* Semaphore.make(1);
++  // Mutated only inside synchronous blocks, so a fiber can never observe a
++  // half-applied transition between the gate flag and the counter.
++  let closed = false;
++  let inFlight = 0;
++  let drained: Deferred.Deferred<void> | undefined;
++
++  const release = Effect.sync(() => {
++    inFlight -= 1;
++    if (inFlight === 0 && drained !== undefined) {
++      Deferred.doneUnsafe(drained, Effect.void);
++    }
++  });
++
++  const withAdmission: UpdateAdmissionShape["withAdmission"] = <A, E, R>(
++    effect: Effect.Effect<A, E, R>,
++  ) =>
++    Effect.uninterruptibleMask((restore) =>
++      Effect.suspend((): Effect.Effect<A, E | UpdateAdmissionClosedError, R> => {
++        if (closed) {
++          return Effect.fail(new UpdateAdmissionClosedError());
++        }
++        inFlight += 1;
++        return restore(effect).pipe(Effect.ensuring(release));
++      }),
++    );
++
++  // Closing and registering the drain waiter happen in one synchronous step,
++  // so the last command's release cannot slip between them.
++  const closeAndAwaitDrain = Effect.suspend(() => {
++    closed = true;
++    if (inFlight === 0) {
++      return Effect.void;
++    }
++    const waiter = Deferred.makeUnsafe<void>();
++    drained = waiter;
++    return Deferred.await(waiter);
++  });
++
++  const reopen = Effect.sync(() => {
++    closed = false;
++    drained = undefined;
++  });
++
++  const withMaintenance: UpdateAdmissionShape["withMaintenance"] = (callback) =>
++    ownership.withPermits(1)(
++      Effect.uninterruptibleMask((restore) =>
++        restore(closeAndAwaitDrain).pipe(
++          Effect.andThen(restore(callback)),
++          Effect.ensuring(reopen),
++        ),
++      ),
++    );
++
++  const state = Effect.sync((): UpdateAdmissionState => ({
++    phase: closed ? "maintenance" : "open",
++    inFlight,
++  }));
++
++  // A maintenance waiting for the drain must not outlive the owning scope.
++  yield* Effect.addFinalizer(() =>
++    Effect.suspend(() => (drained === undefined ? Effect.void : Deferred.interrupt(drained))),
++  );
++
++  return UpdateAdmission.of({ withAdmission, withMaintenance, state });
++});
++
++export const layer = Layer.effect(UpdateAdmission, make());

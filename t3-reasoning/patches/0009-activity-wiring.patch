@@ -1,16 +1,16 @@
 diff --git a/apps/server/integration/OrchestrationEngineHarness.integration.ts b/apps/server/integration/OrchestrationEngineHarness.integration.ts
-index 1c035d5fa..09fea94b2 100644
+index 4d8a384ee9978a7e482f7f083235513504888f98..45ae7568f7b734f81f02459a0bd87d1ae352514d 100644
 --- a/apps/server/integration/OrchestrationEngineHarness.integration.ts
 +++ b/apps/server/integration/OrchestrationEngineHarness.integration.ts
-@@ -88,6 +88,7 @@ import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
+@@ -89,6 +89,7 @@ import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
  import * as VcsProcess from "../src/vcs/VcsProcess.ts";
  import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
  import * as PullRequestService from "../src/pullRequest/PullRequestService.ts";
 +import { UpdateActivityLive } from "../src/updateActivity.ts";
- 
+
  const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
- 
-@@ -418,6 +419,9 @@ export const makeOrchestrationIntegrationHarness = (
+
+@@ -423,6 +424,9 @@ export const makeOrchestrationIntegrationHarness = (
        Layer.provideMerge(runtimeServicesLayer),
        Layer.provideMerge(orchestrationReactorLayer),
        Layer.provideMerge(providerRegistryLayer),
@@ -21,18 +21,18 @@ index 1c035d5fa..09fea94b2 100644
        Layer.provideMerge(RepositoryIdentityResolver.layer),
        Layer.provideMerge(ServerSettingsService.layerTest()),
 diff --git a/apps/server/integration/orphanedProviderSessionStartup.integration.test.ts b/apps/server/integration/orphanedProviderSessionStartup.integration.test.ts
-index 86a00323c..4777cdef1 100644
+index e07681ae153b067c093d158cf273641aecb3dfce..7d55d774344e03984b49c23b4e24808428632fed 100644
 --- a/apps/server/integration/orphanedProviderSessionStartup.integration.test.ts
 +++ b/apps/server/integration/orphanedProviderSessionStartup.integration.test.ts
-@@ -40,6 +40,7 @@ import * as ServerLifecycleEvents from "../src/serverLifecycleEvents.ts";
+@@ -43,6 +43,7 @@ import * as ServerLifecycleEvents from "../src/serverLifecycleEvents.ts";
  import * as ServerRuntimeStartup from "../src/serverRuntimeStartup.ts";
  import * as ServerSettings from "../src/serverSettings.ts";
  import * as AnalyticsService from "../src/telemetry/AnalyticsService.ts";
 +import { UpdateActivityLive } from "../src/updateActivity.ts";
  import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
- 
+
  const providerInstanceId = ProviderInstanceId.make("codex");
-@@ -57,6 +58,7 @@ const makePersistedRuntimeLayer = (dbPath: string) => {
+@@ -60,6 +61,7 @@ const makePersistedRuntimeLayer = (dbPath: string) => {
    const orchestration = OrchestrationLayerLive.pipe(
      Layer.provideMerge(RepositoryIdentityResolver.layer),
      Layer.provideMerge(persistence),
@@ -40,16 +40,16 @@ index 86a00323c..4777cdef1 100644
    );
    const directory = ProviderSessionDirectoryLive.pipe(
      Layer.provide(ProviderSessionRuntime.layer),
-@@ -122,6 +124,7 @@ const startupDependencies = Layer.mergeAll(
+@@ -125,6 +127,7 @@ const startupDependencies = Layer.mergeAll(
      rollbackConversation: () => Effect.die("unused"),
      uploadFeedback: () => Effect.die("unused"),
      streamEvents: Stream.empty,
 +    subscribeUpdateEvents: () => Effect.die("unused"),
    }),
  );
- 
+
 diff --git a/apps/server/integration/providerService.integration.test.ts b/apps/server/integration/providerService.integration.test.ts
-index 0d041b36e..719499407 100644
+index 0d041b36ecb8a01505b13c5f9298b5cafbe36f84..719499407d4a88ce6ac2eed9daddc011991297ed 100644
 --- a/apps/server/integration/providerService.integration.test.ts
 +++ b/apps/server/integration/providerService.integration.test.ts
 @@ -28,6 +28,7 @@ import { ServerSettingsService } from "../src/serverSettings.ts";
@@ -57,7 +57,7 @@ index 0d041b36e..719499407 100644
  import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
  import * as ProviderSessionRuntime from "../src/persistence/ProviderSessionRuntime.ts";
 +import { UpdateActivityLive } from "../src/updateActivity.ts";
- 
+
  import {
    makeTestProviderAdapterHarness,
 @@ -103,6 +104,7 @@ const makeIntegrationFixture = (options?: { readonly analytics?: Layer.Layer<Ana
@@ -66,10 +66,10 @@ index 0d041b36e..719499407 100644
        Layer.provide(shared),
 +      Layer.provide(UpdateActivityLive),
      );
- 
+
      return {
 diff --git a/apps/server/src/bin.test.ts b/apps/server/src/bin.test.ts
-index e1a13d4ce..817e20775 100644
+index e1a13d4ce8e751ecefa02a2d253d9b56682cf1fa..817e20775f08cefa5c5763ef3892235c274d51ea 100644
 --- a/apps/server/src/bin.test.ts
 +++ b/apps/server/src/bin.test.ts
 @@ -34,6 +34,7 @@ import {
@@ -89,7 +89,7 @@ index e1a13d4ce..817e20775 100644
        Layer.provideMerge(SqlitePersistenceLayerLive),
      ),
 diff --git a/apps/server/src/cli/project.ts b/apps/server/src/cli/project.ts
-index 3ef92d438..1658d3166 100644
+index 86f8a15418d173aeca21710c075fd3ffb2601fe4..845154f6e247dbc7fbc7c3a3dbc6f09eea5c65f3 100644
 --- a/apps/server/src/cli/project.ts
 +++ b/apps/server/src/cli/project.ts
 @@ -34,6 +34,7 @@ import {
@@ -99,7 +99,7 @@ index 3ef92d438..1658d3166 100644
 +import { UpdateActivityLive } from "../updateActivity.ts";
  import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
  import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
- 
+
 @@ -202,6 +203,9 @@ const ProjectCliRuntimeLive = Layer.mergeAll(
    OrchestrationLayerLive.pipe(
      Layer.provideMerge(RepositoryIdentityResolver.layer),
@@ -109,18 +109,55 @@ index 3ef92d438..1658d3166 100644
 +    Layer.provideMerge(UpdateActivityLive),
    ),
  );
- 
+
+diff --git a/apps/server/src/git/linkCreatedPullRequest.test.ts b/apps/server/src/git/linkCreatedPullRequest.test.ts
+index 2c33d82792bd66b88718ca80bc8dfb77224ac920..d77f5581986152cd78f64cd65ba2041b1e79504b 100644
+--- a/apps/server/src/git/linkCreatedPullRequest.test.ts
++++ b/apps/server/src/git/linkCreatedPullRequest.test.ts
+@@ -86,6 +86,7 @@ const makeDependencies = (
+       getProjectShellById: () => Effect.succeed(Option.some(project)),
+     }),
+     Layer.mock(OrchestrationEngineService)({
++      initialSequence: 0,
+       readEvents: () => Stream.empty,
+       dispatch,
+       streamDomainEvents: Stream.empty,
+diff --git a/apps/server/src/mcp/McpHttpServer.test.ts b/apps/server/src/mcp/McpHttpServer.test.ts
+index 88562993070699f30e7dba11c53aa05c23468e2d..89e53bf48be3ed0f7362efb46ca4082a53a3a8b3 100644
+--- a/apps/server/src/mcp/McpHttpServer.test.ts
++++ b/apps/server/src/mcp/McpHttpServer.test.ts
+@@ -58,7 +58,7 @@ const PullRequestsTestLayer = McpHttpServer.PullRequestsToolkitRegistrationLive.
+       Layer.mock(ProjectionSnapshotQuery)({
+         getThreadShellById: () => Effect.succeed(Option.none()),
+       }),
+-      Layer.mock(OrchestrationEngineService)({}),
++      Layer.mock(OrchestrationEngineService)({ initialSequence: 0 }),
+       NodeServices.layer,
+     ),
+   ),
+diff --git a/apps/server/src/mcp/toolkits/pullRequests/handlers.test.ts b/apps/server/src/mcp/toolkits/pullRequests/handlers.test.ts
+index 18062a216bb4b8c13a56a117df31bfc9c9a20caa..d1ffde4a21a2e76176ce8564cf5d20f0b2140a16 100644
+--- a/apps/server/src/mcp/toolkits/pullRequests/handlers.test.ts
++++ b/apps/server/src/mcp/toolkits/pullRequests/handlers.test.ts
+@@ -155,6 +155,7 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
+       getProjectShellById: () => Effect.succeed(Option.fromNullishOr(project)),
+     }),
+     Layer.mock(OrchestrationEngineService)({
++      initialSequence: 0,
+       readEvents: () => Stream.empty,
+       dispatch,
+       streamDomainEvents: Stream.empty,
 diff --git a/apps/server/src/orchestration/Errors.ts b/apps/server/src/orchestration/Errors.ts
-index dc29dcbfa..6b8ff026d 100644
+index dccb8b4be0f7bc35e700a4495296dca8a873766b..e9ef6074b12d3a7da70f640b67a1a2b3836c15ab 100644
 --- a/apps/server/src/orchestration/Errors.ts
 +++ b/apps/server/src/orchestration/Errors.ts
 @@ -3,6 +3,7 @@ import * as SchemaIssue from "effect/SchemaIssue";
  import * as Schema from "effect/Schema";
- 
+
  import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
 +import type { UpdateActivityUnavailableError } from "../updateActivity.ts";
- 
- export class OrchestrationCommandJsonParseError extends Schema.TaggedErrorClass<OrchestrationCommandJsonParseError>()(
+
+ export class OrchestrationCommandJsonParseError extends Schema.TaggedError<OrchestrationCommandJsonParseError>()(
    "OrchestrationCommandJsonParseError",
 @@ -119,7 +120,10 @@ export type OrchestrationDispatchError =
    | OrchestrationCommandIdConflictError
@@ -131,11 +168,11 @@ index dc29dcbfa..6b8ff026d 100644
 +  // Admission refused before queueing: the server is sealed or closing for an
 +  // update. Nothing was persisted and no receipt exists.
 +  | UpdateActivityUnavailableError;
- 
+
  export type OrchestrationEngineError =
    | OrchestrationDispatchError
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
-index 93329d150..4ab95f0e0 100644
+index 94f126c22af518a88085d5ebb43e5eff0383bcd7..f4a2a4c3ec2481e9e31687199cce806232b3393f 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 @@ -27,7 +27,6 @@ import * as Effect from "effect/Effect";
@@ -157,12 +194,12 @@ index 93329d150..4ab95f0e0 100644
 +  type UpdateActivityState,
 +} from "../../updateActivity.ts";
 +import { makeTrackedFanout } from "../../updateActivityFanout.ts";
- 
+
  const asProjectId = (value: string): ProjectId => ProjectId.make(value);
  const asTurnId = (value: string): TurnId => TurnId.make(value);
 @@ -84,13 +90,22 @@ type LegacyProviderRuntimeEvent = {
  };
- 
+
  function createProviderServiceHarness(
 +  activity: UpdateActivityShape,
 +  activityScope: Scope.Scope,
@@ -194,12 +231,12 @@ index 93329d150..4ab95f0e0 100644
 +    streamEvents: runtimeEvents.streamObservers,
 +    subscribeUpdateEvents: runtimeEvents.subscribeRequired,
    };
- 
+
    const emit = (event: LegacyProviderRuntimeEvent): void => {
 -    Effect.runSync(PubSub.publish(runtimeEventPubSub, event as unknown as ProviderRuntimeEvent));
 +    Effect.runSync(runtimeEvents.publish(event as unknown as ProviderRuntimeEvent));
    };
- 
+
    return {
      service,
 +    runtimeEvents,
@@ -208,7 +245,7 @@ index 93329d150..4ab95f0e0 100644
      emit,
    };
  }
- 
+
 +const awaitActivity = (
 +  activity: UpdateActivityShape,
 +  predicate: (state: UpdateActivityState) => boolean,
@@ -336,11 +373,11 @@ index 93329d150..4ab95f0e0 100644
 +          Effect.andThen(reactor.drain),
 +        ),
 +      );
- 
+
      const createdAt = "2026-01-01T00:00:00.000Z";
      await Effect.runPromise(
 @@ -488,6 +573,7 @@ describe("CheckpointReactor", () => {
- 
+
      return {
        engine,
 +      activity,
@@ -350,7 +387,7 @@ index 93329d150..4ab95f0e0 100644
 @@ -877,6 +963,50 @@ describe("CheckpointReactor", () => {
      expect(gitStatusRefreshCalls).toEqual([harness.cwd]);
    });
- 
+
 +  effectIt.effect(
 +    "keeps update activity busy after the provider turn ends until checkpoint work finishes",
 +    () =>
@@ -399,7 +436,7 @@ index 93329d150..4ab95f0e0 100644
      const pullRequestRefreshCalls: string[] = [];
      const harness = await createHarness({
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index df19830f6..5c8fd8f56 100644
+index 2a3768e181d7dbad433b5efb2c1428e066829bce..17fa0d107997907657d2f6dd42ceb5f1d6374800 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -19,8 +19,6 @@ import * as Effect from "effect/Effect";
@@ -409,7 +446,7 @@ index df19830f6..5c8fd8f56 100644
 -import * as Stream from "effect/Stream";
 -import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
  import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
- 
+
  import { parseTurnDiffFilesFromNumstat } from "../../checkpointing/Diffs.ts";
 @@ -32,6 +30,7 @@ import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
  import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -426,9 +463,9 @@ index df19830f6..5c8fd8f56 100644
 +  const activity = yield* UpdateActivity;
    const startedTurns = new Map<ThreadId, TurnId>();
    const pending = new Set<ThreadId>();
- 
-@@ -615,8 +615,12 @@ const make = Effect.gen(function* () {
- 
+
+@@ -614,8 +614,12 @@ const make = Effect.gen(function* () {
+
    // Refreshing git status ends in a remote PR lookup under the vcs status
    // write lock. Run it on its own worker so file capture for this turn (and
 -  // checkpoints for other threads) never wait behind that network call.
@@ -442,16 +479,16 @@ index df19830f6..5c8fd8f56 100644
      (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) =>
        refreshLocalGitStatusFromTurnCompletion(event).pipe(
          Effect.catchCause((cause) =>
-@@ -936,11 +940,23 @@ const make = Effect.gen(function* () {
+@@ -935,11 +939,23 @@ const make = Effect.gen(function* () {
        }),
      );
- 
+
 -  const worker = yield* makeDrainableWorker(processInputSafely);
 +  // Every queued input owns update activity until checkpoint work for it ends,
 +  // so a turn whose provider already finished still counts as busy while its
 +  // checkpoint and derived commands are in flight.
 +  const worker = yield* makeTrackedWorker(activity, "checkpoint-reactor", processInputSafely);
- 
+
    const start: CheckpointReactorShape["start"] = Effect.fn("start")(function* () {
 +    // Both required subscriptions register before parking so nothing published
 +    // between registration and activation is lost or unowned.
@@ -468,9 +505,9 @@ index df19830f6..5c8fd8f56 100644
          if (
            event.type !== "thread.turn-start-requested" &&
            event.type !== "thread.message-sent" &&
-@@ -953,7 +969,7 @@ const make = Effect.gen(function* () {
+@@ -952,7 +968,7 @@ const make = Effect.gen(function* () {
      );
- 
+
      yield* forkParked(
 -      Stream.runForEach(providerService.streamEvents, (event) => {
 +      runtimeSubscription.run((event) => {
@@ -478,7 +515,7 @@ index df19830f6..5c8fd8f56 100644
            event.type !== "turn.started" &&
            event.type !== "turn.completed" &&
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
-index 0b2e08c40..5e75d108e 100644
+index 6d062ebcab4b1a96085cdb6514fb1c33819a8b07..79b5b454a90d8d3601ea71105089272c9248b59e 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 @@ -19,12 +19,16 @@ import {
@@ -497,7 +534,7 @@ index 0b2e08c40..5e75d108e 100644
 +import * as Scope from "effect/Scope";
  import * as Stream from "effect/Stream";
  import { TestClock } from "effect/testing";
- import { describe, expect, it } from "vite-plus/test";
+ import { describe, expect, it, vi } from "vite-plus/test";
 @@ -47,13 +51,23 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
  import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
  import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
@@ -520,43 +557,43 @@ index 0b2e08c40..5e75d108e 100644
 +  type UpdateActivityShape,
 +  type UpdateActivityState,
 +} from "../../updateActivity.ts";
- 
+
  const asProjectId = (value: string): ProjectId => ProjectId.make(value);
  const asMessageId = (value: string): MessageId => MessageId.make(value);
-@@ -81,6 +95,7 @@ function makeOrchestrationLayer(databasePath?: string) {
-     Layer.provide(RepositoryIdentityResolver.layer),
+@@ -91,6 +105,7 @@ function makeOrchestrationLayer(
+     ),
      Layer.provide(persistence),
      Layer.provideMerge(ServerConfigLayer),
 +    Layer.provideMerge(UpdateActivityLive),
      Layer.provideMerge(NodeServices.layer),
    );
  }
-@@ -441,6 +456,7 @@ describe("OrchestrationEngine", () => {
+@@ -469,6 +484,7 @@ describe("OrchestrationEngine", () => {
        Layer.provide(ThreadBackgroundLiveness.layer),
        Layer.provide(OrchestrationCommandReceiptRepositoryLive),
        Layer.provide(SqlitePersistenceMemory),
 +      Layer.provide(UpdateActivityLive),
        Layer.provideMerge(NodeServices.layer),
      );
- 
-@@ -448,6 +464,7 @@ describe("OrchestrationEngine", () => {
- 
+
+@@ -476,6 +492,7 @@ describe("OrchestrationEngine", () => {
+
      const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
      expect(await runtime.runPromise(engine.latestSequence)).toBe(7);
 +    expect(engine.initialSequence).toBe(7);
      const result = await runtime.runPromise(
        engine.dispatch({
          type: "thread.meta.update",
-@@ -459,6 +476,8 @@ describe("OrchestrationEngine", () => {
- 
+@@ -487,6 +504,8 @@ describe("OrchestrationEngine", () => {
+
      expect(result.sequence).toBe(8);
      expect(await runtime.runPromise(engine.latestSequence)).toBe(8);
 +    // The boot sequence is the fixed boundary below which nothing was queued.
 +    expect(engine.initialSequence).toBe(7);
      expect(fullSnapshotReadCount).toBe(0);
- 
+
      await runtime.dispose();
-@@ -1468,6 +1487,7 @@ describe("OrchestrationEngine", () => {
+@@ -1516,6 +1535,7 @@ describe("OrchestrationEngine", () => {
          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
          Layer.provide(RepositoryIdentityResolver.layer),
          Layer.provide(SqlitePersistenceMemory),
@@ -564,7 +601,7 @@ index 0b2e08c40..5e75d108e 100644
          Layer.provideMerge(ServerConfigLayer),
          Layer.provideMerge(NodeServices.layer),
        ),
-@@ -1576,6 +1596,7 @@ describe("OrchestrationEngine", () => {
+@@ -1624,6 +1644,7 @@ describe("OrchestrationEngine", () => {
          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
          Layer.provide(RepositoryIdentityResolver.layer),
          Layer.provide(SqlitePersistenceMemory),
@@ -572,7 +609,7 @@ index 0b2e08c40..5e75d108e 100644
          Layer.provide(NodeServices.layer),
        ),
      );
-@@ -1725,6 +1746,7 @@ describe("OrchestrationEngine", () => {
+@@ -1773,6 +1794,7 @@ describe("OrchestrationEngine", () => {
          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
          Layer.provide(RepositoryIdentityResolver.layer),
          Layer.provide(SqlitePersistenceMemory),
@@ -580,7 +617,7 @@ index 0b2e08c40..5e75d108e 100644
          Layer.provide(NodeServices.layer),
        ),
      );
-@@ -2076,3 +2098,297 @@ describe("OrchestrationEngine", () => {
+@@ -2124,3 +2146,297 @@ describe("OrchestrationEngine", () => {
      await system.dispose();
    });
  });
@@ -879,7 +916,7 @@ index 0b2e08c40..5e75d108e 100644
 +  );
 +});
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
-index 4350d1458..f038d1307 100644
+index fb2fadde5e63e61fb8e389b772304979580db4b3..29d17de12c71836f9e1a4f82921feef0f674a05b 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
 @@ -17,8 +17,6 @@ import * as Exit from "effect/Exit";
@@ -905,10 +942,10 @@ index 4350d1458..f038d1307 100644
    const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
    const crypto = yield* Crypto.Crypto;
 +  const activity = yield* UpdateActivity;
- 
+
    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
    let commandReadModel = createEmptyReadModel(yield* nowIso);
- 
+
 -  const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
 -  const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
 +  // Every committed or replayed event is owned by each required consumer until
@@ -937,19 +974,19 @@ index 4350d1458..f038d1307 100644
 +        ),
 +      ),
 +    );
- 
+
    const projectEventsOntoReadModel = (
      baseReadModel: OrchestrationReadModel,
 @@ -127,7 +152,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
        commandReadModel = yield* projectEventsOntoReadModel(commandReadModel, persistedEvents);
- 
+
        for (const persistedEvent of persistedEvents) {
 -        yield* PubSub.publish(eventPubSub, persistedEvent);
 +        yield* publishDomainEvent(persistedEvent);
        }
      });
- 
-@@ -300,7 +325,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+
+@@ -324,7 +349,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
            yield* cleanup;
          }
          for (const [index, event] of committedCommand.committedEvents.entries()) {
@@ -958,8 +995,8 @@ index 4350d1458..f038d1307 100644
            if (index === 0) {
              yield* Metric.update(
                Metric.withAttributes(
-@@ -388,9 +413,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
- 
+@@ -412,9 +437,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+
    yield* projectionPipeline.bootstrap;
    commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
 -
@@ -981,7 +1018,7 @@ index 4350d1458..f038d1307 100644
    yield* Effect.logDebug("orchestration engine started").pipe(
      Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
    );
-@@ -414,7 +449,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+@@ -438,7 +473,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
    const dispatch: OrchestrationEngineShape["dispatch"] = (command, options) =>
      Effect.gen(function* () {
        const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
@@ -992,7 +1029,7 @@ index 4350d1458..f038d1307 100644
          command,
          origin: options?.origin,
          result,
-@@ -428,18 +465,20 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+@@ -452,18 +489,20 @@ const makeOrchestrationEngine = Effect.gen(function* () {
      readThreadEvents,
      getThreadReplayStats,
      dispatch,
@@ -1017,20 +1054,20 @@ index 4350d1458..f038d1307 100644
 +    initialSequence,
    } satisfies OrchestrationEngineShape;
  });
- 
+
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-index e88e47ab3..d8f5d1bde 100644
+index 68a8a91f42dc18d1d90d32ab9b07acd49a067237..d527498692f4aa777c3bb98a90c392f3fed5d436 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-@@ -44,6 +44,7 @@ import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
+@@ -45,6 +45,7 @@ import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
  import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
  import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
  import { ServerConfig } from "../../config.ts";
 +import { UpdateActivityLive } from "../../updateActivity.ts";
- 
+
  const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
    OrchestrationProjectionPipelineLive.pipe(
-@@ -4753,6 +4754,7 @@ const engineLayer = it.layer(
+@@ -5070,6 +5071,7 @@ const engineLayer = it.layer(
      Layer.provide(OrchestrationEventStoreLive),
      Layer.provide(OrchestrationCommandReceiptRepositoryLive),
      Layer.provide(RepositoryIdentityResolver.layer),
@@ -1039,11 +1076,11 @@ index e88e47ab3..d8f5d1bde 100644
      Layer.provideMerge(
        ServerConfig.layerTest(process.cwd(), {
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-index 51aef1fb8..49c782469 100644
+index 51aef1fb89b226c76e41fb4428179fcb9f8f2249..49c782469b8f0b1237e81f221b26577f68530656 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 @@ -5,7 +5,7 @@ import * as NodePath from "node:path";
- 
+
  import {
    ModelSelection,
 -  ProviderRuntimeEvent,
@@ -1074,11 +1111,11 @@ index 51aef1fb8..49c782469 100644
 +} from "../../updateActivity.ts";
  import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
  import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
- 
+
 @@ -114,6 +120,33 @@ async function waitFor(
    return poll();
  }
- 
+
 +const awaitActivity = (
 +  activity: UpdateActivityShape,
 +  predicate: (state: UpdateActivityState) => boolean,
@@ -1170,7 +1207,7 @@ index 51aef1fb8..49c782469 100644
 +      streamEvents: Stream.empty,
 +      subscribeUpdateEvents: () => unsupported(),
      };
- 
+
      const orchestrationLayer = OrchestrationEngineLive.pipe(
 @@ -424,12 +491,20 @@ describe("ProviderCommandReactor", () => {
            dispatch: (command) => {
@@ -1234,7 +1271,7 @@ index 51aef1fb8..49c782469 100644
 @@ -566,16 +660,64 @@ describe("ProviderCommandReactor", () => {
        );
      }
- 
+
 -    scope = await Effect.runPromise(Scope.make("sequential"));
      await Effect.runPromise(
 -      reactor
@@ -1301,7 +1338,7 @@ index 51aef1fb8..49c782469 100644
 +    );
 +    // Kills the reactor's required consumer while the registry stays open.
 +    const stop = Scope.close(startScope, Exit.void);
- 
+
      return {
        engine,
 @@ -608,7 +750,10 @@ describe("ProviderCommandReactor", () => {
@@ -1318,7 +1355,7 @@ index 51aef1fb8..49c782469 100644
 @@ -951,6 +1096,164 @@ describe("ProviderCommandReactor", () => {
      }),
    );
- 
+
 +  effectIt.effect(
 +    "keeps update activity busy after a turn start is processed until the send ends",
 +    () =>
@@ -1483,7 +1520,7 @@ index 51aef1fb8..49c782469 100644
 @@ -1681,6 +1984,60 @@ describe("ProviderCommandReactor", () => {
      expect(thread?.titleRegeneration).toBeNull();
    });
- 
+
 +  effectIt.effect(
 +    "keeps update activity busy while startup title cleanup waits before its first dispatch",
 +    () =>
@@ -1542,7 +1579,7 @@ index 51aef1fb8..49c782469 100644
      const harness = await createHarness({
        titleRegenerationBeforeStart: "two",
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index b355205a7..be52ff168 100644
+index 85379729197d7cbcf54fc7f53bbf35a5cf0ec1ea..1a334d1ca0f32e1a111fc46c9f215528afb1c95d 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 @@ -20,6 +20,7 @@ import * as Cache from "effect/Cache";
@@ -1559,7 +1596,7 @@ index b355205a7..be52ff168 100644
  import * as Schema from "effect/Schema";
 -import * as Stream from "effect/Stream";
 -import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
- 
+
  import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
  import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 @@ -50,6 +49,7 @@ import {
@@ -1600,7 +1637,7 @@ index b355205a7..be52ff168 100644
 +          }),
 +        )
        : Effect.void;
- 
+
      const startProviderSession = (input?: {
 @@ -1179,7 +1191,9 @@ const make = Effect.gen(function* () {
          }),
@@ -1612,11 +1649,11 @@ index b355205a7..be52ff168 100644
 +    "thread-title-regeneration",
      processThreadTitleRegenerationSafely,
    );
- 
+
 @@ -1317,19 +1331,25 @@ const make = Effect.gen(function* () {
          ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
        };
- 
+
 -      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
 -        threadId: event.payload.threadId,
 -        branch: thread.branch,
@@ -1649,7 +1686,7 @@ index b355205a7..be52ff168 100644
 +        );
        }
      }
- 
+
 @@ -1394,28 +1414,32 @@ const make = Effect.gen(function* () {
          return;
        }
@@ -1708,7 +1745,7 @@ index b355205a7..be52ff168 100644
 @@ -1443,9 +1467,12 @@ const make = Effect.gen(function* () {
        return;
      }
- 
+
 -    yield* providerService
 -      .sendTurn(sendTurnRequest.value)
 -      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
@@ -1719,23 +1756,23 @@ index b355205a7..be52ff168 100644
 +        .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure)),
 +    );
    });
- 
+
    const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
-@@ -1772,7 +1799,9 @@ const make = Effect.gen(function* () {
+@@ -1775,7 +1802,9 @@ const make = Effect.gen(function* () {
        }),
      );
- 
+
 -  const worker = yield* makeDrainableWorker(processDomainEventSafely);
 +  // Every queued intent owns update activity until its handler returns; the
 +  // detached children above extend that ownership past the handler.
 +  const worker = yield* makeTrackedWorker(activity, "provider-command", processDomainEventSafely);
- 
+
    const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
      const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
-@@ -1801,9 +1830,13 @@ const make = Effect.gen(function* () {
+@@ -1804,9 +1833,13 @@ const make = Effect.gen(function* () {
        }
      });
- 
+
 -    // Subscribe before returning, even while event handling waits for server activation.
 -    const domainEvents = yield* orchestrationEngine.subscribeDomainEvents;
 -    yield* forkParked(Stream.runForEach(domainEvents, processEvent));
@@ -1746,10 +1783,10 @@ index b355205a7..be52ff168 100644
 +      .subscribeUpdateEvents("provider-command")
 +      .pipe(Effect.orDie);
 +    yield* forkParked(subscription.run(processEvent));
- 
+
      // The domain event stream is hot, so work pending before this reactor
      // starts cannot be resumed. Correlated completions only clear the request
-@@ -1823,11 +1856,24 @@ const make = Effect.gen(function* () {
+@@ -1826,11 +1859,24 @@ const make = Effect.gen(function* () {
          );
        }),
      );
@@ -1775,9 +1812,9 @@ index b355205a7..be52ff168 100644
 +      yield* Deferred.await(parked);
      }
    });
- 
+
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index 14588c2fd..211401b16 100644
+index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09d2cc1637 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -33,7 +33,6 @@ import * as Exit from "effect/Exit";
@@ -1801,11 +1838,11 @@ index 14588c2fd..211401b16 100644
 +import { makeTrackedFanout } from "../../updateActivityFanout.ts";
  import * as NodeServices from "@effect/platform-node/NodeServices";
  import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
- 
+
 @@ -107,12 +113,14 @@ function isLegacyTurnCompletedEvent(
    );
  }
- 
+
 -function createProviderServiceHarness() {
 -  const runtimeEventPubSub = Effect.runSync(
 -    PubSub.unbounded<{
@@ -1822,7 +1859,7 @@ index 14588c2fd..211401b16 100644
 +    ]).pipe(Scope.provide(activityScope)),
    );
    const runtimeSessions: ProviderSession[] = [];
- 
+
 @@ -143,18 +151,8 @@ function createProviderServiceHarness() {
      },
      rollbackConversation: () => unsupported(),
@@ -1842,16 +1879,16 @@ index 14588c2fd..211401b16 100644
 +    streamEvents: runtimeEvents.streamObservers,
 +    subscribeUpdateEvents: runtimeEvents.subscribeRequired,
    };
- 
+
    const setSession = (session: ProviderSession): void => {
 @@ -182,28 +180,48 @@ function createProviderServiceHarness() {
    };
- 
+
    const emit = (event: LegacyProviderRuntimeEvent): void => {
 -    Effect.runSync(PubSub.publish(runtimeEventPubSub, { events: [normalizeLegacyEvent(event)] }));
 +    Effect.runSync(runtimeEvents.publish(normalizeLegacyEvent(event)));
    };
- 
+
 -  const emitAndWaitForEnqueue = Effect.fnUntraced(function* (
 -    events: ReadonlyArray<LegacyProviderRuntimeEvent>,
 -  ) {
@@ -1865,7 +1902,7 @@ index 14588c2fd..211401b16 100644
      });
 -    yield* Deferred.await(enqueued);
 -  });
- 
+
    return {
      service,
 +    runtimeEvents,
@@ -1875,7 +1912,7 @@ index 14588c2fd..211401b16 100644
      setSession,
    };
  }
- 
+
 +const awaitActivity = (
 +  activity: UpdateActivityShape,
 +  predicate: (state: UpdateActivityState) => boolean,
@@ -1989,11 +2026,11 @@ index 14588c2fd..211401b16 100644
 -        provider.emitAndWaitForEnqueue(events).pipe(Effect.andThen(ingestion.drain)),
 -      );
 +      testRuntime.runPromise(provider.emitAll(events).pipe(Effect.andThen(drainEffect)));
- 
+
      const createdAt = "2026-01-01T00:00:00.000Z";
      await dispatch({
 @@ -390,6 +451,7 @@ describe("ProviderRuntimeIngestion", () => {
- 
+
      return {
        engine,
 +      activity,
@@ -2003,7 +2040,7 @@ index 14588c2fd..211401b16 100644
 @@ -408,6 +470,62 @@ describe("ProviderRuntimeIngestion", () => {
      };
    }
- 
+
 +  effectIt.effect(
 +    "keeps update activity busy while another required consumer still holds a terminal event",
 +    () =>
@@ -2064,7 +2101,7 @@ index 14588c2fd..211401b16 100644
      const harness = await createHarness();
      const now = "2026-01-01T00:00:00.000Z";
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index d21ffcb00..a794b96f3 100644
+index d21ffcb005b2d7855860f464518fcde6f459c8a7..a794b96f3f3fe7b5d0b783ce3a1152866d9f91bf 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 @@ -27,8 +27,6 @@ import * as Effect from "effect/Effect";
@@ -2074,7 +2111,7 @@ index d21ffcb00..a794b96f3 100644
 -import * as Stream from "effect/Stream";
 -import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
  import { formatTokens } from "@t3tools/shared/usageFormat";
- 
+
  import { ProviderService } from "../../provider/Services/ProviderService.ts";
 @@ -55,6 +53,7 @@ import {
  import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
@@ -2082,7 +2119,7 @@ index d21ffcb00..a794b96f3 100644
  import { ServerSettingsService } from "../../serverSettings.ts";
 +import { makeTrackedWorker, UpdateActivity } from "../../updateActivity.ts";
  import { canReplaceThreadTitle } from "../threadTitles.ts";
- 
+
  const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 @@ -944,6 +943,7 @@ const make = Effect.gen(function* () {
    const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
@@ -2095,13 +2132,13 @@ index d21ffcb00..a794b96f3 100644
 @@ -2482,17 +2482,26 @@ const make = Effect.gen(function* () {
        }),
      );
- 
+
 -  const worker = yield* makeDrainableWorker(processInputSafely);
 +  // Every queued input owns update activity until its projection commands are
 +  // dispatched, so a runtime event that has been published but not yet
 +  // ingested can never look idle.
 +  const worker = yield* makeTrackedWorker(activity, "runtime-ingestion", processInputSafely);
- 
+
    const start: ProviderRuntimeIngestionShape["start"] = () =>
      Effect.gen(function* () {
 +      // Both required subscriptions register before parking so nothing
@@ -2125,7 +2162,7 @@ index d21ffcb00..a794b96f3 100644
              return Effect.void;
            }
 diff --git a/apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts b/apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts
-index f83f1dd1b..1f1c230b7 100644
+index f83f1dd1b9faae9726f9074dc8073137dad78734..1f1c230b7ea778b822143d8ea2a4e052b1b92fbf 100644
 --- a/apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts
 @@ -1,8 +1,11 @@
@@ -2147,7 +2184,7 @@ index f83f1dd1b..1f1c230b7 100644
 -import * as Ref from "effect/Ref";
 -import * as Stream from "effect/Stream";
  import { describe, expect, it } from "vite-plus/test";
- 
+
  import {
    ProviderService,
    type ProviderServiceShape,
@@ -2167,7 +2204,7 @@ index f83f1dd1b..1f1c230b7 100644
 @@ -62,7 +71,32 @@ describe("logCleanupCauseUnlessInterrupted", () => {
    });
  });
- 
+
 -describe("ThreadDeletionReactor drain", () => {
 +const awaitActivity = (
 +  activity: UpdateActivityShape,
@@ -2226,7 +2263,7 @@ index f83f1dd1b..1f1c230b7 100644
 +      updatedAt: now,
 +    },
 +  });
- 
+
 -  effectIt.effect("waits for a published deletion the subscriber has not consumed yet", () =>
 +  // A real required fanout stands in for the engine so publication, delivery
 +  // ownership, and registration blockers behave exactly as in production.
@@ -2333,7 +2370,7 @@ index f83f1dd1b..1f1c230b7 100644
 +          Effect.gen(function* () {
 +            yield* harness.reactor.start();
 +            yield* awaitIdle(harness.activity);
- 
+
 -      yield* Effect.scoped(
 +            yield* harness.publish(1);
 +            yield* Deferred.await(cleanupStarted);
@@ -2474,7 +2511,7 @@ index f83f1dd1b..1f1c230b7 100644
    );
  });
 diff --git a/apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts b/apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts
-index 14a92a5ea..0d0e15c9d 100644
+index 14a92a5eaef58ee6ef26970bef8b90f7412ef084..0d0e15c9dc9fd217c104439d8a701873f6cf5075 100644
 --- a/apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts
 @@ -1,5 +1,4 @@
@@ -2488,21 +2525,21 @@ index 14a92a5ea..0d0e15c9d 100644
  } from "../Services/ThreadDeletionReactor.ts";
  import { forkParked } from "../../serverActivation.ts";
 +import { makeTrackedWorker, UpdateActivity } from "../../updateActivity.ts";
- 
+
  type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
- 
+
 @@ -42,6 +42,7 @@ const make = Effect.gen(function* () {
    const orchestrationEngine = yield* OrchestrationEngineService;
    const providerService = yield* ProviderService;
    const terminalManager = yield* TerminalManager.TerminalManager;
 +  const activity = yield* UpdateActivity;
- 
+
    const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
      logCleanupCauseUnlessInterrupted({
 @@ -79,28 +80,37 @@ const make = Effect.gen(function* () {
        }),
      );
- 
+
 -  const worker = yield* makeDrainableWorker(processThreadDeletedSafely);
 +  // Each deletion owns update activity from publication until its cleanup
 +  // ends, so a deletion sitting in the queue can never look idle.
@@ -2511,7 +2548,7 @@ index 14a92a5ea..0d0e15c9d 100644
 +    "thread-deletion-reactor",
 +    processThreadDeletedSafely,
 +  );
- 
+
 -  // Highest event sequence the subscriber has handed to the worker. Waiting
 -  // through a successful thread.created sequence covers every deletion that
 -  // was ahead of that create in the engine queue; the worker drain then covers
@@ -2528,7 +2565,7 @@ index 14a92a5ea..0d0e15c9d 100644
 +  const seenSequence = yield* SubscriptionRef.make(orchestrationEngine.initialSequence);
    const noteSeen = (sequence: number) =>
      SubscriptionRef.update(seenSequence, (seen) => Math.max(seen, sequence));
- 
+
    const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
 +    // Register before parking so nothing published between registration and
 +    // activation is lost or unowned.
@@ -2552,8 +2589,20 @@ index 14a92a5ea..0d0e15c9d 100644
        ),
      );
    });
+diff --git a/apps/server/src/orchestration/PullRequestSyncReactor.test.ts b/apps/server/src/orchestration/PullRequestSyncReactor.test.ts
+index 414f76f324964ea4e65a917c0b12d2d10781f28c..7f4d4f20d8662563bd1060a3bf11043617b94531 100644
+--- a/apps/server/src/orchestration/PullRequestSyncReactor.test.ts
++++ b/apps/server/src/orchestration/PullRequestSyncReactor.test.ts
+@@ -210,6 +210,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options:
+       invalidate: options.invalidate ?? (() => Effect.void),
+     }),
+     Layer.mock(OrchestrationEngineService)({
++      initialSequence: 0,
+       readEvents: () => Stream.empty,
+       dispatch,
+       streamDomainEvents: Stream.empty,
 diff --git a/apps/server/src/orchestration/Services/OrchestrationEngine.ts b/apps/server/src/orchestration/Services/OrchestrationEngine.ts
-index cf2ef2a40..bfd2d2cae 100644
+index cf2ef2a40354f44629ae44cca8ece88de3b44456..bfd2d2cae17398d056ca1a50f0c9397319bff32b 100644
 --- a/apps/server/src/orchestration/Services/OrchestrationEngine.ts
 +++ b/apps/server/src/orchestration/Services/OrchestrationEngine.ts
 @@ -24,6 +24,8 @@ import type * as Stream from "effect/Stream";
@@ -2562,13 +2611,13 @@ index cf2ef2a40..bfd2d2cae 100644
  import type { OrchestrationAggregateReplayStats } from "../../persistence/Services/OrchestrationEventStore.ts";
 +import type { UpdateActivityUnavailableError } from "../../updateActivity.ts";
 +import type { RequiredSubscription } from "../../updateActivityFanout.ts";
- 
+
  export interface OrchestrationThreadReplayRange {
    readonly threadId: ThreadId;
 @@ -31,6 +33,16 @@ export interface OrchestrationThreadReplayRange {
    readonly toSequenceInclusive: number;
  }
- 
+
 +/**
 + * Consumers whose processing of every domain event must finish before the
 + * server can claim it is idle for an update. Each name may be claimed once.
@@ -2601,7 +2650,7 @@ index cf2ef2a40..bfd2d2cae 100644
 +   * delays an update.
     */
    readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
- 
+
    /**
     * Acquire a domain-event subscription before starting a consumer.
     * The subscription is ready when this effect returns and closes with the scope.
@@ -2612,7 +2661,7 @@ index cf2ef2a40..bfd2d2cae 100644
 @@ -92,12 +109,34 @@ export interface OrchestrationEngineShape {
      Scope.Scope
    >;
- 
+
 +  /**
 +   * Claim a required consumer's domain-event queue. Every committed or
 +   * replayed event stays owned in the update-activity registry until this
@@ -2642,13 +2691,13 @@ index cf2ef2a40..bfd2d2cae 100644
 +   */
 +  readonly initialSequence: number;
  }
- 
+
  /**
 diff --git a/apps/server/src/orchestration/ThreadPullRequestReactor.test.ts b/apps/server/src/orchestration/ThreadPullRequestReactor.test.ts
-index f9872e6dd..0f758aecf 100644
+index d6572083dad285e3d23ff03d806be3ab641f51be..f9eb9fae0b06336b14211ead7e0b36694cfa65af 100644
 --- a/apps/server/src/orchestration/ThreadPullRequestReactor.test.ts
 +++ b/apps/server/src/orchestration/ThreadPullRequestReactor.test.ts
-@@ -175,6 +175,7 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
+@@ -178,6 +178,7 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
          (() => Effect.succeed(options.project?.repositoryIdentity ?? project.repositoryIdentity)),
      }),
      Layer.mock(OrchestrationEngineService)({
@@ -2657,10 +2706,10 @@ index f9872e6dd..0f758aecf 100644
          Effect.map((subscription) => Stream.fromSubscription(subscription)),
        ),
 diff --git a/apps/server/src/orchestration/ThreadSettlementReactor.test.ts b/apps/server/src/orchestration/ThreadSettlementReactor.test.ts
-index f2038bfe6..f5dcef529 100644
+index 0690eea2d50eb5f56cc82b211f4fb6bdf7fdb1da..f474504cc3d6d871886ae3d5b79d2de39a3d6b01 100644
 --- a/apps/server/src/orchestration/ThreadSettlementReactor.test.ts
 +++ b/apps/server/src/orchestration/ThreadSettlementReactor.test.ts
-@@ -256,6 +256,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
+@@ -258,6 +258,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
        readEvents: () => Stream.empty,
        dispatch,
        streamDomainEvents: Stream.empty,
@@ -2669,7 +2718,7 @@ index f2038bfe6..f5dcef529 100644
      }),
      Layer.succeed(ServerSettingsService, serverSettings),
 diff --git a/apps/server/src/project/AgentSessionImporter.test.ts b/apps/server/src/project/AgentSessionImporter.test.ts
-index 38d6ad1d4..b3573a574 100644
+index 4eb03a5cc036c868dd7681d7ce0b9d9af4136c15..9bd0eb50218925329cb4b8fcb975c83b17895e02 100644
 --- a/apps/server/src/project/AgentSessionImporter.test.ts
 +++ b/apps/server/src/project/AgentSessionImporter.test.ts
 @@ -56,6 +56,7 @@ import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistr
@@ -2680,7 +2729,7 @@ index 38d6ad1d4..b3573a574 100644
  import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
  import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
  import { importRecentAgentThreads } from "./AgentSessionImporter.ts";
-@@ -225,6 +226,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
+@@ -226,6 +227,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
            getThreadReplayStats: () => Effect.die("unused"),
            streamDomainEvents: Stream.empty,
            subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -2689,7 +2738,7 @@ index 38d6ad1d4..b3573a574 100644
            latestSequence: Effect.succeed(0),
          });
          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
-@@ -302,7 +305,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
+@@ -303,7 +306,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
            ),
            Effect.provide(
              Layer.mergeAll(
@@ -2698,7 +2747,7 @@ index 38d6ad1d4..b3573a574 100644
                Layer.mock(ProviderSessionDirectory.ProviderSessionDirectory)({}),
                makeSnapshotsLayer({
                  project: { ...makeProject(), workspaceRoot: "/tmp/project-moved" },
-@@ -330,6 +333,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
+@@ -331,6 +334,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
            getThreadReplayStats: () => Effect.die("unused"),
            streamDomainEvents: Stream.empty,
            subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -2707,7 +2756,7 @@ index 38d6ad1d4..b3573a574 100644
            latestSequence: Effect.succeed(0),
          });
          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
-@@ -395,6 +400,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
+@@ -396,6 +401,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
            getThreadReplayStats: () => Effect.die("unused"),
            streamDomainEvents: Stream.empty,
            subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -2716,7 +2765,7 @@ index 38d6ad1d4..b3573a574 100644
            latestSequence: Effect.succeed(0),
          });
          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
-@@ -466,6 +473,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
+@@ -467,6 +474,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
            getThreadReplayStats: () => Effect.die("unused"),
            streamDomainEvents: Stream.empty,
            subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -2724,8 +2773,8 @@ index 38d6ad1d4..b3573a574 100644
 +          initialSequence: 0,
            latestSequence: Effect.succeed(0),
          });
- 
-@@ -504,6 +513,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
+
+@@ -505,6 +514,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
            getThreadReplayStats: () => Effect.die("unused"),
            streamDomainEvents: Stream.empty,
            subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -2734,18 +2783,18 @@ index 38d6ad1d4..b3573a574 100644
            latestSequence: Effect.succeed(0),
          });
          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
-@@ -576,6 +587,7 @@ const integrationLayer = Layer.mergeAll(
+@@ -577,6 +588,7 @@ const integrationLayer = Layer.mergeAll(
    Layer.provide(RepositoryIdentityResolver.layer),
    Layer.provide(SqlitePersistenceMemory),
    Layer.provideMerge(integrationServerConfig),
 +  Layer.provideMerge(UpdateActivityLive),
    Layer.provideMerge(NodeServices.layer),
  );
- 
-@@ -858,155 +870,6 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
+
+@@ -859,155 +871,6 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
        }),
    );
- 
+
 -  for (const source of ["codex", "claudeAgent"] as const) {
 -    it.effect(`resumes imported ${source} history only after the first prompt`, () =>
 -      Effect.gen(function* () {
@@ -2898,7 +2947,7 @@ index 38d6ad1d4..b3573a574 100644
    it.effect("persists the resume cursor before publishing a new imported thread", () =>
      Effect.gen(function* () {
        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
-@@ -1211,3 +1074,156 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
+@@ -1212,3 +1075,156 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
      }),
    );
  });
@@ -3056,7 +3105,7 @@ index 38d6ad1d4..b3573a574 100644
 +  });
 +}
 diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
-index 4d17aabaa..dbeef49f9 100644
+index 1ce1a396796f9ee9fd296e8e558505ae2992f7b7..ac75ecc17a4c03fefe76add970b7f4aba6f07f65 100644
 --- a/apps/server/src/provider/Layers/ProviderService.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.test.ts
 @@ -76,8 +76,17 @@ import {
@@ -3074,10 +3123,10 @@ index 4d17aabaa..dbeef49f9 100644
  import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
  import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 +import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
- 
+
+ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
  const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
- const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
-@@ -447,6 +456,7 @@ function makeProviderServiceLayer(
+@@ -448,6 +457,7 @@ function makeProviderServiceLayer(
      Layer.mergeAll(
        makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3085,7 +3134,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(providerAdapterLayer),
          Layer.provide(directoryLayer),
          Layer.provide(defaultServerSettingsLayer),
-@@ -500,6 +510,7 @@ for (const [enabled, completed] of [
+@@ -501,6 +511,7 @@ for (const [enabled, completed] of [
          const services = yield* Layer.build(
            makeProviderServiceLive().pipe(
              Layer.provide(NodeServices.layer),
@@ -3093,7 +3142,7 @@ index 4d17aabaa..dbeef49f9 100644
              Layer.provide(
                Layer.succeed(ProviderSessionDirectory.ProviderSessionDirectory, directory),
              ),
-@@ -620,6 +631,7 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
+@@ -621,6 +632,7 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
      const providerLayer = Layer.mergeAll(
        makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3101,7 +3150,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(providerAdapterLayer),
          Layer.provide(directoryLayer),
          Layer.provide(defaultServerSettingsLayer),
-@@ -663,6 +675,7 @@ it.effect("ProviderServiceLive flushes deferred completions during shutdown", ()
+@@ -664,6 +676,7 @@ it.effect("ProviderServiceLive flushes deferred completions during shutdown", ()
      const providerLayer = Layer.mergeAll(
        makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3109,7 +3158,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(providerAdapterLayer),
          Layer.provide(directoryLayer),
          Layer.provide(defaultServerSettingsLayer),
-@@ -800,6 +813,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", ()
+@@ -801,6 +814,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", ()
      const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
      const providerLayer = makeProviderServiceLive().pipe(
        Layer.provide(NodeServices.layer),
@@ -3117,7 +3166,7 @@ index 4d17aabaa..dbeef49f9 100644
        Layer.provide(providerAdapterLayer),
        Layer.provide(directoryLayer),
        Layer.provide(defaultServerSettingsLayer),
-@@ -884,6 +898,7 @@ it.effect(
+@@ -885,6 +899,7 @@ it.effect(
        );
        const providerLayer = makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3125,7 +3174,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(providerAdapterLayer),
          Layer.provide(directoryLayer),
          Layer.provide(serverSettingsLayer),
-@@ -954,6 +969,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
+@@ -955,6 +970,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
      const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
      const providerLayer = makeProviderServiceLive().pipe(
        Layer.provide(NodeServices.layer),
@@ -3133,7 +3182,7 @@ index 4d17aabaa..dbeef49f9 100644
        Layer.provide(providerAdapterLayer),
        Layer.provide(directoryLayer),
        Layer.provide(defaultServerSettingsLayer),
-@@ -1246,6 +1262,7 @@ it.effect(
+@@ -1247,6 +1263,7 @@ it.effect(
        );
        const providerLayer = makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3141,7 +3190,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
          Layer.provide(directoryLayer),
          Layer.provide(defaultServerSettingsLayer),
-@@ -1305,6 +1322,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
+@@ -1306,6 +1323,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
          close: () => Effect.void,
        },
      }).pipe(
@@ -3149,15 +3198,15 @@ index 4d17aabaa..dbeef49f9 100644
        Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
        Layer.provide(directoryLayer),
        Layer.provide(defaultServerSettingsLayer),
-@@ -1367,6 +1385,7 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
- 
+@@ -1368,6 +1386,7 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
+
      const providerLayer = makeProviderServiceLive().pipe(
        Layer.provide(NodeServices.layer),
 +      Layer.provide(UpdateActivityLive),
        Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
        Layer.provide(directoryLayer),
        Layer.provide(defaultServerSettingsLayer),
-@@ -1433,6 +1452,7 @@ it.effect(
+@@ -1434,6 +1453,7 @@ it.effect(
        );
        const firstProviderLayer = makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3165,7 +3214,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(
            Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, firstRegistry),
          ),
-@@ -1494,6 +1514,7 @@ it.effect(
+@@ -1495,6 +1515,7 @@ it.effect(
        );
        const secondProviderLayer = makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3173,7 +3222,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(
            Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
          ),
-@@ -2575,6 +2596,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
+@@ -2939,6 +2960,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
        );
        const firstProviderLayer = makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3181,7 +3230,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(
            Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, firstRegistry),
          ),
-@@ -2615,6 +2637,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
+@@ -2979,6 +3001,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
        );
        const secondProviderLayer = makeProviderServiceLive().pipe(
          Layer.provide(NodeServices.layer),
@@ -3189,7 +3238,7 @@ index 4d17aabaa..dbeef49f9 100644
          Layer.provide(
            Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
          ),
-@@ -2685,6 +2708,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
+@@ -3049,6 +3072,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
          );
          const firstProviderLayer = makeProviderServiceLive().pipe(
            Layer.provide(NodeServices.layer),
@@ -3197,7 +3246,7 @@ index 4d17aabaa..dbeef49f9 100644
            Layer.provide(
              Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, firstRegistry),
            ),
-@@ -2720,6 +2744,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
+@@ -3084,6 +3108,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
          );
          const secondProviderLayer = makeProviderServiceLive().pipe(
            Layer.provide(NodeServices.layer),
@@ -3205,15 +3254,15 @@ index 4d17aabaa..dbeef49f9 100644
            Layer.provide(
              Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
            ),
-@@ -4506,6 +4531,7 @@ describe("agent browser access", () => {
+@@ -4868,6 +4893,7 @@ describe("agent browser access", () => {
+             return undefined;
            }),
-         revokeMcpCredential: (revoked) => Effect.sync(() => void revokedThreads.push(revoked)),
        }).pipe(
 +        Layer.provide(UpdateActivityLive),
          Layer.provide(providerAdapterLayer),
          Layer.provide(directoryLayer),
          Layer.provide(projectionLayer),
-@@ -4592,3 +4618,723 @@ describe("agent browser access", () => {
+@@ -4940,3 +4966,723 @@ describe("agent browser access", () => {
      }).pipe(Effect.provide(NodeServices.layer)),
    );
  });
@@ -3938,10 +3987,10 @@ index 4d17aabaa..dbeef49f9 100644
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/ProviderService.ts b/apps/server/src/provider/Layers/ProviderService.ts
-index 2b2719faa..ca20e0e32 100644
+index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947ee31346d2 100644
 --- a/apps/server/src/provider/Layers/ProviderService.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.ts
-@@ -36,10 +36,10 @@ import { resolveProjectAgentBrowserAccess } from "@t3tools/shared/serverSettings
+@@ -40,10 +40,10 @@ import { resolveProjectAgentBrowserAccess } from "@t3tools/shared/serverSettings
  import * as DateTime from "effect/DateTime";
  import * as Deferred from "effect/Deferred";
  import * as Effect from "effect/Effect";
@@ -3953,7 +4002,7 @@ index 2b2719faa..ca20e0e32 100644
  import * as Ref from "effect/Ref";
  import * as Schema from "effect/Schema";
  import * as SchemaIssue from "effect/SchemaIssue";
-@@ -63,6 +63,7 @@ import {
+@@ -68,6 +68,7 @@ import {
    ProviderValidationError,
    ProviderWorkspaceMissingError,
  } from "../Errors.ts";
@@ -3961,17 +4010,19 @@ index 2b2719faa..ca20e0e32 100644
  import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
  import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
  import * as ProviderService from "../Services/ProviderService.ts";
-@@ -74,21 +75,49 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+@@ -79,6 +80,8 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
  import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
  import * as ServerSettings from "../../serverSettings.ts";
  import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 +import { UpdateActivity, type ActivityBlocker } from "../../updateActivity.ts";
 +import { makeTrackedFanout } from "../../updateActivityFanout.ts";
  const isModelSelection = Schema.is(ModelSelection);
- 
+ const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+@@ -225,16 +228,42 @@ function compactAccessibilityForPrompt(
  /** How long a manual context compaction may run before ProviderService gives up on it. */
  const COMPACTION_COMPLETION_TIMEOUT = "10 minutes";
- 
+
 +/**
 + * An event parked until the fallback compaction turn id is known. The adapter
 + * receipt, when the adapter delivers owned events, stays with the entry so the
@@ -3992,7 +4043,7 @@ index 2b2719faa..ca20e0e32 100644
    compactedEventObserved: boolean;
    expectedTurnId: TurnId | undefined;
  }
- 
+
 +interface RuntimeEventSource {
 +  readonly instanceId: ProviderInstanceId;
 +  readonly provider: ProviderDriverKind;
@@ -4012,9 +4063,9 @@ index 2b2719faa..ca20e0e32 100644
  /**
   * Hook for tests that want to override the canonical event logger pulled
   * from `ProviderEventLoggers`. Production wiring leaves this undefined and
-@@ -336,7 +365,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
-   const revokeMcpCredential =
-     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
+@@ -478,7 +507,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+   const issueMcpCredential =
+     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
    const fileSystem = yield* FileSystem.FileSystem;
 -  const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 +  const activity = yield* UpdateActivity;
@@ -4032,10 +4083,10 @@ index 2b2719faa..ca20e0e32 100644
    const pendingCompactions = new Map<ThreadId, PendingCompaction>();
    const timedOutNativeCompactions = new Set<ThreadId>();
    const settleCompaction = (threadId: ThreadId, pending: PendingCompaction, terminal: string) =>
-@@ -767,6 +807,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -903,6 +943,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
      );
- 
+
 +  // A publish can only fail once the registry or fanout is closing or a
 +  // required queue refused the event. The helper already blocked idleness for
 +  // the refusal; the blocker here covers the closing cases too, so a lost
@@ -4043,7 +4094,7 @@ index 2b2719faa..ca20e0e32 100644
    const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
      Effect.succeed(event).pipe(
        Effect.tap((canonicalEvent) =>
-@@ -774,8 +818,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -910,8 +954,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
            ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId)
            : Effect.void,
        ),
@@ -4066,12 +4117,12 @@ index 2b2719faa..ca20e0e32 100644
 +        ),
 +      ),
      );
- 
+
    const isCompactedEvent = (
-@@ -837,6 +895,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -973,6 +1031,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        yield* publishRuntimeEvent(compactedEvent);
      });
- 
+
 +  // Empties the buffer and publishes each entry, settling its receipt only
 +  // after that entry's own publication(s). The mask keeps the splice and the
 +  // cleanup atomic, and an abandoned flush marks whatever it had not yet
@@ -4115,10 +4166,10 @@ index 2b2719faa..ca20e0e32 100644
    const requireBindingInstanceId = (
      operation: string,
      payload: {
-@@ -881,13 +979,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1017,13 +1115,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        });
      });
- 
+
 -  const processRuntimeEvent = (
 -    source: {
 -      readonly instanceId: ProviderInstanceId;
@@ -4136,7 +4187,7 @@ index 2b2719faa..ca20e0e32 100644
      Effect.gen(function* () {
        const canonicalEvent = yield* Effect.sync(() =>
          correlateRuntimeEventWithInstance(source, event),
-@@ -913,16 +1012,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1049,16 +1148,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
          timedOutNativeCompactions.delete(canonicalEvent.threadId)
        ) {
          yield* publishRuntimeEvent(canonicalEvent);
@@ -4156,7 +4207,7 @@ index 2b2719faa..ca20e0e32 100644
        }
        if (pendingCompaction.native) {
          const compacted = isCompactedEvent(canonicalEvent);
-@@ -932,19 +1031,49 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1068,19 +1167,49 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
          );
          if (terminal !== null)
            yield* settleCompaction(canonicalEvent.threadId, pendingCompaction, terminal);
@@ -4176,7 +4227,7 @@ index 2b2719faa..ca20e0e32 100644
        yield* processFallbackCompactionEvent(pendingCompaction, canonicalEvent);
 +      return "published";
      });
- 
+
 +  // Legacy adapter stream: owns the event from adapter delivery through
 +  // canonical publication, where each required consumer's delivery lease
 +  // takes over. The permanent adapter stream reader holds nothing between
@@ -4209,10 +4260,10 @@ index 2b2719faa..ca20e0e32 100644
    // `subscribedAdapters` is our source-of-truth for "which instance adapters
    // are currently wired into the runtime event bus". It both tracks the set
    // of live subscriptions (so `reconcileInstanceSubscriptions` can diff and
-@@ -961,12 +1090,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1097,12 +1226,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      Effect.map((map) => Array.from(map.entries())),
    );
- 
+
 +  // Owned adapter delivery: the adapter's receipt already holds the event, so
 +  // no lease is taken here. It completes only once every canonical
 +  // publication and the bookkeeping around it has finished; a buffered event
@@ -4287,7 +4338,7 @@ index 2b2719faa..ca20e0e32 100644
    const reconcileInstanceSubscriptions = Effect.gen(function* () {
      const previous = yield* Ref.get(subscribedAdapters);
      const currentIds = yield* registry.listInstances();
-@@ -979,15 +1172,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1115,15 +1308,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        const adapter = adapterOption.value;
        next.set(id, adapter);
        if (previous.get(id) !== adapter) {
@@ -4311,7 +4362,7 @@ index 2b2719faa..ca20e0e32 100644
        }
      }
      yield* Ref.set(subscribedAdapters, next);
-@@ -1562,10 +1754,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1739,10 +1931,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
            detail: "Context compaction is already in progress.",
          });
        }
@@ -4327,7 +4378,7 @@ index 2b2719faa..ca20e0e32 100644
        });
        const awaitNativeCompaction = (start: Effect.Effect<void, ProviderAdapterError>) =>
          start.pipe(
-@@ -1608,18 +1804,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1785,18 +1981,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                  threadId,
                  input: compaction.command,
                  ...(modelSelection !== undefined ? { modelSelection } : {}),
@@ -4350,7 +4401,7 @@ index 2b2719faa..ca20e0e32 100644
                return yield* awaitFallbackCompaction;
              })
        ).pipe(Effect.ensuring(clearPending));
-@@ -2085,12 +2274,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -2266,12 +2455,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      assertConversationRollbackSupported,
      rollbackConversation,
      uploadFeedback,
@@ -4367,21 +4418,21 @@ index 2b2719faa..ca20e0e32 100644
 +    subscribeUpdateEvents: runtimeEvents.subscribeRequired,
    } satisfies ProviderService.ProviderService["Service"];
  });
- 
+
 diff --git a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
-index 4998f710c..c7683939f 100644
+index 2538e05e37dcb3a3970320809725034de0faf77f..dd90f1dab398dab0509a69dba85a5b563fdc56be 100644
 --- a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
-@@ -188,6 +188,7 @@ describe("ProviderSessionReaper", () => {
+@@ -216,6 +216,7 @@ describe("ProviderSessionReaper", () => {
        rollbackConversation: () => unsupported(),
        uploadFeedback: () => unsupported(),
        streamEvents: Stream.empty,
 +      subscribeUpdateEvents: () => unsupported(),
      };
- 
+
      const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
 diff --git a/apps/server/src/provider/Services/ProviderAdapter.ts b/apps/server/src/provider/Services/ProviderAdapter.ts
-index c9b62fd79..1a35c9e8f 100644
+index c9b62fd795256c54e469a769c04880cbc58b5413..1a35c9e8fb15650b02cbfcef0f2fb1dffeeae2d0 100644
 --- a/apps/server/src/provider/Services/ProviderAdapter.ts
 +++ b/apps/server/src/provider/Services/ProviderAdapter.ts
 @@ -23,8 +23,12 @@ import type {
@@ -4390,12 +4441,12 @@ index c9b62fd79..1a35c9e8f 100644
  import type * as Effect from "effect/Effect";
 +import type * as Scope from "effect/Scope";
  import type * as Stream from "effect/Stream";
- 
+
 +import type { UpdateActivityUnavailableError } from "../../updateActivity.ts";
 +import type { RequiredOwnedSubscription } from "../ownedEventSource.ts";
 +
  export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
- 
+
  /**
 @@ -155,4 +159,17 @@ export interface ProviderAdapterShape<TError> {
     * Canonical runtime event stream emitted by this adapter.
@@ -4416,7 +4467,7 @@ index c9b62fd79..1a35c9e8f 100644
 +  >;
  }
 diff --git a/apps/server/src/provider/Services/ProviderService.ts b/apps/server/src/provider/Services/ProviderService.ts
-index c189e2916..acdacee35 100644
+index c189e2916ff1ef44665698700ea33d70b5bb4620..acdacee35f4e27c7bf627967284684999329314f 100644
 --- a/apps/server/src/provider/Services/ProviderService.ts
 +++ b/apps/server/src/provider/Services/ProviderService.ts
 @@ -29,11 +29,21 @@ import type {
@@ -4425,7 +4476,7 @@ index c189e2916..acdacee35 100644
  import type * as Effect from "effect/Effect";
 +import type * as Scope from "effect/Scope";
  import type * as Stream from "effect/Stream";
- 
+
  import type { ProviderServiceError } from "../Errors.ts";
  import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
  import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
@@ -4438,7 +4489,7 @@ index c189e2916..acdacee35 100644
 + * claimed once.
 + */
 +export type ProviderRuntimeEventConsumer = "runtime-ingestion" | "checkpoint";
- 
+
  /**
   * ProviderServiceShape - Service API for provider session and turn orchestration.
 @@ -132,8 +142,24 @@ export interface ProviderServiceShape {
@@ -4464,11 +4515,11 @@ index c189e2916..acdacee35 100644
 +    Scope.Scope
 +  >;
  }
- 
+
  /**
 diff --git a/apps/server/src/provider/ownedEventSource.test.ts b/apps/server/src/provider/ownedEventSource.test.ts
 new file mode 100644
-index 000000000..b1b1a582d
+index 0000000000000000000000000000000000000000..b1b1a582ddc416ffeb45a8e69e524da26323c208
 --- /dev/null
 +++ b/apps/server/src/provider/ownedEventSource.test.ts
 @@ -0,0 +1,631 @@
@@ -5105,7 +5156,7 @@ index 000000000..b1b1a582d
 +);
 diff --git a/apps/server/src/provider/ownedEventSource.ts b/apps/server/src/provider/ownedEventSource.ts
 new file mode 100644
-index 000000000..e43051df8
+index 0000000000000000000000000000000000000000..e43051df87ab09382467f5d99803f5bb5ee2968d
 --- /dev/null
 +++ b/apps/server/src/provider/ownedEventSource.ts
 @@ -0,0 +1,299 @@
@@ -5409,10 +5460,10 @@ index 000000000..e43051df8
 +    } satisfies OwnedEventSource<A>;
 +  });
 diff --git a/apps/server/src/relay/AgentAwarenessRelay.test.ts b/apps/server/src/relay/AgentAwarenessRelay.test.ts
-index 590495007..5a60b8759 100644
+index 1e7cdc3f00e636e7e5347e427ad685154652673e..23a3267612507b1eeab1027f2912e8892f9e39f2 100644
 --- a/apps/server/src/relay/AgentAwarenessRelay.test.ts
 +++ b/apps/server/src/relay/AgentAwarenessRelay.test.ts
-@@ -512,6 +512,8 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
+@@ -514,6 +514,8 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
            dispatch: () => Effect.succeed({ sequence: 1 }),
            streamDomainEvents: Stream.fromQueue(events),
            subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
@@ -5420,8 +5471,8 @@ index 590495007..5a60b8759 100644
 +          initialSequence: 0,
            latestSequence: Effect.succeed(0),
          } satisfies OrchestrationEngineShape;
- 
-@@ -737,6 +739,8 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
+
+@@ -740,6 +742,8 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
              dispatch: () => Effect.succeed({ sequence: 1 }),
              streamDomainEvents: Stream.fromQueue(events),
              subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
@@ -5431,10 +5482,10 @@ index 590495007..5a60b8759 100644
            } satisfies OrchestrationEngineShape),
            Layer.succeed(ProjectionSnapshotQuery, {
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 64bfea1b9..1f4083d19 100644
+index 01f2dd96b18f6b2e262e16649e6977574c69d435..532e17f74dae94f7d5c765c94274baaa8a86d194 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -948,6 +948,7 @@ const buildAppUnderTest = (options?: {
+@@ -951,6 +951,7 @@ const buildAppUnderTest = (options?: {
                }),
              dispatch: () => Effect.succeed({ sequence: 0 }),
              streamDomainEvents: Stream.empty,
@@ -5443,10 +5494,10 @@ index 64bfea1b9..1f4083d19 100644
              ...options?.layers?.orchestrationEngine,
            }),
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 696210b36..7f66a79a2 100644
+index 3831763a3eac52b03b3a4301737dcdf161a4ea4f..c5b9f49f2ec008d9ba518c58ddb27bd243e9cad3 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -127,6 +127,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+@@ -129,6 +129,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
  import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
  import * as UsageService from "./usage/UsageService.ts";
  import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
@@ -5454,7 +5505,7 @@ index 696210b36..7f66a79a2 100644
  import {
    clearPersistedServerRuntimeState,
    makePersistedServerRuntimeState,
-@@ -464,6 +465,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -469,6 +470,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    Layer.provideMerge(GitLayerLive),
    Layer.provideMerge(VcsLayerLive),
    Layer.provideMerge(ProviderRuntimeLayerLive),
@@ -5466,7 +5517,7 @@ index 696210b36..7f66a79a2 100644
    Layer.provideMerge(PersistenceLayerLive),
    // Both read a user-owned file out of the state directory and stream changes
 diff --git a/apps/server/src/serverRuntimeStartup.reconcile.test.ts b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
-index e46c2a8ca..1120edcf1 100644
+index 37fd210ee6da28ae63001381a57d66ef40e03ba0..bf6475d395616299cc65cf0d8f83e0eac8b7a9b3 100644
 --- a/apps/server/src/serverRuntimeStartup.reconcile.test.ts
 +++ b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
 @@ -70,6 +70,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
@@ -5475,7 +5526,7 @@ index e46c2a8ca..1120edcf1 100644
      streamEvents: Stream.empty,
 +    subscribeUpdateEvents: () => Effect.die("unused"),
    }) satisfies ProviderService.ProviderService["Service"];
- 
+
  const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>) =>
 @@ -103,6 +104,8 @@ const runReconciliation = (input: {
        dispatch: input.dispatch,
@@ -5486,7 +5537,7 @@ index e46c2a8ca..1120edcf1 100644
        latestSequence: Effect.succeed(0),
      }),
      Effect.provide(
-@@ -701,6 +704,8 @@ it.effect("does not fail startup when the live provider session inventory cannot
+@@ -721,6 +724,8 @@ it.effect("does not fail startup when the live provider session inventory cannot
        dispatch: () => Effect.die("unused"),
        streamDomainEvents: Stream.empty,
        subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -5496,7 +5547,7 @@ index e46c2a8ca..1120edcf1 100644
      }),
      Effect.provide(Layer.mergeAll(NodeServices.layer, ServerSettings.layerTest())),
 diff --git a/apps/server/src/serverRuntimeStartup.test.ts b/apps/server/src/serverRuntimeStartup.test.ts
-index 0426df44b..9e9aaa08f 100644
+index 0426df44bceac75a4cbc84f6efd34df26afdd32d..9e9aaa08f25f3f0bcc55678967e6b946207bd325 100644
 --- a/apps/server/src/serverRuntimeStartup.test.ts
 +++ b/apps/server/src/serverRuntimeStartup.test.ts
 @@ -187,6 +187,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa

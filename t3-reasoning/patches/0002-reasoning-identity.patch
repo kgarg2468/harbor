@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/app/DesktopAppIdentity.test.ts b/apps/desktop/src/app/DesktopAppIdentity.test.ts
-index 71bcf5f7aef1c4b5753d2882e325180b9fdfd797..d4ddddf4a2809c2b1551ba62f60747800f604d3b 100644
+index 71bcf5f7aef1c4b5753d2882e325180b9fdfd797..df48c1cd3c108a0732db61c1237e359c4a3b736b 100644
 --- a/apps/desktop/src/app/DesktopAppIdentity.test.ts
 +++ b/apps/desktop/src/app/DesktopAppIdentity.test.ts
 @@ -21,9 +21,9 @@ const defaultEnvironmentInput = {
@@ -29,7 +29,7 @@ index 71bcf5f7aef1c4b5753d2882e325180b9fdfd797..d4ddddf4a2809c2b1551ba62f6074780
                  : Effect.succeed(
 -                    input.legacyPathExists === true && path.includes("T3 Code (Alpha)"),
 +                    input.legacyPathExists === true &&
-+                    path === "/Users/alice/Library/Application Support/t3code-reasoning",
++                      path === "/Users/alice/Library/Application Support/t3code-reasoning",
                    ),
              readFileString: () =>
                Effect.succeed(input.packageJson ?? '{"t3codeCommitHash":"abcdef1234567890"}'),
@@ -68,13 +68,87 @@ index 71bcf5f7aef1c4b5753d2882e325180b9fdfd797..d4ddddf4a2809c2b1551ba62f6074780
          assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
          assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
          // Packaged: the bundle's own icon stands, so a custom one the user
+diff --git a/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts b/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts
+index 70441702e016b1f670affa8eb3f5fd8c9cfa4440..6f5b11d35f30c8b1d518b3836261135a3f04f32c 100644
+--- a/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts
++++ b/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts
+@@ -24,6 +24,27 @@ describe("DesktopEarlyElectronStartup", () => {
+     assert.equal(preference, "kwallet6");
+   });
+
++  it.each([undefined, "   "])(
++    "isolates production startup identity and settings with T3CODE_HOME=%s",
++    (t3Home) => {
++      const options = resolveEarlyLinuxElectronOptions({
++        env: t3Home === undefined ? {} : { T3CODE_HOME: t3Home },
++        homeDirectory: "/home/user",
++        joinPath,
++        readFileString: (path) => {
++          assert.equal(path, "/home/user/.t3-reasoning/userdata/desktop-settings.json");
++          return JSON.stringify({ linuxPasswordStore: "kwallet6" });
++        },
++      });
++      assert.deepEqual(options, {
++        isDevelopment: false,
++        linuxWmClass: "t3code-reasoning",
++        linuxDesktopEntryName: "t3code-reasoning.desktop",
++        passwordStore: "kwallet6",
++      });
++    },
++  );
++
+   it("accepts JSONC in the early desktop settings file", () => {
+     const preference = resolveEarlyLinuxPasswordStorePreference({
+       env: { T3CODE_HOME: "/home/user/.t3-test" },
+diff --git a/apps/desktop/src/app/DesktopEarlyElectronStartup.ts b/apps/desktop/src/app/DesktopEarlyElectronStartup.ts
+index 95922bdfdca88f54dd319db571b8d1a68d9cbb9f..bcd78150a10268216d7673664d28ebddd4284b44 100644
+--- a/apps/desktop/src/app/DesktopEarlyElectronStartup.ts
++++ b/apps/desktop/src/app/DesktopEarlyElectronStartup.ts
+@@ -32,7 +32,7 @@ export interface EarlyLinuxElectronOptions {
+ }
+
+ export const resolveLinuxDesktopEntryName = (isDevelopment: boolean): string =>
+-  isDevelopment ? "com.t3tools.T3Code.Development.desktop" : "com.t3tools.T3Code.desktop";
++  isDevelopment ? "com.t3tools.T3Code.Development.desktop" : "t3code-reasoning.desktop";
+
+ const trimNonEmpty = (value: string | undefined): string | null => {
+   const trimmed = value?.trim();
+@@ -55,11 +55,14 @@ function resolveEarlyDesktopSettingsPath(input: {
+   readonly joinPath: JoinPath;
+ }): string {
+   const t3Home = Option.fromUndefinedOr(input.env.T3CODE_HOME);
+-  const baseDir = resolveDesktopBaseDir({
+-    homeDirectory: input.homeDirectory,
+-    joinPath: input.joinPath,
+-    t3Home,
+-  });
++  const baseDir =
++    isDevelopmentEnvironment(input.env) || trimNonEmpty(input.env.T3CODE_HOME) !== null
++      ? resolveDesktopBaseDir({
++          homeDirectory: input.homeDirectory,
++          joinPath: input.joinPath,
++          t3Home,
++        })
++      : input.joinPath(input.homeDirectory, ".t3-reasoning");
+   const stateDir = resolveDesktopStateDir({
+     baseDir,
+     isDevelopment: isDevelopmentEnvironment(input.env),
+@@ -88,7 +91,7 @@ export function resolveEarlyLinuxElectronOptions(
+   const isDevelopment = isDevelopmentEnvironment(input.env);
+   return {
+     isDevelopment,
+-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
++    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code-reasoning",
+     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
+     passwordStore: resolveLinuxPasswordStoreSwitch({
+       preference,
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index 18d8d73d15d17e5ccde397dc6da952c90e16f7b7..a3777eca1faad36b8c230c4fb54c8476fd18b3e8 100644
+index c714b259bc257b0460aef1f44fcc13794e3e1823..0a9b30fb3b6781464d97467ef6de890a1d1b0724 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
 @@ -40,21 +40,26 @@ const makeEnvironment = (
    DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
- 
+
  describe("DesktopEnvironment", () => {
 -  it.effect("exposes a frozen managed identity independent of overridable settings", () =>
 +  it.effect("exposes a frozen Reasoning managed identity independent of overridable settings", () =>
@@ -105,9 +179,18 @@ index 18d8d73d15d17e5ccde397dc6da952c90e16f7b7..a3777eca1faad36b8c230c4fb54c8476
        });
        assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity));
        assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity?.urlSchemes));
-@@ -184,7 +189,56 @@ describe("DesktopEnvironment", () => {
+@@ -185,7 +190,7 @@ describe("DesktopEnvironment", () => {
+         resourcesPath: "/tmp/.mount_t3code/resources",
+       });
+
+-      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.desktop");
++      assert.equal(environment.linuxDesktopEntryName, "t3code-reasoning.desktop");
+     }),
+   );
+
+@@ -198,7 +203,56 @@ describe("DesktopEnvironment", () => {
        const production = yield* makeEnvironment();
- 
+
        assert.equal(development.stateDir, "/Users/alice/.t3/dev");
 -      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
 +      assert.equal(production.stateDir, "/Users/alice/.t3-reasoning/userdata");
@@ -162,15 +245,15 @@ index 18d8d73d15d17e5ccde397dc6da952c90e16f7b7..a3777eca1faad36b8c230c4fb54c8476
 +      assert.equal(development.legacyUserDataDirName, "T3 Code (Dev)");
      }),
    );
- 
+
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b0e1cf20f 100644
+index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c9d398165 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
-@@ -38,13 +38,13 @@ export interface ManagedDesktopPresentationIdentity {
+@@ -39,13 +39,13 @@ export interface ManagedDesktopPresentationIdentity {
    readonly urlSchemes: ReadonlyArray<string>;
  }
- 
+
 -// Build-owned identity: the Reasoning overlay replaces these fixed values.
 +// Build-owned identity for the Reasoning overlay.
  // Never derive this from overridable branding or appUserModelId settings.
@@ -184,19 +267,19 @@ index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b
 +  productName: "T3 Code (Reasoning)",
 +  urlSchemes: Object.freeze(["t3code-reasoning"]),
  });
- 
+
  // Keep this exact managed grammar in sync with updates/updateChannels.ts.
-@@ -120,6 +120,9 @@ export class DesktopEnvironment extends Context.Service<
+@@ -121,6 +121,9 @@ export class DesktopEnvironment extends Context.Service<
  >()("@t3tools/desktop/app/DesktopEnvironment") {}
- 
+
  const APP_BASE_NAME = "T3 Code";
 +// The private Reasoning build owns every packaged (non-development) identity
 +// surface so it can be installed beside official T3 Code without colliding.
 +const REASONING_APP_NAME = "T3 Code (Reasoning)";
- 
+
  function resolveDesktopAppStageLabel(input: {
    readonly isDevelopment: boolean;
-@@ -137,10 +140,21 @@ function resolveDesktopAppBranding(input: {
+@@ -138,10 +141,21 @@ export function resolveDesktopAppBranding(input: {
    readonly appVersion: string;
  }): DesktopAppBranding {
    const stageLabel = resolveDesktopAppStageLabel(input);
@@ -219,8 +302,8 @@ index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b
 +    displayName: REASONING_APP_NAME,
    };
  }
- 
-@@ -190,11 +204,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
+
+@@ -191,11 +205,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
        : input.platform === "darwin"
          ? path.join(homeDirectory, "Library", "Application Support")
          : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
@@ -246,7 +329,7 @@ index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b
    const rootDir = path.resolve(input.dirname, "../../..");
    const appRoot = input.isPackaged ? input.appPath : rootDir;
    const serverRoot =
-@@ -212,8 +236,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -213,8 +237,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
      joinPath: path.join,
      t3Home: config.t3Home,
    });
@@ -260,25 +343,60 @@ index ebb3d14aa958635f0cd07f50ad9d1566c05f5810..1a4b13e1c42aa921adc3d2550727479b
    const linuxApplicationsDir = path.join(
      Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
      "applications",
-@@ -261,10 +288,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -262,10 +289,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
      branding,
      displayName,
      appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
 -      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
 +      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code.reasoning",
      ),
--    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
+     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
 -    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
-+    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code-reasoning.desktop",
 +    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code-reasoning",
      linuxApplicationsDir,
      appImagePath: config.appImagePath,
      userDataDirName,
 diff --git a/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts b/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts
-index 30183808a15216d63a137bd9163d8cbd3adcf389..9e357ecf8629171ad891174cc943f93da16e36a8 100644
+index f0b88101587c72dd9a71e14e45fe1d6099176423..0faa93d5746cc22a9724a3b78d4fc2258bcad84c 100644
 --- a/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts
 +++ b/apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts
-@@ -167,11 +167,11 @@ describe("DesktopLinuxUrlHandler", () => {
+@@ -23,8 +23,8 @@ const makeEnvironment = (overrides: Record<string, unknown> = {}) =>
+     isPackaged: true,
+     isDevelopment: false,
+     displayName: "T3 Code (Alpha)",
+-    linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
+-    linuxWmClass: "t3code",
++    linuxDesktopEntryName: "t3code-reasoning.desktop",
++    linuxWmClass: "t3code-reasoning",
+     linuxApplicationsDir: "/home/alice/.local/share/applications",
+     appImagePath: Option.some("/home/alice/Applications/T3-Code.AppImage"),
+     path: { join: (...parts: ReadonlyArray<string>) => parts.join("/") },
+@@ -131,7 +131,7 @@ describe("DesktopLinuxUrlHandler", () => {
+     const writeError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
+       step: "write-desktop-entry",
+       scheme: "t3code",
+-      desktopEntryPath: "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
++      desktopEntryPath: "/home/alice/.local/share/applications/t3code-reasoning.desktop",
+       cause: new Error("boom"),
+     });
+     assert.equal(
+@@ -140,7 +140,7 @@ describe("DesktopLinuxUrlHandler", () => {
+     );
+     assert.equal(
+       writeError.desktopEntryPath,
+-      "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
++      "/home/alice/.local/share/applications/t3code-reasoning.desktop",
+     );
+
+     const exitError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
+@@ -164,17 +164,17 @@ describe("DesktopLinuxUrlHandler", () => {
+       assert.equal(recorded.files.length, 1);
+       assert.equal(
+         recorded.files[0]?.path,
+-        "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
++        "/home/alice/.local/share/applications/t3code-reasoning.desktop",
+       );
+       assert.include(
          recorded.files[0]?.content,
          'Exec="/home/alice/Applications/T3-Code.AppImage" %U',
        );
@@ -287,11 +405,59 @@ index 30183808a15216d63a137bd9163d8cbd3adcf389..9e357ecf8629171ad891174cc943f93d
        assert.deepEqual(recorded.commands, [
          {
            command: "xdg-mime",
--          args: ["default", "t3code-url-handler.desktop", "x-scheme-handler/t3code"],
-+          args: ["default", "t3code-url-handler.desktop", "x-scheme-handler/t3code-reasoning"],
+-          args: ["default", "com.t3tools.T3Code.desktop", "x-scheme-handler/t3code"],
++          args: ["default", "t3code-reasoning.desktop", "x-scheme-handler/t3code-reasoning"],
          },
        ]);
      });
+@@ -201,7 +201,7 @@ describe("DesktopLinuxUrlHandler", () => {
+         existingEntry: DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+           displayName: "T3 Code (Alpha)",
+           execTarget: "/home/alice/Applications/T3-Code.AppImage",
+-          scheme: "t3code",
++          scheme: "t3code-reasoning",
+         }),
+       });
+
+@@ -245,7 +245,7 @@ describe("DesktopLinuxUrlHandler", () => {
+           module: "FileSystem",
+           method: "writeFileString",
+           description: "read-only filesystem",
+-          pathOrDescriptor: "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
++          pathOrDescriptor: "/home/alice/.local/share/applications/t3code-reasoning.desktop",
+         }),
+       });
+
+diff --git a/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts b/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts
+index 9ddaf40caa0a22a4acb7caa6ec4b544317ef580c..d354639328e278cd9bbe7273fd34adc399f7ecc9 100644
+--- a/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts
++++ b/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts
+@@ -89,7 +89,7 @@ describe("DesktopPreReadyPlatform", () => {
+           desktopName = name;
+         });
+         writeFileSyncMock.mockImplementation((path: string, contents: string) => {
+-          if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
++          if (path === "/xdg/applications/t3code-reasoning.desktop") desktopEntry = contents;
+         });
+
+         return Effect.scoped(
+@@ -101,10 +101,13 @@ describe("DesktopPreReadyPlatform", () => {
+               ),
+             );
+             const identity = yield* Effect.promise(() => portalIdentity);
+-            assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
++            assert.equal(identity.desktopName, "t3code-reasoning.desktop");
+             assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
+-            assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Alpha)");
+-            assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
++            assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Reasoning)");
++            assert.include(
++              identity.desktopEntry ?? "",
++              "MimeType=x-scheme-handler/t3code-reasoning;",
++            );
+           }),
+         ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
+       },
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 index 4a42abd63bc638b1014388e2125ec0c544165795..5466dedf1dc8dd7094d9df2f569d0918ceb76a8d 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
@@ -315,26 +481,23 @@ index 4a42abd63bc638b1014388e2125ec0c544165795..5466dedf1dc8dd7094d9df2f569d0918
              assert.notProperty(primary.bootstrap, "managedDesktopArtifactHelperPath");
            }
 diff --git a/apps/desktop/src/electron/ElectronProtocol.test.ts b/apps/desktop/src/electron/ElectronProtocol.test.ts
-index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b77bdb80b6 100644
+index a5c03e0b933624ff2241a2454f6d3098a193179b..df236689897bdbefe13dc34ee2ec1563d4da633c 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.test.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.test.ts
-@@ -23,6 +23,15 @@ describe("ElectronProtocol", () => {
+@@ -23,6 +23,12 @@ describe("ElectronProtocol", () => {
      unhandleMock.mockReset();
    });
- 
+
 +  it("keeps the packaged Reasoning scheme apart from stock and dev schemes", () => {
-+    assert.equal(ElectronProtocol.DESKTOP_PRODUCTION_SCHEME, "t3code-reasoning");
-+    assert.equal(ElectronProtocol.DESKTOP_DEVELOPMENT_SCHEME, "t3code-dev");
 +    assert.equal(ElectronProtocol.getDesktopScheme(false), "t3code-reasoning");
 +    assert.equal(ElectronProtocol.getDesktopScheme(true), "t3code-dev");
-+    assert.equal(ElectronProtocol.getDesktopOrigin(false), "t3code-reasoning://app");
 +    assert.equal(ElectronProtocol.getDesktopUrl(false), "t3code-reasoning://app/");
 +  });
 +
    it.effect("proxies the stable renderer origin to the current app server", () =>
      Effect.gen(function* () {
        let handler: ((request: Request) => Promise<Response>) | undefined;
-@@ -99,12 +108,12 @@ describe("ElectronProtocol", () => {
+@@ -99,12 +105,12 @@ describe("ElectronProtocol", () => {
          Effect.gen(function* () {
            const protocol = yield* ElectronProtocol.ElectronProtocol;
            yield* protocol.registerDesktopProtocol({
@@ -348,8 +511,8 @@ index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b7
 +          return yield* Effect.promise(() => handler!(new Request("t3code-reasoning://other/")));
          }),
        );
- 
-@@ -176,7 +185,7 @@ describe("ElectronProtocol", () => {
+
+@@ -176,7 +182,7 @@ describe("ElectronProtocol", () => {
        const exit = yield* Effect.exit(
          Effect.scoped(
            protocol.registerDesktopProtocol({
@@ -358,7 +521,7 @@ index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b7
              targetOrigin: new URL("http://127.0.0.1:3773/"),
              backendOrigin: new URL("http://127.0.0.1:3773/"),
              clerkFrontendApiHostname: undefined,
-@@ -188,16 +197,19 @@ describe("ElectronProtocol", () => {
+@@ -188,16 +194,19 @@ describe("ElectronProtocol", () => {
        if (exit._tag === "Failure") {
          const error = Cause.squash(exit.cause);
          assert.instanceOf(error, ElectronProtocol.ElectronProtocolUnregistrationError);
@@ -373,7 +536,7 @@ index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b7
        }
      }).pipe(Effect.provide(ElectronProtocol.layer)),
    );
- 
+
    it("keeps executable sources host-restricted while allowing runtime network resources", () => {
      const policy = ElectronProtocol.makeDesktopContentSecurityPolicy({
 -      scheme: "t3code",
@@ -381,7 +544,7 @@ index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b7
        targetOrigin: new URL("http://127.0.0.1:3773/"),
        backendOrigin: new URL("http://127.0.0.1:3773/"),
        clerkFrontendApiHostname: "clerk.t3.codes",
-@@ -219,13 +231,19 @@ describe("ElectronProtocol", () => {
+@@ -219,13 +228,19 @@ describe("ElectronProtocol", () => {
      assert.deepEqual(directives["connect-src"], ["'self'", "http:", "https:", "ws:", "wss:"]);
      assert.deepEqual(directives["img-src"], [
        "'self'",
@@ -405,25 +568,25 @@ index a5c03e0b933624ff2241a2454f6d3098a193179b..5d527e6e9d9a120f127c5d1d681873b7
    });
  });
 diff --git a/apps/desktop/src/electron/ElectronProtocol.ts b/apps/desktop/src/electron/ElectronProtocol.ts
-index fabd598d7ffab125afd5e73c70d71996564d0646..91b9204888dfa8704d836c63d6b3e56c40c63e31 100644
+index da8fcd3a2e4b2ce9a761155fd14c328827646010..7b2b3e908bee82dcb46a51d981886353f4d79477 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.ts
 @@ -9,7 +9,9 @@ import * as Scope from "effect/Scope";
  import * as Electron from "electron";
- 
+
  export const DESKTOP_HOST = "app";
--export const DESKTOP_PRODUCTION_SCHEME = "t3code";
+-const DESKTOP_PRODUCTION_SCHEME = "t3code";
 +// The private Reasoning build claims its own production scheme so packaged
 +// installs never contend with official T3 Code for t3code:// callbacks.
-+export const DESKTOP_PRODUCTION_SCHEME = "t3code-reasoning";
- export const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
- 
++const DESKTOP_PRODUCTION_SCHEME = "t3code-reasoning";
+ const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+
  export function getDesktopScheme(isDevelopment: boolean): string {
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f733c7b06 100644
+index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b67130afcbd25 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -56,7 +56,6 @@ import {
+@@ -59,7 +59,6 @@ import {
    resolveResourceMonitorRustTargets,
    resolveWindowsServerAsarIgnoreGlobs,
    resourceMonitorExecutableName,
@@ -431,10 +594,10 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
    resolveMockUpdateServerPort,
    resolveMockUpdateServerUrl,
    resolvePackageManagerUserAgent,
-@@ -326,10 +325,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -330,10 +329,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      }
    });
- 
+
 -  it("switches desktop packaging product names to nightly for nightly builds", () => {
 -    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
 -    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
@@ -444,12 +607,12 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
 +    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Reasoning)");
 +    assert.equal(resolveDesktopProductName(MANAGED_NIGHTLY_VERSION), "T3 Code (Reasoning)");
    });
- 
+
    it("keeps nightly icons and web branding for managed nightly versions", () => {
-@@ -360,86 +359,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -364,86 +363,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
    });
- 
+
 -  it.effect("resolves GitHub desktop publish config from Effect config", () =>
 +  it.effect("never wires an official update feed into the package", () =>
      Effect.gen(function* () {
@@ -516,7 +679,7 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
          undefined,
          undefined,
        );
- 
+
 -      assert.notProperty(preview, "publish");
 -      assert.deepStrictEqual(release.publish, [
 -        {
@@ -544,7 +707,7 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
        ),
      ),
    );
- 
+
 +  it.effect("keeps mock updates opt-in and away from preview builds", () =>
 +    Effect.gen(function* () {
 +      const mockUpdates = yield* createBuildConfig(
@@ -579,10 +742,10 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
    it.effect("packages managed nightly versions with nightly presentation and no update feed", () =>
      Effect.gen(function* () {
        const build = (version: string, mockUpdates = false) =>
-@@ -459,32 +448,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -463,32 +452,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          const stable = yield* build("0.0.40").pipe(withEnv);
          const preview = yield* build("0.0.40-pr.8182.1").pipe(withEnv);
- 
+
 -        // Managed builds keep the Nightly product identity but never ship the
 -        // stock GitHub feed, whichever repository variable the runner exposes.
 +        // Managed builds keep the Reasoning product identity with nightly
@@ -595,7 +758,7 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
 -        assert.equal(managedDmg.title, `T3 Code (Nightly) ${MANAGED_NIGHTLY_VERSION} Installer`);
 +        assert.equal(managedDmg.title, `T3 Code (Reasoning) ${MANAGED_NIGHTLY_VERSION} Installer`);
          assert.equal(managedDmg.background, "dmg/dmg-background-nightly.png");
- 
+
 -        // Ordinary versions keep their upstream feeds.
 -        assert.deepStrictEqual(nightly.publish, [
 -          {
@@ -620,18 +783,18 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
 +        assert.notProperty(stable, "publish", Object.keys(env).join(","));
          assert.notProperty(preview, "publish");
        }
- 
-@@ -824,7 +800,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+
+@@ -829,7 +805,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          "**/node_modules/.bin/**",
        ]);
        assert.deepStrictEqual(mac.dmg, {
 -        title: "T3 Code (Alpha) 1.2.3 Installer",
 +        title: "T3 Code (Reasoning) 1.2.3 Installer",
          background: "dmg/dmg-background-latest.png",
-         window: { width: 540, height: 412 },
+         window: { width: 640, height: 432 },
          contents: [
-@@ -834,11 +810,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
-         iconSize: 80,
+@@ -839,11 +815,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+         iconSize: 120,
          iconTextSize: 12,
        });
 -      // Linux must register the renderer schemes so the generated .desktop
@@ -658,18 +821,18 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
 +        entry: { StartupWMClass: "t3code-reasoning" },
 +      });
        assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
-       assert.notProperty(mac.mac as Record<string, unknown>, "sign");
-       for (const config of [linux, win]) {
-@@ -1753,7 +1744,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+       assert.deepStrictEqual(linux.files, DESKTOP_FILE_EXCLUSIONS);
+       assert.deepStrictEqual(win.files, DESKTOP_FILE_EXCLUSIONS);
+@@ -1857,7 +1848,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      });
- 
+
      assert.deepStrictEqual(configuration, {
 -      appId: "com.t3tools.t3code",
 +      appId: "com.t3tools.t3code.reasoning",
        teamId: "ABC1234567",
        rpDomains: ["example.clerk.accounts.dev"],
        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-@@ -1773,7 +1764,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1877,7 +1868,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        "clerk.example.com",
        "example.clerk.accounts.dev",
      ]);
@@ -678,18 +841,18 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
      assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
      assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
      assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
-@@ -1860,7 +1851,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1964,7 +1955,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.notInclude(error.message, secret);
    });
- 
+
 -  it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
 +  it.effect("adds passkey entitlements and the Reasoning protocol to signed macOS builds", () =>
      Effect.gen(function* () {
        const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
          entitlementsPath: "/tmp/entitlements.mac.plist",
-@@ -1868,12 +1859,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1972,12 +1963,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        });
- 
+
        const mac = config.mac as Record<string, unknown>;
 -      assert.equal(config.appId, "com.t3tools.t3code");
 +      assert.equal(config.appId, "com.t3tools.t3code.reasoning");
@@ -703,24 +866,24 @@ index ce7f0607c204f1e5f6653c15e463a618accef6c5..88c88466b34abe687a66d420d914b80f
      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
    );
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd72e310da0 100644
+index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a823233e9cb 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -52,7 +52,9 @@ import { Command, Flag } from "effect/unstable/cli";
+@@ -53,7 +53,9 @@ import { Command, Flag } from "effect/unstable/cli";
  import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
- 
+
  const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 -const DESKTOP_APP_ID = "com.t3tools.t3code";
 +// Private Reasoning build: a distinct bundle id lets it install and run
 +// beside the official T3 Code apps.
 +const DESKTOP_APP_ID = "com.t3tools.t3code.reasoning";
  const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
- 
+
  const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
-@@ -2525,32 +2527,6 @@ export function resolveDesktopRuntimeDependencies(
+@@ -2609,32 +2611,6 @@ export function resolveDesktopRuntimeDependencies(
    return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
  }
- 
+
 -export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
 -  updateChannel: "latest" | "nightly",
 -) {
@@ -749,11 +912,11 @@ index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd7
 -
  // Ordinary upstream nightlies keep their historical suffix-only classification.
  const ORDINARY_NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
- 
-@@ -2620,10 +2596,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
+
+@@ -2704,10 +2680,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
    return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
  }
- 
+
 -export function resolveDesktopProductName(version: string): string {
 -  return resolveDesktopUpdateChannel(version) === "nightly"
 -    ? "T3 Code (Nightly)"
@@ -764,9 +927,9 @@ index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd7
 +  // an official T3 Code install.
 +  return "T3 Code (Reasoning)";
  }
- 
+
  export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
-@@ -2648,7 +2625,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2732,7 +2709,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    const buildConfig: Record<string, unknown> = {
      appId: DESKTOP_APP_ID,
      productName: resolveDesktopProductName(version),
@@ -775,7 +938,7 @@ index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd7
      electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
      files: [
        ...DESKTOP_FILE_EXCLUSIONS,
-@@ -2672,24 +2649,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2759,24 +2736,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      ],
    };
    const updateChannel = resolveDesktopUpdateChannel(version);
@@ -810,12 +973,12 @@ index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd7
 +      },
 +    ];
    }
- 
+
    if (platform === "mac") {
-@@ -2699,10 +2670,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
-       target: target === "dmg" ? [target, "zip"] : [target],
-       icon: "icon.icns",
-       category: "public.app-category.developer-tools",
+@@ -2790,10 +2761,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+         NSScreenCaptureUsageDescription:
+           "T3 Code captures the active window when you use the window capture shortcut.",
+       },
 +      // Only the Reasoning scheme: claiming t3code or t3code-dev would let
 +      // this private build capture the official apps' OAuth callbacks.
        protocols: [
@@ -827,7 +990,7 @@ index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd7
          },
        ],
        ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-@@ -2741,21 +2714,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2831,21 +2804,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    if (platform === "linux") {
      buildConfig.linux = {
        target: [target],
@@ -855,7 +1018,7 @@ index a0d94205808bdbba3804a9dba4ff6c00ecc5120d..1ce149f8a4c8157b8b1d8eaa8b781bd7
          },
        },
      };
-@@ -3738,13 +3712,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+@@ -3848,13 +3822,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
        ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
        : undefined;
    const stagePackageJson: StagePackageJson = {

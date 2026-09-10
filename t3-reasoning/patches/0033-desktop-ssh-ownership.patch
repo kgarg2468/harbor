@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
-index 1fe2b86a..5329dc0b 100644
+index 1fe2b86aae7b96e41f87675748497a49501047d1..5329dc0b883935e4d6338e70b3eb4f0c902b6dea 100644
 --- a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
 +++ b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
 @@ -1,8 +1,23 @@
@@ -401,7 +401,7 @@ index 1fe2b86a..5329dc0b 100644
 +  );
 +}
 diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
-index 2c9ab0c0..c1b9974f 100644
+index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958c8fc62f0 100644
 --- a/apps/desktop/src/ssh/DesktopSshEnvironment.ts
 +++ b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
 @@ -18,13 +18,19 @@ import {
@@ -418,16 +418,17 @@ index 2c9ab0c0..c1b9974f 100644
 +import * as Semaphore from "effect/Semaphore";
  import * as HttpClient from "effect/unstable/http/HttpClient";
  import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
- 
+
 +import * as DesktopUpdateLifecycle from "../backend/desktopUpdateLifecycle.ts";
 +
  import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
- 
+
  export type DesktopSshEnvironmentRuntimeServices =
-@@ -128,45 +134,126 @@ const makePasswordPrompt = (
+@@ -128,46 +134,126 @@ const makePasswordPrompt = (
      prompts.request(request).pipe(Effect.mapError(toSshPasswordPromptError)),
  });
- 
+
+-/** @public Service construction is part of the canonical Effect module API. */
 -export const make = Effect.gen(function* () {
 -  const manager = yield* SshTunnel.SshEnvironmentManager;
 -  const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
@@ -509,7 +510,7 @@ index 2c9ab0c0..c1b9974f 100644
 +    });
    });
 -});
- 
+
 -export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
 -  Layer.effect(DesktopSshEnvironment, make).pipe(
 -    Layer.provide(
@@ -584,7 +585,7 @@ index 2c9ab0c0..c1b9974f 100644
        SshTunnel.SshEnvironmentManager.layer({
          ...(options.resolveCliPackageSpec === undefined
            ? {}
-@@ -175,5 +262,12 @@ export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
+@@ -176,5 +262,13 @@ export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
            ? {}
            : { resolveCliRunner: options.resolveCliRunner }),
        }),
@@ -595,6 +596,7 @@ index 2c9ab0c0..c1b9974f 100644
 +    return yield* makeEnvironment(ownership).pipe(Effect.provide(managerContext));
 +  });
 +
++/** @public Service construction is part of the canonical Effect module API. */
 +export const make = makeWithOptions();
 +
 +export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>

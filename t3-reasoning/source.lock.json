@@ -1,12 +1,12 @@
 {
   "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
-  "commit": "357b8d5217cd62826767b6ce6d7c47915f2777d2",
+  "commit": "3836890e4484406813997259efc69065b25ce698",
   "patches": [
     {
       "id": "reasoning-full",
       "path": "patches/0001-reasoning.patch",
-      "sha256": "e919e6c6ec6fbf00a86f97af4c73282f24b9a6b4256bc6433788bc356c9ccb7c"
+      "sha256": "5b4fe724bcc65327f0196d7d177d8521c50436a22e799d1e6b85f6f7b31162f3"
     },
     {
       "id": "desktop-runtime-common",
@@ -16,22 +16,22 @@
     {
       "id": "update-admission",
       "path": "patches/0003-update-admission.patch",
-      "sha256": "663f8d54b6c79b5eaaebac0fd7e25c4cb84c3fc7ffba0cc2dd7566911cbf712a"
+      "sha256": "f61160bc8350d118a12f8d4a8f4cf488d31a48ee721bdb9cfc9910ce3356bfb4"
     },
     {
       "id": "queued-update",
       "path": "patches/0004-queued-update.patch",
-      "sha256": "a1242b0c4d74d0830e611686f87de6403befc7fe6cb36b31b989d3a583c208ce"
+      "sha256": "2e9f7ab5d5764f6ef5db9b0954a3220c45c27462540281563ed816c2a841399c"
     },
     {
       "id": "update-activity",
       "path": "patches/0005-update-activity.patch",
-      "sha256": "79f9a1d428990ebd092ddc1e5c32b54c7cbba67c51c817300a0a3f3c5ef2f2f2"
+      "sha256": "bf0131d5d5a3c126b1eb8b62531198fc0a992f4f6e056aca49e74db94e49bea3"
     },
     {
       "id": "activity-wiring",
       "path": "patches/0009-activity-wiring.patch",
-      "sha256": "b47e9e18c25278649cc5139d6b52e11c9e5102029caf28f13b9e24cd22e3b0b4"
+      "sha256": "12da1c2183e966577fcc300f2144f507a17a4cef2ac4661208096defe31f7a84"
     },
     {
       "id": "thread-fork-backend",
@@ -46,17 +46,17 @@
     {
       "id": "migration-preflight",
       "path": "patches/0012-migration-preflight.patch",
-      "sha256": "1502b837bc78c595d750ccfcde52e8d76dcf1b09bfaeea0a0ac0083c2648d4fe"
+      "sha256": "3be7db00e1e205e1ff7f0d3493f50dcbb21c82b53bf3cb61621a8a3676bfcfed"
     },
     {
       "id": "idle-coordinator",
       "path": "patches/0013-idle-coordinator.patch",
-      "sha256": "a3474c41ed4854fd3fd32919afc495ad11ed2aeb114c655a6840d302833d2a9a"
+      "sha256": "0993c973289e9ef21ffca52b3613ab2746c99dfb023ed8be2fd75fb9aa96aa6c"
     },
     {
       "id": "managed-runtime-stager",
       "path": "patches/0014-managed-runtime-stager.patch",
-      "sha256": "ee2aeab5d11e6d7f4432e0030500dcbac38b8834eaf3fb69a6260097be7b8009"
+      "sha256": "1ee8c20491db96d7f24402377f5c40f6d4c9bcfd0b183ee1972da600bd2bdc30"
     },
     {
       "id": "desktop-reservation",
@@ -71,17 +71,17 @@
     {
       "id": "candidate-process",
       "path": "patches/0018-candidate-process.patch",
-      "sha256": "d0850e428f54a4e18e43af07b048d84e35769fd9fc5bf51551e8060633c7b606"
+      "sha256": "f73571bfeb3e38d8c1913a6b9babc7c8a15d4c3a96c50c537455a1f0fe7d97fb"
     },
     {
       "id": "managed-runtime-transaction",
       "path": "patches/0019-managed-runtime-transaction.patch",
-      "sha256": "19aeb429932431447c0766a1a780387e7775c0ac4b4acfe77c1e5631070042f2"
+      "sha256": "fd064b6eeff3fec62b4c9000f212819e7aea1f710c396da50e6a8a82f9e58ca2"
     },
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "b777ffdc6ce9d012a543ef7f14a8e14a867d2171027469bc0e2a7f01e39362a5"
+      "sha256": "9ad1f47ae571ab26cc531ddf42af0eccd37d6d1962c182c1e64398c9765ec0ab"
     },
     {
       "id": "managed-release-feed",
@@ -96,7 +96,7 @@
     {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
-      "sha256": "f533ca63350e78edd51e4f245a178e0c7ebfb91625c935982ccfd766027a7d35"
+      "sha256": "83b5719e7afb6de4bdc5adea68e0bb33511aa12283c435e7ab5d070d998b7813"
     },
     {
       "id": "idle-preparation",
@@ -111,7 +111,7 @@
     {
       "id": "live-admission",
       "path": "patches/0024-live-admission.patch",
-      "sha256": "92fcfbe0952f55ca4f6420c4f27bf6d84c5442a548305e99f205403fce24a728"
+      "sha256": "d56dd9ec491a7750d74aa9501ee2cbe018c99379b7ec40f2ff7e9fa0d7323f5c"
     },
     {
       "id": "managed-desktop-identity",
@@ -126,7 +126,7 @@
     {
       "id": "managed-queue-controls",
       "path": "patches/0027-managed-queue-controls.patch",
-      "sha256": "000c675f17c7ad3db4013a3859b024d39b960b9f978fc4cdba6ba1b01a018167"
+      "sha256": "9a8458d3f7d195b1d53428e6358999ec43ad181d1e8fa104d3d19c5d3f9a3d9e"
     },
     {
       "id": "desktop-reservation-transport",
@@ -156,12 +156,12 @@
     {
       "id": "desktop-ssh-ownership",
       "path": "patches/0033-desktop-ssh-ownership.patch",
-      "sha256": "0a824e326688cd48a1d055300ceeb05540bb82f1165236946dd64b624279caaa"
+      "sha256": "52bcdb48cbe6ca665803f19a9c6a623e0156c1513e209ca2d2ce7ed0546e4dd4"
     },
     {
       "id": "managed-desktop-artifact-stager",
       "path": "patches/0034-managed-desktop-artifact-stager.patch",
-      "sha256": "c8df70eb91089344d6089ba7d68756b691ff2253a6281002274cb3272fe54c07"
+      "sha256": "59793348ee2fb0420abc72a0d8ba2799662955984c92f93ed257aaf652101729"
     },
     {
       "id": "managed-desktop-artifact-capability",
@@ -186,7 +186,7 @@
     {
       "id": "desktop-update-report-ack",
       "path": "patches/0039-desktop-update-report-ack.patch",
-      "sha256": "a1a5d14592da020c2fab05f4c9118f53aaa7940ee140ae8af536a7ed96952b59"
+      "sha256": "833d691e4913012fc2ad1d5ad5e037ea2762415c822e04673c23e2747e27e6fa"
     },
     {
       "id": "managed-desktop-installer",
@@ -196,7 +196,7 @@
     {
       "id": "managed-desktop-routing",
       "path": "patches/0041-managed-desktop-routing.patch",
-      "sha256": "668fd928d14b9ee1bf788d70a5fd2f8067c70f8e9fd496c16482254607fda832"
+      "sha256": "5135f1e7a7a598cc3e7ec2ea204e15b65b6419b184d6880a511c367e78e9c122"
     },
     {
       "id": "managed-desktop-scheduler",
@@ -206,7 +206,7 @@
     {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "c1c963771f0548710e339a76ce67fff34d4fb1a5a86e297b1dbf192b7b9f8f13"
+      "sha256": "d7e315b874a6ca42be6f73a89003174c368b28aa5cc6d889532682fe3a2a741b"
     }
   ],
   "variants": {
