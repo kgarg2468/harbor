@@ -159,9 +159,19 @@
       "sha256": "0a824e326688cd48a1d055300ceeb05540bb82f1165236946dd64b624279caaa"
     },
     {
+      "id": "managed-desktop-artifact-stager",
+      "path": "patches/0034-managed-desktop-artifact-stager.patch",
+      "sha256": "c8df70eb91089344d6089ba7d68756b691ff2253a6281002274cb3272fe54c07"
+    },
+    {
+      "id": "managed-desktop-artifact-capability",
+      "path": "patches/0035-managed-desktop-artifact-capability.patch",
+      "sha256": "53173265c37322ab9d40c23d18602928ec3d20a86738e067dcb473a62580aa68"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "7743f69e213a60a86641ec1206dc83546956a58db16a18dfe0dcbd643320065e"
+      "sha256": "c1c963771f0548710e339a76ce67fff34d4fb1a5a86e297b1dbf192b7b9f8f13"
     }
   ],
   "variants": {
@@ -195,7 +205,9 @@
       "server-desktop-reservation-receiver",
       "managed-presentation-identity",
       "desktop-update-lifecycle",
-      "desktop-ssh-ownership"
+      "desktop-ssh-ownership",
+      "managed-desktop-artifact-stager",
+      "managed-desktop-artifact-capability"
     ],
     "reasoning": [
       "reasoning-full",
@@ -228,6 +240,8 @@
       "managed-presentation-identity",
       "desktop-update-lifecycle",
       "desktop-ssh-ownership",
+      "managed-desktop-artifact-stager",
+      "managed-desktop-artifact-capability",
       "reasoning-identity"
     ]
   }

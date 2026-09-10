@@ -1035,8 +1035,10 @@ describe("source.lock.json", () => {
     "apps/server/src/os-jank.ts",
   ];
   const IDENTITY_FILES = [
+    "apps/desktop/src/app/DesktopAppIdentity.test.ts",
     "apps/desktop/src/app/DesktopEnvironment.test.ts",
     "apps/desktop/src/app/DesktopEnvironment.ts",
+    "apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts",
     "apps/desktop/src/backend/DesktopBackendConfiguration.test.ts",
     "apps/desktop/src/electron/ElectronProtocol.test.ts",
     "apps/desktop/src/electron/ElectronProtocol.ts",
@@ -1132,9 +1134,10 @@ describe("source.lock.json", () => {
           assert.ok(nightlyBlobs.has(file), `${file} missing from managed-nightly`);
         }
         // Managed Nightly keeps upstream's packaged identity.
-        const protocol = await readFile(path.join(nightly, IDENTITY_FILES[4]), "utf8");
+        const protocolFile = "apps/desktop/src/electron/ElectronProtocol.ts";
+        const protocol = await readFile(path.join(nightly, protocolFile), "utf8");
         assert.match(protocol, /DESKTOP_PRODUCTION_SCHEME = "t3code";/);
-        const reasoningProtocol = await readFile(path.join(reasoning, IDENTITY_FILES[4]), "utf8");
+        const reasoningProtocol = await readFile(path.join(reasoning, protocolFile), "utf8");
         assert.match(reasoningProtocol, /DESKTOP_PRODUCTION_SCHEME = "t3code-reasoning";/);
       } finally {
         await rm(dir, { recursive: true, force: true });
