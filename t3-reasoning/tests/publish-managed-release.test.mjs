@@ -1650,6 +1650,14 @@ describe("t3-managed-release workflow", () => {
     assert.doesNotMatch(build, /--signed|codesign|notar|CSC_|APPLE_|keychain|security /);
   });
 
+  it("checks the Rust host from captured complete output without an early-exit pipe under pipefail", () => {
+    const build = jobs.build.join("\n");
+    assert.doesNotMatch(build, /rustc -vV\s*\|\s*grep\s+-\w*q/, "grep -q can SIGPIPE rustc under pipefail even when the host matches");
+    assert.match(build, /rustc_verbose="\$\(rustc -vV\)"\n\s+if ! grep -Fxq "host: \$\{RUST_TARGET\}" <<< "\$\{rustc_verbose\}"; then/);
+    assert.equal((build.match(/rustc -vV/g) ?? []).length, 1, "capture the complete rustc output once");
+    assert.match(build, /echo "::error::rustc host is not \$\{RUST_TARGET\}"\n\s+printf '%s\\n' "\$\{rustc_verbose\}"\n\s+exit 1/);
+  });
+
   it("runs the shared smoke on both native server rows after the build and before upload, isolated and fail-closed", () => {
     const build = jobs.build;
     const buildIndex = build.findIndex((line) => /- name: Build the artifact with the existing builder$/.test(line));
