@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/orchestration/ThreadSettlementReactor.test.ts b/apps/server/src/orchestration/ThreadSettlementReactor.test.ts
-index f5dcef529..217d251c1 100644
+index f474504cc3d6d871886ae3d5b79d2de39a3d6b01..7b97a052340a32c0e19a24bcd4dd75fe61a4915f 100644
 --- a/apps/server/src/orchestration/ThreadSettlementReactor.test.ts
 +++ b/apps/server/src/orchestration/ThreadSettlementReactor.test.ts
 @@ -32,6 +32,12 @@ import {
@@ -15,10 +15,10 @@ index f5dcef529..217d251c1 100644
  import { OrchestrationCommandInvariantError } from "./Errors.ts";
  import {
    OrchestrationEngineService,
-@@ -161,8 +167,20 @@ interface HarnessOptions {
+@@ -162,8 +168,20 @@ interface HarnessOptions {
    ) => Effect.Effect<void, OrchestrationCommandInvariantError>;
  }
- 
+
 +// Resolves through registry revisions once the predicate holds; never polls.
 +const awaitActivity = (
 +  activity: UpdateActivityShape,
@@ -36,7 +36,7 @@ index f5dcef529..217d251c1 100644
    const snapshots = yield* Ref.make(options.snapshot);
    const snapshotReadCount = yield* Ref.make(0);
    const snapshotReads = yield* Queue.unbounded<number>();
-@@ -262,6 +280,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
+@@ -264,6 +282,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
      Layer.succeed(ServerSettingsService, serverSettings),
      Layer.succeed(ServerActivation, Deferred.await(activation)),
      Layer.succeed(Crypto.Crypto, testCrypto),
@@ -44,18 +44,18 @@ index f5dcef529..217d251c1 100644
      FileSystem.layerNoop({
        exists: (path) => Effect.succeed(options.existingWorktreePaths?.includes(path) ?? false),
      }),
-@@ -269,6 +288,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
- 
+@@ -271,6 +290,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
+
    return {
      activation,
 +    activity,
      snapshots,
      snapshotReadCount,
      snapshotReads,
-@@ -540,15 +560,23 @@ describe("ThreadSettlementReactor", () => {
+@@ -650,15 +670,23 @@ describe("ThreadSettlementReactor", () => {
            yield* fixture.updateSettings({ sidebarAutoSettleAfterDays: 4 });
            yield* Deferred.await(periodicLookupStarted);
- 
+
 +          // Every trigger shares one worker, so the merge sweep queues behind
 +          // the settings sweep still waiting on its lookup and is owned while
 +          // it waits: the running sweep and the queued merge are both counted.
@@ -64,7 +64,7 @@ index f5dcef529..217d251c1 100644
 +          yield* awaitActivity(fixture.activity, (state) => state.outstanding === 2);
 +          assert.strictEqual(yield* Deferred.isDone(mergedThreadSettled), false);
 +          assert.strictEqual((yield* fixture.activity.trySealIdle).status, "busy");
- 
+
 +          // Once the lookup releases, the merge settles without a clock tick.
 +          yield* Deferred.succeed(releasePeriodicLookup, undefined);
 +          yield* Deferred.await(mergedThreadSettled);
@@ -79,7 +79,7 @@ index f5dcef529..217d251c1 100644
          }).pipe(Effect.provide(fixture.layer));
        }),
      ),
-@@ -1088,4 +1116,74 @@ describe("ThreadSettlementReactor", () => {
+@@ -1201,4 +1229,74 @@ describe("ThreadSettlementReactor", () => {
        }),
      ),
    );
@@ -155,7 +155,7 @@ index f5dcef529..217d251c1 100644
 +  );
  });
 diff --git a/apps/server/src/orchestration/ThreadSettlementReactor.ts b/apps/server/src/orchestration/ThreadSettlementReactor.ts
-index 994830b30..f6b0d3dcb 100644
+index 61fc5d4ab8635af58a67a05f04efae7ab2ac17e7..5dfa3e25a77d1d086023860abcc517a7d7b84b07 100644
 --- a/apps/server/src/orchestration/ThreadSettlementReactor.ts
 +++ b/apps/server/src/orchestration/ThreadSettlementReactor.ts
 @@ -1,5 +1,4 @@
@@ -173,15 +173,15 @@ index 994830b30..f6b0d3dcb 100644
  import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
  import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
  import { pullRequestMatchesProject } from "./ThreadPullRequestReactor.ts";
-@@ -40,6 +41,7 @@ export const make = Effect.gen(function* () {
+@@ -41,6 +42,7 @@ export const make = Effect.gen(function* () {
    const pullRequests = yield* PullRequestService.PullRequestService;
    const crypto = yield* Crypto.Crypto;
    const fileSystem = yield* FileSystem.FileSystem;
 +  const activity = yield* UpdateActivity;
- 
+
    const sweep = Effect.fn("ThreadSettlementReactor.sweep")(function* (
      mergedPullRequest: PullRequestService.PullRequestMergeEvent | null,
-@@ -239,7 +241,23 @@ export const make = Effect.gen(function* () {
+@@ -246,7 +248,23 @@ export const make = Effect.gen(function* () {
              }),
        ),
      );
@@ -203,10 +203,10 @@ index 994830b30..f6b0d3dcb 100644
 +        }),
 +      ),
 +    );
- 
+
    const start: ThreadSettlementReactor["Service"]["start"] = Effect.fn(
      "ThreadSettlementReactor.start",
-@@ -251,7 +269,7 @@ export const make = Effect.gen(function* () {
+@@ -258,7 +276,7 @@ export const make = Effect.gen(function* () {
      let lastOnMerge = initialSettings.sidebarAutoSettleOnMerge;
      yield* forkParked(
        Effect.gen(function* () {
@@ -215,7 +215,7 @@ index 994830b30..f6b0d3dcb 100644
          yield* worker.drain;
        }).pipe(Effect.repeat(Schedule.spaced("1 minute")), Effect.asVoid),
      );
-@@ -265,10 +283,10 @@ export const make = Effect.gen(function* () {
+@@ -272,10 +290,10 @@ export const make = Effect.gen(function* () {
          }
          lastAfterDays = settings.sidebarAutoSettleAfterDays;
          lastOnMerge = settings.sidebarAutoSettleOnMerge;
@@ -226,10 +226,10 @@ index 994830b30..f6b0d3dcb 100644
 -    yield* forkParked(Stream.runForEach(mergedPullRequests, runSweep));
 +    yield* forkParked(Stream.runForEach(mergedPullRequests, enqueue));
    });
- 
+
    return { start, drain: worker.drain } satisfies ThreadSettlementReactor["Service"];
 diff --git a/apps/server/src/provider/Drivers/ClaudeDriver.ts b/apps/server/src/provider/Drivers/ClaudeDriver.ts
-index 324284a3a..1a6fa0ed3 100644
+index 324284a3a4c74c4db039d7522062cb652d17ada8..1a6fa0ed31e64db7cff6f9b5ddf3623b90705b90 100644
 --- a/apps/server/src/provider/Drivers/ClaudeDriver.ts
 +++ b/apps/server/src/provider/Drivers/ClaudeDriver.ts
 @@ -28,6 +28,7 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -247,7 +247,7 @@ index 324284a3a..1a6fa0ed3 100644
 -  | ServerSettingsService;
 +  | ServerSettingsService
 +  | UpdateActivity;
- 
+
  export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
    driverKind: DRIVER_KIND,
 @@ -114,6 +116,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
@@ -270,7 +270,7 @@ index 324284a3a..1a6fa0ed3 100644
        };
        const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
 diff --git a/apps/server/src/provider/Drivers/CodexDriver.test.ts b/apps/server/src/provider/Drivers/CodexDriver.test.ts
-index bac34db45..ff65d5457 100644
+index bac34db452fde28729dee5cf2c4e037fdd3cca2c..ff65d5457982e69a90eb63f35c9b87c218ac71ca 100644
 --- a/apps/server/src/provider/Drivers/CodexDriver.test.ts
 +++ b/apps/server/src/provider/Drivers/CodexDriver.test.ts
 @@ -17,6 +17,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
@@ -290,7 +290,7 @@ index bac34db45..ff65d5457 100644
      Layer.mock(BackgroundPolicy.BackgroundPolicy)({
        shouldRunScopeWork: () => Effect.succeed(false),
 diff --git a/apps/server/src/provider/Drivers/CodexDriver.ts b/apps/server/src/provider/Drivers/CodexDriver.ts
-index 071fb2067..90e2e6200 100644
+index 071fb20674a8bd7bccde486316b1525fd361bdd7..90e2e6200d1b4e267622c0b5d795e1d86fae3ac0 100644
 --- a/apps/server/src/provider/Drivers/CodexDriver.ts
 +++ b/apps/server/src/provider/Drivers/CodexDriver.ts
 @@ -35,6 +35,7 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -308,7 +308,7 @@ index 071fb2067..90e2e6200 100644
 -  | ServerSettingsService;
 +  | ServerSettingsService
 +  | UpdateActivity;
- 
+
  export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
    driverKind: DRIVER_KIND,
 @@ -134,6 +136,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
@@ -331,15 +331,15 @@ index 071fb2067..90e2e6200 100644
        });
        const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
 diff --git a/apps/server/src/provider/Errors.ts b/apps/server/src/provider/Errors.ts
-index 4abb10554..193ed2e7c 100644
+index cdeeb3b922d4c7c69b9d3b961afccd9bd5e1c5ad..be7f3282ba6dda2b3da7f44d1ca761d45dd24456 100644
 --- a/apps/server/src/provider/Errors.ts
 +++ b/apps/server/src/provider/Errors.ts
 @@ -1,6 +1,7 @@
  import * as Schema from "effect/Schema";
- 
+
  import type { CheckpointServiceError } from "../checkpointing/Errors.ts";
 +import type { UpdateActivityUnavailableError } from "../updateActivity.ts";
- 
+
  /**
   * ProviderAdapterValidationError - Invalid adapter API input.
 @@ -218,4 +219,7 @@ export type ProviderServiceError =
@@ -352,10 +352,10 @@ index 4abb10554..193ed2e7c 100644
 +  // or closed registry refuses the operation before any routing or recovery.
 +  | UpdateActivityUnavailableError;
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f701cf9fc0b 100644
+index cbdfa5fdd56abdc09672b2ccc17e5d1df7f31193..3872b28f33af09b898ec7a901cc1b1c8759f2135 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-@@ -38,6 +38,12 @@ import * as TestClock from "effect/testing/TestClock";
+@@ -39,6 +39,12 @@ import * as TestClock from "effect/testing/TestClock";
  import { attachmentRelativePath } from "../../attachmentStore.ts";
  import { ServerConfig } from "../../config.ts";
  import { ServerSettingsService } from "../../serverSettings.ts";
@@ -368,7 +368,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
  import {
    SYNTHETIC_CLAUDE_CAPABLE_MODEL,
    SYNTHETIC_CLAUDE_COLLIDING_ALIAS,
-@@ -65,12 +71,76 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
+@@ -66,12 +72,76 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
    }> = [];
    private done = false;
    private failure: unknown | undefined;
@@ -421,7 +421,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
 +    });
 +    return { reached, resume };
 +  }
- 
+
    public readonly setModelCalls: Array<string | undefined> = [];
    public readonly setPermissionModeCalls: Array<string> = [];
    public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
@@ -442,13 +442,13 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
 +      this.closeWaiters.push(resolve);
 +    });
 +  }
- 
+
    emit(message: SDKMessage): void {
      if (this.done) {
-@@ -106,12 +176,33 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
+@@ -107,12 +177,33 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
      }
    }
- 
+
 +  /**
 +   * Resolves once the adapter has fully handled every emitted message and
 +   * is parked waiting for the next one. The adapter pulls one message at a
@@ -467,7 +467,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
    readonly setModel = async (model?: string): Promise<void> => {
      this.setModelCalls.push(model);
    };
- 
+
    readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
      this.setPermissionModeCalls.push(mode);
 +    const gate = this.permissionModeGate;
@@ -477,10 +477,10 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
 +      await gate;
 +    }
    };
- 
+
    readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
-@@ -120,10 +211,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
- 
+@@ -121,10 +212,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
+
    readonly close = (): void => {
      this.closeCalls += 1;
 +    for (const wake of this.closeWaiters.splice(0)) wake();
@@ -490,9 +490,9 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
 -    this.finish();
 +    if (this.closeEndsStream) this.finish();
    };
- 
+
    [Symbol.asyncIterator](): AsyncIterator<SDKMessage> {
-@@ -154,6 +246,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
+@@ -155,6 +247,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
              resolve,
              reject,
            });
@@ -500,7 +500,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
          });
        },
      };
-@@ -169,8 +262,13 @@ function makeHarness(config?: {
+@@ -170,8 +263,13 @@ function makeHarness(config?: {
    readonly instanceId?: ProviderInstanceId;
    readonly scopedLimitNames?: ClaudeAdapterLiveOptions["scopedLimitNames"];
    readonly environment?: ClaudeAdapterLiveOptions["environment"];
@@ -515,7 +515,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
    let createInput:
      | {
          readonly prompt: AsyncIterable<SDKUserMessage>;
-@@ -182,10 +280,15 @@ function makeHarness(config?: {
+@@ -183,10 +281,15 @@ function makeHarness(config?: {
      ...(config?.environment ? { environment: config.environment } : {}),
      ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
      ...(config?.scopedLimitNames ? { scopedLimitNames: config.scopedLimitNames } : {}),
@@ -532,7 +532,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
      },
      ...(config?.nativeEventLogger
        ? {
-@@ -216,7 +319,10 @@ function makeHarness(config?: {
+@@ -217,7 +320,10 @@ function makeHarness(config?: {
        Layer.provideMerge(ServerSettingsService.layerTest()),
        Layer.provideMerge(NodeServices.layer),
      ),
@@ -544,7 +544,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
      getLastCreateQueryInput: () => createInput,
    };
  }
-@@ -7151,3 +7257,1871 @@ describe("ClaudeAdapterLive", () => {
+@@ -7323,3 +7429,1871 @@ describe("ClaudeAdapterLive", () => {
      );
    });
  });
@@ -2417,7 +2417,7 @@ index 53e6b44d95a75c520c999dcd01075c2502239bb8..dc24fa44887894c80672aedca8428f70
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a3bcea6cd 100644
+index 54131df6eff5cacd7d107c4a474ac3c8c5df3020..0d3dbb7bdbc2aa2643bad9cfd2ebab7a17a89b31 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
 @@ -8,7 +8,6 @@
@@ -2458,7 +2458,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 @@ -134,6 +140,14 @@ type PromptQueueItem =
        readonly type: "terminate";
      };
- 
+
 +/**
 + * The most client uuids a result's `user_message_uuids` can carry (SDK
 + * `SDKResultMessage`). Handing the CLI no more unacknowledged prompts than
@@ -2470,10 +2470,10 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
  interface ClaudeResumeState {
    readonly threadId?: ThreadId;
    readonly resume?: string;
-@@ -287,8 +301,75 @@ function rememberPendingTaskModel(
+@@ -288,8 +302,75 @@ function rememberPendingTaskModel(
    }
  }
- 
+
 +/**
 + * Update-activity ownership of one session's native Claude work. Every
 + * field is a no-op stand-in when the adapter runs without `updateActivity`.
@@ -2546,15 +2546,15 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
    readonly promptQueue: Queue.Queue<PromptQueueItem>;
    readonly query: ClaudeQueryRuntime;
    streamFiber: Fiber.Fiber<void, Error> | undefined;
-@@ -333,6 +414,7 @@ interface ClaudeSessionContext {
+@@ -334,6 +415,7 @@ interface ClaudeSessionContext {
    /** Limits already announced for the running turn, keyed `window:resetsAt`. */
    announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
    stopped: boolean;
 +  retiring: ClaudeIdleRetirement | undefined;
  }
- 
+
  interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
-@@ -340,6 +422,15 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
+@@ -341,6 +423,15 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
    readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
    readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
    readonly close: () => void;
@@ -2568,9 +2568,9 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +   */
 +  readonly waitForExit?: () => Promise<void>;
  }
- 
+
  export interface ClaudeAdapterLiveOptions {
-@@ -354,6 +445,14 @@ export interface ClaudeAdapterLiveOptions {
+@@ -355,6 +446,14 @@ export interface ClaudeAdapterLiveOptions {
    readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
    /** Scoped-bucket names the driver's status probe last saw; see `claudeUsageLimits`. */
    readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
@@ -2583,12 +2583,12 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +   */
 +  readonly updateActivity?: UpdateActivityShape;
  }
- 
+
  function isUuid(value: string): boolean {
-@@ -1943,19 +2042,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -1944,19 +2043,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const managedNativeEventLogger =
      options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
- 
+
 +  // Production spawns the CLI itself through the SDK's spawn hook so every
 +  // query carries proof of its own process exit; see `claudeQueryRuntime`.
    const createQuery =
@@ -2602,7 +2602,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 -        options: input.options,
 -      }) as ClaudeQueryRuntime);
 +    }): ClaudeQueryRuntime => makeClaudeQueryRuntime(input));
- 
+
    const sessions = new Map<ThreadId, ClaudeSessionContext>();
 -  const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 +  const activity = options?.updateActivity;
@@ -2620,13 +2620,13 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +  // Set once a runtime event could not be handed to the owned source. The
 +  // event is gone, so the registry can never again prove this adapter idle.
 +  let undeliverableRuntimeEvents: ActivityBlocker | undefined;
- 
+
    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
    const randomUUIDv4 = crypto.randomUUIDv4.pipe(
-@@ -1972,8 +2083,327 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -1973,8 +2084,327 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const nextEventId = Effect.map(randomUUIDv4, (id) => EventId.make(id));
    const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
- 
+
 -  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
 -    Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
 +  // A refused owned publish is a lost event: the registry is blocked for good
@@ -2950,10 +2950,10 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +        Effect.ensuring(restore(effect), Effect.sync(lease.release)),
 +      ),
 +    );
- 
+
    const logNativeSdkMessage = Effect.fnUntraced(function* (
      context: ClaudeSessionContext,
-@@ -3152,6 +3582,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3153,6 +3583,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      // Auto-start a synthetic turn for assistant messages that arrive without
      // an active turn (e.g., background agent/subagent responses between user prompts).
      if (!context.turnState) {
@@ -2963,10 +2963,10 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        const turnId = TurnId.make(yield* randomUUIDv4);
        const startedAt = yield* nowIso;
        context.turnState = {
-@@ -3268,6 +3701,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3273,6 +3706,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          : undefined);
      const { status, errorMessage } = resultOutcome(message, failureHint);
- 
+
 +    // Bookkeeping only: the cycle lease outlives the result until the CLI's
 +    // authoritative idle, which is what actually settles the loop.
 +    acknowledgePrompts(context, message);
@@ -2975,7 +2975,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
      if (status === "failed") {
        yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
      }
-@@ -3533,6 +3971,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3538,6 +3976,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            effort,
          });
          context.liveTaskIds.add(message.task_id);
@@ -2987,7 +2987,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
          yield* offerRuntimeEvent({
            ...base,
            type: "task.started",
-@@ -3615,6 +4058,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3620,6 +4063,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              ...taskLinkageFor(context.taskAgents, message.task_id),
            },
          });
@@ -2997,7 +2997,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
          return;
        }
        case "task_notification": {
-@@ -3641,6 +4087,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3646,6 +4092,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              ...taskLinkageFor(context.taskAgents, message.task_id),
            },
          });
@@ -3007,7 +3007,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
          return;
        }
        case "files_persisted":
-@@ -3696,6 +4145,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3701,6 +4150,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              reason: `session_state:${message.state}`,
            },
          });
@@ -3028,7 +3028,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
          return;
        case "notification":
          // User-facing CLI notification (e.g. context-limit warnings). Only
-@@ -3712,20 +4175,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3717,20 +4180,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          // by a different model.
          yield* emitRuntimeWarning(context, message.content, message);
          return;
@@ -3059,7 +3059,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        case "control_request_progress":
        case "worker_shutting_down":
          return;
-@@ -3984,7 +4450,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3989,7 +4455,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      ).pipe(
        Stream.takeWhile(() => !context.stopped),
        Stream.runForEach((message) =>
@@ -3068,7 +3068,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
            Effect.mapError(
              (cause) =>
                new ProviderAdapterProcessError({
-@@ -4012,6 +4478,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4017,6 +4483,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            yield* completeTurn(context, "interrupted", "Claude runtime interrupted.");
          }
        } else {
@@ -3081,7 +3081,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
          const failures = exit.cause.reasons.flatMap((reason) =>
            Cause.isFailReason(reason) ? [reason.error] : [],
          );
-@@ -4036,6 +4508,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4041,6 +4513,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      options?: { readonly emitExitEvent?: boolean },
    ) {
      if (context.stopped) return;
@@ -3097,10 +3097,10 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +    // process but could not end the session, so this context is the only
 +    // handle on a process whose exit is unproven. See below.
 +    const retainedByRetirement = context.retiring !== undefined;
- 
+
      // Schedule process termination before any cleanup that can wait on the
      // provider. The SDK closes stdin, then escalates from SIGTERM to SIGKILL.
-@@ -4048,7 +4532,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4053,7 +4537,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            detail: "Failed to close Claude runtime query.",
            cause,
          }),
@@ -3140,10 +3140,10 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +        return;
 +      }
 +    }
- 
+
      context.stopped = true;
- 
-@@ -4138,6 +4656,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+
+@@ -4143,6 +4661,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      if (sessions.get(context.session.threadId) === context) {
        sessions.delete(context.session.threadId);
      }
@@ -3191,9 +3191,9 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +      Effect.forkDetach,
 +    );
    });
- 
+
    const requireSession = (
-@@ -4152,7 +4713,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4157,7 +4718,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          }),
        );
      }
@@ -3209,7 +3209,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        return Effect.fail(
          new ProviderAdapterSessionClosedError({
            provider: PROVIDER,
-@@ -4382,35 +4950,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4387,35 +4955,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            ageMinutes: finiteNonNegativeInteger(request.payload.sessionAgeMinutes) ?? 0,
            estimatedTokens: finiteNonNegativeInteger(request.payload.estimatedTokens) ?? 0,
          });
@@ -3275,9 +3275,9 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +            },
 +          ),
          );
- 
+
          if (result.behavior !== "allow") {
-@@ -4449,7 +5021,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4454,7 +5026,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          // user via the user-input runtime event channel, regardless of
          // runtime mode (plan mode relies on this heavily).
          if (toolName === "AskUserQuestion") {
@@ -3288,12 +3288,12 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +            handleAskUserQuestion(context, toolInput, callbackOptions),
 +          );
          }
- 
+
          if (toolName === "ExitPlanMode") {
-@@ -4482,6 +5058,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4487,6 +5063,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            } satisfies PermissionResult;
          }
- 
+
 +        return yield* withRequestOwnership(
 +          context,
 +          "claude approval request",
@@ -3310,15 +3310,15 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
          const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
          const requestType = classifyRequestType(toolName);
          const detail = summarizeToolRequest(toolName, toolInput);
-@@ -4772,6 +5361,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
- 
+@@ -4777,6 +5366,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+
        const context: ClaudeSessionContext = {
          session,
 +        native: makeNativeOwnership(),
          promptQueue,
          query: queryRuntime,
          streamFiber: undefined,
-@@ -4797,6 +5387,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4802,6 +5392,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          lastThreadStartedId: undefined,
          announcedUsageLimits: undefined,
          stopped: false,
@@ -3326,7 +3326,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        };
        yield* Ref.set(contextRef, context);
        sessions.set(threadId, context);
-@@ -4854,6 +5445,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4859,6 +5450,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              if (context.streamFiber === streamFiber) {
                context.streamFiber = undefined;
              }
@@ -3340,8 +3340,8 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
              return handleStreamExit(context, exit).pipe(
                Effect.catch((cause) =>
                  Effect.logError("Failed to close Claude runtime stream.", { cause }),
-@@ -4877,6 +5475,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
- 
+@@ -4882,6 +5480,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+
    const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
      const context = yield* requireSession(input.threadId);
 +    // Ownership precedes everything the send publishes or admits: a sealed
@@ -3376,7 +3376,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
      const modelCatalog = yield* modelCatalogEffect;
      const selectedModel =
        input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
-@@ -4988,7 +5615,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4994,7 +5621,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
        Effect.provideService(FileSystem.FileSystem, fileSystem),
        Effect.provideService(Path.Path, path),
      );
@@ -3385,7 +3385,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        fileSystem,
        attachmentsDir: serverConfig.attachmentsDir,
        boundInstanceId,
-@@ -4999,11 +5626,51 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5005,11 +5632,51 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            .map((skill) => skill.name),
        ),
      });
@@ -3439,11 +3439,11 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
 +        threadId: input.threadId,
 +      });
 +    }
- 
+
      return {
        threadId: context.session.threadId,
-@@ -5077,7 +5744,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
- 
+@@ -5083,7 +5750,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+
    const stopSession: ClaudeAdapterShape["stopSession"] = Effect.fn("stopSession")(
      function* (threadId) {
 -      const context = yield* requireSession(threadId);
@@ -3455,10 +3455,10 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        yield* stopSessionInternal(context, {
          emitExitEvent: true,
        });
-@@ -5111,12 +5782,270 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5117,12 +5788,270 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const stopAll: ClaudeAdapterShape["stopAll"] = () =>
      stopSessions(Array.from(sessions.values()), true);
- 
+
 +  // Synchronous verdict on whether a context may be retired for a managed
 +  // update. Loss comes first: a blocked context can never retire. Every kind
 +  // of native work refuses: what the registry tracks (cycle, prompts, tasks)
@@ -3727,7 +3727,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
        Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
      ),
    );
-@@ -5138,8 +6067,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5144,8 +6073,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      listSessions,
      hasSession,
      stopAll,
@@ -3744,7 +3744,7 @@ index 0ab697f746fef3e389465d8a77b54ff3243cd171..5ce75269589246b6a0ac5234f4ad7d8a
    } satisfies ClaudeAdapterShape;
  });
 diff --git a/apps/server/src/provider/Layers/CodexAdapter.test.ts b/apps/server/src/provider/Layers/CodexAdapter.test.ts
-index ef6e97d89..8b5758ebf 100644
+index f7c6036885d9dd73920a9af329aa6a03d94621ef..af4abd2ac3deb523546278b6c57f54f0098641a7 100644
 --- a/apps/server/src/provider/Layers/CodexAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/CodexAdapter.test.ts
 @@ -12,6 +12,7 @@ import {
@@ -3757,7 +3757,7 @@ index ef6e97d89..8b5758ebf 100644
    type ProviderUserInputAnswers,
 @@ -23,6 +24,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
  import { it, vi } from "@effect/vitest";
- 
+
  import * as Context from "effect/Context";
 +import * as Deferred from "effect/Deferred";
  import * as Effect from "effect/Effect";
@@ -3768,7 +3768,7 @@ index ef6e97d89..8b5758ebf 100644
  import * as TestClock from "effect/testing/TestClock";
  import * as CodexErrors from "effect-codex-app-server/errors";
 +import { describe } from "vite-plus/test";
- 
+
  import { ServerConfig } from "../../config.ts";
  import { ServerSettingsService } from "../../serverSettings.ts";
 +import {
@@ -3803,11 +3803,10 @@ index ef6e97d89..8b5758ebf 100644
    it.effect("maps codex model options before starting a session", () =>
      Effect.gen(function* () {
        validationRuntimeFactory.factory.mockClear();
-@@ -2694,3 +2717,537 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
-     }
+@@ -2695,6 +2718,548 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
    }),
  );
-+
+
 +// ---------------------------------------------------------------------------
 +// Owned delivery: runtime receipts → adapter source → service receipts.
 +// ---------------------------------------------------------------------------
@@ -4083,6 +4082,14 @@ index ef6e97d89..8b5758ebf 100644
 +      // One output, zero outputs (filtered interaction), two outputs.
 +      yield* runtime.emit(codexTurnEvent("turn/started", "turn-1"));
 +      yield* runtime.emit(codexInteractedEvent("evt-interacted"));
++      // Upstream suppresses this duplicate error; its owned receipt must still settle.
++      yield* runtime.emit(
++        codexErrorNotification({
++          id: "evt-owned-limit-error",
++          message: "You've hit your usage limit.",
++          codexErrorInfo: "usageLimitExceeded",
++        }),
++      );
 +      yield* runtime.emit(codexCompactionCompletedEvent("evt-compaction"));
 +      yield* service.awaitEvent("thread.state.changed");
 +
@@ -4341,8 +4348,12 @@ index ef6e97d89..8b5758ebf 100644
 +    }).pipe(Effect.provide(ownedAdapterDependencies)),
 +  );
 +});
++
+ const usageLimitRuntimeFactory = makeRuntimeFactory();
+ const usageLimitLayer = it.layer(
+   Layer.effect(
 diff --git a/apps/server/src/provider/Layers/CodexAdapter.ts b/apps/server/src/provider/Layers/CodexAdapter.ts
-index 5e2244336..c7455c4d4 100644
+index 5c3d1f08e2d07f27027364b4c3d45e814abdcfd7..a27b784479cdb4e9b4dc92cebfbea6b2ab040c5d 100644
 --- a/apps/server/src/provider/Layers/CodexAdapter.ts
 +++ b/apps/server/src/provider/Layers/CodexAdapter.ts
 @@ -58,6 +58,7 @@ import {
@@ -4361,8 +4372,8 @@ index 5e2244336..c7455c4d4 100644
 +import { makeOwnedEventSource, type OwnedEventSource } from "../ownedEventSource.ts";
  import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
  import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
- import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
-@@ -93,6 +96,13 @@ export interface CodexAdapterLiveOptions {
+ import {
+@@ -98,6 +101,13 @@ export interface CodexAdapterLiveOptions {
    >;
    readonly nativeEventLogPath?: string;
    readonly nativeEventLogger?: EventNdjsonLogger;
@@ -4374,9 +4385,9 @@ index 5e2244336..c7455c4d4 100644
 +   */
 +  readonly updateActivity?: UpdateActivityShape;
  }
- 
+
  interface CodexAdapterSessionContext {
-@@ -2226,9 +2236,68 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+@@ -2231,9 +2241,68 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
        : undefined);
    const managedNativeEventLogger =
      options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
@@ -4405,7 +4416,7 @@ index 5e2244336..c7455c4d4 100644
 +  let publishedAnyEvent = false;
 +  let undeliveredEvents: ActivityBlocker | undefined;
    const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
- 
+
 +  const publishRuntimeEvents = (
 +    owned: OwnedEventSource<ProviderRuntimeEvent>,
 +    runtimeEvents: ReadonlyArray<ProviderRuntimeEvent>,
@@ -4446,7 +4457,7 @@ index 5e2244336..c7455c4d4 100644
    const startSession: CodexAdapterShape["startSession"] = (input) =>
      Effect.scoped(
        Effect.gen(function* () {
-@@ -2261,6 +2330,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+@@ -2266,6 +2335,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
            ...(isCodexResumeCursorSchema(input.resumeCursor)
              ? { resumeCursor: input.resumeCursor }
              : {}),
@@ -4454,10 +4465,10 @@ index 5e2244336..c7455c4d4 100644
            runtimeMode: input.runtimeMode,
            ...(input.modelSelection?.instanceId === boundInstanceId
              ? { model: input.modelSelection.model }
-@@ -2303,11 +2373,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+@@ -2315,11 +2385,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
            ),
          );
- 
+
 -        // Fork into the session scope, not the calling fiber. `forkChild` makes
 -        // this a child of `startSession`, and Effect interrupts a fiber's
 -        // children when it completes, so the consumer died on return and every
@@ -4467,7 +4478,16 @@ index 5e2244336..c7455c4d4 100644
            Effect.gen(function* () {
              yield* writeNativeEvent(event);
              if (event.method === "turn/started" && event.turnId) {
-@@ -2375,10 +2441,63 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+@@ -2366,7 +2432,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+               );
+               // The failed `turn/completed` repeats this sentence and is answered
+               // below; relaying both would show the limit twice.
+-              if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return;
++              if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return [];
+             }
+
+             let usageLimitError: ProviderRuntimeEvent | undefined;
+@@ -2434,10 +2500,63 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                  turnId: event.turnId,
                  itemId: event.itemId,
                });
@@ -4532,12 +4552,12 @@ index 5e2244336..c7455c4d4 100644
 +                Effect.flatMap(mapRuntimeEvent(event), offerRuntimeEvents),
 +              )
          ).pipe(Effect.forkIn(sessionScope));
- 
+
          const started = yield* runtime.start().pipe(
-@@ -2640,9 +2759,81 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+@@ -2699,9 +2818,81 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
        discard: true,
      }).pipe(Effect.asVoid);
- 
+
 +  // The runtime proves the exit and drains its own queue through the session's
 +  // required consumer before it reports; only then does the session's scope
 +  // (that consumer's subscription) close, mirroring `stopSessionInternal`. A
@@ -4617,7 +4637,7 @@ index 5e2244336..c7455c4d4 100644
        Effect.andThen(managedNativeEventLogger?.close() ?? Effect.void),
        Effect.ignore,
      ),
-@@ -2667,9 +2858,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+@@ -2726,9 +2917,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
      listSessions,
      hasSession,
      stopAll,
@@ -4641,14 +4661,14 @@ index 5e2244336..c7455c4d4 100644
 +        }),
    } satisfies CodexAdapterShape;
  });
- 
+
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-index 2cffc4fee..67de0ff6d 100644
+index 744eefe052534a09a7d1fb55aebe774159de7750..f8367b668a6a7c651e1f2d21c4e8efdaa1858a18 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 @@ -1,21 +1,43 @@
  import * as NodeAssert from "node:assert/strict";
- 
+
 +import * as NodeServices from "@effect/platform-node/NodeServices";
  import { it } from "@effect/vitest";
 +import * as Cause from "effect/Cause";
@@ -4671,7 +4691,7 @@ index 2cffc4fee..67de0ff6d 100644
  import * as CodexErrors from "effect-codex-app-server/errors";
  import * as CodexRpc from "effect-codex-app-server/rpc";
  import * as EffectCodexSchema from "effect-codex-app-server/schema";
- 
+
 +import {
 +  make as makeUpdateActivity,
 +  type UpdateActivityShape,
@@ -4691,7 +4711,7 @@ index 2cffc4fee..67de0ff6d 100644
    makeMemoryConsolidationNotificationFilter,
    openCodexThread,
    toMcpElicitationResponse,
-@@ -861,3 +883,1688 @@ describe("openCodexThread", () => {
+@@ -953,3 +975,1688 @@ describe("openCodexThread", () => {
      }),
    );
  });
@@ -6381,7 +6401,7 @@ index 2cffc4fee..67de0ff6d 100644
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index 95b619f20..ca3d2fcd8 100644
+index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26adec189925 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 @@ -19,11 +19,13 @@ import {
@@ -6415,7 +6435,7 @@ index 95b619f20..ca3d2fcd8 100644
 +  ProviderIdleRetirementResult,
 +} from "../Services/ProviderAdapter.ts";
  const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
- 
+
  const PROVIDER = ProviderDriverKind.make("codex");
 @@ -74,6 +87,11 @@ const CodexUserInputAnswerObject = Schema.Struct({
  });
@@ -6429,10 +6449,10 @@ index 95b619f20..ca3d2fcd8 100644
  const NullableMcpElicitationString = Schema.NullOr(Schema.String);
  const McpElicitationMetadata = Schema.Struct({
    app: Schema.optionalKey(NullableMcpElicitationString),
-@@ -166,6 +184,13 @@ export interface CodexSessionRuntimeOptions {
-   readonly serviceTier?: CodexServiceTier | undefined;
-   readonly resumeCursor?: CodexResumeCursor;
-   readonly appServerArgs?: ReadonlyArray<string>;
+@@ -173,6 +191,13 @@ export interface CodexSessionRuntimeOptions {
+    * access; the credential's own capability decides the developer prompt.
+    */
+   readonly browserToolsAvailable?: boolean;
 +  /**
 +   * Update-activity registry for native ownership. When present, every raw
 +   * notification, emitted event, accepted root turn, live child turn and
@@ -6441,9 +6461,9 @@ index 95b619f20..ca3d2fcd8 100644
 +   */
 +  readonly updateActivity?: UpdateActivityShape;
  }
- 
+
  export interface CodexSessionRuntimeSendTurnInput {
-@@ -214,11 +239,36 @@ export interface CodexSessionRuntimeShape {
+@@ -221,11 +246,36 @@ export interface CodexSessionRuntimeShape {
      answers: ProviderUserInputAnswers,
    ) => Effect.Effect<void, CodexSessionRuntimeError>;
    readonly events: Stream.Stream<ProviderEvent, never>;
@@ -6473,17 +6493,17 @@ index 95b619f20..ca3d2fcd8 100644
 +   */
 +  readonly retireIdle?: Effect.Effect<ProviderIdleRetirementResult>;
  }
- 
+
  export type CodexSessionRuntimeError =
    | CodexErrors.CodexAppServerError
 +  | UpdateActivityUnavailableError
    | CodexSessionRuntimePendingApprovalNotFoundError
    | CodexSessionRuntimePendingUserInputNotFoundError
    | CodexSessionRuntimeInvalidUserInputAnswersError
-@@ -1152,6 +1202,326 @@ function parseThreadSnapshot(
+@@ -1186,6 +1236,326 @@ function parseThreadSnapshot(
    };
  }
- 
+
 +interface PendingRootStart {
 +  readonly lease: ActivityLease | undefined;
 +  /** Set when the caller left before the turn/start response was bound. */
@@ -6807,7 +6827,7 @@ index 95b619f20..ca3d2fcd8 100644
  export const makeCodexSessionRuntime = (
    options: CodexSessionRuntimeOptions,
  ): Effect.Effect<
-@@ -1161,9 +1531,27 @@ export const makeCodexSessionRuntime = (
+@@ -1195,9 +1565,27 @@ export const makeCodexSessionRuntime = (
  > =>
    Effect.gen(function* () {
      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -6837,7 +6857,7 @@ index 95b619f20..ca3d2fcd8 100644
      const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
      const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
      const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
-@@ -1174,6 +1562,46 @@ export const makeCodexSessionRuntime = (
+@@ -1208,6 +1596,46 @@ export const makeCodexSessionRuntime = (
      const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
      const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
      const closedRef = yield* Ref.make(false);
@@ -6881,10 +6901,10 @@ index 95b619f20..ca3d2fcd8 100644
 +    const rawScope = yield* Scope.fork(sessionScope);
 +    const clientScope = yield* Scope.fork(sessionScope);
 +    const processScope = yield* Scope.fork(sessionScope);
- 
+
      // `~` is not shell-expanded when env vars are set via
      // `child_process.spawn`; `expandHomePath` lets a configured
-@@ -1200,7 +1628,7 @@ export const makeCodexSessionRuntime = (
+@@ -1234,7 +1662,7 @@ export const makeCodexSessionRuntime = (
          }),
        )
        .pipe(
@@ -6893,10 +6913,10 @@ index 95b619f20..ca3d2fcd8 100644
          Effect.mapError(
            (cause) =>
              new CodexErrors.CodexAppServerSpawnError({
-@@ -1210,14 +1638,17 @@ export const makeCodexSessionRuntime = (
+@@ -1244,14 +1672,17 @@ export const makeCodexSessionRuntime = (
          ),
        );
- 
+
 -    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
 -      Layer.build,
 -      Effect.provideService(Scope.Scope, runtimeScope),
@@ -6916,7 +6936,7 @@ index 95b619f20..ca3d2fcd8 100644
      const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
      const randomUUIDv4 = (purpose: CodexErrors.CodexAppServerIdentifierPurpose) =>
        crypto.randomUUIDv4.pipe(
-@@ -1244,7 +1675,33 @@ export const makeCodexSessionRuntime = (
+@@ -1278,7 +1709,33 @@ export const makeCodexSessionRuntime = (
        updatedAt: sessionCreatedAt,
      } satisfies ProviderSession;
      const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
@@ -6948,13 +6968,13 @@ index 95b619f20..ca3d2fcd8 100644
 +              }),
 +            ),
 +          );
- 
+
      const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
        Effect.gen(function* () {
-@@ -1317,6 +1774,36 @@ export const makeCodexSessionRuntime = (
+@@ -1351,6 +1808,36 @@ export const makeCodexSessionRuntime = (
          return next;
        });
- 
+
 +    // Single point where the live-turn map gains or loses a child turn, so
 +    // native child ownership follows it exactly, including the suppressed
 +    // pre-registration branch that emits nothing. A terminal naming a turn
@@ -6988,7 +7008,7 @@ index 95b619f20..ca3d2fcd8 100644
      const emitCollabChildMetadataUpdated = Effect.fn(
        "CodexSessionRuntime.emitCollabChildMetadataUpdated",
      )(function* (agentThreadId: string) {
-@@ -1599,11 +2086,7 @@ export const makeCodexSessionRuntime = (
+@@ -1633,11 +2120,7 @@ export const makeCodexSessionRuntime = (
                  ? ((notification.params as { turn: { id: string } }).turn.id as string)
                  : undefined;
              if (childTurnId) {
@@ -7001,7 +7021,7 @@ index 95b619f20..ca3d2fcd8 100644
              }
              yield* emitEvent({
                kind: "notification",
-@@ -1615,11 +2098,6 @@ export const makeCodexSessionRuntime = (
+@@ -1649,11 +2132,6 @@ export const makeCodexSessionRuntime = (
              return true;
            }
            case "turn/completed":
@@ -7013,7 +7033,7 @@ index 95b619f20..ca3d2fcd8 100644
              yield* emitEvent({
                kind: "notification",
                threadId: options.threadId,
-@@ -1630,6 +2108,9 @@ export const makeCodexSessionRuntime = (
+@@ -1664,6 +2142,9 @@ export const makeCodexSessionRuntime = (
                  turn: notification.params.turn,
                },
              });
@@ -7023,7 +7043,7 @@ index 95b619f20..ca3d2fcd8 100644
              return true;
            case "thread/status/changed":
              yield* emitEvent({
-@@ -1672,11 +2153,6 @@ export const makeCodexSessionRuntime = (
+@@ -1706,11 +2187,6 @@ export const makeCodexSessionRuntime = (
              // The child is gone: drop its live-turn entry so a later Stop
              // doesn't waste a turn/interrupt RPC on a closed thread before
              // reaching the parent (review finding).
@@ -7035,7 +7055,7 @@ index 95b619f20..ca3d2fcd8 100644
              yield* markCollabChildClosed(child.agentThreadId);
              yield* emitEvent({
                kind: "notification",
-@@ -1685,6 +2161,7 @@ export const makeCodexSessionRuntime = (
+@@ -1719,6 +2195,7 @@ export const makeCodexSessionRuntime = (
                method: "collabAgent/closed",
                payload: childIdentity,
              });
@@ -7043,7 +7063,7 @@ index 95b619f20..ca3d2fcd8 100644
              return true;
            case "error": {
              // A child error must surface as a failed agent, not vanish into
-@@ -1699,11 +2176,6 @@ export const makeCodexSessionRuntime = (
+@@ -1733,11 +2210,6 @@ export const makeCodexSessionRuntime = (
              if (willRetry) {
                return true;
              }
@@ -7055,7 +7075,7 @@ index 95b619f20..ca3d2fcd8 100644
              yield* emitEvent({
                kind: "notification",
                threadId: options.threadId,
-@@ -1714,6 +2186,7 @@ export const makeCodexSessionRuntime = (
+@@ -1748,6 +2220,7 @@ export const makeCodexSessionRuntime = (
                  status: { type: "systemError" },
                },
              });
@@ -7063,7 +7083,7 @@ index 95b619f20..ca3d2fcd8 100644
              return true;
            }
            default:
-@@ -1786,21 +2259,16 @@ export const makeCodexSessionRuntime = (
+@@ -1820,21 +2293,16 @@ export const makeCodexSessionRuntime = (
                    ? (notification.params as { turn: { id: string } }).turn.id
                    : undefined;
                if (foreignTurnId) {
@@ -7094,7 +7114,7 @@ index 95b619f20..ca3d2fcd8 100644
              }
            }
            yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
-@@ -1851,8 +2319,54 @@ export const makeCodexSessionRuntime = (
+@@ -1885,8 +2353,54 @@ export const makeCodexSessionRuntime = (
              : {}),
            ...(payload !== undefined ? { payload } : {}),
          });
@@ -7129,7 +7149,7 @@ index 95b619f20..ca3d2fcd8 100644
 +          yield* forgetChildLiveTurn(notificationThreadId, notification.params.turnId);
 +        }
        });
- 
+
 +    // A raw item is owned from the CLI's dispatch until its processing and
 +    // every event it emitted have finished acquiring their own leases. Mapping
 +    // that fails or is interrupted may have produced nothing for outputs the
@@ -7147,47 +7167,47 @@ index 95b619f20..ca3d2fcd8 100644
 +      );
 +
      const currentSessionProviderThreadId = Effect.map(Ref.get(sessionRef), currentProviderThreadId);
- 
+
      yield* client.handleServerNotification("thread/started", (payload) =>
-@@ -1971,7 +2485,7 @@ export const makeCodexSessionRuntime = (
+@@ -2005,7 +2519,7 @@ export const makeCodexSessionRuntime = (
          return {
            decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
          } satisfies EffectCodexSchema.CommandExecutionRequestApprovalResponse;
 -      }),
 +      }).pipe(ownership.withRequest),
      );
- 
+
      yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
-@@ -2029,7 +2543,7 @@ export const makeCodexSessionRuntime = (
+@@ -2063,7 +2577,7 @@ export const makeCodexSessionRuntime = (
          return {
            decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
          } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
 -      }),
 +      }).pipe(ownership.withRequest),
      );
- 
+
      yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
-@@ -2094,7 +2608,7 @@ export const makeCodexSessionRuntime = (
+@@ -2128,7 +2642,7 @@ export const makeCodexSessionRuntime = (
            ),
          );
          return toMcpElicitationResponse(payload, resolved);
 -      }),
 +      }).pipe(ownership.withRequest),
      );
- 
+
      yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
-@@ -2144,17 +2658,28 @@ export const makeCodexSessionRuntime = (
+@@ -2178,17 +2692,28 @@ export const makeCodexSessionRuntime = (
              ),
            ),
          } satisfies EffectCodexSchema.ToolRequestUserInputResponse;
 -      }),
 +      }).pipe(ownership.withRequest),
      );
- 
+
      yield* client.handleUnknownServerRequest((method) =>
        Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
      );
- 
+
 +    // The lease is acquired inside the CLI's dispatch, before the offer, so a
 +    // notification is owned from the moment it is accepted rather than from
 +    // whenever the raw loop wakes up.
@@ -7207,11 +7227,11 @@ index 95b619f20..ca3d2fcd8 100644
 +          ),
          ),
        );
- 
-@@ -2166,9 +2691,9 @@ export const makeCodexSessionRuntime = (
+
+@@ -2200,9 +2725,9 @@ export const makeCodexSessionRuntime = (
        { concurrency: 1, discard: true },
      );
- 
+
 -    yield* Stream.fromQueue(serverNotifications).pipe(
 -      Stream.runForEach(handleRawNotification),
 -      Effect.forkIn(runtimeScope),
@@ -7219,12 +7239,12 @@ index 95b619f20..ca3d2fcd8 100644
 +      Stream.runForEach(processRawNotification),
 +      Effect.forkIn(rawScope),
      );
- 
+
      const stderrRemainderRef = yield* Ref.make("");
-@@ -2204,32 +2729,73 @@ export const makeCodexSessionRuntime = (
+@@ -2238,32 +2763,73 @@ export const makeCodexSessionRuntime = (
        Effect.forkIn(runtimeScope),
      );
- 
+
 -    yield* child.exitCode.pipe(
 -      Effect.flatMap((exitCode) =>
 -        Ref.get(closedRef).pipe(
@@ -7315,13 +7335,13 @@ index 95b619f20..ca3d2fcd8 100644
 -    );
 +      );
 +    }).pipe(Effect.forkIn(runtimeScope));
- 
+
      const start = Effect.fn("CodexSessionRuntime.start")(function* () {
        yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-@@ -2272,25 +2838,179 @@ export const makeCodexSessionRuntime = (
+@@ -2306,25 +2872,179 @@ export const makeCodexSessionRuntime = (
        return providerThreadId;
      });
- 
+
 +    // One shutdown sequence for both an ordinary stop and an idle retirement.
 +    // The only difference is step 0: a stop answers whatever the user left
 +    // pending; an idle retirement has already proven there is nothing pending
@@ -7509,9 +7529,9 @@ index 95b619f20..ca3d2fcd8 100644
 +      if (admission !== "begin") return admission;
 +      return verdictAfterClose(yield* runCloseOnce("retire"));
      });
- 
+
      return {
-@@ -2298,46 +3018,103 @@ export const makeCodexSessionRuntime = (
+@@ -2332,48 +3052,105 @@ export const makeCodexSessionRuntime = (
        getSession: Ref.get(sessionRef),
        compactThread: Effect.gen(function* () {
          const providerThreadId = yield* readProviderThreadId;
@@ -7560,10 +7580,12 @@ index 95b619f20..ca3d2fcd8 100644
 -            ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
 -            ...(input.effort ? { effort: input.effort } : {}),
 -            ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
--            // Derived from the session's own MCP configuration rather than the
+-            // Derived from the session's own credential rather than the
 -            // setting, so the prompt describes the tools this turn actually
 -            // has even if the setting changed after the session started.
--            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+-            browserToolsAvailable:
+-              hasConfiguredMcpServer(options.appServerArgs) &&
+-              (options.browserToolsAvailable ?? true),
 +          const issueTurnStart = Effect.gen(function* () {
 +            if (hasConfiguredMcpServer(options.appServerArgs)) {
 +              yield* client.request("config/mcpServer/reload", undefined).pipe(
@@ -7583,10 +7605,12 @@ index 95b619f20..ca3d2fcd8 100644
 +              ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
 +              ...(input.effort ? { effort: input.effort } : {}),
 +              ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-+              // Derived from the session's own MCP configuration rather than the
++              // Derived from the session's own credential rather than the
 +              // setting, so the prompt describes the tools this turn actually
 +              // has even if the setting changed after the session started.
-+              browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
++              browserToolsAvailable:
++                hasConfiguredMcpServer(options.appServerArgs) &&
++                (options.browserToolsAvailable ?? true),
 +            });
 +            return params;
            });
@@ -7647,7 +7671,7 @@ index 95b619f20..ca3d2fcd8 100644
            );
            const turnId = TurnId.make(response.turn.id);
            yield* updateSession(sessionRef, (session) => ({
-@@ -2477,7 +3254,23 @@ export const makeCodexSessionRuntime = (
+@@ -2513,7 +3290,23 @@ export const makeCodexSessionRuntime = (
              },
            });
          }),
@@ -7673,7 +7697,7 @@ index 95b619f20..ca3d2fcd8 100644
      } satisfies CodexSessionRuntimeShape;
    });
 diff --git a/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.test.ts b/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.test.ts
-index 25dafa5ba..1db4da135 100644
+index 25dafa5ba04095ef51d99095037de08273a76884..1db4da1357c56f1d861e90ed15895c98322b5f05 100644
 --- a/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.test.ts
 @@ -36,10 +36,15 @@ import {
@@ -7691,7 +7715,7 @@ index 25dafa5ba..1db4da135 100644
 +import * as Scope from "effect/Scope";
  import * as Stream from "effect/Stream";
  import { HttpClient, HttpClientResponse } from "effect/unstable/http";
- 
+
 @@ -49,6 +54,12 @@ import { AntigravityInstallation } from "../AntigravityInstallation.ts";
  import { ServerConfig } from "../../config.ts";
  import { expandHomePath } from "../../pathExpansion.ts";
@@ -7726,7 +7750,7 @@ index 25dafa5ba..1db4da135 100644
      Layer.provideMerge(CodexResetCredit.layerTest),
 +    Layer.provideMerge(UpdateActivityLive),
    );
- 
+
    it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
 @@ -460,6 +480,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
      Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
@@ -7734,7 +7758,7 @@ index 25dafa5ba..1db4da135 100644
      Layer.provideMerge(CodexResetCredit.layerTest),
 +    Layer.provideMerge(UpdateActivityLive),
    );
- 
+
    it.live("boots one instance of every shipped driver from a single config map", () =>
 @@ -623,3 +644,318 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
      }).pipe(Effect.provide(testLayer)),
@@ -8056,19 +8080,19 @@ index 25dafa5ba..1db4da135 100644
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts b/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts
-index 0cc4b6c93..cf3993487 100644
+index 67ccbd167c304cdcbfb63de366abf01ead27bbdb..e42deaab03f93ffda446280c54485700a22b9d5c 100644
 --- a/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts
 +++ b/apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts
-@@ -52,6 +52,8 @@ import * as Schema from "effect/Schema";
+@@ -51,6 +51,8 @@ import * as Schema from "effect/Schema";
  import * as Scope from "effect/Scope";
  import * as Stream from "effect/Stream";
- 
+
 +import { UpdateActivity } from "../../updateActivity.ts";
 +import { runWhenOpen } from "../../updateActivityRoots.ts";
  import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
  import {
    ProviderInstanceRegistry,
-@@ -345,9 +347,12 @@ export const makeProviderInstanceRegistry = <R>(input: {
+@@ -344,9 +346,12 @@ export const makeProviderInstanceRegistry = <R>(input: {
      readonly mutator: ProviderInstanceRegistryMutatorShape;
    },
    never,
@@ -8082,8 +8106,8 @@ index 0cc4b6c93..cf3993487 100644
      const driversById = new Map<ProviderDriverKind, AnyProviderDriver<R>>(
        input.drivers.map((driver) => [driver.driverKind, driver]),
      );
-@@ -371,8 +376,18 @@ export const makeProviderInstanceRegistry = <R>(input: {
- 
+@@ -370,8 +375,18 @@ export const makeProviderInstanceRegistry = <R>(input: {
+
      const state: RegistryState = { entries, unavailable, changes };
      const reconcileWithR = makeReconcile({ state, driversById, parentScope });
 +    // One lease spans the previous-state read, the awaited old scope closures,
@@ -8099,10 +8123,10 @@ index 0cc4b6c93..cf3993487 100644
 +        "provider instance reconcile",
 +        reconcileWithR(configMap).pipe(Effect.provideContext(driverContext)),
 +      );
- 
+
      // Hydrate the initial configMap synchronously so callers can read
      // `listInstances` immediately after this effect completes.
-@@ -420,7 +435,11 @@ export const makeProviderInstanceRegistry = <R>(input: {
+@@ -419,7 +434,11 @@ export const makeProviderInstanceRegistry = <R>(input: {
  export const ProviderInstanceRegistryMutableLayer = <R>(input: {
    readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
    readonly configMap: ProviderInstanceConfigMap;
@@ -8115,7 +8139,7 @@ index 0cc4b6c93..cf3993487 100644
    Layer.effectContext(
      makeProviderInstanceRegistry(input).pipe(
        Effect.map(({ registry, mutator }) =>
-@@ -429,6 +448,10 @@ export const ProviderInstanceRegistryMutableLayer = <R>(input: {
+@@ -428,4 +447,8 @@ export const ProviderInstanceRegistryMutableLayer = <R>(input: {
          ),
        ),
      ),
@@ -8125,10 +8149,8 @@ index 0cc4b6c93..cf3993487 100644
 +    never,
 +    R | UpdateActivity
 +  >;
- 
- export { defaultInstanceIdForDriver };
 diff --git a/apps/server/src/provider/Layers/ProviderRegistry.test.ts b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
-index 988c89e1e..53d3362ee 100644
+index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417acda67c065 100644
 --- a/apps/server/src/provider/Layers/ProviderRegistry.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
 @@ -49,6 +49,7 @@ import {
@@ -8172,7 +8194,7 @@ index 988c89e1e..53d3362ee 100644
                Layer.provideMerge(
                  Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
 diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
-index dbeef49f9..a84334a86 100644
+index ac75ecc17a4c03fefe76add970b7f4aba6f07f65..8e57bd8c7184e26b1996d27c21eac3ea9b781239 100644
 --- a/apps/server/src/provider/Layers/ProviderService.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.test.ts
 @@ -80,6 +80,7 @@ import {
@@ -8183,16 +8205,16 @@ index dbeef49f9..a84334a86 100644
    type UpdateActivityShape,
    type UpdateActivityState,
  } from "../../updateActivity.ts";
-@@ -5000,7 +5001,7 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5348,7 +5349,7 @@ describe("ProviderServiceLive update activity", () => {
      });
- 
+
    // Publishes an early terminal into the compaction buffer and proves it was
 -  // handled (a later event passes straight through) while its receipt holds.
 +  // handled while the facade operation and early-terminal receipt both hold leases.
    const parkEarlyTerminal = (
      input: Effect.Success<ReturnType<typeof startOwnedFallbackSession>>,
      threadId: ThreadId,
-@@ -5010,7 +5011,7 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5358,7 +5359,7 @@ describe("ProviderServiceLive update activity", () => {
        yield* input.cursor.publish(fallbackTerminal("evt-early-terminal", threadId, turnId));
        yield* input.cursor.publish(fallbackDelta("evt-after-early", threadId, turnId));
        yield* input.consumers.awaitEvent("evt-after-early");
@@ -8201,7 +8223,7 @@ index dbeef49f9..a84334a86 100644
        assert.deepEqual(parked.blockers, []);
        assert.equal((yield* input.activity.trySealIdle).status, "busy");
        assert.equal(input.consumers.seen.includes("checkpoint:evt-early-terminal"), false);
-@@ -5208,7 +5209,8 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5556,7 +5557,8 @@ describe("ProviderServiceLive update activity", () => {
        // With the turn id known, an unrelated terminal publishes straight through.
        yield* session.cursor.publish(fallbackTerminal("evt-other-turn", threadId, "turn-other"));
        yield* session.consumers.awaitEvent("evt-other-turn");
@@ -8209,9 +8231,9 @@ index dbeef49f9..a84334a86 100644
 +      // The still-running compactThread facade operation retains one lease.
 +      yield* awaitActivity(session.activity, (state) => state.outstanding === 1);
        assert.equal(compactFiber.pollUnsafe(), undefined);
- 
+
        yield* advanceTestClock(600_001);
-@@ -5337,4 +5339,189 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5685,4 +5687,189 @@ describe("ProviderServiceLive update activity", () => {
        assert.equal((yield* scenario.activity.trySealIdle).status, "busy");
      }),
    );
@@ -8402,13 +8424,13 @@ index dbeef49f9..a84334a86 100644
 +  );
  });
 diff --git a/apps/server/src/provider/Layers/ProviderService.ts b/apps/server/src/provider/Layers/ProviderService.ts
-index ca20e0e32..ecee6b3ca 100644
+index 3e9760a0642e3826942b17f350ee947ee31346d2..2669b3bd41474476f57964211c099814203b387e 100644
 --- a/apps/server/src/provider/Layers/ProviderService.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.ts
-@@ -2260,20 +2260,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -2441,20 +2441,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      ),
    );
- 
+
 +  // Every mutating operation owns one activity lease from before routing and
 +  // recovery until its last write and finalizer have run, so an update cannot
 +  // seal the registry between a native reply and the binding it settles.
@@ -8451,18 +8473,10 @@ index ca20e0e32..ecee6b3ca 100644
      // consumers (usage ingestion, relays, etc.) each independently receive all
      // runtime events without holding update activity.
 diff --git a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
-index c7683939f..f2e9551a6 100644
+index dd90f1dab398dab0509a69dba85a5b563fdc56be..b2bcb3d566a51efbaf01465f299167985a58cafc 100644
 --- a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
-@@ -8,6 +8,7 @@ import {
- } from "@t3tools/contracts";
- import * as Clock from "effect/Clock";
- import * as DateTime from "effect/DateTime";
-+import * as Deferred from "effect/Deferred";
- import * as Effect from "effect/Effect";
- import * as Exit from "effect/Exit";
- import * as Layer from "effect/Layer";
-@@ -20,6 +21,12 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+@@ -20,6 +20,12 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
  import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
  import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
  import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
@@ -8475,10 +8489,10 @@ index c7683939f..f2e9551a6 100644
  import { ProviderValidationError } from "../Errors.ts";
  import { ProviderSessionReaper } from "../Services/ProviderSessionReaper.ts";
  import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
-@@ -56,6 +63,17 @@ const drainFibers = Effect.forEach(Array.from({ length: 10 }), () => Effect.yiel
- 
+@@ -56,6 +62,17 @@ const drainFibers = Effect.forEach(Array.from({ length: 10 }), () => Effect.yiel
+
  const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
- 
+
 +// Resolves through registry revisions once the predicate holds; never polls.
 +const awaitActivity = (
 +  activity: UpdateActivityShape,
@@ -8493,8 +8507,8 @@ index c7683939f..f2e9551a6 100644
  function makeReadModel(
    threads: ReadonlyArray<{
      readonly id: ThreadId;
-@@ -121,7 +139,9 @@ function makeReadModel(
- 
+@@ -122,7 +139,9 @@ function makeReadModel(
+
  describe("ProviderSessionReaper", () => {
    let runtime: ManagedRuntime.ManagedRuntime<
 -    ProviderSessionReaper | ProviderSessionRuntime.ProviderSessionRuntimeRepository,
@@ -8504,7 +8518,7 @@ index c7683939f..f2e9551a6 100644
      unknown
    > | null = null;
    let scope: Scope.Closeable | null = null;
-@@ -150,8 +170,14 @@ describe("ProviderSessionReaper", () => {
+@@ -178,8 +197,14 @@ describe("ProviderSessionReaper", () => {
      readonly stopSessionImplementation?: (input: {
        readonly threadId: ThreadId;
      }) => ReturnType<ProviderServiceShape["stopSession"]>;
@@ -8519,7 +8533,7 @@ index c7683939f..f2e9551a6 100644
      const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
        (request) =>
          (input.stopSessionImplementation
-@@ -224,21 +250,27 @@ describe("ProviderSessionReaper", () => {
+@@ -252,21 +277,27 @@ describe("ProviderSessionReaper", () => {
            getThreadRuntimeContext: () => Effect.die("unused"),
            getTurnStartMessage: () => Effect.die("unused"),
            getThreadShellById: (threadId) =>
@@ -8546,14 +8560,14 @@ index c7683939f..f2e9551a6 100644
        Layer.provideMerge(NodeServices.layer),
 +      Layer.provideMerge(UpdateActivityLive),
      );
- 
+
      runtime = ManagedRuntime.make(layer);
 -    return { stopSession, stoppedThreadIds };
 +    return { stopSession, stoppedThreadIds, threadShellReads: () => threadShellReads };
    }
- 
+
    it("reaps stale persisted sessions without active turns", async () => {
-@@ -644,4 +676,87 @@ describe("ProviderSessionReaper", () => {
+@@ -731,4 +762,87 @@ describe("ProviderSessionReaper", () => {
        reapedThreadId,
      ]);
    });
@@ -8642,7 +8656,7 @@ index c7683939f..f2e9551a6 100644
 +  });
  });
 diff --git a/apps/server/src/provider/Layers/ProviderSessionReaper.ts b/apps/server/src/provider/Layers/ProviderSessionReaper.ts
-index 15d4f925c..3c69acc81 100644
+index 8f04bd1821fd9aca05256c627384300cdd5097b6..f1111e58344d70b394e66dfe7a1c6346366657e7 100644
 --- a/apps/server/src/provider/Layers/ProviderSessionReaper.ts
 +++ b/apps/server/src/provider/Layers/ProviderSessionReaper.ts
 @@ -12,6 +12,8 @@ import {
@@ -8652,20 +8666,20 @@ index 15d4f925c..3c69acc81 100644
 +import { UpdateActivity } from "../../updateActivity.ts";
 +import { runWhenOpen } from "../../updateActivityRoots.ts";
  import { ProviderService } from "../Services/ProviderService.ts";
- 
+
  const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
 @@ -27,6 +29,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
      const providerService = yield* ProviderService;
      const directory = yield* ProviderSessionDirectory;
      const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 +    const activity = yield* UpdateActivity;
- 
+
      const inactivityThresholdMs = Math.max(
        1,
-@@ -117,10 +120,16 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
+@@ -127,10 +130,16 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
        }
      });
- 
+
 +    // One lease spans the candidate read and every stop it decides on, so a
 +    // sweep cannot pause across a seal and act on its stale snapshot after
 +    // the update. While sealed the sweep waits before reading; the sleep
@@ -8681,13 +8695,13 @@ index 15d4f925c..3c69acc81 100644
                Effect.logWarning("provider.session.reaper.sweep-failed", {
                  error,
 diff --git a/apps/server/src/provider/Services/ProviderAdapter.ts b/apps/server/src/provider/Services/ProviderAdapter.ts
-index 1a35c9e8f..545830343 100644
+index 1a35c9e8fb15650b02cbfcef0f2fb1dffeeae2d0..545830343b46d230e7e65e25685b474f7d8ae862 100644
 --- a/apps/server/src/provider/Services/ProviderAdapter.ts
 +++ b/apps/server/src/provider/Services/ProviderAdapter.ts
 @@ -58,6 +58,25 @@ export interface ProviderAdapterCapabilities {
    readonly supportsConversationRollback?: boolean;
  }
- 
+
 +/**
 + * Outcome of `retireIdleSessions`. `busy` means native work was found and
 + * nothing active was cancelled or interrupted; the caller may retry after
@@ -8730,7 +8744,7 @@ index 1a35c9e8f..545830343 100644
  }
 diff --git a/apps/server/src/provider/claudeQueryRuntime.test.ts b/apps/server/src/provider/claudeQueryRuntime.test.ts
 new file mode 100644
-index 000000000..a59c0d9bb
+index 0000000000000000000000000000000000000000..a59c0d9bbb0ae2e95a659963ad711abc58295830
 --- /dev/null
 +++ b/apps/server/src/provider/claudeQueryRuntime.test.ts
 @@ -0,0 +1,404 @@
@@ -9140,7 +9154,7 @@ index 000000000..a59c0d9bb
 +});
 diff --git a/apps/server/src/provider/claudeQueryRuntime.ts b/apps/server/src/provider/claudeQueryRuntime.ts
 new file mode 100644
-index 000000000..d340e237b
+index 0000000000000000000000000000000000000000..d340e237bdee782a5e364c7d2b288ae27792fe64
 --- /dev/null
 +++ b/apps/server/src/provider/claudeQueryRuntime.ts
 @@ -0,0 +1,269 @@
@@ -9414,10 +9428,10 @@ index 000000000..d340e237b
 +  };
 +};
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 7f66a79a2..7e4543a5b 100644
+index c5b9f49f2ec008d9ba518c58ddb27bd243e9cad3..423eea141351c01308ea4abe3b51a053770b15bd 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -465,10 +465,6 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -470,10 +470,6 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    Layer.provideMerge(GitLayerLive),
    Layer.provideMerge(VcsLayerLive),
    Layer.provideMerge(ProviderRuntimeLayerLive),
@@ -9428,7 +9442,7 @@ index 7f66a79a2..7e4543a5b 100644
    Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
    Layer.provideMerge(PersistenceLayerLive),
    // Both read a user-owned file out of the state directory and stream changes
-@@ -483,6 +479,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -488,6 +484,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // `providerInstances` hydration merges `settings.providers.<kind>`
    // with explicit `providerInstances` entries on boot.
    Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -9444,7 +9458,7 @@ index 7f66a79a2..7e4543a5b 100644
    // Shared native/canonical NDJSON writers used by both the per-instance
 diff --git a/apps/server/src/updateActivityRoots.test.ts b/apps/server/src/updateActivityRoots.test.ts
 new file mode 100644
-index 000000000..0ecdb77a2
+index 0000000000000000000000000000000000000000..0ecdb77a234b5e5890f9944a801bf727a3382a84
 --- /dev/null
 +++ b/apps/server/src/updateActivityRoots.test.ts
 @@ -0,0 +1,277 @@
@@ -9727,7 +9741,7 @@ index 000000000..0ecdb77a2
 +});
 diff --git a/apps/server/src/updateActivityRoots.ts b/apps/server/src/updateActivityRoots.ts
 new file mode 100644
-index 000000000..d2ba8233f
+index 0000000000000000000000000000000000000000..d2ba8233f99e934febe7283ff041750830ae7d09
 --- /dev/null
 +++ b/apps/server/src/updateActivityRoots.ts
 @@ -0,0 +1,172 @@
@@ -9904,7 +9918,7 @@ index 000000000..d2ba8233f
 +    return { enqueue, drain } satisfies TrackedWorker<A>;
 +  });
 diff --git a/packages/effect-codex-app-server/src/client.test.ts b/packages/effect-codex-app-server/src/client.test.ts
-index 3830c5fc5..9eccd024e 100644
+index 3830c5fc5f6fabee5f0b6351a7ae1eff69bde496..9eccd024ea6b66990197e5b16d7faab224d2694d 100644
 --- a/packages/effect-codex-app-server/src/client.test.ts
 +++ b/packages/effect-codex-app-server/src/client.test.ts
 @@ -2,7 +2,9 @@ import * as Exit from "effect/Exit";
@@ -9916,17 +9930,17 @@ index 3830c5fc5..9eccd024e 100644
 +import * as Schema from "effect/Schema";
  import * as Scope from "effect/Scope";
  import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
- 
+
 @@ -10,6 +12,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
  import { assert, it } from "@effect/vitest";
- 
+
  import * as CodexClient from "./client.ts";
 +import { makeInMemoryStdio } from "./_internal/stdio.ts";
 +
 +const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 +const encoder = new TextEncoder();
 +const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
- 
+
  const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
    path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
 @@ -154,4 +161,50 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
@@ -9981,7 +9995,7 @@ index 3830c5fc5..9eccd024e 100644
 +  );
  });
 diff --git a/packages/effect-codex-app-server/src/client.ts b/packages/effect-codex-app-server/src/client.ts
-index 78d719626..99d917e7a 100644
+index 78d7196261394b5589485682e0b442564bae31a9..99d917e7a506ab358c7de18414df4add236d57b5 100644
 --- a/packages/effect-codex-app-server/src/client.ts
 +++ b/packages/effect-codex-app-server/src/client.ts
 @@ -24,6 +24,13 @@ export interface CodexAppServerClientOptions {
@@ -9996,7 +10010,7 @@ index 78d719626..99d917e7a 100644
 +   */
 +  readonly onNotificationLoss?: (reason: string) => Effect.Effect<void>;
  }
- 
+
  interface CodexAppServerClientRaw {
 @@ -74,6 +81,12 @@ export class CodexAppServerClient extends Context.Service<
          params: unknown,
@@ -10010,11 +10024,11 @@ index 78d719626..99d917e7a 100644
 +    readonly awaitIngress: Effect.Effect<CodexProtocol.CodexIngressCompletion>;
    }
  >()("effect-codex-app-server/client/CodexAppServerClient") {}
- 
+
 @@ -84,7 +97,7 @@ type ServerNotificationHandler = (
    payload: unknown,
  ) => Effect.Effect<void, CodexError.CodexAppServerError>;
- 
+
 -const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
 +export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
    stdio: Stdio.Stdio,
@@ -10023,7 +10037,7 @@ index 78d719626..99d917e7a 100644
 @@ -137,6 +150,16 @@ const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(func
        >
      | undefined => CodexRpc.CLIENT_NOTIFICATION_PARAMS[method] as never;
- 
+
 +  // First notification dropped on its way to a registered handler, if any.
 +  let dispatchLoss: string | undefined;
 +  const swallowAsLoss =
@@ -10039,7 +10053,7 @@ index 78d719626..99d917e7a 100644
    ): Effect.Effect<void, never> => {
 @@ -149,17 +172,19 @@ const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(func
      const handlers = notificationHandlers.get(notification.method) ?? [];
- 
+
      if (schema) {
 +      // A method nobody registered for is not lost to anyone.
 +      if (handlers.length === 0) return Effect.void;
@@ -10051,7 +10065,7 @@ index 78d719626..99d917e7a 100644
 +        Effect.catch(swallowAsLoss(notification.method)),
        );
      }
- 
+
      return unknownNotificationHandler
        ? unknownNotificationHandler(notification.method, notification.params).pipe(
 -          Effect.catch(() => Effect.void),
@@ -10072,9 +10086,9 @@ index 78d719626..99d917e7a 100644
 +    ),
    });
  });
- 
+
 diff --git a/packages/effect-codex-app-server/src/protocol.test.ts b/packages/effect-codex-app-server/src/protocol.test.ts
-index 7249afff1..f531d2c96 100644
+index 7249afff10713c91b8aabfde4601be1450dcd32c..f531d2c96b8ee215ae31a832b89ba82958d1c957 100644
 --- a/packages/effect-codex-app-server/src/protocol.test.ts
 +++ b/packages/effect-codex-app-server/src/protocol.test.ts
 @@ -1,8 +1,10 @@
@@ -10087,7 +10101,7 @@ index 7249afff1..f531d2c96 100644
 +import * as Scope from "effect/Scope";
  import * as Stdio from "effect/Stdio";
  import * as Stream from "effect/Stream";
- 
+
 @@ -804,4 +806,153 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
        assert.equal("cause" in error, false);
      }),
@@ -10243,13 +10257,13 @@ index 7249afff1..f531d2c96 100644
 +  );
  });
 diff --git a/packages/effect-codex-app-server/src/protocol.ts b/packages/effect-codex-app-server/src/protocol.ts
-index 4a32973a9..8b242efd5 100644
+index 4a32973a988bdbc565ebf4e60cf56e4aac6f7686..8b242efd5fc7a33d6c89a31040fa8abcfc7f819b 100644
 --- a/packages/effect-codex-app-server/src/protocol.ts
 +++ b/packages/effect-codex-app-server/src/protocol.ts
 @@ -34,6 +34,18 @@ export interface CodexAppServerIncomingRequest {
    readonly params?: unknown;
  }
- 
+
 +/**
 + * How the input side ended. `drained` means the input stream reached its real
 + * end, the text decoder flushed, the final unterminated line was routed, and
@@ -10276,7 +10290,7 @@ index 4a32973a9..8b242efd5 100644
 +   */
 +  readonly awaitIngress: Effect.Effect<CodexIngressCompletion>;
  }
- 
+
  interface CodexAppServerPendingRequest {
 @@ -169,6 +187,11 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
      const terminationFailure = yield* Ref.make(Option.none<CodexError.CodexAppServerError>());
@@ -10287,13 +10301,13 @@ index 4a32973a9..8b242efd5 100644
 +      Deferred.succeed(ingress, completion).pipe(Effect.asVoid);
 +    const describeExit = (exit: Exit.Exit<unknown, unknown>): string =>
 +      Exit.isSuccess(exit) ? "ended" : (exit.cause.reasons[0]?._tag ?? "failure");
- 
+
      const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
        if (event.direction === "incoming" && !options.logIncoming) {
 @@ -395,9 +418,28 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
        );
      };
- 
+
 +    // Decoded here, not with `Stream.decodeText`, because that helper never
 +    // finalizes its decoder: bytes of a multibyte character still pending at
 +    // EOF would vanish and the input would look cleanly drained. This decoder
@@ -10398,9 +10412,9 @@ index 4a32973a9..8b242efd5 100644
 +    yield* Effect.addFinalizer(() =>
 +      settleIngress({ status: "lost", reason: "protocol scope closed before input ended" }),
 +    );
- 
+
      yield* Stream.fromQueue(outgoing).pipe(Stream.run(options.stdio.stdout()), Effect.forkScoped);
- 
+
 @@ -480,6 +560,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
        notify,
        respond,

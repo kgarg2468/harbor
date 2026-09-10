@@ -16,7 +16,7 @@ index ed3c156d6aa05df6ab6aabd6765cc8701ce1d507..9a64374eb09105144df14ad9faee9e63
        updateRequests: Stream.empty,
        updateCommits: Stream.empty,
 diff --git a/apps/desktop/src/backend/DesktopBackendPool.test.ts b/apps/desktop/src/backend/DesktopBackendPool.test.ts
-index 65d0ce30ce0be44d0290f68dc76acabeb882337d..d37c5e5a74463e10205422681cd786c676f23659 100644
+index 2eec0812a165e55b536b494f40a74ee0c3342d21..9c92eccdc6862fcca713fe0002922d67fba81265 100644
 --- a/apps/desktop/src/backend/DesktopBackendPool.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendPool.test.ts
 @@ -88,6 +88,12 @@ function makePoolLayer(
@@ -261,7 +261,7 @@ index 0ed5c41c8093963cc55e370407078f3d65d57dae..aa0afaf0a8872a2c975e60e86e68ff27
 +  );
 +});
 diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
-index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dcc736e9d1 100644
+index fe8d05e48616225e78c9c1d7067ed28df36c67da..55a0aa89d78ccd68c3139999d37a89086b215313 100644
 --- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
 +++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
 @@ -1,5 +1,6 @@
@@ -282,12 +282,12 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
 +export const UPDATE_REPORT_ACKNOWLEDGEMENT_CAPACITY = 4096;
  const encodeMessage = Schema.encodeSync(Schema.fromJsonString(DesktopHostTelemetryMessage));
  const textEncoder = new TextEncoder();
- 
+
 @@ -96,6 +102,11 @@ export interface DesktopUpdateReservationTransport {
    ) => Effect.Effect<DesktopUpdateReservationExchange>;
  }
- 
-+export class DesktopUpdateReportAcknowledgementFailed extends Schema.TaggedErrorClass<DesktopUpdateReportAcknowledgementFailed>()(
+
++export class DesktopUpdateReportAcknowledgementFailed extends Schema.TaggedError<DesktopUpdateReportAcknowledgementFailed>()(
 +  "DesktopUpdateReportAcknowledgementFailed",
 +  { message: Schema.String },
 +) {}
@@ -317,8 +317,8 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
 +  >;
    closed: boolean;
  }
- 
-@@ -419,6 +439,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+
+@@ -420,6 +440,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
          return Queue.offer(updateCommitQueue, message).pipe(Effect.asVoid);
        case "cancelDesktopUpdate":
          return Queue.offer(updateCancellationQueue, message).pipe(Effect.asVoid);
@@ -326,7 +326,7 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
        case "desktopUpdateReservationReply":
          // Only a run channel can correlate a reply with the generation that
          // sent it. A reply on a string-keyed source has no trusted run.
-@@ -524,6 +545,18 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -525,6 +546,18 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
        if (generations.size === 0) reservationRuns.delete(entry.run.instanceId);
      }
      Queue.endUnsafe(entry.commands);
@@ -345,7 +345,7 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
      const waiters = [...entry.pending.values()];
      entry.pending.clear();
      const result = Effect.succeed(unanswered(`${describeRun(entry.run)} closed: ${reason}`));
-@@ -572,6 +605,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -573,6 +606,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
            sourceId: runSourceId(run),
            commands,
            pending: new Map(),
@@ -353,7 +353,7 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
            closed: false,
          };
          // Registration and the displaced entry's retirement are one
-@@ -594,6 +628,18 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -595,6 +629,18 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
            encoded: encodeWithHello(Stream.merge(globalBody, Stream.fromQueue(commands))),
            handleControl: (message) => {
              switch (message.type) {
@@ -372,10 +372,10 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
                case "desktopUpdateReservationReply":
                  return settleReply(entry, message);
                case "setDiagnosticsDemand":
-@@ -668,6 +714,116 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -669,6 +715,116 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
        }),
      );
- 
+
 +  // Explicit field ordering makes wire/object key order irrelevant. Tombstones
 +  // prevent a replay or late receipt from authorizing a second publication.
 +  const reportKey = (report: DesktopUpdateStatusAcknowledgement): string =>
@@ -489,7 +489,7 @@ index c92f2d65ab5f1341151dfbcde10a9303e196d577..da19abfe87dfc16dc32bee54985ec5dc
    return DesktopTelemetryPublisher.of({
      latest: Ref.get(latest),
      changes: Stream.fromPubSub(changes),
-@@ -676,6 +832,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -677,6 +833,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
      handleControlForSource,
      removeControlSource,
      publishUpdateReport,
@@ -504,7 +504,7 @@ index 62b27d43971fa195e9ec16aa7099a4f4208d469b..9ac757e1d0069b51da8718ab524c328b
 @@ -32,10 +32,23 @@ const settle = Effect.gen(function* () {
    }
  });
- 
+
 +const artifact = {
 +  schemaVersion: 1,
 +  targetVersion: "1.2.4-nightly.20260910.0.managed.1.paaaaaaaaaaaa",
@@ -523,7 +523,7 @@ index 62b27d43971fa195e9ec16aa7099a4f4208d469b..9ac757e1d0069b51da8718ab524c328b
 +  targetVersion: artifact.targetVersion,
 +  artifact,
  });
- 
+
  function runRemoteUpdatesTest(
 @@ -60,6 +73,12 @@ function runRemoteUpdatesTest(
          handleControl: () => Effect.void,
@@ -551,7 +551,7 @@ index f15acec8f92e1afcd85436f5d0ecdbccbd54260b..af6ed5bdfa5aaba135b88fa25f03c429
    type DesktopUpdateReservationCommand,
    type DesktopUpdateReservationReply,
 @@ -202,6 +203,7 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
- 
+
    const requests = yield* Queue.unbounded<DesktopTelemetryControlMessage>();
    const replies = yield* Queue.unbounded<DesktopUpdateReservationReply>();
 +  const acknowledgements = yield* Queue.unbounded<DesktopUpdateStatusAcknowledgement>();
@@ -583,7 +583,7 @@ index f15acec8f92e1afcd85436f5d0ecdbccbd54260b..af6ed5bdfa5aaba135b88fa25f03c429
          NodeFS.writeSync(inputWriter, `${encodeHostMessage(message)}\n`);
 @@ -271,6 +280,50 @@ const makeReceiverHarness = Effect.fn("test.make_desktop_telemetry_receiver_harn
  });
- 
+
  it.layer(NodeServices.layer)("DesktopTelemetryReceiver reservation commands", (it) => {
 +  it.effect("acknowledges a disposition only after recording and publishing the exact report", () =>
 +    Effect.gen(function* () {
@@ -667,10 +667,10 @@ index f15acec8f92e1afcd85436f5d0ecdbccbd54260b..af6ed5bdfa5aaba135b88fa25f03c429
 +  } as const;
 +}
 diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
-index 53172818d5b214d731c1280b08a04ca5ecffef22..546d57cc3fdb1357cf953996a19569b860d0fb42 100644
+index 238d5fa92dc61ae3644af537e85215ce5c3a9fe6..f2c356194460a8c73292a0b491a8cfb92b07dff8 100644
 --- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
 +++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
-@@ -404,7 +404,18 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+@@ -405,7 +405,18 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
      controlMutex.withPermits(1)(
        Effect.gen(function* () {
          const fd = config.desktopTelemetryControlFd;
@@ -690,7 +690,7 @@ index 53172818d5b214d731c1280b08a04ca5ecffef22..546d57cc3fdb1357cf953996a19569b8
          const encoded = yield* encodeControlMessage(
            message,
            message.type === "requestDesktopUpdate" ? { onExcessProperty: "error" } : undefined,
-@@ -595,6 +606,25 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+@@ -596,6 +607,25 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
            return recordContact.pipe(
              Effect.andThen(Ref.set(latestUpdateReport, Option.some(message))),
              Effect.andThen(PubSub.publish(updateReportChanges, message)),
@@ -754,7 +754,7 @@ index 64b0389ab488b9d48c724190a592ba147e8ad2d9..7e2557c4a5bae433ce40779773a15c1d
 @@ -353,6 +353,20 @@ export const DesktopUpdateStatusReport = Schema.Union([
  ]);
  export type DesktopUpdateStatusReport = typeof DesktopUpdateStatusReport.Type;
- 
+
 +/** Receipt of a recorded and published descriptor-bound disposition, never a readiness report. */
 +export const DesktopUpdateStatusAcknowledgement = Schema.Struct({
 +  version: Schema.Literal(1),
@@ -771,7 +771,7 @@ index 64b0389ab488b9d48c724190a592ba147e8ad2d9..7e2557c4a5bae433ce40779773a15c1d
 +
  export const DesktopUpdateReservationAction = Schema.Literals(["reserve", "abort", "commit"]);
  export type DesktopUpdateReservationAction = typeof DesktopUpdateReservationAction.Type;
- 
+
 @@ -466,6 +480,7 @@ export const DesktopTelemetryControlMessage = Schema.Union([
    DesktopTelemetryCommitDesktopUpdate,
    DesktopTelemetryCancelDesktopUpdate,
@@ -779,4 +779,4 @@ index 64b0389ab488b9d48c724190a592ba147e8ad2d9..7e2557c4a5bae433ce40779773a15c1d
 +  DesktopUpdateStatusAcknowledgement,
  ]);
  export type DesktopTelemetryControlMessage = typeof DesktopTelemetryControlMessage.Type;
- 
+

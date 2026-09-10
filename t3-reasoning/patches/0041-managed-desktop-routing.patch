@@ -52,7 +52,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +import type { PreparedManagedDesktopArtifact } from "./ManagedDesktopArtifact.ts";
 +import type { DesktopUpdateFreezeResult } from "./desktopUpdateReservation.ts";
 +import { makeHarness, type UpdatesHarnessOptions } from "./updatesTestHarness.ts";
- 
+
  const artifact = {
    schemaVersion: 1,
 @@ -42,30 +38,111 @@ const artifact = {
@@ -75,7 +75,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +    yield* Effect.promise(() => Promise.resolve());
 +  }
 +});
- 
+
 -function runRemoteUpdatesTest(
 -  harness: ReturnType<typeof makeHarness>,
 +interface Options {
@@ -333,7 +333,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 -  return reports.filter((report) => report.outcome !== undefined);
 +  ).pipe(Effect.provide(harness.layer));
  }
- 
+
 -describe("DesktopRemoteUpdates", () => {
 -  it.effect("drives check, download, and install with no local confirmation", () => {
 -    const harness = makeHarness();
@@ -471,7 +471,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
        ),
 -    });
 +  );
- 
+
 -    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
 +  it.effect("does not overlap a local action", () =>
 +    testFlow({}, ({ send, reports, prepared, updates }) =>
@@ -518,7 +518,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 -  });
 +    ),
 +  );
- 
+
 -  it.effect("does not join a normal app quit as an update install", () => {
 -    const harness = makeHarness();
 -
@@ -561,7 +561,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 -  });
 +    ),
 +  );
- 
+
 -  it.effect("does not misread a lingering install error as a failed retry", () => {
 -    let installAttempts = 0;
 -    const harness = makeHarness({
@@ -652,7 +652,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +        }),
      );
    });
- 
+
 -  it.effect("ignores an unrelated updater event while an install is starting", () => {
 -    const stopStarted = Deferred.makeUnsafe<void>();
 -    const releaseStop = Deferred.makeUnsafe<void>();
@@ -855,7 +855,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +        }),
 +      ),
 +  );
- 
+
 -    return runRemoteUpdatesTest(harness, ({ requests, commits }) =>
 +  it.effect("TTL releases staging and admission, and stale commit cannot launch", () =>
 +    testFlow({}, ({ send, commit, cancelledTokens, updates, events }) =>
@@ -992,7 +992,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
      );
 -  });
 +  }
- 
+
 -  it.effect("rejects a new preparation while an install commit is active", () => {
 -    const installStarted = Deferred.makeUnsafe<void>();
 -    const releaseInstall = Deferred.makeUnsafe<void>();
@@ -1033,7 +1033,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
        ),
 -    });
 +  );
- 
+
 -    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
 -      Effect.gen(function* () {
 -        yield* Queue.offer(requests, request("req-active"));
@@ -1120,7 +1120,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 -        yield* Queue.offer(requests, request("req-next"));
 -        yield* settle;
 +  }
- 
+
 -        assert.equal(harness.checkCount(), 2);
 -      }),
 +  it.effect("an exact generation already stopped after reservation needs no second stop", () =>
@@ -1151,7 +1151,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
      );
 -  });
 +  }
- 
+
 -  it.effect("remembers a cancellation that arrives before its request starts", () => {
 -    const harness = makeHarness();
 +  it.effect(
@@ -1259,7 +1259,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +        }),
 +    ),
 +  );
- 
+
 -    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
 +  it.effect("every frozen generation is acknowledged and stopped before helper COMMIT", () =>
 +    testFlow({ extraRun: true }, ({ send, commit, events }) =>
@@ -1293,7 +1293,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 -    const harness = makeHarness();
 +    ),
 +  );
- 
+
 -    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
 +  it.effect("a fresh helper after a rejected attempt gets a distinct reservation identity", () =>
 +    testFlow({ freeze: { _tag: "busy", reason: "busy" } }, ({ send, commit, reports }) =>
@@ -1329,7 +1329,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 -  });
 +    ),
 +  );
- 
+
 -  it.effect("does not install after cancellation wins the commit claim", () => {
 -    const harness = makeHarness();
 -
@@ -1663,7 +1663,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +      );
 +    },
 +  );
- 
+
 -    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
 +  it.effect("scope interruption after preparation cleans owned staging", () =>
 +    testFlow({}, ({ send, interrupt, cancelledTokens, updates }) =>
@@ -1690,7 +1690,7 @@ index 9ac757e1d0069b51da8718ab524c328bf2055e7e..c51608160d35b23abfe16d03592b351f
 +  );
  });
 diff --git a/apps/desktop/src/updates/DesktopRemoteUpdates.ts b/apps/desktop/src/updates/DesktopRemoteUpdates.ts
-index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace51bfc486b 100644
+index 31e3c5af5260532b8b4eb244edeae6c65daf271b..45b14edb61d127c17fcab98f39e40cc1c994eee8 100644
 --- a/apps/desktop/src/updates/DesktopRemoteUpdates.ts
 +++ b/apps/desktop/src/updates/DesktopRemoteUpdates.ts
 @@ -1,461 +1,478 @@
@@ -1717,7 +1717,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 -import type * as Scope from "effect/Scope";
  import * as Stream from "effect/Stream";
 +import * as Duration from "effect/Duration";
- 
+
 -import * as DesktopObservability from "../app/DesktopObservability.ts";
 +import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 +import * as DesktopState from "../app/DesktopState.ts";
@@ -1740,13 +1740,13 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +  sameManagedArtifact,
 +  type OwnedBackendRun,
 +} from "./desktopUpdateReservation.ts";
- 
+
 -const { logInfo, logError } = DesktopObservability.makeComponentLogger("desktop-remote-updates");
-+class ManagedDesktopUpdateFailure extends Schema.TaggedErrorClass<ManagedDesktopUpdateFailure>()(
++class ManagedDesktopUpdateFailure extends Schema.TaggedError<ManagedDesktopUpdateFailure>()(
 +  "ManagedDesktopUpdateFailure",
 +  { message: Schema.String },
 +) {}
- 
+
 -/** Pause before retrying an action the updater refused for a held reservation. */
 -const ACTION_RETRY_DELAY = Duration.millis(250);
 -const PREPARED_UPDATE_TTL = Duration.minutes(5);
@@ -1755,7 +1755,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +// reopening admission. The preparer's fire-and-forget timer is only a later,
 +// bounded backstop for abandoned tokens, never the normal five-minute expiry.
 +const PREPARER_BACKSTOP_TTL_MS = 2 * PREPARED_UPDATE_TTL_MS;
- 
+
 -interface PreparedUpdate {
 -  readonly requestId: string;
 -  readonly downloadedVersion: string;
@@ -1771,7 +1771,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +  readonly cancel: (token: PreparedManagedDesktopArtifact) => Promise<void>;
 +  readonly prepareInstall: ReturnType<typeof createManagedDesktopInstaller>["prepareInstall"];
  }
- 
+
 -type CommitClaim =
 -  | { readonly _tag: "invalid" }
 -  | { readonly _tag: "failed"; readonly prepared: PreparedUpdate }
@@ -1786,7 +1786,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +  cleanup?: Promise<void>;
 +  expiresAt: number;
 +}
- 
+
 -/**
 - * Server-triggered desktop updates. Mirrors updater state, prepares downloads,
 - * cancels abandoned preparations, and commits installs after the remote client
@@ -1821,7 +1821,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +    const cancelled = new Set<string>();
 +    // Preserve immutable request identity even after cancellation, expiry or failure.
 +    const identities = new Map<string, DesktopTelemetryRequestDesktopUpdate>();
- 
+
 -  const publishReport = (
 -    state: DesktopUpdateState,
 -    terminal?: { readonly outcome: DesktopUpdateRemoteOutcome; readonly reason?: string },
@@ -1912,7 +1912,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 -    );
 -  };
 +      );
- 
+
 -  const recordPreparedFailure = (requestId: string, reason: string) =>
 -    Ref.modify(preparedUpdateRef, (prepared) => {
 -      if (
@@ -1938,13 +1938,13 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +        yield* Stream.runForEach(changes, publish);
 +      }),
 +    ).pipe(Effect.forkScoped);
- 
+
 -  const clearActiveRequest = (requestId: string) =>
 -    Ref.update(activeRequestIdRef, (active) =>
 -      Option.isSome(active) && active.value === requestId ? Option.none() : active,
 -    );
 +    yield* Effect.addFinalizer(() => (current === undefined ? Effect.void : release(current)));
- 
+
 -  yield* Effect.scoped(
 -    Effect.gen(function* () {
 -      const { latest, changes } = yield* updates.subscribe;
@@ -2049,7 +2049,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
        );
 -    }),
 -  ).pipe(Effect.forkScoped);
- 
+
 -  const handleRequest = (request: DesktopTelemetryRequestDesktopUpdate): Effect.Effect<void> =>
 -    Effect.scoped(
 +    // Preparation runs separately so cancellations and new requests remain live.
@@ -2252,7 +2252,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 -  // handled after the current one, when the state machine resolves it fast.
 -  yield* Stream.runForEach(publisher.updateRequests, handleRequest).pipe(Effect.forkScoped);
 +    ).pipe(Effect.forkScoped);
- 
+
 -  yield* Stream.runForEach(publisher.updateCancellations, (cancellation) =>
 -    Effect.gen(function* () {
 -      const activeSignal = yield* Ref.modify(requestControlRef, (control) => {
@@ -2321,7 +2321,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 -      }
 -    }),
 -  ).pipe(Effect.forkScoped);
- 
+
 -  yield* Stream.runForEach(publisher.updateCommits, (commit) =>
 -    Effect.gen(function* () {
 -      const current = yield* updates.getState;
@@ -2586,16 +2586,16 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..bf299d71fb84d8bb7381150b0360ace5
 +  });
  });
 diff --git a/apps/desktop/src/updates/DesktopUpdates.ts b/apps/desktop/src/updates/DesktopUpdates.ts
-index 344d135a10247af394d0eb395ce4802d507ef145..1cd19550268a791e20f07f20cf7cf402b0e7e7a6 100644
+index 51584e3c796de35fe0c590496e0b156b941cd399..00e2668f50e89979d3b634f32b64de0f4cc3afa8 100644
 --- a/apps/desktop/src/updates/DesktopUpdates.ts
 +++ b/apps/desktop/src/updates/DesktopUpdates.ts
 @@ -50,7 +50,7 @@ const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
  const AUTO_UPDATE_POLL_INTERVAL = "4 minutes";
  const PREPARED_INSTALL_CHECK_WAIT = Duration.seconds(90);
- 
+
 -type UpdateAction = "check" | "download" | "install" | "install-recovery" | "channel";
 +type UpdateAction = "check" | "download" | "install" | "install-recovery" | "channel" | "managed";
- 
+
  interface DesktopPreparedUpdateInstallResult extends DesktopUpdateActionResult {
    readonly failed: boolean;
 @@ -159,6 +159,8 @@ export type DesktopUpdateSetChannelError = typeof DesktopUpdateSetChannelError.T
@@ -2607,7 +2607,7 @@ index 344d135a10247af394d0eb395ce4802d507ef145..1cd19550268a791e20f07f20cf7cf402
      readonly getState: Effect.Effect<DesktopUpdateState>;
      /** True while a check, download, install, or channel change holds the
          updater's single action reservation. */
-@@ -756,7 +758,8 @@ export const make = Effect.gen(function* () {
+@@ -757,7 +759,8 @@ export const make = Effect.gen(function* () {
      const error = new DesktopUpdaterReportedError({
        operation: Option.match(activeAction, {
          onNone: () => "background" as const,
@@ -2617,9 +2617,9 @@ index 344d135a10247af394d0eb395ce4802d507ef145..1cd19550268a791e20f07f20cf7cf402
        }),
        cause,
      });
-@@ -845,6 +848,12 @@ export const make = Effect.gen(function* () {
+@@ -846,6 +849,12 @@ export const make = Effect.gen(function* () {
    });
- 
+
    return DesktopUpdates.of({
 +    beginManagedAction: Ref.get(desktopState.quitting).pipe(
 +      Effect.flatMap((quitting) =>
@@ -2630,7 +2630,7 @@ index 344d135a10247af394d0eb395ce4802d507ef145..1cd19550268a791e20f07f20cf7cf402
      getState: Ref.get(updateStateRef),
      isActionActive: activeUpdateAction.pipe(Effect.map(Option.isSome)),
      isInstallActive: activeUpdateAction.pipe(
-@@ -928,7 +937,10 @@ export const make = Effect.gen(function* () {
+@@ -929,7 +938,10 @@ export const make = Effect.gen(function* () {
        const activeAction = yield* tryStartChannelChange;
        if (Option.isSome(activeAction)) {
          return yield* new DesktopUpdateActionInProgressError({
@@ -2649,7 +2649,7 @@ index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb
 @@ -149,7 +149,17 @@ const makeFake = (options: FakeOptions = {}) =>
      return { controller, log, sent, dispositions };
    });
- 
+
 -const input = { requestId: "req-1", targetVersion: "1.2.4" };
 +const artifact = {
 +  schemaVersion: 1,
@@ -2662,7 +2662,7 @@ index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb
 +  releaseInputSha256: "a".repeat(64),
 +} as const;
 +const input = { requestId: "req-1", targetVersion: "1.2.4", artifact };
- 
+
  describe("desktopUpdateReservation", () => {
    it.effect("defers without touching any backend while lifecycle work is executing", () =>
 @@ -172,6 +182,7 @@ describe("desktopUpdateReservation", () => {
@@ -2699,7 +2699,7 @@ index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb
 +        targetVersion: "1.2.5",
 +        artifact: { ...artifact, targetVersion: "1.2.5" },
 +      };
- 
+
        const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
        yield* Deferred.await(reserveReached);
 @@ -628,15 +645,20 @@ describe("desktopUpdateReservation", () => {
@@ -2715,7 +2715,7 @@ index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb
 +              Effect.andThen(Deferred.await(installFinished)),
 +            ),
          });
- 
+
          const attempt = yield* fake.controller.tryInstall(input).pipe(Effect.forkChild);
          yield* Deferred.await(installReached);
 -        yield* Fiber.interrupt(attempt);
@@ -2724,7 +2724,7 @@ index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb
 +        yield* Deferred.succeed(installFinished, undefined);
 +        yield* Fiber.join(interrupt);
          const exit = yield* Fiber.await(attempt);
- 
+
          assert.isTrue(Exit.isFailure(exit));
 @@ -882,7 +904,7 @@ describe("desktopUpdateReservation", () => {
    it.effect("accepts an empty owned set without any exchange", () =>
@@ -2732,7 +2732,7 @@ index f1e9799f5409b7c0f71bb668abd15ea955a34d03..ffdb6a6f99726e5f464b8227a42878cb
        const fake = yield* makeFake({ runs: [] });
 -      const result = yield* fake.controller.tryInstall({ targetVersion: "1.2.4" });
 +      const result = yield* fake.controller.tryInstall({ targetVersion: "1.2.4", artifact });
- 
+
        assert.equal(result._tag, "accepted");
        assert.deepEqual(fake.log, ["retain", "publish accepted", "install "]);
 @@ -890,3 +912,75 @@ describe("desktopUpdateReservation", () => {
@@ -2847,7 +2847,7 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
    readonly targetVersion: string;
 +  readonly artifact: ManagedDesktopArtifactDescriptor;
  }
- 
+
  export type DesktopUpdateRejection =
 @@ -153,7 +159,9 @@ export interface DesktopUpdateReservationController<InstallError> {
     * Interrupting the caller before the commit decision aborts the attempt.
@@ -2863,7 +2863,7 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
 @@ -165,6 +173,19 @@ export interface DesktopUpdateReservationOptions {
    readonly attemptIdPrefix?: string;
  }
- 
+
 +export const sameManagedArtifact = (
 +  left: ManagedDesktopArtifactDescriptor,
 +  right: ManagedDesktopArtifactDescriptor,
@@ -2879,7 +2879,7 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
 +
  const sameRun = (left: OwnedBackendRun, right: OwnedBackendRun) =>
    left.instanceId === right.instanceId && left.runId === right.runId;
- 
+
 @@ -189,6 +210,7 @@ export const make = <InstallError>(
       */
      interface RequestEntry {
@@ -2891,7 +2891,7 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
 @@ -226,14 +248,22 @@ export const make = <InstallError>(
              exchange.reply.attemptId === attemptId &&
              exchange.reply.status === status;
- 
+
 -          const publish = (disposition: DesktopUpdateCommitDisposition, reason?: string) =>
 -            deps.publishDisposition({
 -              requestId: input.requestId,
@@ -2916,13 +2916,13 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
 +              },
 +              runs,
 +            );
- 
+
            const finish = (result: Result) =>
              Deferred.succeed(record, result).pipe(Effect.as(result));
 @@ -339,19 +369,14 @@ export const make = <InstallError>(
              }
              if (committed.length !== backends.runs.length) return yield* finish(retained());
- 
+
 -            // Acceptance is recorded before the first stop and is never
 -            // inferred from the stop or install having happened. An owner
 -            // interrupted while the stop or install is pending keeps the
@@ -2957,11 +2957,11 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
 +          });
          });
        });
- 
+
 @@ -410,11 +438,17 @@ export const make = <InstallError>(
        | { readonly _tag: "join"; readonly record: Deferred.Deferred<Result> }
        | { readonly _tag: "conflict"; readonly targetVersion: string };
- 
+
 -    const tryInstall: DesktopUpdateReservationController<InstallError>["tryInstall"] = (input) =>
 +    const tryInstall: DesktopUpdateReservationController<InstallError>["tryInstall"] = (
 +      requestedInput,
@@ -3013,11 +3013,11 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
          }),
        );
 +    };
- 
+
      return { tryInstall };
    });
 diff --git a/apps/desktop/src/updates/updatesTestHarness.ts b/apps/desktop/src/updates/updatesTestHarness.ts
-index 53a6dc97f5a40dafd80d31c92a6fa3d4258be680..8e08f4600497cba0f2bc8ba6638bde2b2189c85a 100644
+index cd1404a50464792644b8dbd3f90b280c60d1a06e..b3c8cb471a38bdb206908cb294baeaae87677765 100644
 --- a/apps/desktop/src/updates/updatesTestHarness.ts
 +++ b/apps/desktop/src/updates/updatesTestHarness.ts
 @@ -31,6 +31,7 @@ export interface UpdatesHarnessOptions {
@@ -3027,8 +3027,8 @@ index 53a6dc97f5a40dafd80d31c92a6fa3d4258be680..8e08f4600497cba0f2bc8ba6638bde2b
 +  readonly generationSnapshot?: DesktopBackendPool.DesktopBackendInstance["generationSnapshot"];
    readonly env?: Record<string, string | undefined>;
  }
- 
-@@ -125,6 +126,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
+
+@@ -126,6 +127,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
    const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
      id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
      label: Effect.succeed("Windows"),

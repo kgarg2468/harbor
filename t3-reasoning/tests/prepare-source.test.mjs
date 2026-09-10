@@ -1036,6 +1036,8 @@ describe("source.lock.json", () => {
   ];
   const IDENTITY_FILES = [
     "apps/desktop/src/app/DesktopAppIdentity.test.ts",
+    "apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts",
+    "apps/desktop/src/app/DesktopEarlyElectronStartup.ts",
     "apps/desktop/src/app/DesktopEnvironment.test.ts",
     "apps/desktop/src/app/DesktopEnvironment.ts",
     "apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts",

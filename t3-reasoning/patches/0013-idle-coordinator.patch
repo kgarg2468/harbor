@@ -1,6 +1,6 @@
 diff --git a/apps/server/src/cloud/idleUpdateCoordinator.test.ts b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
 new file mode 100644
-index 000000000..6437fbebd
+index 0000000000000000000000000000000000000000..6437fbebd3fbf8d3708411ff80204021a551244d
 --- /dev/null
 +++ b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
 @@ -0,0 +1,471 @@
@@ -477,7 +477,7 @@ index 000000000..6437fbebd
 +});
 diff --git a/apps/server/src/cloud/idleUpdateCoordinator.ts b/apps/server/src/cloud/idleUpdateCoordinator.ts
 new file mode 100644
-index 000000000..d795ebafa
+index 0000000000000000000000000000000000000000..d795ebafa437fc5635d6e7b42aaca4c044a5209b
 --- /dev/null
 +++ b/apps/server/src/cloud/idleUpdateCoordinator.ts
 @@ -0,0 +1,215 @@
@@ -697,325 +697,30 @@ index 000000000..d795ebafa
 +  }),
 +);
 diff --git a/apps/server/src/updateActivity.test.ts b/apps/server/src/updateActivity.test.ts
-index bf69b0be8..ba4944f34 100644
+index 5d8e50cb7a1dd5e70331a35677355cd1dfe7f6b3..ba4944f347b20f701cc9512fabd3bdbceb33d2ce 100644
 --- a/apps/server/src/updateActivity.test.ts
 +++ b/apps/server/src/updateActivity.test.ts
 @@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
  import * as Scope from "effect/Scope";
- 
+
  import {
 +  type ActivitySeal,
    make,
    makeTrackedWorker,
    UpdateActivityUnavailableError,
-@@ -21,48 +22,50 @@ const expectBusy = (activity: { readonly trySealIdle: Effect.Effect<unknown> })
+@@ -21,7 +22,7 @@ const expectBusy = (activity: { readonly trySealIdle: Effect.Effect<unknown> })
  const expectSealed = (activity: { readonly trySealIdle: Effect.Effect<unknown> }) =>
    Effect.map(activity.trySealIdle, (claim) => {
      expect(claim).toMatchObject({ status: "sealed" });
 -    return claim as { readonly status: "sealed"; readonly seal: { release: () => void } };
 +    return claim as { readonly status: "sealed"; readonly seal: ActivitySeal };
    });
- 
--it.effect("forkTracked keeps the child counted after the parent ends and releases on pre-start cancel", () =>
--  Effect.gen(function* () {
--    const activity = yield* make();
--    const parent = yield* activity.acquire("parent");
--
--    // Child that will actually run later.
--    const childScope = yield* Scope.make();
--    const childGate = yield* Deferred.make<void>();
--    const childStarted = yield* Deferred.make<void>();
--    const child = yield* activity.forkTracked(
--      "child",
--      Deferred.succeed(childStarted, undefined).pipe(Effect.andThen(Deferred.await(childGate))),
--      childScope,
--    );
-+it.effect(
-+  "forkTracked keeps the child counted after the parent ends and releases on pre-start cancel",
-+  () =>
-+    Effect.gen(function* () {
-+      const activity = yield* make();
-+      const parent = yield* activity.acquire("parent");
- 
--    // Child that is canceled before its body ever runs.
--    const canceledScope = yield* Scope.make();
--    const canceledStarted = yield* Deferred.make<void>();
--    const canceled = yield* activity.forkTracked(
--      "canceled",
--      Deferred.succeed(canceledStarted, undefined),
--      canceledScope,
--    );
--    yield* Scope.close(canceledScope, Exit.void);
--    const canceledExit = yield* Fiber.await(canceled);
--    expect(Exit.isFailure(canceledExit)).toBe(true);
--    expect(yield* Deferred.isDone(canceledStarted)).toBe(false);
-+      // Child that will actually run later.
-+      const childScope = yield* Scope.make();
-+      const childGate = yield* Deferred.make<void>();
-+      const childStarted = yield* Deferred.make<void>();
-+      const child = yield* activity.forkTracked(
-+        "child",
-+        Deferred.succeed(childStarted, undefined).pipe(Effect.andThen(Deferred.await(childGate))),
-+        childScope,
-+      );
- 
--    parent.release();
--    parent.release();
--    const busy = yield* expectBusy(activity);
--    expect(busy.state.outstanding).toBe(1);
-+      // Child that is canceled before its body ever runs.
-+      const canceledScope = yield* Scope.make();
-+      const canceledStarted = yield* Deferred.make<void>();
-+      const canceled = yield* activity.forkTracked(
-+        "canceled",
-+        Deferred.succeed(canceledStarted, undefined),
-+        canceledScope,
-+      );
-+      yield* Scope.close(canceledScope, Exit.void);
-+      const canceledExit = yield* Fiber.await(canceled);
-+      expect(Exit.isFailure(canceledExit)).toBe(true);
-+      expect(yield* Deferred.isDone(canceledStarted)).toBe(false);
- 
--    yield* Deferred.await(childStarted);
--    yield* Deferred.succeed(childGate, undefined);
--    yield* Fiber.join(child);
--    yield* expectSealed(activity);
--    yield* Scope.close(childScope, Exit.void);
--  }),
-+      parent.release();
-+      parent.release();
-+      const busy = yield* expectBusy(activity);
-+      expect(busy.state.outstanding).toBe(1);
-+
-+      yield* Deferred.await(childStarted);
-+      yield* Deferred.succeed(childGate, undefined);
-+      yield* Fiber.join(child);
-+      yield* expectSealed(activity);
-+      yield* Scope.close(childScope, Exit.void);
-+    }),
+
+ it.effect(
+@@ -279,6 +280,75 @@ it.effect(
+     }),
  );
- 
- it.effect("track releases exactly once on success, failure, and interruption", () =>
-@@ -74,7 +77,10 @@ it.effect("track releases exactly once on success, failure, and interruption", (
- 
-     const entered = yield* Deferred.make<void>();
-     const fiber = yield* Effect.forkChild(
--      activity.track("hang", Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))),
-+      activity.track(
-+        "hang",
-+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
-+      ),
-     );
-     yield* Deferred.await(entered);
-     yield* expectBusy(activity);
-@@ -96,17 +102,18 @@ it.effect("tracked worker items survive caller cancel and a closed worker reject
- 
-     const offered = yield* Deferred.make<void>();
-     const caller = yield* Effect.forkChild(
--      worker.enqueue("job").pipe(
--        Effect.andThen(Deferred.succeed(offered, undefined)),
--        Effect.andThen(Effect.never),
--      ),
-+      worker
-+        .enqueue("job")
-+        .pipe(Effect.andThen(Deferred.succeed(offered, undefined)), Effect.andThen(Effect.never)),
-     );
-     yield* Deferred.await(offered);
-     yield* Fiber.interrupt(caller);
- 
-     expect(yield* Deferred.await(entered)).toBe("job");
-     const drained = yield* Deferred.make<void>();
--    yield* Effect.forkChild(worker.drain.pipe(Effect.andThen(Deferred.succeed(drained, undefined))));
-+    yield* Effect.forkChild(
-+      worker.drain.pipe(Effect.andThen(Deferred.succeed(drained, undefined))),
-+    );
-     yield* Effect.yieldNow;
-     expect(yield* Deferred.isDone(drained)).toBe(false);
-     const busy = yield* expectBusy(activity);
-@@ -120,8 +127,10 @@ it.effect("tracked worker items survive caller cancel and a closed worker reject
- 
-     // A worker whose scope closed cannot accept work, and the false offer leaks nothing.
-     const closedScope = yield* Scope.make();
--    const closedWorker = yield* makeTrackedWorker<string, never, never>(activity, "closed", () =>
--      Effect.void,
-+    const closedWorker = yield* makeTrackedWorker<string, never, never>(
-+      activity,
-+      "closed",
-+      () => Effect.void,
-     ).pipe(Scope.provide(closedScope));
-     yield* Scope.close(closedScope, Exit.void);
-     const rejected = yield* Effect.flip(closedWorker.enqueue("late"));
-@@ -178,115 +187,203 @@ it.effect("worker death blocks before its counters reach zero and finishes local
-   }),
- );
- 
--it.effect("a process callback that throws while constructing its effect still settles and blocks", () =>
--  Effect.gen(function* () {
--    const activity = yield* make();
--    const worker = yield* makeTrackedWorker<number, never, never>(activity, "throwing", (): Effect.Effect<void> => {
--      throw new Error("construction defect");
--    });
--    const blocked = yield* Effect.forkChild(
--      Effect.gen(function* () {
--        let current = yield* activity.state;
--        while (current.blockers.length === 0) current = yield* activity.awaitChange(current.revision);
--      }),
--    );
--    yield* worker.enqueue(1);
--    yield* Fiber.join(blocked);
--    yield* worker.drain;
--    const state = yield* activity.state;
--    expect(state.outstanding).toBe(0);
--    expect(state.blockers).toEqual(["worker unavailable: throwing"]);
--    yield* expectBusy(activity);
--  }),
-+it.effect(
-+  "a process callback that throws while constructing its effect still settles and blocks",
-+  () =>
-+    Effect.gen(function* () {
-+      const activity = yield* make();
-+      const worker = yield* makeTrackedWorker<number, never, never>(
-+        activity,
-+        "throwing",
-+        (): Effect.Effect<void> => {
-+          throw new Error("construction defect");
-+        },
-+      );
-+      const blocked = yield* Effect.forkChild(
-+        Effect.gen(function* () {
-+          let current = yield* activity.state;
-+          while (current.blockers.length === 0)
-+            current = yield* activity.awaitChange(current.revision);
-+        }),
-+      );
-+      yield* worker.enqueue(1);
-+      yield* Fiber.join(blocked);
-+      yield* worker.drain;
-+      const state = yield* activity.state;
-+      expect(state.outstanding).toBe(0);
-+      expect(state.blockers).toEqual(["worker unavailable: throwing"]);
-+      yield* expectBusy(activity);
-+    }),
- );
- 
--it.effect("acquire and trySealIdle race atomically; stale seals and closed scopes cannot reopen", () =>
--  Effect.gen(function* () {
--    const activity = yield* make();
--    const go = yield* Deferred.make<void>();
--    const acquirer = yield* Effect.forkChild(
--      Deferred.await(go).pipe(Effect.andThen(Effect.exit(activity.acquire("racer")))),
--    );
--    const sealer = yield* Effect.forkChild(Deferred.await(go).pipe(Effect.andThen(activity.trySealIdle)));
--    yield* Deferred.succeed(go, undefined);
--    const acquired = yield* Fiber.join(acquirer);
--    const claim = yield* Fiber.join(sealer);
--    if (Exit.isSuccess(acquired)) {
--      expect(claim.status).toBe("busy");
--      acquired.value.release();
--    } else {
--      expect(claim.status).toBe("sealed");
--      expect(acquired).toEqual(Exit.fail(new UpdateActivityUnavailableError({ reason: "sealed" })));
--      if (claim.status === "sealed") claim.seal.release();
--    }
-+it.effect(
-+  "acquire and trySealIdle race atomically; stale seals and closed scopes cannot reopen",
-+  () =>
-+    Effect.gen(function* () {
-+      const activity = yield* make();
-+      const go = yield* Deferred.make<void>();
-+      const acquirer = yield* Effect.forkChild(
-+        Deferred.await(go).pipe(Effect.andThen(Effect.exit(activity.acquire("racer")))),
-+      );
-+      const sealer = yield* Effect.forkChild(
-+        Deferred.await(go).pipe(Effect.andThen(activity.trySealIdle)),
-+      );
-+      yield* Deferred.succeed(go, undefined);
-+      const acquired = yield* Fiber.join(acquirer);
-+      const claim = yield* Fiber.join(sealer);
-+      if (Exit.isSuccess(acquired)) {
-+        expect(claim.status).toBe("busy");
-+        acquired.value.release();
-+      } else {
-+        expect(claim.status).toBe("sealed");
-+        expect(acquired).toEqual(
-+          Exit.fail(new UpdateActivityUnavailableError({ reason: "sealed" })),
-+        );
-+        if (claim.status === "sealed") claim.seal.release();
-+      }
- 
--    const first = yield* expectSealed(activity);
--    yield* expectBusy(activity);
--    const rejected = yield* Effect.flip(activity.acquire("while sealed"));
--    expect(rejected.reason).toBe("sealed");
--    first.seal.release();
--    const second = yield* expectSealed(activity);
--    first.seal.release();
--    expect((yield* activity.state).phase).toBe("sealed");
--    second.seal.release();
--    expect((yield* activity.state).phase).toBe("open");
--
--    // Blockers keep the registry busy; only the owning handle clears them.
--    const blockerA = activity.block("same reason");
--    const blockerB = activity.block("same reason");
--    blockerA.clear();
--    blockerA.clear();
--    expect((yield* activity.state).blockers).toEqual(["same reason"]);
--    yield* expectBusy(activity);
--    blockerB.clear();
--    const third = yield* expectSealed(activity);
--    third.seal.release();
-+      const first = yield* expectSealed(activity);
-+      yield* expectBusy(activity);
-+      const rejected = yield* Effect.flip(activity.acquire("while sealed"));
-+      expect(rejected.reason).toBe("sealed");
-+      first.seal.release();
-+      const second = yield* expectSealed(activity);
-+      first.seal.release();
-+      expect((yield* activity.state).phase).toBe("sealed");
-+      second.seal.release();
-+      expect((yield* activity.state).phase).toBe("open");
- 
--    // Closing the owning scope is permanent.
--    const scope = yield* Scope.make();
--    const scopedActivity = yield* make().pipe(Scope.provide(scope));
--    const lease = yield* scopedActivity.acquire("before close");
--    const seal = yield* scopedActivity.trySealIdle;
--    expect(seal.status).toBe("busy");
--    yield* Scope.close(scope, Exit.void);
--    lease.release();
--    expect((yield* scopedActivity.state).phase).toBe("closed");
--    const closedAcquire = yield* Effect.flip(scopedActivity.acquire("after close"));
--    expect(closedAcquire.reason).toBe("closed");
--    const closedClaim = yield* scopedActivity.trySealIdle;
--    expect(closedClaim).toMatchObject({ status: "busy", state: { phase: "closed" } });
--  }),
-+      // Blockers keep the registry busy; only the owning handle clears them.
-+      const blockerA = activity.block("same reason");
-+      const blockerB = activity.block("same reason");
-+      blockerA.clear();
-+      blockerA.clear();
-+      expect((yield* activity.state).blockers).toEqual(["same reason"]);
-+      yield* expectBusy(activity);
-+      blockerB.clear();
-+      const third = yield* expectSealed(activity);
-+      third.seal.release();
-+
-+      // Closing the owning scope is permanent.
-+      const scope = yield* Scope.make();
-+      const scopedActivity = yield* make().pipe(Scope.provide(scope));
-+      const lease = yield* scopedActivity.acquire("before close");
-+      const seal = yield* scopedActivity.trySealIdle;
-+      expect(seal.status).toBe("busy");
-+      yield* Scope.close(scope, Exit.void);
-+      lease.release();
-+      expect((yield* scopedActivity.state).phase).toBe("closed");
-+      const closedAcquire = yield* Effect.flip(scopedActivity.acquire("after close"));
-+      expect(closedAcquire.reason).toBe("closed");
-+      const closedClaim = yield* scopedActivity.trySealIdle;
-+      expect(closedClaim).toMatchObject({ status: "busy", state: { phase: "closed" } });
-+    }),
-+);
-+
+
 +it.effect(
 +  "armIdleShutdown authorizes only through the live seal and release clears it before reopening",
 +  () =>
@@ -1054,23 +759,15 @@ index bf69b0be8..ba4944f34 100644
 +      second.seal.release();
 +      expect(yield* activity.state).toMatchObject({ phase: "open", idleShutdownAuthorized: false });
 +    }),
- );
- 
--it.effect("awaitChange wakes on the next revision, returns stale revisions immediately, and survives interruption", () =>
++);
++
 +it.effect("registry closure keeps an armed authorization readable and never reopens", () =>
-   Effect.gen(function* () {
-     const scope = yield* Scope.make();
-     const activity = yield* make().pipe(Scope.provide(scope));
--    const initial = yield* activity.state;
++  Effect.gen(function* () {
++    const scope = yield* Scope.make();
++    const activity = yield* make().pipe(Scope.provide(scope));
 +    const sealed = yield* expectSealed(activity);
 +    sealed.seal.armIdleShutdown();
- 
--    const woke = yield* Deferred.make<UpdateActivityState>();
--    yield* Effect.forkChild(activity.awaitChange(initial.revision).pipe(Effect.andThen((s) => Deferred.succeed(woke, s))));
--    const abandoned = yield* Effect.forkChild(activity.awaitChange(initial.revision));
--    yield* Effect.yieldNow;
--    yield* Fiber.interrupt(abandoned);
--    expect(yield* Deferred.isDone(woke)).toBe(false);
++
 +    yield* Scope.close(scope, Exit.void);
 +    expect(yield* activity.state).toMatchObject({ phase: "closed", idleShutdownAuthorized: true });
 +    sealed.seal.release();
@@ -1082,11 +779,7 @@ index bf69b0be8..ba4944f34 100644
 +      status: "busy",
 +      state: { phase: "closed" },
 +    });
- 
--    const lease = yield* activity.acquire("wake");
--    const next = yield* Deferred.await(woke);
--    expect(next.revision).toBe(initial.revision + 1);
--    expect(next.outstanding).toBe(1);
++
 +    // Closing without an armed seal authorizes nothing.
 +    const plainScope = yield* Scope.make();
 +    const plain = yield* make().pipe(Scope.provide(plainScope));
@@ -1096,63 +789,16 @@ index bf69b0be8..ba4944f34 100644
 +    expect(yield* plain.state).toMatchObject({ phase: "closed", idleShutdownAuthorized: false });
 +  }),
 +);
- 
--    const stale = yield* activity.awaitChange(initial.revision);
--    expect(stale.revision).toBe(next.revision);
-+it.effect(
-+  "awaitChange wakes on the next revision, returns stale revisions immediately, and survives interruption",
-+  () =>
-+    Effect.gen(function* () {
-+      const scope = yield* Scope.make();
-+      const activity = yield* make().pipe(Scope.provide(scope));
-+      const initial = yield* activity.state;
- 
--    const closing = yield* Effect.forkChild(activity.awaitChange(next.revision));
--    yield* Effect.yieldNow;
--    yield* Scope.close(scope, Exit.void);
--    const closed = yield* Fiber.join(closing);
--    expect(closed.phase).toBe("closed");
--    expect(closed.revision).toBeGreaterThan(next.revision);
--    // Closed registries answer immediately even at the current revision.
--    expect((yield* activity.awaitChange(closed.revision)).phase).toBe("closed");
--    lease.release();
--  }),
-+      const woke = yield* Deferred.make<UpdateActivityState>();
-+      yield* Effect.forkChild(
-+        activity
-+          .awaitChange(initial.revision)
-+          .pipe(Effect.andThen((s) => Deferred.succeed(woke, s))),
-+      );
-+      const abandoned = yield* Effect.forkChild(activity.awaitChange(initial.revision));
-+      yield* Effect.yieldNow;
-+      yield* Fiber.interrupt(abandoned);
-+      expect(yield* Deferred.isDone(woke)).toBe(false);
 +
-+      const lease = yield* activity.acquire("wake");
-+      const next = yield* Deferred.await(woke);
-+      expect(next.revision).toBe(initial.revision + 1);
-+      expect(next.outstanding).toBe(1);
-+
-+      const stale = yield* activity.awaitChange(initial.revision);
-+      expect(stale.revision).toBe(next.revision);
-+
-+      const closing = yield* Effect.forkChild(activity.awaitChange(next.revision));
-+      yield* Effect.yieldNow;
-+      yield* Scope.close(scope, Exit.void);
-+      const closed = yield* Fiber.join(closing);
-+      expect(closed.phase).toBe("closed");
-+      expect(closed.revision).toBeGreaterThan(next.revision);
-+      // Closed registries answer immediately even at the current revision.
-+      expect((yield* activity.awaitChange(closed.revision)).phase).toBe("closed");
-+      lease.release();
-+    }),
- );
+ it.effect(
+   "awaitChange wakes on the next revision, returns stale revisions immediately, and survives interruption",
+   () =>
 diff --git a/apps/server/src/updateActivity.ts b/apps/server/src/updateActivity.ts
-index ce1b50c49..078069860 100644
+index 22990993102d5bff7645b3aaa2c77deba8da47ba..d4c07c5fcf297b4403d8c8739ab1fb432ffda82a 100644
 --- a/apps/server/src/updateActivity.ts
 +++ b/apps/server/src/updateActivity.ts
 @@ -30,6 +30,12 @@ export interface ActivityBlocker {
- 
+
  export interface ActivitySeal {
    readonly release: () => void;
 +  /**
@@ -1162,7 +808,7 @@ index ce1b50c49..078069860 100644
 +   */
 +  readonly armIdleShutdown: () => void;
  }
- 
+
  export interface UpdateActivityState {
 @@ -37,6 +43,13 @@ export interface UpdateActivityState {
    readonly revision: number;
@@ -1176,8 +822,8 @@ index ce1b50c49..078069860 100644
 +   */
 +  readonly idleShutdownAuthorized: boolean;
  }
- 
- export class UpdateActivityUnavailableError extends Schema.TaggedErrorClass<UpdateActivityUnavailableError>()(
+
+ export class UpdateActivityUnavailableError extends Schema.TaggedError<UpdateActivityUnavailableError>()(
 @@ -93,6 +106,7 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
      let revision = 0;
      let outstanding = 0;
@@ -1185,38 +831,16 @@ index ce1b50c49..078069860 100644
 +    let idleShutdownAuthorized = false;
      const blockers = new Set<{ readonly reason: string }>();
      const waiters = new Set<Deferred.Deferred<UpdateActivityState>>();
- 
+
 @@ -101,6 +115,7 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
        revision,
        outstanding,
        blockers: Array.from(blockers, (blocker) => blocker.reason),
 +      idleShutdownAuthorized,
      });
- 
+
      const bump = (): void => {
-@@ -132,7 +147,9 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
-         const lease = acquireUnsafe();
-         return lease === undefined
-           ? Effect.fail(
--              new UpdateActivityUnavailableError({ reason: phase === "sealed" ? "sealed" : "closed" }),
-+              new UpdateActivityUnavailableError({
-+                reason: phase === "sealed" ? "sealed" : "closed",
-+              }),
-             )
-           : Effect.succeed(lease);
-       });
-@@ -172,7 +189,9 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
-         if (phase === "closed" || revision !== afterRevision) return Effect.succeed(snapshot());
-         const waiter = Deferred.makeUnsafe<UpdateActivityState>();
-         waiters.add(waiter);
--        return Effect.onInterrupt(Deferred.await(waiter), () => Effect.sync(() => waiters.delete(waiter)));
-+        return Effect.onInterrupt(Deferred.await(waiter), () =>
-+          Effect.sync(() => waiters.delete(waiter)),
-+        );
-       });
- 
-     const trySealIdle: UpdateActivityShape["trySealIdle"] = Effect.sync(() => {
-@@ -183,19 +202,28 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
+@@ -187,19 +202,28 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
        sealToken = token;
        phase = "sealed";
        bump();
@@ -1240,68 +864,20 @@ index ce1b50c49..078069860 100644
          },
        } as const;
      });
- 
+
 +    // Closing keeps an armed authorization readable for shutdown finalizers
 +    // that run after this registry; it never reopens the registry.
      yield* Effect.addFinalizer(() =>
        Effect.sync(() => {
          phase = "closed";
-@@ -265,7 +293,11 @@ export const makeTrackedWorker = <A, E, R>(
-       if (closed) return;
-       closed = true;
-       markUnavailable();
--      for (let item = Queue.takeUnsafe(queue); item !== undefined && Exit.isSuccess(item); item = Queue.takeUnsafe(queue)) {
-+      for (
-+        let item = Queue.takeUnsafe(queue);
-+        item !== undefined && Exit.isSuccess(item);
-+        item = Queue.takeUnsafe(queue)
-+      ) {
-         settle(item.value.lease);
-       }
-     }).pipe(Effect.andThen(Queue.shutdown(queue)));
-@@ -274,14 +306,15 @@ export const makeTrackedWorker = <A, E, R>(
-     // callback that throws synchronously still settles its lease. The mask keeps
-     // the dequeue-to-finalizer handoff atomic while waiting and processing stay
-     // interruptible.
--    const processItem = (item: TrackedItem<A>, restore: <X, XE, XR>(e: Effect.Effect<X, XE, XR>) => Effect.Effect<X, XE, XR>) =>
--      Effect.onExit(
--        restore(Effect.suspend(() => process(item.value))),
--        (exit) =>
--          Effect.sync(() => {
--            if (!Exit.isSuccess(exit)) markUnavailable();
--            settle(item.lease);
--          }),
-+    const processItem = (
-+      item: TrackedItem<A>,
-+      restore: <X, XE, XR>(e: Effect.Effect<X, XE, XR>) => Effect.Effect<X, XE, XR>,
-+    ) =>
-+      Effect.onExit(restore(Effect.suspend(() => process(item.value))), (exit) =>
-+        Effect.sync(() => {
-+          if (!Exit.isSuccess(exit)) markUnavailable();
-+          settle(item.lease);
-+        }),
-       );
- 
-     yield* Effect.uninterruptibleMask((restore) =>
-@@ -311,7 +344,9 @@ export const makeTrackedWorker = <A, E, R>(
-       if (localOutstanding === 0) return Effect.void;
-       const waiter = Deferred.makeUnsafe<void>();
-       drainWaiters.add(waiter);
--      return Effect.onInterrupt(Deferred.await(waiter), () => Effect.sync(() => drainWaiters.delete(waiter)));
-+      return Effect.onInterrupt(Deferred.await(waiter), () =>
-+        Effect.sync(() => drainWaiters.delete(waiter)),
-+      );
-     });
- 
-     return { enqueue, drain } satisfies TrackedWorker<A>;
 diff --git a/apps/server/src/updateAdmission.test.ts b/apps/server/src/updateAdmission.test.ts
-index be80fad6d..8d756f1e3 100644
+index be80fad6db9aa4343264a3b256f7aa2d5d6dacfc..8d756f1e35ec93dfa0d5ebaa6154a12c4e4be65f 100644
 --- a/apps/server/src/updateAdmission.test.ts
 +++ b/apps/server/src/updateAdmission.test.ts
 @@ -6,7 +6,12 @@ import * as Exit from "effect/Exit";
  import * as Fiber from "effect/Fiber";
  import * as Scope from "effect/Scope";
- 
+
 -import { make, UpdateAdmissionClosedError, type UpdateAdmissionShape } from "./updateAdmission.ts";
 +import {
 +  type HandoffMaintenanceControl,
@@ -1309,13 +885,13 @@ index be80fad6d..8d756f1e3 100644
 +  UpdateAdmissionClosedError,
 +  type UpdateAdmissionShape,
 +} from "./updateAdmission.ts";
- 
+
  /**
   * Forks a command that stays admitted until `release` completes, then waits
 @@ -46,6 +51,23 @@ const forkTryClaim = Effect.fn("forkTryClaim")(function* (admission: UpdateAdmis
    return { fiber, started, finish };
  });
- 
+
 +/** Forks a handoff claim whose callback hands out its control, signals `started`, and blocks until `finish`. */
 +const forkHandoffClaim = Effect.fn("forkHandoffClaim")(function* (admission: UpdateAdmissionShape) {
 +  const started = yield* Deferred.make<HandoffMaintenanceControl>();
@@ -1540,13 +1116,13 @@ index be80fad6d..8d756f1e3 100644
 +  });
  });
 diff --git a/apps/server/src/updateAdmission.ts b/apps/server/src/updateAdmission.ts
-index 76bef32c7..ba3bc93cc 100644
+index 0eb1f3f2d117f539925c0f043b909057760f384a..f081d4d2a199ad4ed19ff9dc0d75730a59c338d7 100644
 --- a/apps/server/src/updateAdmission.ts
 +++ b/apps/server/src/updateAdmission.ts
 @@ -31,6 +31,17 @@ export type UpdateMaintenanceClaim<A> =
    | { readonly status: "busy" }
    | { readonly status: "ran"; readonly value: A };
- 
+
 +/** Control handed to a `tryWithHandoffMaintenance` callback while it owns the gate. */
 +export interface HandoffMaintenanceControl {
 +  /**
@@ -1576,11 +1152,11 @@ index 76bef32c7..ba3bc93cc 100644
 +  ) => Effect.Effect<UpdateMaintenanceClaim<A>, E, R>;
    readonly state: Effect.Effect<UpdateAdmissionState>;
  }
- 
+
 @@ -140,6 +160,44 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
        )
        .pipe(Effect.map(Option.getOrElse((): UpdateMaintenanceClaim<A> => busy)));
- 
+
 +  // Same permit and counter as above, but the permit is taken by hand so a
 +  // retained claim can simply never give it back. Acquisition, the in-flight
 +  // check, the close and the cleanup all run under the mask; only the callback
@@ -1625,7 +1201,7 @@ index 76bef32c7..ba3bc93cc 100644
 @@ -150,7 +208,13 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
      Effect.suspend(() => (drained === undefined ? Effect.void : Deferred.interrupt(drained))),
    );
- 
+
 -  return UpdateAdmission.of({ withAdmission, withMaintenance, tryWithMaintenance, state });
 +  return UpdateAdmission.of({
 +    withAdmission,
@@ -1635,5 +1211,5 @@ index 76bef32c7..ba3bc93cc 100644
 +    state,
 +  });
  });
- 
+
  export const layer = Layer.effect(UpdateAdmission, make());

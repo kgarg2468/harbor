@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/bin.ts b/apps/server/src/bin.ts
-index 0a2e40915..43ce870b2 100644
+index 52cc363ed04ff2e1113cde9aca5f724bebe52c9e..9799a0117c319b79c82bb455496344f49c9234bb 100644
 --- a/apps/server/src/bin.ts
 +++ b/apps/server/src/bin.ts
 @@ -14,6 +14,7 @@ import { pairCommand } from "./cli/pair.ts";
@@ -19,7 +19,7 @@ index 0a2e40915..43ce870b2 100644
        triageCommand,
        cloudEnabled ? connectCommand : connectUnavailableCommand,
 diff --git a/apps/server/src/cli/invocation.test.ts b/apps/server/src/cli/invocation.test.ts
-index 370a8977f..7b5591cc5 100644
+index 370a8977fc4c3861f34d236a5ce73432b3d7fb0a..7b5591cc577a48345b5a1dabc0ddf0d363378f5a 100644
 --- a/apps/server/src/cli/invocation.test.ts
 +++ b/apps/server/src/cli/invocation.test.ts
 @@ -1,5 +1,26 @@
@@ -36,7 +36,7 @@ index 370a8977f..7b5591cc5 100644
 +import { Command } from "effect/unstable/cli";
 +import * as CliError from "effect/unstable/cli/CliError";
 +import * as SqlClient from "effect/unstable/sql/SqlClient";
- 
+
 +import packageJson from "../../package.json" with { type: "json" };
 +import { makeCli } from "../bin.ts";
 +import {
@@ -47,7 +47,7 @@ index 370a8977f..7b5591cc5 100644
 +import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 +import { migrationManifest } from "../persistence/Migrations.ts";
  import { formatCliCommand } from "./invocation.ts";
- 
+
  it("formats package runner commands from their cache entry paths", () => {
 @@ -85,3 +106,135 @@ it("formats serve suggestions to match the launching command", () => {
      "t3 serve",
@@ -187,7 +187,7 @@ index 370a8977f..7b5591cc5 100644
 +});
 diff --git a/apps/server/src/cli/migrationPreflight.ts b/apps/server/src/cli/migrationPreflight.ts
 new file mode 100644
-index 000000000..d5611c767
+index 0000000000000000000000000000000000000000..d3883047f3026b3d16be5a3153052246dbbd4f34
 --- /dev/null
 +++ b/apps/server/src/cli/migrationPreflight.ts
 @@ -0,0 +1,24 @@
@@ -207,7 +207,7 @@ index 000000000..d5611c767
 +  snapshotPath: Flag.string("snapshot-path"),
 +  launcherProtocol: Flag.integer("launcher-protocol"),
 +}).pipe(
-+  Command.withHidden,
++  Command.unlisted,
 +  Command.withHandler(({ snapshotPath, launcherProtocol }) =>
 +    runMigrationPreflight({ snapshotPath, launcherProtocol }).pipe(
 +      Effect.flatMap((result) => Console.log(JSON.stringify(result))),
@@ -217,7 +217,7 @@ index 000000000..d5611c767
 +);
 diff --git a/apps/server/src/cloud/managedMigrationPreflight.test.ts b/apps/server/src/cloud/managedMigrationPreflight.test.ts
 new file mode 100644
-index 000000000..b207242d1
+index 0000000000000000000000000000000000000000..b88ba2932a6bbb388dc56168c6a554e80ff9232d
 --- /dev/null
 +++ b/apps/server/src/cloud/managedMigrationPreflight.test.ts
 @@ -0,0 +1,357 @@
@@ -249,7 +249,7 @@ index 000000000..b207242d1
 +} from "./migrationPreflight.ts";
 +import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 +
-+class UseFailed extends Schema.TaggedErrorClass<UseFailed>()("UseFailed", {}) {}
++class UseFailed extends Schema.TaggedError<UseFailed>()("UseFailed", {}) {}
 +
 +/** Opens a connection in the current scope; the writer connections stay open on purpose. */
 +const openDatabase = (filename: string, readonly = false) =>
@@ -580,7 +580,7 @@ index 000000000..b207242d1
 +});
 diff --git a/apps/server/src/cloud/managedMigrationPreflight.ts b/apps/server/src/cloud/managedMigrationPreflight.ts
 new file mode 100644
-index 000000000..a4e2bdbd0
+index 0000000000000000000000000000000000000000..158c1042dfef724ba87089cc7306337978fbf32a
 --- /dev/null
 +++ b/apps/server/src/cloud/managedMigrationPreflight.ts
 @@ -0,0 +1,217 @@
@@ -609,7 +609,7 @@ index 000000000..a4e2bdbd0
 + * and -shm files, is removed when the callback scope closes.
 + */
 +
-+export class MigrationSnapshotError extends Schema.TaggedErrorClass<MigrationSnapshotError>()(
++export class MigrationSnapshotError extends Schema.TaggedError<MigrationSnapshotError>()(
 +  "MigrationSnapshotError",
 +  {
 +    step: Schema.String,
@@ -803,7 +803,7 @@ index 000000000..a4e2bdbd0
 +}
 diff --git a/apps/server/src/cloud/migrationPreflight.test.ts b/apps/server/src/cloud/migrationPreflight.test.ts
 new file mode 100644
-index 000000000..690aa8449
+index 0000000000000000000000000000000000000000..690aa8449d21e650489cd1089e351b9b5e1a3434
 --- /dev/null
 +++ b/apps/server/src/cloud/migrationPreflight.test.ts
 @@ -0,0 +1,491 @@
@@ -1300,7 +1300,7 @@ index 000000000..690aa8449
 +});
 diff --git a/apps/server/src/cloud/migrationPreflight.ts b/apps/server/src/cloud/migrationPreflight.ts
 new file mode 100644
-index 000000000..674e3fd53
+index 0000000000000000000000000000000000000000..4fdc213209b90e6126a5d7d08a7bbddd8f701a71
 --- /dev/null
 +++ b/apps/server/src/cloud/migrationPreflight.ts
 @@ -0,0 +1,219 @@
@@ -1374,7 +1374,7 @@ index 000000000..674e3fd53
 +    : { ...base, status: "blocked", reason: result.reason };
 +}
 +
-+class SnapshotRejectedError extends Schema.TaggedErrorClass<SnapshotRejectedError>()(
++class SnapshotRejectedError extends Schema.TaggedError<SnapshotRejectedError>()(
 +  "SnapshotRejectedError",
 +  { reason: Schema.String },
 +) {

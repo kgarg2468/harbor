@@ -1,4 +1,5 @@
 diff --git a/apps/server/package.json b/apps/server/package.json
+index 7d27d39d2eb3228be05db6c9039f033f19242272..98fdb905afeb3883b3d273376602d56d3d9acbd0 100644
 --- a/apps/server/package.json
 +++ b/apps/server/package.json
 @@ -33,6 +33,7 @@
@@ -11,7 +12,7 @@ diff --git a/apps/server/package.json b/apps/server/package.json
    },
 diff --git a/apps/server/src/cloud/managedRelease.test.ts b/apps/server/src/cloud/managedRelease.test.ts
 new file mode 100644
-index 000000000..686dea73c
+index 0000000000000000000000000000000000000000..686dea73cb4ce82bc7a1c22be7a29d2b21e0da8b
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRelease.test.ts
 @@ -0,0 +1,457 @@
@@ -474,7 +475,7 @@ index 000000000..686dea73c
 +});
 diff --git a/apps/server/src/cloud/managedRelease.ts b/apps/server/src/cloud/managedRelease.ts
 new file mode 100644
-index 000000000..8f040bb51
+index 0000000000000000000000000000000000000000..abe550f143f8156fb86bbf605c33131f50bb9378
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRelease.ts
 @@ -0,0 +1,630 @@
@@ -598,7 +599,7 @@ index 000000000..8f040bb51
 +  MANAGED_RELEASE_SUMS_FILE,
 +]);
 +
-+export class ManagedReleaseError extends Schema.TaggedErrorClass<ManagedReleaseError>()(
++export class ManagedReleaseError extends Schema.TaggedError<ManagedReleaseError>()(
 +  "ManagedReleaseError",
 +  {
 +    document: Schema.Literals(["manifest", "checksums", "target"]),
@@ -1110,7 +1111,7 @@ index 000000000..8f040bb51
 +}
 diff --git a/apps/server/src/cloud/managedRuntimeArchive.test.ts b/apps/server/src/cloud/managedRuntimeArchive.test.ts
 new file mode 100644
-index 000000000..0821a2652
+index 0000000000000000000000000000000000000000..0821a265238dcf5764686bd326ccc8ac99aaf027
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntimeArchive.test.ts
 @@ -0,0 +1,874 @@
@@ -1990,7 +1991,7 @@ index 000000000..0821a2652
 +});
 diff --git a/apps/server/src/cloud/managedRuntimeArchive.ts b/apps/server/src/cloud/managedRuntimeArchive.ts
 new file mode 100644
-index 000000000..15f1fdee4
+index 0000000000000000000000000000000000000000..e058dc34db1b7a11c4865b1429f013cf8473f14a
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntimeArchive.ts
 @@ -0,0 +1,1018 @@
@@ -2103,7 +2104,7 @@ index 000000000..15f1fdee4
 +  readonly payloadBytes: number;
 +}
 +
-+export class ManagedRuntimeArchiveError extends Schema.TaggedErrorClass<ManagedRuntimeArchiveError>()(
++export class ManagedRuntimeArchiveError extends Schema.TaggedError<ManagedRuntimeArchiveError>()(
 +  "ManagedRuntimeArchiveError",
 +  {
 +    reason: Schema.String,
@@ -3013,9 +3014,10 @@ index 000000000..15f1fdee4
 +  );
 +});
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 6c58c455b4655a508e1ad685cc92e3f61b531b35..f7d65a884258d8a60136f948b8de7aeaf1fd8b0c 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -508,6 +508,9 @@
+@@ -524,6 +524,9 @@ importers:
        stream-json:
          specifier: 3.6.0
          version: 3.6.0

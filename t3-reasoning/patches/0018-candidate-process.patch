@@ -1,6 +1,6 @@
 diff --git a/apps/server/src/cloud/managedCandidateProcess.test.ts b/apps/server/src/cloud/managedCandidateProcess.test.ts
 new file mode 100644
-index 000000000..cad2faa68
+index 0000000000000000000000000000000000000000..cad2faa689ca45f80db0d02d690be5077ac3e5ac
 --- /dev/null
 +++ b/apps/server/src/cloud/managedCandidateProcess.test.ts
 @@ -0,0 +1,866 @@
@@ -872,7 +872,7 @@ index 000000000..cad2faa68
 +});
 diff --git a/apps/server/src/cloud/managedCandidateProcess.ts b/apps/server/src/cloud/managedCandidateProcess.ts
 new file mode 100644
-index 000000000..ffdff6e27
+index 0000000000000000000000000000000000000000..253a4c71dd237577ef07a744e15f04a4d0901b87
 --- /dev/null
 +++ b/apps/server/src/cloud/managedCandidateProcess.ts
 @@ -0,0 +1,721 @@
@@ -956,7 +956,7 @@ index 000000000..ffdff6e27
 +  readonly glibcVersionRuntime: string | undefined;
 +}
 +
-+export class ManagedCandidateError extends Schema.TaggedErrorClass<ManagedCandidateError>()(
++export class ManagedCandidateError extends Schema.TaggedError<ManagedCandidateError>()(
 +  "ManagedCandidateError",
 +  {
 +    reason: Schema.String,

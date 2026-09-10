@@ -1,6 +1,6 @@
 diff --git a/apps/server/src/cloud/managedRuntime.test.ts b/apps/server/src/cloud/managedRuntime.test.ts
 new file mode 100644
-index 000000000..1bb10d8e7
+index 0000000000000000000000000000000000000000..1bb10d8e721f07b96bba2dbd8c05f63712e0bcd8
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntime.test.ts
 @@ -0,0 +1,1699 @@
@@ -1705,7 +1705,7 @@ index 000000000..1bb10d8e7
 +});
 diff --git a/apps/server/src/cloud/managedRuntime.ts b/apps/server/src/cloud/managedRuntime.ts
 new file mode 100644
-index 000000000..5976d5f20
+index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b6c049d01
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntime.ts
 @@ -0,0 +1,1203 @@
@@ -1794,7 +1794,7 @@ index 000000000..5976d5f20
 +// so a killed process leaves nothing that can block a later attempt.
 +const stagingLock = Semaphore.makeUnsafe(1);
 +
-+export class ManagedRuntimeStageError extends Schema.TaggedErrorClass<ManagedRuntimeStageError>()(
++export class ManagedRuntimeStageError extends Schema.TaggedError<ManagedRuntimeStageError>()(
 +  "ManagedRuntimeStageError",
 +  {
 +    step: Schema.String,
@@ -1807,7 +1807,7 @@ index 000000000..5976d5f20
 +  }
 +}
 +
-+export class ManagedArtifactSourceError extends Schema.TaggedErrorClass<ManagedArtifactSourceError>()(
++export class ManagedArtifactSourceError extends Schema.TaggedError<ManagedArtifactSourceError>()(
 +  "ManagedArtifactSourceError",
 +  {
 +    reason: Schema.String,

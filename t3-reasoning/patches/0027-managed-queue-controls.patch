@@ -23,7 +23,7 @@ index 7262239577b482f84309654431c16c15349af272..efd4acb0d802ae680e2939e6949aaac4
      for (const method of ["server.notRegistered", "toString", "constructor"]) {
        expect(() => requiredScopeForRpcMethod(method)).toThrow(
 diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
-index a069322aa8bf9ba327a998e623ce823f779593d4..45ea8cb9a4ee36b098cf310f04acac19d2a8314a 100644
+index a63b07f0adefc34b66f2b52c4b1e428069d6f569..1308f0edf5d76ec93a0661576908731e2e8b88f6 100644
 --- a/apps/server/src/auth/RpcAuthorization.ts
 +++ b/apps/server/src/auth/RpcAuthorization.ts
 @@ -46,6 +46,9 @@ export const RPC_REQUIRED_SCOPES = {
@@ -36,7 +36,7 @@ index a069322aa8bf9ba327a998e623ce823f779593d4..45ea8cb9a4ee36b098cf310f04acac19
    [WS_METHODS.serverUpsertKeybinding]: AuthOrchestrationOperateScope,
    [WS_METHODS.serverRemoveKeybinding]: AuthOrchestrationOperateScope,
    [WS_METHODS.serverGetSettings]: AuthOrchestrationReadScope,
-@@ -144,6 +147,7 @@ export const RPC_REQUIRED_SCOPES = {
+@@ -146,6 +149,7 @@ export const RPC_REQUIRED_SCOPES = {
    [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
@@ -156,7 +156,7 @@ index aed766968d0d47ef78898af707ebd529462141b5..b761b00fc01ca8778905bf00f5e69210
 +  );
  });
 diff --git a/apps/server/src/cloud/queuedUpdate.ts b/apps/server/src/cloud/queuedUpdate.ts
-index 301609c9cde734e518f91499f404cdf55d0e512c..74d3db213d3b7a05ee510a0d392e2a95e92d3601 100644
+index e82c3055328103a059088ca581bcb0bd498e7d2e..4937264c8c71d35fa24aa22fdc23c334f4214fc4 100644
 --- a/apps/server/src/cloud/queuedUpdate.ts
 +++ b/apps/server/src/cloud/queuedUpdate.ts
 @@ -5,9 +5,11 @@ import * as Effect from "effect/Effect";
@@ -239,7 +239,7 @@ index 301609c9cde734e518f91499f404cdf55d0e512c..74d3db213d3b7a05ee510a0d392e2a95
 +  });
  });
 diff --git a/apps/server/src/environment/ServerEnvironment.test.ts b/apps/server/src/environment/ServerEnvironment.test.ts
-index a674a25c1ec8593a1709b39a2a235134c6c9d691..c76a63087e0a1434df1ae1b0f3075349beeaab24 100644
+index a12a8242b0d20961168f01dc49fd097ef5b28a6c..6391c044722ec4094bd87c8fdfc3d7b515f6c9b8 100644
 --- a/apps/server/src/environment/ServerEnvironment.test.ts
 +++ b/apps/server/src/environment/ServerEnvironment.test.ts
 @@ -1,5 +1,6 @@
@@ -268,7 +268,7 @@ index a674a25c1ec8593a1709b39a2a235134c6c9d691..c76a63087e0a1434df1ae1b0f3075349
  import * as ServerConfig from "../config.ts";
  import * as ServerEnvironment from "./ServerEnvironment.ts";
 
-@@ -259,6 +266,66 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+@@ -260,6 +267,66 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
      }),
    );
 
@@ -336,10 +336,10 @@ index a674a25c1ec8593a1709b39a2a235134c6c9d691..c76a63087e0a1434df1ae1b0f3075349
      Effect.gen(function* () {
        const fileSystem = yield* FileSystem.FileSystem;
 diff --git a/apps/server/src/environment/ServerEnvironment.ts b/apps/server/src/environment/ServerEnvironment.ts
-index 0b7f1761cf767bd44d99d85219fab37bc6cc1b04..3d82dd5787fc9f8a2ed41259ec7110ef8bd318c5 100644
+index 2aab17b27a7637426b725df29478216db2e8c8ba..9b9a52da9b2aa77359668faa1040fdd50379d933 100644
 --- a/apps/server/src/environment/ServerEnvironment.ts
 +++ b/apps/server/src/environment/ServerEnvironment.ts
-@@ -237,6 +237,10 @@ export const make = Effect.gen(function* () {
+@@ -241,6 +241,10 @@ export const make = Effect.gen(function* () {
              serverUpdateThreadContinuation: true,
            }
          : {}),
@@ -351,7 +351,7 @@ index 0b7f1761cf767bd44d99d85219fab37bc6cc1b04..3d82dd5787fc9f8a2ed41259ec7110ef
      },
    };
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8462641f9 100644
+index 23fd13555416bb95fdb1420b3472e80b01e0da01..155c3b9fbfe0ff545f858f58fe8343663d8a9217 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -24,6 +24,7 @@ import {
@@ -370,7 +370,7 @@ index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8
  import * as PubSub from "effect/PubSub";
  import * as Ref from "effect/Ref";
  import * as Queue from "effect/Queue";
-@@ -534,6 +536,8 @@ const buildAppUnderTest = (options?: {
+@@ -537,6 +539,8 @@ const buildAppUnderTest = (options?: {
      providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
      antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
      updateAdmission?: UpdateAdmission.UpdateAdmission["Service"];
@@ -379,7 +379,7 @@ index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8
      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
      externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
      vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
-@@ -759,9 +763,13 @@ const buildAppUnderTest = (options?: {
+@@ -762,9 +766,13 @@ const buildAppUnderTest = (options?: {
          ),
        ),
      );
@@ -396,7 +396,7 @@ index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8
 
      const servedRoutesLayer = HttpRouter.serve(
        makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
-@@ -1083,14 +1091,20 @@ const buildAppUnderTest = (options?: {
+@@ -1091,14 +1099,20 @@ const buildAppUnderTest = (options?: {
          }),
        ),
        Layer.provide(
@@ -425,7 +425,7 @@ index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8
        ),
        Layer.provide(
          Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-@@ -11819,6 +11833,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11865,6 +11879,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
    );
  });
 
@@ -946,10 +946,10 @@ index 51dc504813427219e518d388c187a665563ede79..6b3ac219e7e7998b1424015c3b57aff8
    "reports thread HTTP and WebSocket transfer budgets",
    () =>
 diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
-index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141ae1ae58a6 100644
+index 5e4ca0a18db91a377341af92b4d8867fb5a0744b..ee20a58405819b9b172d2329a60b780c8cf65a2f 100644
 --- a/apps/server/src/ws.ts
 +++ b/apps/server/src/ws.ts
-@@ -55,6 +55,9 @@ import {
+@@ -56,6 +56,9 @@ import {
    ProviderSetupError,
    RelayClientInstallFailedError,
    type RelayClientInstallProgressEvent,
@@ -959,7 +959,7 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
    ServerSelfUpdateError,
    type ServerSelfUpdateProgressEvent,
    type ServerLifecycleStreamEvent,
-@@ -106,7 +109,9 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
+@@ -108,7 +111,9 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
  import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
  import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
  import { makeProviderInstallation } from "./provider/providerInstallation.ts";
@@ -969,7 +969,7 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
  import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
  import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
  import * as ServerSettings from "./serverSettings.ts";
-@@ -157,6 +162,59 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http
+@@ -164,6 +169,59 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http
  import * as RelayClient from "@t3tools/shared/relayClient";
  const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
@@ -1029,7 +1029,7 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
  const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
  const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 
-@@ -527,7 +585,30 @@ const makeWsRpcLayer = (
+@@ -545,7 +603,30 @@ const makeWsRpcLayer = (
        const providerInstances = yield* ProviderInstanceRegistry;
        const providerInstallation = yield* makeProviderInstallation();
        const serverUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -1060,7 +1060,7 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
        const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
        const serverSettings = yield* ServerSettings.ServerSettingsService;
        const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
-@@ -1962,6 +2043,26 @@ const makeWsRpcLayer = (
+@@ -1981,6 +2062,26 @@ const makeWsRpcLayer = (
              serverUpdate.commitDesktopUpdate(input.requestId),
              { "rpc.aggregate": "server" },
            ),
@@ -1087,7 +1087,7 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
          [WS_METHODS.serverUpsertKeybinding]: (rule) =>
            observeRpcEffect(
              WS_METHODS.serverUpsertKeybinding,
-@@ -2842,6 +2943,12 @@ const makeWsRpcLayer = (
+@@ -2925,6 +3026,12 @@ const makeWsRpcLayer = (
              }),
              { "rpc.aggregate": "server" },
            ),
@@ -1100,10 +1100,10 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
          [WS_METHODS.subscribeAuthAccess]: (_input) =>
            observeRpcStreamEffect(
              WS_METHODS.subscribeAuthAccess,
-@@ -2928,6 +3035,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
-         ),
+@@ -3012,6 +3119,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
      });
      const pullRequests = yield* PullRequestService.PullRequestService;
+     const sql = yield* SqlClient.SqlClient;
 +    // The runtime composes exactly one managed update queue; every connection
 +    // must command and observe that instance.
 +    const managedUpdateQueue = yield* QueuedUpdate.QueuedUpdate;
@@ -1111,7 +1111,7 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
      return HttpRouter.add(
        "GET",
        "/ws",
-@@ -2965,6 +3076,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
+@@ -3050,6 +3161,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
                Layer.provide(AgentSessionScanner.layer),
                Layer.provide(ProviderMaintenanceRunner.layer),
                Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
@@ -1123,10 +1123,10 @@ index 46396bf1e4a78f799d84b5d6d45f43228d4b5d8a..c483ebf209245c8a18eda81f5367141a
                // mutation invalidates the HTTP diff cache that every client reads from.
                Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
 diff --git a/packages/contracts/src/environment.ts b/packages/contracts/src/environment.ts
-index 94d7c60812502b2e59b6739ea2e246400fde59f0..c5da3dc9c454ff45acc0d852c11b3bf2f86f91d8 100644
+index 9dcc844e713a04b092145baf9098806d9d37e93b..8127d7e803cae2a206d8217f5c608e2bf77d4068 100644
 --- a/packages/contracts/src/environment.ts
 +++ b/packages/contracts/src/environment.ts
-@@ -133,6 +133,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
+@@ -141,6 +141,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    /** Server can durably mark running provider turns before a self-update and
        continue them after the replacement process starts. */
    serverUpdateThreadContinuation: Schema.optionalKey(Schema.Boolean),
@@ -1139,7 +1139,7 @@ index 94d7c60812502b2e59b6739ea2e246400fde59f0..c5da3dc9c454ff45acc0d852c11b3bf2
        currently leave this environment: the publish opt-in is enabled and the
        relay link credentials exist. Clients skip seeding a Live Activity when
 diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
-index 56beabc7e11cd38f6c63261b6d8d4ceb4e42cd31..939c2defeffe4fefe56e0a899d3393165f67c4f7 100644
+index 055190bbb5185c17406a33901bdfd07828705c17..b0dbb99deb03498bd49fde1720da9de29c9bb0aa 100644
 --- a/packages/contracts/src/rpc.test.ts
 +++ b/packages/contracts/src/rpc.test.ts
 @@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
@@ -1152,7 +1152,7 @@ index 56beabc7e11cd38f6c63261b6d8d4ceb4e42cd31..939c2defeffe4fefe56e0a899d339316
  import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
 
  /**
-@@ -146,6 +148,9 @@ describe("update admission classification", () => {
+@@ -148,6 +150,9 @@ describe("update admission classification", () => {
      "server.updateServer",
      "server.updateServerWithProgress",
      "server.commitDesktopUpdate",
@@ -1162,7 +1162,7 @@ index 56beabc7e11cd38f6c63261b6d8d4ceb4e42cd31..939c2defeffe4fefe56e0a899d339316
      // Automation host channel: the host answers admitted tool calls through it.
      "previewAutomation.connect",
      "previewAutomation.respond",
-@@ -162,6 +167,7 @@ describe("update admission classification", () => {
+@@ -164,6 +169,7 @@ describe("update admission classification", () => {
      "subscribeTerminalMetadata",
      "subscribeServerConfig",
      "subscribeServerLifecycle",
@@ -1170,7 +1170,7 @@ index 56beabc7e11cd38f6c63261b6d8d4ceb4e42cd31..939c2defeffe4fefe56e0a899d339316
      "subscribeAuthAccess",
      "subscribeBackgroundPolicy",
      "subscribeResourceTelemetry",
-@@ -182,3 +188,50 @@ describe("update admission classification", () => {
+@@ -184,3 +190,50 @@ describe("update admission classification", () => {
      expect([...admitted, ...excluded].sort()).toEqual(all);
    });
  });
@@ -1222,10 +1222,10 @@ index 56beabc7e11cd38f6c63261b6d8d4ceb4e42cd31..939c2defeffe4fefe56e0a899d339316
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf58524f0f5c39 100644
+index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab9083ec1922 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
-@@ -189,6 +189,10 @@ import {
+@@ -191,6 +191,10 @@ import {
  import {
    ServerConfigStreamEvent,
    DesktopUpdateCommitInput,
@@ -1236,7 +1236,7 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
    ServerConfig,
    ServerProviderUpdateError,
    ServerProviderUpdateInput,
-@@ -319,6 +323,9 @@ export const WS_METHODS = {
+@@ -321,6 +325,9 @@ export const WS_METHODS = {
    serverUpdateServer: "server.updateServer",
    serverUpdateServerWithProgress: "server.updateServerWithProgress",
    serverCommitDesktopUpdate: "server.commitDesktopUpdate",
@@ -1246,7 +1246,7 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
    serverUpsertKeybinding: "server.upsertKeybinding",
    serverRemoveKeybinding: "server.removeKeybinding",
    serverGetSettings: "server.getSettings",
-@@ -377,6 +384,7 @@ export const WS_METHODS = {
+@@ -381,6 +388,7 @@ export const WS_METHODS = {
    subscribeDiscoveredLocalServers: "subscribeDiscoveredLocalServers",
    subscribeServerConfig: "subscribeServerConfig",
    subscribeServerLifecycle: "subscribeServerLifecycle",
@@ -1254,7 +1254,7 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
    subscribeAuthAccess: "subscribeAuthAccess",
    subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
    subscribeResourceTelemetry: "subscribeResourceTelemetry",
-@@ -512,6 +520,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
+@@ -516,6 +524,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
    error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
  });
 
@@ -1288,7 +1288,7 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
  const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
    payload: Schema.Struct({}),
    success: ServerSettings,
-@@ -1161,6 +1196,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
+@@ -1177,6 +1212,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
    stream: true,
  });
 
@@ -1303,7 +1303,7 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
  const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
    payload: Schema.Struct({}),
    success: AuthAccessStreamEvent,
-@@ -1200,6 +1243,9 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -1216,6 +1259,9 @@ export const WsRpcGroup = RpcGroup.make(
    WsServerUpdateServerRpc,
    WsServerUpdateServerWithProgressRpc,
    WsServerCommitDesktopUpdateRpc,
@@ -1313,7 +1313,7 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
    WsServerUpsertKeybindingRpc,
    WsServerRemoveKeybindingRpc,
    WsServerGetSettingsRpc,
-@@ -1293,6 +1339,7 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -1311,6 +1357,7 @@ export const WsRpcGroup = RpcGroup.make(
    WsSubscribeDiscoveredLocalServersRpc,
    WsSubscribeServerConfigRpc,
    WsSubscribeServerLifecycleRpc,
@@ -1322,10 +1322,10 @@ index 3fdcf666d30b3d5aa600df42114c1ead53aeb832..5a837fb6c6a4f61e56f175f20dcf5852
    WsSubscribeBackgroundPolicyRpc,
    WsSubscribeResourceTelemetryRpc,
 diff --git a/packages/contracts/src/server.ts b/packages/contracts/src/server.ts
-index 3ea7bed8f1c4b22e4725f234f51b1742a6d72db9..5515c27169a528a21c4b2621aa07e56b46309240 100644
+index c2fc8524ece285e3b30ed7db3a1ef5a294e45f68..1cbbabfd77ce20d3688d5a14e72222e5dae61f47 100644
 --- a/packages/contracts/src/server.ts
 +++ b/packages/contracts/src/server.ts
-@@ -856,3 +856,62 @@ export class ServerSelfUpdateError extends Schema.TaggedErrorClass<ServerSelfUpd
+@@ -859,3 +859,62 @@ export class ServerSelfUpdateError extends Schema.TaggedError<ServerSelfUpdateEr
      return `Server update failed: ${this.reason}`;
    }
  }
@@ -1372,7 +1372,7 @@ index 3ea7bed8f1c4b22e4725f234f51b1742a6d72db9..5515c27169a528a21c4b2621aa07e56b
 +export type ManagedServerUpdateRejectedReason = typeof ManagedServerUpdateRejectedReason.Type;
 +
 +/** The queue refused the command and left its state untouched. */
-+export class ManagedServerUpdateRejectedError extends Schema.TaggedErrorClass<ManagedServerUpdateRejectedError>()(
++export class ManagedServerUpdateRejectedError extends Schema.TaggedError<ManagedServerUpdateRejectedError>()(
 +  "ManagedServerUpdateRejectedError",
 +  {
 +    reason: ManagedServerUpdateRejectedReason,
@@ -1382,7 +1382,7 @@ index 3ea7bed8f1c4b22e4725f234f51b1742a6d72db9..5515c27169a528a21c4b2621aa07e56b
 +
 +/** The queue's durable state could not be read or written. Carries only a
 +    user-safe message: never a path, cause, or artifact detail. */
-+export class ManagedServerUpdateUnavailableError extends Schema.TaggedErrorClass<ManagedServerUpdateUnavailableError>()(
++export class ManagedServerUpdateUnavailableError extends Schema.TaggedError<ManagedServerUpdateUnavailableError>()(
 +  "ManagedServerUpdateUnavailableError",
 +  {
 +    message: TrimmedNonEmptyString,
