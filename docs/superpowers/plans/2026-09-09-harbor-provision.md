@@ -532,6 +532,12 @@ Validation: `connect` is the default and is accepted. `tailnet` is **refused wit
 
 The dispatcher sources this file with the provision arguments rather than executing it, exactly as it does `node/bootstrap.sh`, because an installed release carries it `0644`.
 
+**`bin/harbor` must source the reader-owning libraries, and this is not optional.** Task 1 gave the `runtime-install` op one owner and made an unregistered target render `"unobservable:runtime-install:<target>"`. That fail-closed answer is correct, but it is only useful in a process that actually loaded the readers. `bin/harbor` today sources `log`, `checks`, `versions`, `lock`, `journal`, `entrypoint`, and `auth` — not `lib/node.sh`, and not `lib/runtime.sh`. That was harmless through PR 3, because the only `runtime-install` entries were Node.js entries in the **root** journal, which only `node/bootstrap.sh` recovers, and it sources both.
+
+PR 4 breaks that: `harbor_agents_install` and `harbor_t3_install` write `runtime-install` entries into the **operator** journal, and every operator command runs operator journal recovery — including `harbor journal resolve`, which PR 2 shipped and which reaches recovery through `bin/harbor` alone. So a crash between an agent install and its `applied` write would leave an entry that `harbor journal resolve` reports as unobservable and therefore undecidable, sending the operator to resolve by hand an entry Harbor could have decided for them.
+
+Task 17 therefore adds `lib/runtime.sh`, `lib/agents.sh`, and `lib/t3.sh` to `bin/harbor`'s source list, with `lib/runtime.sh` first, and `tests/unit/bin/harbor.bats` asserts it behaviourally: with an operator-journal `runtime-install` entry for `claude` left `prepared` and the runtime at the locked version on disk, `harbor journal resolve` decides it rather than printing it as undecidable. Asserting the *outcome* rather than the source list is deliberate — a test that greps for source lines passes the day someone reorders them wrongly.
+
 **Tests.** Each precondition fails in isolation with the stated exit code and message and mutates nothing; the state root is created `0700` before the lock, asserted positionally with `HARBOR_FAIL_AFTER=lock-gate`; the checks run in table order, asserted from the log; a root caller exits 3 before the state root is created; the whole preflight on a healthy fixture passes and reaches the first row.
 
 **Commit:** `feat(provision): the operator preflight in table order`

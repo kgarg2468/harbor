@@ -53,6 +53,10 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/user.sh"
 # shellcheck source=../lib/apt.sh
 . "${HARBOR_ROOT}/lib/apt.sh"
+# lib/runtime.sh owns the runtime-install op and its reader registry, and lib/node.sh
+# registers its prefix reader at source time, so it is sourced before it.
+# shellcheck source=../lib/runtime.sh
+. "${HARBOR_ROOT}/lib/runtime.sh"
 # shellcheck source=../lib/node.sh
 . "${HARBOR_ROOT}/lib/node.sh"
 # shellcheck source=../lib/firewall.sh

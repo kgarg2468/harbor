@@ -20,26 +20,27 @@ harbor_node_installed_version() {
     *) harbor_die 2 node.unreadable "${node} --version printed '${out}', not a version; remove ${1} by hand and rerun so it is reinstalled" ;;
   esac
 }
-# harbor_observe_op_runtime_install PREFIX: the observer harbor_journal_observe
-# dispatches to for a runtime-install entry, so a prepared entry left by a crash
+# harbor_node_prefix_version PREFIX: the version reader lib/runtime.sh dispatches to
+# for an absolute-path runtime-install target, so a prepared entry left by a crash
 # between the swap into place and the applied write is decidable by recovery (design
-# section 3.7). It renders what harbor_node_installed_version reports as the JSON
-# string a runtime-install entry's pre_state and post_state carry, "absent" when the
-# prefix holds no runtime. When the prefix holds none but PREFIX.harbor-previous
+# section 3.7). It reports what harbor_node_installed_version reports, "absent" when
+# the prefix holds no runtime. When the prefix holds none but PREFIX.harbor-previous
 # does, it reports that version: the swap moves the displaced tree there and then
 # renames the new one into place, so a crash between the two moves leaves the prefix
 # empty and the whole previous runtime intact one path over. That is the pre-install
 # state, not a third state, and harbor_node_install puts the tree back before it does
-# anything else. Inspection only; a runtime that cannot answer stays the exit 2 of
-# harbor_node_installed_version. Called only through harbor_journal_observe.
-harbor_observe_op_runtime_install() {
+# anything else. The fallback lives here rather than in the dispatcher because it is
+# this swap's own semantics and belongs beside the swap. Inspection only; a runtime
+# that cannot answer stays the exit 2 of harbor_node_installed_version.
+harbor_node_prefix_version() {
   local version
   version="$(harbor_node_installed_version "${1}")" || exit "$?"
   if [ "${version}" = absent ]; then
     version="$(harbor_node_installed_version "${1}.harbor-previous")" || exit "$?"
   fi
-  printf '"%s"' "$(harbor_json_escape "${version}")"
+  printf '%s' "${version}"
 }
+harbor_runtime_reader_register prefix harbor_node_prefix_version
 # harbor_node_tar_flag URL: the tar decompression flag for the tarball URL names
 harbor_node_tar_flag() {
   case "${1}" in

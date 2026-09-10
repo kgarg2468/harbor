@@ -275,3 +275,27 @@ harbor_versions_require_node_range() {
     harbor_die 3 versions.node_range "${file}: nodejs_version ${version} does not satisfy t3_engines_node ${range}"
   fi
 }
+harbor_versions_require_installed_engines() {
+  # harbor_versions_require_installed_engines NODE_VERSION INSTALLED_RANGE: the twin
+  # of harbor_versions_require_node_range, run at provision time against the engines
+  # range the *installed* t3 package declares rather than the copy versions.lock
+  # carries (design section 2, "Node.js"). Having both is the point: the lock's copy
+  # is a transcription made in a version-bump PR, and a transcription that drifted
+  # from the package is exactly the failure this catches. Two things must hold, and
+  # each is refused separately so the message says which one broke.
+  #
+  # The range arrives as a parameter rather than being read here, so this file keeps
+  # the property it has had since PR 2 of depending on nothing above it; lib/t3.sh
+  # reads the installed package, because that is where the vendor knowledge lives.
+  local version="${1}" installed="${2}" locked
+  [ -n "${installed}" ] \
+    || harbor_die 3 versions.installed_engines_empty "the installed t3 package declares no engines.node range; an absent constraint is not the same as any version satisfying it, so Harbor refuses rather than assuming the node is fine"
+  locked="$(harbor_version_require t3_engines_node)" || exit "$?"
+  # The lock first. A package whose range differs from the lock's is drift whatever
+  # the node's Node.js happens to be, and passing it quietly because this node's
+  # version satisfies both would leave the disagreement to surface on some other node.
+  [ "${installed}" = "${locked}" ] \
+    || harbor_die 3 versions.installed_engines_drift "the installed t3 package declares engines.node '${installed}' and ${HARBOR_VERSIONS_FILE:-versions.lock} pins t3_engines_node '${locked}'; the lock's copy is a transcription of the package's own range, so one of the two is stale and the pinned pair cannot be trusted until they agree"
+  harbor_semver_satisfies "${version}" "${installed}" \
+    || harbor_die 3 versions.installed_engines_range "node ${version} does not satisfy the engines.node range '${installed}' the installed t3 package declares; T3's own service launcher runs on the Node this operator's shell resolves, so fix that before provisioning further"
+}
