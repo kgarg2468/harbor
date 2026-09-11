@@ -301,7 +301,7 @@ async function inspect(api, number, main, { recovery = false } = {}) {
   );
   requireGate(
     provenance.commit === lock.commit &&
-      pr.head.ref === `${PREFIX}${provenance.version}`,
+      pr.head.ref === `${PREFIX}${provenance.version}--${parentSha}`,
     "provenance/head mismatch",
   );
   if (trusted.map.has(PROVENANCE)) {

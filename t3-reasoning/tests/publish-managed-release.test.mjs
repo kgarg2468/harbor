@@ -1602,7 +1602,8 @@ describe("t3-managed-release workflow", () => {
     assert.equal((resolve.match(/resolve-managed-release\.mjs/g) ?? []).length, 1);
     assert.match(resolve, /--release-counter "\$\{RELEASE_COUNTER\}"/);
     assert.match(resolve, /git rev-list --count "\$\{GITHUB_SHA\}"/);
-    assert.match(resolve, /RELEASE_COUNTER="\$\{GITHUB_RUN_NUMBER\}"/);
+    assert.match(resolve, /RELEASE_COUNTER=\$\(\(MAIN_COUNT \* 1000000000\)\)/);
+    assert.match(resolve, /RELEASE_COUNTER=\$\(\(RELEASE_COUNTER \+ GITHUB_RUN_NUMBER\)\)/);
     assert.match(resolve, /--builder-revision "\$\{GITHUB_SHA\}"/);
     assert.match(resolve, /--upstream-version "\$\{UPSTREAM_VERSION\}"/);
     assert.match(resolve, /--github-output "\$\{GITHUB_OUTPUT\}"/);

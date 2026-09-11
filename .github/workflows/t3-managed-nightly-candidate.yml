@@ -178,7 +178,10 @@ jobs:
           if (pr.head?.sha !== headSha) fail(`PR #${prNumber} head is ${pr.head?.sha}, not ${headSha}; the head moved`);
           const headRef = pr.head?.ref;
           if (typeof headRef !== "string" || !headRef.startsWith(branchPrefix)) fail(`PR #${prNumber} branch ${headRef} is not a ${branchPrefix}* candidate branch`);
-          const branchVersion = headRef.slice(branchPrefix.length);
+          const branchMatch = /^([^/]+)--([0-9a-f]{40})$/.exec(headRef.slice(branchPrefix.length));
+          if (branchMatch === null) fail("candidate branch must name version--full-base-sha");
+          const branchVersion = branchMatch[1];
+          const branchBaseSha = branchMatch[2];
           try {
             release.parseUpstreamNightlyVersion(branchVersion);
           } catch (error) {
@@ -190,6 +193,9 @@ jobs:
           if ((await git("rev-parse", "HEAD")) !== headSha) fail("candidate clone is not at the candidate head");
           const mergeBase = await git("merge-base", `refs/remotes/origin/${baseBranch}`, headSha);
           if (!COMMIT_RE.test(mergeBase)) fail("no merge-base with the default branch");
+          if (mergeBase !== branchBaseSha) fail("candidate branch base does not match merge-base");
+          const parents = (await git("rev-list", "--parents", "-n", "1", headSha)).split(" ");
+          if (parents.length !== 2 || parents[1] !== branchBaseSha) fail("candidate is not a direct child of its named base");
           if (mergeBase === headSha) fail("candidate head is already contained in the default branch");
           const raw = (await git("diff-tree", "-r", "--no-renames", "--raw", mergeBase, headSha)).split("\n").filter((line) => line !== "");
           const entries = raw.map((line) => {

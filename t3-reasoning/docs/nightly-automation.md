@@ -228,7 +228,7 @@ the checkout and requires `git status` to show nothing but them. The commit is
 created through the Git data API from the base commit's tree plus the two
 blobs (parent = the run's base commit), so nothing else can be pushed and no
 credential ever enters git configuration. The branch is deterministic,
-`t3/nightly-candidate/<upstream version>`, and is only ever created, never
+`t3/nightly-candidate/<upstream version>--<full base SHA>`, and is only ever created, never
 force-updated. A PR against `main` is opened and the checker is dispatched on
 `main` with the PR number and the exact pushed SHA, because a token-created
 push and PR do not launch the ordinary `push`/`pull_request` workflows.
@@ -236,8 +236,7 @@ push and PR do not launch the ordinary `push`/`pull_request` workflows.
 Rerun behavior for an existing candidate branch. Before the branch is reused
 in any way, its head must be proven to be exactly the deterministic candidate
 commit, read-only through the Git data API: a single-parent commit whose
-parent is the run's base commit or an ancestor of it on `main` (checked with
-the compare API), and whose tree differs from that parent's tree in nothing
+parent is exactly the run's base commit named by the branch, and whose tree differs from that parent's tree in nothing
 but the two candidate paths, each a plain `100644` blob with the expected id.
 Byte-identical candidate files alone are not enough, because a branch can
 carry them beside extra files or extra commits.
@@ -255,9 +254,13 @@ carry them beside extra files or extra commits.
 
 Not proposed automatically: a provenance-only bootstrap where the newest
 Nightly is the commit already pinned (commit `upstream-release.json` by hand),
-and a candidate that has gone stale because the default branch's catalog
-moved (close the PR, delete the branch, rerun). An older open candidate PR is
-not closed when a newer Nightly is proposed.
+and a candidate whose patch proof conflicts with the current catalog. Each
+new main SHA gets a distinct branch name, so daily discovery automatically
+regenerates a direct-parent candidate after a main advance without overwriting
+or depending on its stale branch or PR. Older candidates remain open for
+manual cleanup; the promoter ignores them and can promote the fresh candidate.
+The flat `--` delimiter also avoids Git ref file/directory collisions with
+legacy `<version>` branches, so they do not block a fresh candidate.
 
 Job permissions are `contents: write`, `pull-requests: write`, and
 `actions: write`; the token is supplied to `gh` only through the environment.
@@ -277,7 +280,7 @@ The `validate` job (`contents: read`, `pull-requests: read`):
    comes from the trusted checkout.
 3. Reads the PR through the API and requires it to be open, based on `main`,
    with base and head in this repository, `head.sha` equal to the input, and
-   a `t3/nightly-candidate/<version>` head branch.
+   a `t3/nightly-candidate/<version>--<full base SHA>` head branch.
 4. Requires the diff between the merge-base with `origin/main` and the head
    to be exactly `t3-reasoning/source.lock.json` (modified) and
    `t3-reasoning/upstream-release.json` (added or modified), both plain
@@ -331,7 +334,9 @@ to a successful, completed run of the exact trusted checker workflow,
 `workflow_dispatch` on main at the current base revision, with successful
 `validate` and `status` jobs from that run attempt. Missing or stale checker
 proof triggers a fresh checker dispatch; an active main checker suppresses
-repeat dispatch because its inputs are not exposed in the run listing.
+repeat dispatch because its inputs are not exposed in the run listing. The
+branch version and full base SHA must match provenance and the single parent;
+the checker enforces the same binding against its merge-base.
 
 Greptile must authenticate as app id `867647`, check name `Greptile Review`.
 Its latest exact-head check must complete successfully with zero annotations,
@@ -365,7 +370,7 @@ checker refresh), so unrelated lifetime history does not consume GitHub's
 runs or an ambiguous/truncated result stays pending. Active or successful
 release runs for the exact SHA suppress another dispatch; failed runs may be
 retried. Dispatches accepted but not yet visible can be repeated, but guarded
-release attempts use the same full-history commit-count counter and exact-SHA
+release attempts use the same reserved counter-block base and exact-SHA
 concurrency. Once one publishes, the resolver rejects the same counter on any
 later attempt, even if public config changed; unchanged inputs also resolve
 the same immutable tag. Duplicate attempts cannot publish a second release.
@@ -444,9 +449,15 @@ version. The resolver then runs
 exactly once with the lock, the tracked upstream version, `github.sha` as the
 builder revision, the public config, and
 the prior manifest when one exists. Guarded promotion uses
-`git rev-list --count "$GITHUB_SHA"` from the full-history exact checkout as
-its monotone deterministic counter; manual/unguarded runs retain
-`github.run_number`. `preflight` requires immutable releases
+`git rev-list --count "$GITHUB_SHA"` from the full-history exact checkout to
+reserve a block of 1,000,000,000 counters. Guarded attempts use `count *
+1,000,000,000`; manual/unguarded attempts add the positive `github.run_number`.
+Thus a manual rebuild immediately follows a guarded publication, repeated
+manual attempts increase, and the next main commit starts a greater block.
+Counts must be between 1 and 9,000,000; manual run numbers between 1 and
+999,999,999. The largest possible counter, 9,000,000,999,999,999, is below
+JavaScript's safe-integer maximum. Invalid, overflowing, or exhausted bounds
+fail before resolution. `preflight` requires immutable releases
 to be enabled (read with the Administration-read secret described above)
 and the intended tag to be absent from Git refs and from releases of every
 state, including drafts; a collision is refused, never reused or removed,
@@ -521,8 +532,8 @@ against a release that is already visible. In every case the publisher sends
 the publish call at most once, retries nothing, and deletes, edits, or reuses
 nothing; a person inspects the release by its recorded id and exact tag and
 decides what follows. An unguarded manual run consumes a new run number and
-therefore a new version and tag. Guarded duplicate attempts retain their
-commit-count counter and are refused after a successful publication; they
+therefore a new offset within the same commit block, version, and tag.
+Guarded duplicate attempts retain their block-base counter and are refused after a successful publication; they
 never allocate a second release version for the same candidate. The published release is the feed transaction:
 clients see the previous immutable release until every artifact is present
 and the draft is published.

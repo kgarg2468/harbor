@@ -165,7 +165,7 @@ async function fixture() {
     base: { ref: "main", sha: MAIN, repo: { full_name: "kgarg2468/harbor" } },
     head: {
       sha: HEAD,
-      ref: `t3/nightly-candidate/${provenance.version}`,
+      ref: `t3/nightly-candidate/${provenance.version}--${MAIN}`,
       repo: { full_name: "kgarg2468/harbor" },
     },
   };
@@ -746,7 +746,7 @@ test("run cap ambiguity on the exact SHA fails closed", async () => {
 test("guarded duplicate dispatches have one counter and cannot publish twice", async () => {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
-  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { formatManagedReleaseVersion, checkAgainstPriorRelease } =
     await import("../scripts/resolve-managed-release.mjs");
@@ -757,7 +757,8 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
     "utf8",
   );
   const script =
-    /          RELEASE_COUNTER="\$\{GITHUB_RUN_NUMBER\}"[\s\S]*?(?=          UPSTREAM_VERSION=)/
+    "set -euo pipefail\n" +
+    /          # Counter blocks[\s\S]*?(?=          UPSTREAM_VERSION=)/
       .exec(workflow)[0]
       .split("\n")
       .map((line) => line.slice(10))
@@ -818,7 +819,131 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
       publications++;
     }, /does not increase/);
     assert.equal(publications, 1);
+    let previous = first;
+    for (const runNumber of ["102", "103"]) {
+      await run("bash", ["-c", script], {
+        env: {
+          ...process.env,
+          EXPECTED_MAIN_SHA: "",
+          GITHUB_SHA: actual,
+          GITHUB_RUN_NUMBER: runNumber,
+          GITHUB_ENV: `${dir}/${runNumber}`,
+        },
+      });
+      const counter = Number(
+        (await readFile(`${dir}/${runNumber}`, "utf8")).trim().split("=")[1],
+      );
+      assert.equal(counter, counters[0] + Number(runNumber));
+      const next = {
+        ...first,
+        releaseCounter: counter,
+        releaseVersion: formatManagedReleaseVersion(
+          version,
+          counter,
+          "a".repeat(64),
+        ),
+      };
+      checkAgainstPriorRelease(next, previous);
+      previous = next;
+    }
+    for (const runNumber of ["0", "1000000000", "-1", "01", "9e2"]) {
+      await assert.rejects(
+        run("bash", ["-c", script], {
+          env: {
+            ...process.env,
+            EXPECTED_MAIN_SHA: "",
+            GITHUB_SHA: actual,
+            GITHUB_RUN_NUMBER: runNumber,
+            GITHUB_ENV: `${dir}/invalid`,
+          },
+        }),
+      );
+    }
+    await writeFile(
+      `${dir}/git`,
+      '#!/bin/sh\ncase "$*" in\n"rev-parse --is-shallow-repository") echo false ;;\n"rev-parse HEAD") echo "$GITHUB_SHA" ;;\n*) echo "$FAKE_COUNT" ;;\nesac\n',
+      { mode: 0o700 },
+    );
+    const boundedEnv = {
+      ...process.env,
+      PATH: `${dir}:${process.env.PATH}`,
+      EXPECTED_MAIN_SHA: "",
+      GITHUB_SHA: actual,
+      GITHUB_RUN_NUMBER: "999999999",
+      GITHUB_ENV: `${dir}/bound`,
+    };
+    await run("bash", ["-c", script], {
+      env: { ...boundedEnv, FAKE_COUNT: "9000000" },
+    });
+    const maximum = Number(
+      (await readFile(`${dir}/bound`, "utf8")).trim().split("=")[1],
+    );
+    assert.equal(maximum, 9000000999999999);
+    assert.ok(Number.isSafeInteger(maximum));
+    for (const count of ["0", "9000001", "10000000", "99999999999999999999"]) {
+      await assert.rejects(
+        run("bash", ["-c", script], {
+          env: { ...boundedEnv, FAKE_COUNT: count },
+        }),
+      );
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("stale and fresh candidates coexist but only fresh can write", async () => {
+  const f = await fixture();
+  const stale = structuredClone(f.pr);
+  stale.number = 2;
+  stale.id = 2;
+  stale.head = {
+    ...stale.head,
+    sha: UPSTREAM,
+    ref: `t3/nightly-candidate/0.0.0-nightly.20991231.1--${"e".repeat(40)}`,
+  };
+  f.data.set(`${ROOT}/pulls/2`, stale);
+  f.addCommit(UPSTREAM, f.newTree, ["e".repeat(40)]);
+  f.data.set(`${ROOT}/git/ref/heads/${stale.head.ref}`, {
+    ref: `refs/heads/${stale.head.ref}`,
+    object: { type: "commit", sha: UPSTREAM },
+  });
+  f.intercept = (endpoint) =>
+    endpoint.startsWith(`${ROOT}/pulls?state=open`)
+      ? [[stale], [f.pr]]
+      : undefined;
+  const result = await reconcile(f.options);
+  assert.equal(result.status, "release-dispatched");
+  assert.equal(result.results[0].number, 2);
+  assert.equal(result.results[0].status, "pending");
+  assert.match(result.results[0].reason, /directly descend/);
+  assert.deepEqual(
+    f.writes
+      .filter((w) => w.endpoint.endsWith("/git/refs/heads/main"))
+      .map((w) => w.body),
+    [{ sha: HEAD, force: false }],
+  );
+});
+
+test("discovery and checker bind branch version to full base SHA", async () => {
+  const discovery = await readFile(
+    new URL(
+      "../../.github/workflows/t3-managed-nightly-discovery.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const checker = await readFile(
+    new URL(
+      "../../.github/workflows/t3-managed-nightly-candidate.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    discovery,
+    /const branch = `\$\{branchPrefix\}\$\{provenance.version\}--\$\{baseSha\}`/,
+  );
+  assert.match(checker, /const branchBaseSha = branchMatch\[2\]/);
+  assert.match(checker, /mergeBase !== branchBaseSha/);
 });

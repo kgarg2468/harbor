@@ -4,8 +4,8 @@ run-name: t3-managed-release ${{ inputs.expected_main_sha || github.sha }}
 # Trusted default-branch publication of one immutable managed T3 release.
 # One resolve job on Ubuntu proves the checked-in lock, patches, and upstream
 # provenance, re-reads the official upstream release and tag, fixes the
-# managed version with the existing resolver (commit count for guarded
-# promotion, otherwise run number as the counter; the
+# managed version with the existing resolver (commit-count counter blocks,
+# with a run-number offset for manual rebuilds; the
 # exact workflow SHA as the builder revision, the newest published immutable
 # managed release as the prior), and refuses any tag collision before native
 # build time is spent. Four static matrix rows each prepare a fresh source
@@ -157,12 +157,24 @@ jobs:
           EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
         run: |
           set -euo pipefail
-          RELEASE_COUNTER="${GITHUB_RUN_NUMBER}"
-          if [ -n "${EXPECTED_MAIN_SHA}" ]; then
-            [ "$(git rev-parse --is-shallow-repository)" = "false" ]
-            [ "$(git rev-parse HEAD)" = "${EXPECTED_MAIN_SHA}" ]
-            RELEASE_COUNTER="$(git rev-list --count "${GITHUB_SHA}")"
-            [[ "${RELEASE_COUNTER}" =~ ^[1-9][0-9]*$ ]]
+          # Counter blocks reserve one billion values per main commit count.
+          # Maximum 9000000 * 1000000000 + 999999999 is JS-safe.
+          [ "$(git rev-parse --is-shallow-repository)" = "false" ]
+          [ "$(git rev-parse HEAD)" = "${GITHUB_SHA}" ]
+          MAIN_COUNT="$(git rev-list --count "${GITHUB_SHA}")"
+          if ! [[ "${MAIN_COUNT}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "${MAIN_COUNT}" -gt 9000000 ]; then
+            echo "::error::main commit count exceeds the safe counter block bounds"
+            exit 1
+          fi
+          RELEASE_COUNTER=$((MAIN_COUNT * 1000000000))
+          if [ -z "${EXPECTED_MAIN_SHA}" ]; then
+            if ! [[ "${GITHUB_RUN_NUMBER}" =~ ^[1-9][0-9]{0,8}$ ]]; then
+              echo "::error::manual run number must be between 1 and 999999999"
+              exit 1
+            fi
+            RELEASE_COUNTER=$((RELEASE_COUNTER + GITHUB_RUN_NUMBER))
+          else
+            [ "${EXPECTED_MAIN_SHA}" = "${GITHUB_SHA}" ]
           fi
           echo "RELEASE_COUNTER=${RELEASE_COUNTER}" >> "${GITHUB_ENV}"
           UPSTREAM_VERSION="$(node -p 'JSON.parse(require("node:fs").readFileSync("t3-reasoning/upstream-release.json", "utf8")).version')"
