@@ -47,7 +47,7 @@ harbor_t3_package_dir() {
   printf '%s/node_modules/t3' "$(harbor_agents_prefix "${1}")"
 }
 # harbor_t3_package_engines HOME: the installed package's own engines.node range.
-# This is a line reader standing in for a JSON reader, so its contract is the narrow
+# This is a text reader standing in for a JSON reader, so its contract is the narrow
 # one that keeps that honest: it recognizes the pinned package's canonical block and
 # nothing else. The node line must be the line *immediately* inside the engines line,
 # at the pin's measured two- and four-space depths, because a range match anywhere
@@ -59,28 +59,48 @@ harbor_t3_package_dir() {
 # is needed in lib/, which also runs on macOS before any bootstrap dependencies.
 # A missing or unreadable field is exit 2 naming the package, never an empty range.
 harbor_t3_package_engines() {
-  local package range newline
-  newline='
-'
+  local package out range
   package="$(harbor_t3_package_dir "${1}")/package.json"
   # Refuse links before any reader can follow one into a credential store.
   [ ! -L "${package}" ] || harbor_die 2 t3.engines_unreadable "${package} is a symlink; rerun harbor provision to install the locked t3 package"
   [ -f "${package}" ] && [ -r "${package}" ] || harbor_die 2 t3.engines_unreadable "${package} is absent or unreadable; rerun harbor provision to install the locked t3 package"
-  range="$(sed -n '/^  "engines"[ 	]*:[ 	]*{[ 	]*$/{
-    n
-    s/^    "node"[ 	]*:[ 	]*"\([^"]*\)"[ 	]*,\{0,1\}[ 	]*$/\1/p
-  }' "${package}" && printf .)" || harbor_die 2 t3.engines_unreadable "${package} could not be read; rerun harbor provision to install the locked t3 package"
-  # The sentinel preserves the trailing newlines command substitution would otherwise
-  # strip, and is appended with && so sed's own failure still reaches the refusal
-  # above. Without it a second block declaring an empty range prints a blank line that
-  # vanishes, and the count below would see one declaration where the package has two.
-  range="${range%.}"
-  # Each match printed its own line, so a second newline is a second declaration, and
-  # neither one can be called the package's requirement.
-  case "${range}" in
-    *"${newline}"*"${newline}"*) harbor_die 2 t3.engines_unreadable "${package} declares more than one engines.node range; rerun harbor provision to install the locked t3 package" ;;
+  # One structural pass rather than a line match, so the block's shape is what is
+  # judged: the header must appear exactly once, the block must be explicitly closed
+  # at its own depth, and the node line must be the block's first line. Matching a
+  # line at a time cannot see either end of a block, so a duplicate node key inside
+  # one block reads as the first of the two while JSON's last-wins makes the second
+  # the package's actual requirement, and a header left dangling at end of file
+  # simply never yields a line. Both are refusals here. The token on stdout keeps
+  # awk's own exit status free to mean only that the file could not be read.
+  out="$(awk '
+    /^  "engines"[ 	]*:[ 	]*[{][ 	]*$/ { headers++; inblock = 1; depth = 0; next }
+    inblock {
+      depth++
+      if ($0 ~ /^  [}][ 	]*,?[ 	]*$/) { inblock = 0; closed++; next }
+      if ($0 ~ /^    "node"[ 	]*:[ 	]*"[^"]*"[ 	]*,?[ 	]*$/) {
+        nodes++
+        if (depth == 1) { adjacent++ }
+        range = $0
+        sub(/^    "node"[ 	]*:[ 	]*"/, "", range)
+        sub(/"[ 	]*,?[ 	]*$/, "", range)
+      }
+      next
+    }
+    END {
+      if (headers > 1 || nodes > 1) { print "dup"; exit 0 }
+      if (headers != 1 || closed != 1 || nodes != 1 || adjacent != 1) { print "none"; exit 0 }
+      print "ok " range
+    }
+  ' "${package}")" || harbor_die 2 t3.engines_unreadable "${package} could not be read; rerun harbor provision to install the locked t3 package"
+  # Two declarations disagree by construction, and neither one can be called the
+  # package's requirement, so the count is refused before the value is looked at.
+  case "${out}" in
+    dup) harbor_die 2 t3.engines_unreadable "${package} declares more than one engines.node range; rerun harbor provision to install the locked t3 package" ;;
   esac
-  range="${range%"${newline}"}"
+  range=""
+  case "${out}" in
+    'ok '*) range="${out#ok }" ;;
+  esac
   [ -n "${range}" ] || harbor_die 2 t3.engines_unreadable "${package} carries no engines.node range; rerun harbor provision to install the locked t3 package"
   printf '%s' "${range}"
 }
@@ -233,7 +253,7 @@ harbor_service_cmd() {
 # zero in every state. Only its whole status lines decide the answer; an empty or
 # unfamiliar body is unknown, never evidence that a service is installed.
 harbor_t3_service_status() {
-  local home="${1}" locked installed body rc=0 word=unknown matches=0 newline xt=0
+  local home="${1}" locked installed bin body rc=0 word=unknown matches=0 newline xt=0
   newline='
 '
   locked="$(harbor_version_require t3_version)" || exit "$?"
@@ -247,10 +267,20 @@ harbor_t3_service_status() {
     printf unknown
     return 0
   }
+  # The one caller that does not go through harbor_t3_run, because that seam can
+  # still speak before it execs the vendor: its mismatch diagnostic quotes what the
+  # executable printed, and a t3 that answers --version correctly once and prints a
+  # status-shaped line the next time would have its own words classified below as
+  # the vendor's answer. Nothing is skipped by going direct — the assertion the seam
+  # exists to make was just made above, against this same executable. The vendor
+  # label is logged outside the capture for the same reason: under HARBOR_VERBOSE it
+  # would otherwise put the operator-controlled bin path inside the classified body.
+  bin="$(harbor_t3_bin "${home}")"
+  harbor_log_vendor "${bin}" service status
   # As with agent auth status, keep the vendor body out of inherited xtrace.
   case "$-" in *x*) xt=1 ;; esac
   [ "${xt}" = 0 ] || set +x
-  body="$(harbor_t3_run "${home}" service status 2>&1)" || rc="$?"
+  body="$("${bin}" service status 2>&1)" || rc="$?"
   # Surround the body with newlines so a neighbouring path cannot supply a phrase.
   case "${newline}${body}${newline}" in
     # service-status/installed-current: the CLI version must agree with the lock.

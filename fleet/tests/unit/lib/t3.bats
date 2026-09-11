@@ -894,6 +894,39 @@ engines_login_fixture() {
   assert_output unknown
 }
 
+@test "regression: only vendor bytes are classified, not the run seam's own" {
+  # A t3 that answers --version honestly once and status-shaped the next time.
+  # Hoisting the pin assertion above the capture left one place Harbor's own words
+  # could still reach the classified body: the seam re-checks the version before it
+  # execs, and its refusal quotes what the executable printed, verbatim and on its
+  # own line. Such a body was answered installed-current with the vendor's service
+  # status never invoked at all, so the call count is part of what this asserts.
+  local bin counter
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  counter="${BATS_TEST_TMPDIR}/version-calls"
+  mkdir -p "$(dirname "${bin}")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "${1:-}" = --version ]; then\n'
+    printf '  echo x >>"%s"\n' "${counter}"
+    printf '  if [ "$(wc -l <"%s")" -le 1 ]; then echo "t3 v%s"; exit 0; fi\n' "${counter}" "${T3_VERSION}"
+    printf '  printf "garbage\\n  Status: installed · t3@%s\\ntrailing\\n"\n' "${T3_VERSION}"
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'printf "%%s\\n" "$*" >"%s/service-call"\n' "${BATS_TEST_TMPDIR}"
+    printf '[ "$*" = "service status" ] || exit 97\n'
+    printf 'echo "  Status: not installed"\n'
+  } >"${bin}"
+  chmod 0755 "${bin}"
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output not-installed
+  # The vendor was asked, and asked exactly the operation being classified.
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-call")" 'service status'
+  # One assertion, made before the capture opened; the seam would have made a second.
+  assert_equal "$(wc -l <"${counter}" | tr -d ' ')" 1
+}
+
 @test "regression: repair journals distinct before and after pairs" {
   fake_service_install installed-current 7 inactive
   fake_systemctl inactive 3
@@ -984,9 +1017,9 @@ engines_login_fixture() {
 }
 
 @test "regression: a second block declaring an empty range is still a second block" {
-  # The empty range prints a blank line, and command substitution strips trailing
-  # newlines: the duplicate check has to survive the one duplicate that leaves no
-  # visible text behind, or it only catches the duplicates that were easy to see.
+  # The duplicate that leaves no visible text behind: a reader counting the values it
+  # collected rather than the declarations it saw would see one, and hand back the
+  # first block's range as though the package had asked for nothing else.
   local package
   package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
   mkdir -p "$(dirname "${package}")"
@@ -994,6 +1027,37 @@ engines_login_fixture() {
   run harbor_t3_package_engines "${FIX_HOME}"
   assert_failure 2
   assert_output --partial 'more than one engines.node range'
+  refute_output --partial '>=1.0.0'
+}
+
+@test "regression: a duplicate node key inside one engines block is refused" {
+  # Both declarations sit in the canonical block at the canonical depth, so neither
+  # the header count nor the indentation separates them. JSON is last-wins, which
+  # makes the effective requirement >=999.0.0 while a reader that stops at the first
+  # match reports >=1.0.0 — the one shape where reading a line at a time does not
+  # merely fail to find the range but confidently supplies the wrong one.
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "engines": {\n    "node": ">=1.0.0",\n    "node": ">=999.0.0"\n  }\n}\n' >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'more than one engines.node range'
+  refute_output --partial '>=1.0.0'
+}
+
+@test "regression: an engines block left unclosed at end of file is refused" {
+  # A header whose block runs off the end of the file is malformed, not absent, and
+  # a reader that only ever looks at the line after the header cannot tell the two
+  # apart: it silently finds nothing. Requiring the block to be explicitly closed at
+  # its own depth is what makes a truncated package a refusal rather than a silence.
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "engines": {\n    "node": ">=1.0.0"\n' >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'no engines.node range'
   refute_output --partial '>=1.0.0'
 }
 
