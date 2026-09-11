@@ -370,9 +370,9 @@ checker refresh), so unrelated lifetime history does not consume GitHub's
 runs or an ambiguous/truncated result stays pending. Active or successful
 release runs for the exact SHA suppress another dispatch; failed runs may be
 retried. Dispatches accepted but not yet visible can be repeated, but guarded
-release attempts use the same reserved counter-block base and exact-SHA
-concurrency. Once one publishes, the resolver rejects the same counter on any
-later attempt, even if public config changed; unchanged inputs also resolve
+release attempts use the same reserved counter-block base and repository-wide
+release concurrency. Once one publishes, the resolver rejects the same counter
+on any later attempt, even if public config changed; unchanged inputs also resolve
 the same immutable tag. Duplicate attempts cannot publish a second release.
 The expected-SHA guard still fails if dispatch resolves a moved main.
 
@@ -393,10 +393,11 @@ checkout or building when it differs from `github.sha`; the run name includes
 that expected SHA (or the workflow SHA for a manual rebuild). Every job is gated on
 `github.repository == 'kgarg2468/harbor'` and `github.ref ==
 'refs/heads/main'`; there is no pull-request trigger and no caller-supplied
-ref, repository, tag, or platform. The concurrency group keys the exact
-expected SHA (or workflow SHA for manual runs) and never cancels a run in
-progress. The top-level permission is `contents: read`;
-only the final `publish` job has `contents: write`.
+ref, repository, tag, or platform. One fixed repository-wide concurrency group
+serializes all release attempts from prior resolution through publication and never cancels
+a run in progress. Later main commits therefore cannot resolve the same prior
+while an earlier attempt is building and then publish out of order. The
+top-level permission is `contents: read`; only the final `publish` job has `contents: write`.
 
 Every Node step comes from `scripts/publish-managed-release.mjs`, whose
 subcommands are closed to `kgarg2468/harbor` and the `t3-managed-v` tag

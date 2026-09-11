@@ -41,10 +41,10 @@ on:
 permissions:
   contents: read
 
-# Serialize attempts for the exact SHA, including duplicate dispatches.
-# A run that is already publishing must finish.
+# Serialize every attempt from prior resolution through publication so later
+# main commits cannot resolve the same prior and publish out of order.
 concurrency:
-  group: t3-managed-release-${{ inputs.expected_main_sha || github.sha }}
+  group: t3-managed-release
   cancel-in-progress: false
 
 env:

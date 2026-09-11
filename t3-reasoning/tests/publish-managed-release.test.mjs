@@ -1532,9 +1532,12 @@ describe("t3-managed-release workflow", () => {
     assert.doesNotMatch(text, /github\.event\.inputs/);
   });
 
-  it("uses one fixed non-cancelling concurrency group and top-level contents: read", () => {
+  it("serializes all release revisions through publication without cancellation and keeps contents: read", () => {
     const concurrency = mapping(blockAfter(lines, /^concurrency:$/).block, 2);
-    assert.deepEqual(concurrency, { group: "t3-managed-release-${{ inputs.expected_main_sha || github.sha }}", "cancel-in-progress": "false" });
+    assert.deepEqual(concurrency, {
+      group: "t3-managed-release",
+      "cancel-in-progress": "false",
+    });
     const permissions = mapping(blockAfter(lines, /^permissions:$/).block, 2);
     assert.deepEqual(permissions, { contents: "read" });
   });
