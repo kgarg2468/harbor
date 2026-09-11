@@ -209,6 +209,11 @@
       "sha256": "25aa3c68da3169d6cabc13c14669fd98ab3f07c272b1ca1e505cd89928e65768"
     },
     {
+      "id": "external-reconnect",
+      "path": "patches/0044-external-reconnect.patch",
+      "sha256": "f2df32effc4b1d154acbd0dffc03e3e8afa01c882816263dd9923b5e1c0bf68a"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "d7e315b874a6ca42be6f73a89003174c368b28aa5cc6d889532682fe3a2a741b"
@@ -255,7 +260,8 @@
       "managed-desktop-installer",
       "managed-desktop-routing",
       "managed-desktop-scheduler",
-      "managed-shared-connection"
+      "managed-shared-connection",
+      "external-reconnect"
     ],
     "reasoning": [
       "reasoning-full",
@@ -298,6 +304,7 @@
       "managed-desktop-routing",
       "managed-desktop-scheduler",
       "managed-shared-connection",
+      "external-reconnect",
       "reasoning-identity"
     ]
   }
