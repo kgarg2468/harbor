@@ -206,7 +206,7 @@
     {
       "id": "managed-shared-connection",
       "path": "patches/0043-managed-shared-connection.patch",
-      "sha256": "48ee54274d9665edd015462fe4b7f4be74bc348294eaab34c483743dedf1e8d0"
+      "sha256": "25aa3c68da3169d6cabc13c14669fd98ab3f07c272b1ca1e505cd89928e65768"
     },
     {
       "id": "reasoning-identity",

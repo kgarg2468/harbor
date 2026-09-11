@@ -216,7 +216,7 @@ diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
  import { SshPasswordPrompt } from "./auth.ts";
  import { SshCommandError } from "./errors.ts";
  import {
-@@ -588,3 +597,283 @@
+@@ -588,3 +597,367 @@
        }),
    );
  });
@@ -233,17 +233,28 @@ diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
 +    port: number;
 +    run: () => Promise<{ stdout: string; stderr: string }>;
 +    environment: { serverVersion: string; capabilities: { managedUpdateQueue: boolean } };
-+    response: { status: number; body: string | undefined; delay: boolean };
++    response: {
++      status: number;
++      body: string | undefined;
++      delay: boolean;
++      beforeReply: (() => Promise<void>) | undefined;
++    };
 +  }) => Promise<void>,
 +) {
 +  const home = await NodeFSP.realpath(
 +    await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "ssh-managed-pairing-")),
 +  );
 +  const environment = { serverVersion: managedVersion, capabilities: { managedUpdateQueue: true } };
-+  const response = { status: 200, body: undefined as string | undefined, delay: false };
-+  const server = NodeHttp.createServer((request, res) => {
++  const response = {
++    status: 200,
++    body: undefined as string | undefined,
++    delay: false,
++    beforeReply: undefined as (() => Promise<void>) | undefined,
++  };
++  const server = NodeHttp.createServer(async (request, res) => {
 +    assert.equal(request.url, "/.well-known/t3/environment");
 +    if (response.delay) return;
++    await response.beforeReply?.();
 +    res.statusCode = response.status;
 +    res.setHeader("content-type", "application/json");
 +    res.setHeader("location", "http://example.invalid/never-follow");
@@ -500,10 +511,83 @@ diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
 +    assert.equal((await f.run()).stdout.trim(), "fallback");
 +  });
 +});
++
++for (const phase of ["state", "artifact", "runtime", "endpoint"] as const) {
++  it(`redacts malformed ${phase} content from managed pairing diagnostics`, async () => {
++    await managedPairingFixture(async (f) => {
++      const canary = "S3CR3T";
++      const malformed = `${canary} invalid JSON`;
++      if (phase === "endpoint") f.response.body = malformed;
++      else
++        await NodeFSP.writeFile(
++          phase === "state"
++            ? f.state
++            : phase === "runtime"
++              ? f.runtime
++              : `${f.root}/.managed-artifact.json`,
++          malformed,
++        );
++      await NodeAssert.rejects(f.run(), (error: unknown) => {
++        const failure = error as Error & { stdout: string; stderr: string };
++        assert.include(failure.stderr, "Managed SSH pairing runtime validation failed:");
++        assert.notInclude(failure.stderr, canary);
++        assert.notInclude(failure.stdout, canary);
++        assert.notInclude(failure.message, canary);
++        return true;
++      });
++    });
++  });
++}
++
++for (const swapped of [
++  "CLI",
++  "version directory",
++  "state",
++  "runtime",
++  "artifact",
++  "sentinel",
++  "package",
++] as const) {
++  it(`refuses ${swapped} swapped to an external symlink during the managed endpoint probe`, async () => {
++    await managedPairingFixture(async (f) => {
++      const entry = `${f.root}/node_modules/t3/dist/bin.mjs`;
++      const selected =
++        swapped === "CLI"
++          ? entry
++          : swapped === "version directory"
++            ? f.root
++            : swapped === "state"
++              ? f.state
++              : swapped === "runtime"
++                ? f.runtime
++                : swapped === "artifact"
++                  ? `${f.root}/.managed-artifact.json`
++                  : swapped === "sentinel"
++                    ? `${f.root}/.install-complete`
++                    : `${f.root}/node_modules/t3/package.json`;
++      const external = `${f.home}/untrusted`;
++      f.response.beforeReply = async () => {
++        await NodeFSP.rename(selected, external);
++        if (swapped === "CLI")
++          await NodeFSP.writeFile(external, 'console.log("UNTRUSTED_CLI_EXECUTED")');
++        await NodeFSP.symlink(external, selected);
++      };
++      await NodeAssert.rejects(f.run(), (error: unknown) => {
++        const failure = error as Error & { stdout: string; stderr: string };
++        assert.equal(
++          failure.stderr.trim(),
++          "Managed SSH pairing runtime validation failed: final managed filesystem proof failed",
++        );
++        assert.notInclude(failure.stdout, "UNTRUSTED_CLI_EXECUTED");
++        return true;
++      });
++    });
++  });
++}
 diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 --- a/packages/ssh/src/tunnel.ts
 +++ b/packages/ssh/src/tunnel.ts
-@@ -402,10 +402,131 @@
+@@ -402,10 +402,157 @@
  }
  `;
  
@@ -516,6 +600,11 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +const base = path.resolve(process.argv[2]);
 +const portFile = process.argv[3];
 +const statePath = path.join(base, "runtime/service-state.json");
++// Only these fixed phase labels reach stderr; parser and filesystem errors can
++// contain credentials or untrusted document fragments.
++let phase = "service state proof failed";
++const identities = new Map();
++const documents = new Map();
 +const fail = (reason) => { throw new Error(reason); };
 +const checked = (file, directory = false) => {
 +  const relative = path.relative(base, file);
@@ -524,9 +613,14 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +  const parts = relative ? relative.split(path.sep) : [];
 +  for (let index = -1; index < parts.length; index++) {
 +    if (index >= 0) cursor = path.join(cursor, parts[index]);
-+    const stat = fs.lstatSync(cursor);
++    const stat = fs.lstatSync(cursor, { bigint: true });
 +    const dir = index < parts.length - 1 || directory;
-+    if (stat.isSymbolicLink() || !(dir ? stat.isDirectory() : stat.isFile())) fail("non-regular managed path: " + cursor);
++    if (stat.isSymbolicLink() || !(dir ? stat.isDirectory() : stat.isFile())) fail("non-regular managed path");
++    const identity = (dir ? [stat.dev, stat.ino, stat.mode]
++      : [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs]).join(":");
++    const prior = identities.get(cursor);
++    if (prior && prior.identity !== identity) fail("managed path identity changed");
++    if (!prior) identities.set(cursor, { directory: dir, identity });
 +  }
 +  if (fs.realpathSync(file) !== file) fail("managed path is not canonical");
 +  return file;
@@ -534,7 +628,10 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +const read = (file) => {
 +  checked(file);
 +  if (fs.statSync(file).size > 65536) fail("managed record is too large");
-+  return new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(file));
++  const text = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(file));
++  if (documents.has(file) && documents.get(file) !== text) fail("managed document changed");
++  documents.set(file, text);
++  return text;
 +};
 +const object = (text) => {
 +  const value = JSON.parse(text);
@@ -556,8 +653,10 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +  if (state.update !== undefined && (!state.update || state.update.status !== "committed" ||
 +      state.update.targetVersion !== version || typeof state.update.id !== "string" || !state.update.id.trim() ||
 +      typeof state.update.fromVersion !== "string" || !managed.test(state.update.fromVersion))) fail("service update is not committed");
++  phase = "managed installation proof failed";
 +  const root = path.join(base, "runtime/versions", version);
 +  checked(root, true);
++  phase = "managed artifact proof failed";
 +  const record = object(read(path.join(root, ".managed-artifact.json")));
 +  if (record.schemaVersion !== 1 || record.version !== version || record.launcherProtocol !== 2) fail("managed artifact version mismatch");
 +  const digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -568,10 +667,14 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +      !Number.isSafeInteger(record.archiveBytes) || record.archiveBytes <= 0 ||
 +      record.artifactId !== target + "@sha256:" + record.archiveSha256 ||
 +      !version.endsWith(".p" + record.releaseInputSha256.slice(0, 12))) fail("invalid managed artifact identity");
++  phase = "install sentinel proof failed";
 +  if (read(path.join(root, ".install-complete")) !== version + "\n") fail("install sentinel mismatch");
++  phase = "managed package proof failed";
 +  const pkg = object(read(path.join(root, "node_modules/t3/package.json")));
 +  if (pkg.name !== "t3" || pkg.version !== version) fail("package version mismatch");
++  phase = "managed CLI proof failed";
 +  const entry = checked(path.join(root, "node_modules/t3/dist/bin.mjs"));
++  phase = "server runtime proof failed";
 +  const runtime = object(read(path.join(base, "userdata/server-runtime.json")));
 +  if (runtime.version !== 1 || !Number.isSafeInteger(runtime.pid) || runtime.pid <= 0 ||
 +      !Number.isInteger(runtime.port) || runtime.port < 1 || runtime.port > 65535 || typeof runtime.origin !== "string" ||
@@ -582,6 +685,7 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +      Number(origin.port || 80) !== runtime.port) fail("runtime origin mismatch");
 +  process.kill(runtime.pid, 0);
 +  if (read(portFile).trim() !== String(runtime.port)) fail("SSH port does not match managed runtime");
++  phase = "live managed endpoint proof failed";
 +  const environment = await new Promise((resolve, reject) => {
 +    const request = http.get({ hostname: "127.0.0.1", port: runtime.port,
 +      path: "/.well-known/t3/environment", agent: false }, (response) => {
@@ -604,11 +708,17 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
 +    request.on("close", () => clearTimeout(timer));
 +  });
 +  if (environment.serverVersion !== version || environment.capabilities?.managedUpdateQueue !== true) fail("live managed server version or capability mismatch");
-+  // Recheck launcher state after the probe; do not pair across a committed update.
-+  if (read(statePath) !== stateText) fail("managed service state changed during pairing");
++  // The endpoint is untrusted and may mutate the installation while we await it.
++  // Repeat containment, regular-file, canonical-path, identity and exact-document
++  // proofs without another asynchronous boundary before returning the CLI.
++  phase = "final managed filesystem proof failed";
++  for (const [file, proof] of identities) checked(file, proof.directory);
++  for (const file of documents.keys()) read(file);
++  process.kill(runtime.pid, 0);
++  checked(entry);
 +  process.stdout.write(entry);
-+})().catch((error) => {
-+  process.stderr.write("Managed SSH pairing runtime validation failed: " + error.message + "\n");
++})().catch(() => {
++  process.stderr.write("Managed SSH pairing runtime validation failed: " + phase + "\n");
 +  process.exitCode = 1;
 +});
 +`;
@@ -635,7 +745,7 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
  T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
  if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
    if ! command -v node >/dev/null 2>&1; then
-@@ -656,6 +777,7 @@
+@@ -656,6 +803,7 @@
    return stripTrailingNewlines(
      applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
        T3_PACKAGE_SPEC: packageSpec,

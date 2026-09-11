@@ -1135,6 +1135,8 @@ describe("source.lock.json", () => {
           const ssh = await readFile(path.join(destination, "apps/desktop/src/ssh/DesktopSshEnvironment.ts"), "utf8");
           assert.match(tunnel, /Managed SSH pairing runtime validation failed/);
           assert.match(tunnel, /environment\.serverVersion !== version/);
+          assert.match(tunnel, /phase = "final managed filesystem proof failed"/);
+          assert.match(tunnel, /for \(const \[file, proof\] of identities\) checked\(file, proof\.directory\)/);
           assert.match(ssh, /Effect\.succeed\(\{ _tag: "stopped" \}\)/);
           assert.doesNotMatch(ssh, /Desktop SSH ownership cannot reserve/);
         }
