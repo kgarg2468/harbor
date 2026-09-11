@@ -117,6 +117,64 @@ seed_config() {
   [ ! -e "${BATS_TEST_TMPDIR}/reads" ]
 }
 
+@test "a symlink at the config path is refused by both the reader and the writer" {
+  # A link would let a file outside this path decide the access mode, and would let
+  # the journal record the target's hash while the rename replaces the link itself.
+  local target="${BATS_TEST_TMPDIR}/elsewhere"
+  printf 'access_mode=connect\n' >"${target}"
+  chmod 0600 "${target}"
+  mkdir -p "$(dirname "${CONFIG}")"
+  ln -s "${target}" "${CONFIG}"
+  run harbor_config_access_mode "${FIX_HOME}"
+  assert_equal "${status}" 3
+  assert_output --partial config.foreign
+  assert_output --partial symlink
+  harbor_lock_acquire "${FIX_ROOT}" operator
+  run harbor_config_create "${FIX_ROOT}" "${FIX_HOME}" connect
+  assert_equal "${status}" 3
+  assert_output --partial config.foreign
+  # Nothing followed the link and nothing was journaled.
+  assert_equal "$(cat "${target}")" 'access_mode=connect'
+  [ -L "${CONFIG}" ]
+  set -- "${FIX_ROOT}/journal/"*.json
+  assert_equal "$*" "${FIX_ROOT}/journal/*.json"
+}
+
+@test "the staged file is never readable by anyone else, whatever the umask" {
+  # chmod after the write would leave it at the ambient umask until it lands, and
+  # would leave the staged file behind if the chmod were what failed.
+  harbor_lock_acquire "${FIX_ROOT}" operator
+  umask 000
+  harbor_config_create "${FIX_ROOT}" "${FIX_HOME}" connect
+  assert_equal "$(harbor_stat_mode "${CONFIG}")" 0600
+  set -- "$(dirname "${CONFIG}")"/.tmp.config.*
+  assert_equal "$*" "$(dirname "${CONFIG}")/.tmp.config.*"
+}
+
+@test "a symlink planted at the staged name is not followed" {
+  # The agents run as this operator, so the gap between the unlink and the write is
+  # reachable. noclobber makes the redirection fail rather than follow the link.
+  local victim="${BATS_TEST_TMPDIR}/victim"
+  printf 'original\n' >"${victim}"
+  mkdir -p "$(dirname "${CONFIG}")"
+  harbor_lock_acquire "${FIX_ROOT}" operator
+  # Planting the link before the call would only prove that the unlink removes it.
+  # The window is the instant *after* that unlink, so the unlink is neutralized and
+  # the link planted in its place: the state the race produces, without the timing.
+  rm() {
+    case "${*}" in
+      *.tmp.config.*) ln -s "${victim}" "$(dirname "${CONFIG}")/.tmp.config.${HARBOR_LOCK_ID_PID}" 2>/dev/null || true ;;
+      *) command rm "${@}" ;;
+    esac
+  }
+  run harbor_config_create "${FIX_ROOT}" "${FIX_HOME}" connect
+  unset -f rm
+  assert_equal "${status}" 2
+  assert_output --partial config.stage
+  assert_equal "$(cat "${victim}")" original
+  [ ! -e "${CONFIG}" ]
+}
+
 @test "a missing file exits 3 naming harbor provision" {
   run harbor_config_access_mode "${FIX_HOME}"
   assert_equal "${status}" 3

@@ -351,6 +351,20 @@ harbor_t3_connect_status() {
   # has drifted from the lock. That is deliberate and is the answer the service
   # adapter already gives there: four unknowns, and unknown is an answer.
   body="$(harbor_t3_run "${home}" connect status --json 2>/dev/null)" || :
+  # Judge the document's shape before reading a line out of it. Every reader below
+  # matches a whole line, and a prefix of a document satisfies a whole-line match
+  # exactly as well as the document does: a body truncated after its "linked" line
+  # still carries two intact booleans, and trusting them answers "already authorized
+  # and linked" about output the vendor never finished writing. That is the same
+  # blindness Correction 10 found in the engines parser -- a line at a time cannot
+  # see either end of what it is reading -- and it gets the same answer here.
+  # The emitter is JSON.stringify(x, null, 2), so a complete object is exactly "{"
+  # alone on the first line and "}" alone on the last. Anything else, truncated or
+  # never JSON at all, leaves all four unknown, and unknown is an answer.
+  case "$(printf '%s\n' "${body}" | sed -n '1p;$p' | tr -d '\n')" in
+    '{}') ;;
+    *) body="" ;;
+  esac
   for key in desired authenticated linked; do
     value="$(printf '%s\n' "${body}" | sed -En "s/^  \"${key}\": (true|false),?$/\1/p")"
     case "${value}" in

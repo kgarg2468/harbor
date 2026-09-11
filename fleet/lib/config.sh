@@ -26,16 +26,40 @@ harbor_config_create() {
   harbor_config_validate_mode "${file}" "${mode}"
   dir="$(dirname "${file}")"
   mkdir -p "${dir}" || harbor_die 2 config.directory "cannot create ${dir}; configuration was not written"
+  # Refused before the observation, because harbor_observe_file follows a link and
+  # would record the target's hash while the rename below replaces the link itself:
+  # the journal would then describe a file this entry never touched. lib/t3.sh
+  # refuses a linked package for the same reason, and lib/ssh.sh a linked .ssh.
+  [ ! -L "${file}" ] \
+    || harbor_die 3 config.foreign "${file} is a symlink; Harbor writes its configuration at that path itself; configuration was not written"
   pre="$(harbor_observe_file "${file}")"
   case "${pre}" in
     '"unobservable:'*) harbor_die 3 config.foreign "${file} is not a regular file; configuration was not written" ;;
   esac
   tmp="${dir}/.tmp.config.${HARBOR_LOCK_ID_PID}"
   rm -f "${tmp}"
-  printf 'access_mode=%s\n' "${mode}" >"${tmp}" \
-    || harbor_die 2 config.stage "cannot stage ${tmp}; ${file} was not changed"
-  chmod 0600 "${tmp}" \
-    || harbor_die 2 config.stage "cannot give ${tmp} mode 0600; ${file} was not changed"
+  # Created 0600 by umask rather than widened-then-narrowed: a chmod after the write
+  # leaves the file at the ambient umask until it lands, and if the chmod is what
+  # fails there is nothing left to narrow. The subshell keeps the umask off every
+  # later redirection in this process.
+  (
+    umask 077
+    # noclobber, because the unlink above and this redirection are two instants, and
+    # the agents run as this operator: a process that wins the gap by putting a
+    # symlink at the staged name would otherwise have this write follow it. With -C
+    # the redirection fails on anything already at that path, link or not.
+    set -C
+    printf 'access_mode=%s\n' "${mode}" >"${tmp}"
+  ) || {
+    rm -f "${tmp}"
+    harbor_die 2 config.stage "cannot stage ${tmp}; ${file} was not changed"
+  }
+  # Asserted, not set: umask cannot widen an existing file, so a mode other than 0600
+  # here means something else owns that path, and staging onto it is refused.
+  [ "$(harbor_stat_mode "${tmp}")" = 0600 ] || {
+    rm -f "${tmp}"
+    harbor_die 2 config.stage "${tmp} is not mode 0600; ${file} was not changed"
+  }
   post="$(harbor_observe_file "${tmp}")"
   if [ "${post}" = "${pre}" ]; then
     rm -f "${tmp}"
@@ -58,6 +82,11 @@ harbor_config_create() {
 harbor_config_access_mode() {
   local file permissions line key value mode="" seen=0
   file="$(harbor_config_path "${1}")"
+  # Before -f, which follows a link, as do stat and the read below. A link accepted
+  # here would let a file outside this path decide the access mode, and let it change
+  # without the journaled artifact at this path changing with it.
+  [ ! -L "${file}" ] \
+    || harbor_die 3 config.foreign "${file} is a symlink; Harbor reads its configuration at that path itself; configuration was not read"
   [ -f "${file}" ] \
     || harbor_die 3 config.missing "${file} is missing; run harbor provision; configuration was not read"
   # GNU stat uses -c; BSD stat on macOS needs -f instead. Check permission

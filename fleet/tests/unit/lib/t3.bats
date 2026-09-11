@@ -1231,6 +1231,23 @@ assert_connect_status() {
   done
 }
 
+@test "connect truncated output is unknown even when its boolean lines are intact" {
+  # A vendor killed mid-write emits a prefix. Every reader here matches a whole
+  # line, which a prefix satisfies, so without a shape check two intact booleans
+  # would answer "already authorized and linked" about output that never finished.
+  fake_connect_t3 healthy
+  printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": true,\n  "relayCli' \
+    >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+  # The closing brace alone is not enough either: it has to be the last line.
+  printf '{\n  "authenticated": true,\n}\n trailing\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+  # And the opening brace has to be the first line, so a preamble cannot be wrapped
+  # around a body that would otherwise read as authorized.
+  printf 'warning: something\n{\n  "authenticated": true\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+}
+
 @test "connect booleans require the exact measured whole lines" {
   fake_connect_t3 healthy
   printf '{\n    "desired": true,\n  "authenticated": "true",\n  "linked": true, extra\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
