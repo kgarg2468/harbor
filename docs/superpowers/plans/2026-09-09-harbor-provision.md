@@ -557,6 +557,35 @@ harbor_t3_connect_status HOME
 
 Reading only four keys is not laziness: it is the spec's own instruction, and it means a vendor adding fields cannot change Harbor's classification.
 
+#### Measurement at the pin (t3@0.0.38), and three corrections it forces
+
+`t3 connect status --json` was run against the pin with an **isolated `--base-dir`**, never the real credential store, so nothing in this section required reading or writing a vendor credential. Measured output:
+
+```json
+{
+  "desired": false,
+  "authenticated": false,
+  "linked": false,
+  "cloudUserId": null,
+  "relayUrl": null,
+  "publishAgentActivity": false,
+  "relayClient": {
+    "status": "available",
+    "executablePath": "/opt/homebrew/bin/cloudflared",
+    "source": "path",
+    "version": "2026.5.2"
+  }
+}
+```
+
+**Correction 12 — the connect adapter must capture stdout only, never `2>&1`.** Every invocation at the pin writes `(node:NNNNN) ExperimentalWarning: SQLite is an experimental feature and might change at any time` to **stderr**, because the CLI opens a SQLite database under Node. Capturing `2>&1`, as the service adapter does, would put that text into the body being parsed and make the parse depend on the Node build's warning behaviour. The two adapters must not share a capture rule: the service adapter classifies human text, where the vendor's own diagnostics are part of the answer; this command has a JSON contract that lives on stdout alone. Confirmed by capture: stdout on its own parses as JSON, and stderr carries only the warning.
+
+**Correction 13 — `relayClient.status` is nested, so a flat extraction is wrong.** The plan says to reuse the anchored `sed` extraction `lib/journal.sh` uses, but that reader is written for **top-level** fields, and `status` is one of the most generic key names a vendor can add. The emitter is `JSON.stringify(status, null, 2)`, so the document is 2-space pretty-printed and `relayClient`'s own keys sit at **four** spaces. The relay reader therefore anchors to four-space depth inside the two-space-indented `"relayClient": {` header and requires `status` to be that block's **first** line — the same depth-and-adjacency rule Correction 10 arrived at for `engines.node`, and for the same reason: indentation carries no structure in JSON, so adjacency is what distinguishes a key from a same-named key somewhere else. `status` is the first key in **all three** schema variants, so this costs nothing in fidelity.
+
+**Correction 14 — the relay vocabulary is exactly three words.** `RelayClientStatusSchema` in the pinned bundle is a union of exactly `available` (with `executablePath`, `source`, `version`), `missing` (with `version`), and `unsupported` (with `platform`, `arch`, `version`). Anything outside those three is `unknown`, which is what "the vendor's own status word or `unknown`" means in the interface above. Note the three variants carry **different** sibling keys, so no reader may assume a fixed field order after `status`.
+
+**Fixture provenance.** `needs-login` and the relay variants are recorded from the pin directly. `healthy` and `needs-link` require an **authenticated** account, which cannot be produced without authorizing a real one, so they are constructed from `RelayClientStatusSchema` and the measured emitter rather than captured. The distinction is recorded in the fixture directory so a later reader does not mistake a constructed fixture for a measured one, and no fixture carries a real `cloudUserId` or `relayUrl`.
+
 **Tests.** Each fixture yields its recorded four values; `unparseable` and an empty body yield four `unknown`s; a body missing `relayClient` entirely yields `unknown` for the relay and the real values for the other three; a non-zero exit with a valid body still parses, and the test records that the body wins over the exit code here (unlike the service adapter) because this command has a documented JSON contract; the raw body never reaches stdout.
 
 **Commit:** `feat(t3): version-pinned connect status adapter`
