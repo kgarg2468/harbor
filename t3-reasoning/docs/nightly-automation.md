@@ -8,7 +8,7 @@ mutates nothing on GitHub and nothing in the checkout. The trusted workflows
 that run it on a schedule, propose the candidate PR, check the PR's exact
 head, and publish the four-artifact managed release once a candidate has
 merged are described at the end, together with the stages that remain
-boundaries (merge policy, signing, and installation).
+boundaries (signing and installation).
 
 ## What the helper does
 
@@ -190,13 +190,12 @@ node --test t3-reasoning/tests/discover-upstream-nightly.test.mjs
 
 ## Workflows
 
-Two workflows consume the report contract above, and a third publishes the
-managed release once a candidate has merged. All run only checked-in code
+Discovery and checker workflows consume the report contract above. A trusted
+promoter merges an exact clean candidate and dispatches managed publication. All run only checked-in code
 from the default branch, take their inputs as environment variables or API
 arguments (never shell interpolation), use action revisions pinned by full
-commit SHA, and check out with persisted credentials disabled. None signs,
-merges, installs, or changes a repository setting; only the release workflow
-builds and publishes.
+commit SHA, and check out with persisted credentials disabled. None signs, installs, or changes a repository setting; only the promoter
+merges and only the release workflow builds and publishes.
 
 ### Discovery: `.github/workflows/t3-managed-nightly-discovery.yml`
 
@@ -307,12 +306,76 @@ explicit dispatch from discovery, so ordinary Harbor and fleet PRs never
 receive it. It is the status the candidate merge path must require on the
 PR's exact head SHA, not a required status check on `main` (see below).
 
+### Automatic promotion: `.github/workflows/t3-managed-nightly-promote.yml`
+
+The trusted main-only reconciler runs at minutes 8, 23, 38, and 53 each hour,
+plus `workflow_dispatch`, with fixed noncancelling concurrency. It runs
+`scripts/promote-nightly-candidate.mjs` from the exact workflow SHA and
+requires that SHA still be current main. Candidate objects are read only
+through GitHub APIs; no candidate checkout, hook, script, dependency, or
+binary executes. Permissions are contents/pull-requests/actions write and
+statuses/checks read, with no repository-setting changes.
+
+The promoter paginates open same-repository PRs and requires a GitHub Actions
+bot-created, open, nondraft candidate against current main. The branch must
+own the exact head and name the provenance version. That head must have one
+parent on main ancestry, and complete Git trees must differ from its parent
+in exactly the lock and provenance files as plain `100644` blobs. Blob sizes
+and Git hashes are checked. The lock must match both the parent and current
+main with only the commit line replaced. Trusted lock/provenance validators
+are reused, and the official published release, peeled tag, and newest
+Nightly listing must agree. A superseded or stale candidate stays pending.
+
+The latest exact-head candidate status must come from GitHub Actions and link
+to a successful, completed run of the exact trusted checker workflow,
+`workflow_dispatch` on main at the current base revision, with successful
+`validate` and `status` jobs from that run attempt. Missing or stale checker
+proof triggers a fresh checker dispatch; an active main checker suppresses
+repeat dispatch because its inputs are not exposed in the run listing.
+
+Greptile must authenticate as app id `867647`, check name `Greptile Review`.
+Its latest exact-head check must complete successfully with zero annotations,
+an empty paginated annotation listing, and the exact summary
+`2 files reviewed, 0 comments added.`. Any other grammar stays pending.
+All inline review comments and any `CHANGES_REQUESTED` review block promotion
+conservatively, including historical findings: these REST records do not
+expose a reliable app id. PR body prose is never a gate. Missing, delayed,
+unknown, failed, or truncated results never become success after a timeout.
+
+Every gate is read again immediately before a merge request with explicit
+head SHA. After merging, the promoter authenticates the bot merge, its two
+parents, and its exact resulting tree before dispatching
+`t3-managed-release.yml` on main with `expected_main_sha`. This explicit
+workflow dispatch is necessary because a merge with `GITHUB_TOKEN` suppresses
+the ordinary push-triggered release event. No `check_run` event is required.
+
+If the merge succeeds but its response or release dispatch is lost, a later
+scheduled run recovers only a bot-merged candidate whose merge commit is
+still current main. It repeats provenance, ancestry, checker, and review
+proofs. Active or successful release runs for that exact main SHA suppress
+another dispatch; failed runs may be retried. An older merge after main has
+advanced, a merge with additional tree changes, or a newer upstream Nightly
+is not recovered automatically. GitHub offers no atomic base-SHA merge guard
+or dispatch idempotency key: head SHA is guarded by the merge API, main is
+re-read around the write, and the release input fails closed if dispatch
+resolves a moved main. A dispatch invisible in the API can be retried by a
+later schedule; publication retains its existing immutable-tag safeguards.
+
+Tests use an injected API, command runner, and clock, with no live mutations:
+
+```sh
+node --test t3-reasoning/tests/promote-nightly-candidate.test.mjs
+```
+
 ### Managed release publication: `.github/workflows/t3-managed-release.yml`
 
 Triggers: a push to `main` that changes `t3-reasoning/source.lock.json` or
 `t3-reasoning/upstream-release.json` (a merged candidate), and
-`workflow_dispatch` with no inputs, for a new attempt after a build failure
-or a public-config or builder change. Every job is gated on
+`workflow_dispatch` with optional `expected_main_sha`, for a new attempt
+after a build failure or a public-config or builder change. Automated
+promotion supplies the full expected SHA. The first resolve step fails before
+checkout or building when it differs from `github.sha`; the run name includes
+that expected SHA (or the workflow SHA for a manual rebuild). Every job is gated on
 `github.repository == 'kgarg2468/harbor'` and `github.ref ==
 'refs/heads/main'`; there is no pull-request trigger and no caller-supplied
 ref, repository, tag, or platform. The concurrency group is fixed and never
@@ -461,17 +524,11 @@ node --test t3-reasoning/tests/publish-managed-release.test.mjs
   while `default_workflow_permissions` remains `read`, so the discovery run
   opens its candidate PR with the workflow token. No separate automation
   identity exists; candidate PRs carry the token's identity.
-- Review and merge policy for bot-authored candidate PRs, including whether
-  Greptile reviews them. The merge path for these two-file PRs (a trusted
-  merge identity or a later merge automation) must require a `success`
-  `t3-managed-nightly-candidate` status on the PR's exact head SHA and merge
-  nothing else. That requirement belongs to the candidate merge path only: do
-  not add the context as a required status check in a `main` branch rule,
-  because ordinary PRs never receive it and such a rule would leave every
-  non-candidate PR waiting on a check that never reports. (A global required
-  check would first need a general workflow that reports a result for every
-  PR, which does not exist.) Auto-merge is disabled and no branch rules are
-  enforced today, so following a Nightly stops at an open, checked PR.
+- Greptile must actually review bot-created candidate heads and produce the
+  authenticated clean check described above. The promoter never bypasses a
+  missing review. Do not make the candidate context globally required on
+  main: ordinary Harbor and fleet PRs never receive it. The exact-head gate
+  belongs to this narrow candidate merge path.
 - Porting the newer reviewed source changes into the patch catalog. The helper
   proves only the catalog that is checked in; a `conflict` result is the
   signal that a patch needs to be re-ported by hand.

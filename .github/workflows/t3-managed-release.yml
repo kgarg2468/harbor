@@ -1,4 +1,5 @@
 name: t3-managed-release
+run-name: t3-managed-release ${{ inputs.expected_main_sha || github.sha }}
 
 # Trusted default-branch publication of one immutable managed T3 release.
 # One resolve job on Ubuntu proves the checked-in lock, patches, and upstream
@@ -28,7 +29,13 @@ on:
     paths:
       - t3-reasoning/source.lock.json
       - t3-reasoning/upstream-release.json
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      expected_main_sha:
+        description: Exact main SHA for automated promotion; omit for a manual rebuild
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -60,6 +67,18 @@ jobs:
       public_config_sha256: ${{ steps.resolve.outputs.public_config_sha256 }}
       prior_tag: ${{ steps.prior.outputs.prior_tag }}
     steps:
+      - name: Require expected main SHA before checkout
+        env:
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EXPECTED_MAIN_SHA}" ]; then
+            if ! [[ "${EXPECTED_MAIN_SHA}" =~ ^[0-9a-f]{40}$ ]] || [ "${EXPECTED_MAIN_SHA}" != "${GITHUB_SHA}" ]; then
+              echo "::error::expected main SHA does not match this workflow revision"
+              exit 1
+            fi
+          fi
+
       - name: Check out trusted default-branch code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

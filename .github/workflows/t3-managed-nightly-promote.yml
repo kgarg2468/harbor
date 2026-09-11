@@ -1,0 +1,37 @@
+name: t3-managed-nightly-promote
+
+on:
+  schedule:
+    - cron: "8,23,38,53 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: t3-managed-nightly-promote
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.repository == 'kgarg2468/harbor' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      statuses: read
+      checks: read
+    steps:
+      - name: Check out trusted main revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.13.1"
+      - name: Reconcile exact candidate gates and release dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node t3-reasoning/scripts/promote-nightly-candidate.mjs
