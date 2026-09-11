@@ -1,0 +1,189 @@
+diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
+index 72c0c420..c8920950 100644
+--- a/packages/ssh/src/tunnel.test.ts
++++ b/packages/ssh/src/tunnel.test.ts
+@@ -600,6 +600,168 @@ describe("ssh tunnel scripts", () => {
+
+ const pairingTarget = { alias: "fixture", hostname: "fixture", username: null, port: null };
+ const pairingKey = remoteStateKey(pairingTarget);
++
++async function externalLaunchFixture(
++  test: (f: {
++    home: string;
++    state: string;
++    port: number;
++    response: { status: number };
++    run: () => Promise<{ stdout: string; stderr: string }>;
++    assertExternalState: () => Promise<void>;
++  }) => Promise<void>,
++) {
++  const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "ssh-external-launch-"));
++  const state = NodePath.join(home, ".t3/ssh-launch", pairingKey);
++  const invocation = NodePath.join(home, "fallback-invocation.json");
++  const response = { status: 503 };
++  const server = NodeHttp.createServer((_request, res) => {
++    res.writeHead(response.status);
++    res.end();
++  });
++  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
++  const address = server.address();
++  if (!address || typeof address === "string") throw new Error("missing port");
++  const port = address.port;
++  try {
++    await NodeFSP.mkdir(state, { recursive: true });
++    await NodeFSP.mkdir(NodePath.join(home, "bin"));
++    await NodeFSP.symlink(process.execPath, NodePath.join(home, "bin/node"));
++    await NodeFSP.writeFile(NodePath.join(state, "managed"), "external\n");
++    await NodeFSP.writeFile(NodePath.join(state, "port"), `${port}\n`);
++    const cli = NodePath.join(home, "fallback.mjs");
++    await NodeFSP.writeFile(
++      cli,
++      `
++import fs from "node:fs";
++import http from "node:http";
++fs.writeFileSync(${JSON.stringify(invocation)}, JSON.stringify(process.argv.slice(2)));
++http.createServer((_req, res) => res.end("ready")).listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1");
++`,
++    );
++    const script = buildRemoteLaunchScript({ nodeScriptPath: cli });
++    await test({
++      home,
++      state,
++      port,
++      response,
++      run: () =>
++        NodeUtil.promisify(NodeChildProcess.execFile)(
++          "/bin/sh",
++          ["-c", script, "launch", pairingKey],
++          {
++            env: { HOME: home, PATH: `${home}/bin:/usr/bin:/bin` },
++            timeout: 10_000,
++          },
++        ),
++      assertExternalState: async () => {
++        assert.equal(await NodeFSP.readFile(NodePath.join(state, "managed"), "utf8"), "external\n");
++        assert.equal(await NodeFSP.readFile(NodePath.join(state, "port"), "utf8"), `${port}\n`);
++        assert.isFalse(
++          await NodeFSP.access(NodePath.join(state, "pid")).then(
++            () => true,
++            () => false,
++          ),
++        );
++        assert.isFalse(
++          await NodeFSP.access(invocation).then(
++            () => true,
++            () => false,
++          ),
++        );
++      },
++    });
++  } finally {
++    const pid = await NodeFSP.readFile(NodePath.join(state, "pid"), "utf8").catch(() => "");
++    if (pid) {
++      try {
++        process.kill(Number(pid));
++      } catch {
++        /* The fixture server may already have exited. */
++      }
++    }
++    server.closeAllConnections();
++    await new Promise<void>((resolve) => server.close(() => resolve()));
++    await NodeFSP.rm(home, { recursive: true, force: true });
++  }
++}
++
++it("fails bounded when an external service is unavailable, retaining ownership without a fallback", async () => {
++  await externalLaunchFixture(async (f) => {
++    await NodeFSP.mkdir(NodePath.join(f.home, ".t3/userdata"), { recursive: true });
++    await NodeFSP.writeFile(
++      NodePath.join(f.home, ".t3/userdata/server-runtime.json"),
++      JSON.stringify({
++        pid: process.pid,
++        port: f.port,
++        origin: `http://127.0.0.1:${f.port}`,
++      }),
++    );
++    await NodeAssert.rejects(f.run(), {
++      code: 1,
++      killed: false,
++      stderr: /External remote T3 server is unavailable/,
++    });
++    await f.assertExternalState();
++  });
++}, 15_000);
++
++it("fails closed when an external service has no saved port", async () => {
++  await externalLaunchFixture(async (f) => {
++    await NodeFSP.rm(NodePath.join(f.state, "port"));
++    await NodeAssert.rejects(f.run(), {
++      code: 1,
++      killed: false,
++      stderr: /External remote T3 server is unavailable/,
++    });
++    assert.equal(await NodeFSP.readFile(NodePath.join(f.state, "managed"), "utf8"), "external\n");
++    for (const file of [
++      NodePath.join(f.state, "port"),
++      NodePath.join(f.state, "pid"),
++      NodePath.join(f.home, "fallback-invocation.json"),
++    ]) {
++      assert.isFalse(
++        await NodeFSP.access(file).then(
++          () => true,
++          () => false,
++        ),
++      );
++    }
++  });
++}, 15_000);
++
++it("reuses the external service when it recovers on a later launch attempt", async () => {
++  await externalLaunchFixture(async (f) => {
++    await NodeAssert.rejects(f.run(), { code: 1, killed: false });
++    await f.assertExternalState();
++    f.response.status = 200;
++    assert.deepEqual(JSON.parse((await f.run()).stdout), {
++      remotePort: f.port,
++      serverKind: "external",
++    });
++    await f.assertExternalState();
++  });
++}, 15_000);
++
++it("still launches and owns a server for an unowned cold launch", async () => {
++  await externalLaunchFixture(async (f) => {
++    await NodeFSP.rm(NodePath.join(f.state, "managed"));
++    await NodeFSP.rm(NodePath.join(f.state, "port"));
++    const result = JSON.parse((await f.run()).stdout);
++    assert.equal(result.serverKind, "managed");
++    assert.equal(await NodeFSP.readFile(NodePath.join(f.state, "managed"), "utf8"), "managed\n");
++    assert.equal(
++      Number(await NodeFSP.readFile(NodePath.join(f.state, "port"), "utf8")),
++      result.remotePort,
++    );
++    process.kill(Number(await NodeFSP.readFile(NodePath.join(f.state, "pid"), "utf8")), 0);
++    const args = JSON.parse(
++      await NodeFSP.readFile(NodePath.join(f.home, "fallback-invocation.json"), "utf8"),
++    );
++    assert.equal(args[0], "serve");
++  });
++}, 15_000);
++
+ const managedVersion = "0.0.15-nightly.20260910.1507.managed.1.p123456789abc";
+ async function managedPairingFixture(
+   test: (f: {
+diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
+index 1117d365..002cc6c3 100644
+--- a/packages/ssh/src/tunnel.ts
++++ b/packages/ssh/src/tunnel.ts
+@@ -703,9 +703,8 @@ if [ -n "$DEFAULT_REMOTE_PORT" ]; then
+ fi
+ if [ "$REMOTE_MANAGED" = "external" ]; then
+   if [ -z "$REMOTE_PORT" ] || ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
+-    REMOTE_PID=""
+-    REMOTE_PORT=""
+-    REMOTE_MANAGED=""
++    printf 'External remote T3 server is unavailable. Retry when the external service is ready.\\n' >&2
++    exit 1
+   fi
+ elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
+   if [ "$RUNNER_CHANGED" -eq 1 ]; then
