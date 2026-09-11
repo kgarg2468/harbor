@@ -249,6 +249,155 @@ harbor_service_cmd() {
   printf 'harbor: running %q service %q\n' "${bin}" "${verb}" >&2
   harbor_t3_run "${HOME}" service "${verb}"
 }
+# harbor_t3_connect_login HOME: the attended login belongs to the vendor. Over SSH
+# its out-of-band URL-and-code flow must reach the operator unchanged: Harbor never
+# captures, filters, or pre-answers it. The second status reading, not the login's
+# exit code, decides whether there is a transition Harbor can record.
+harbor_t3_connect_login() {
+  local home="${1}" rc=0
+  # No label of its own, unlike harbor_agents_auth_login and harbor_service_cmd.
+  # Those two have a reason to log before the seam: the agents invoke their vendor
+  # directly, and the service verbs are captured and classified by their callers.
+  # Neither holds here. harbor_t3_run already emits this exact line, and it emits it
+  # after the version guard, so a mismatched install logs no vendor line at all --
+  # which is the truth, because no vendor ran. A label out here would claim an
+  # invocation that the guard refused, and would double the line when it did not.
+  harbor_t3_run "${home}" connect login || rc="$?"
+  harbor_log t3 "connect login exited ${rc}"
+  return "${rc}"
+}
+# harbor_t3_connect STATE_ROOT HOME: recovery precedes the attended login for the
+# same reason it does for the agents: this operator journal can contain a crashed
+# provision. Only a false-to-true authenticated pair is recorded, already applied,
+# because Harbor has no inverse for the vendor's login and must read both ends.
+# Nothing here inspects credentials; the status adapter's words are all we know.
+harbor_t3_connect() {
+  local root="${1}" home="${2}" bin pre_auth pre_linked post_auth entry rc=0
+  harbor_auth_refuse_root
+  bin="$(harbor_t3_bin "${home}")"
+  # An absent executable is an install to request, not an unverifiable login to run.
+  [ -f "${bin}" ] && [ -x "${bin}" ] \
+    || harbor_die 3 t3.not_installed "${bin} is not an installed executable, so there is no t3 on this node to log in; install the pinned tool first, as the operator, with: harbor provision; nothing was changed"
+  harbor_state_root_create "${root}" operator
+  harbor_log_open "${root}/harbor.log" 0600
+  harbor_log command "auth connect"
+  harbor_lock_acquire "${root}" operator
+  harbor_journal_init "${root}"
+  # The home the readers answer out of, set before recovery runs: a crashed provision
+  # can leave runtime-install entries prepared in this same operator journal, and
+  # the registered readers can only decide them when told which home holds the tools.
+  # shellcheck disable=SC2034
+  HARBOR_AGENTS_HOME="${home}"
+  # Before recovery, not after it: the crashed provision this scan exists to decide
+  # can have left a prepared t3-service entry in this same operator journal, and that
+  # entry's reader goes through harbor_t3_service_status, which requires t3_version.
+  # Loading afterwards leaves recovery to die with versions.unset naming an empty
+  # lock path -- a refusal about Harbor's own startup order, raised against the one
+  # journal state the scan is here to resolve.
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  harbor_journal_recover "${root}"
+  harbor_step recovery-scan
+  harbor_t3_connect_status "${home}"
+  pre_auth="${HARBOR_T3_CONNECT_AUTHENTICATED}"
+  pre_linked="${HARBOR_T3_CONNECT_LINKED}"
+  case "${pre_auth}:${pre_linked}" in
+    true:true)
+      harbor_msg "auth.connect: T3 Connect is already authorized and linked on this node (its own status command says so); nothing to do, and Harbor ran no login"
+      return 0
+      ;;
+    true:false)
+      # The link step and its t3-connect-link entry belong to spec section 8 row 5;
+      # PR 4 ships only login, so this gap must not become an implicit link attempt.
+      harbor_die 1 t3.needs_connect_link "needs_connect_link: T3 Connect is authorized but not linked; the link step is not in this release; harbor auth connect in a later release performs it; nothing was journaled"
+      ;;
+    false:*) ;;
+    *)
+      harbor_die 1 t3.auth_unverified "T3 Connect reports authenticated=${pre_auth} and linked=${pre_linked}; Harbor journals a transition only when it read both ends of it, so no login ran and nothing was written; rerun harbor auth connect once t3 answers its own status command"
+      ;;
+  esac
+  harbor_msg "auth.connect: T3 Connect reports authenticated=${pre_auth}; running its own login below — follow what it prints, on your Mac if it asks for a browser"
+  harbor_t3_connect_login "${home}" || rc="$?"
+  harbor_step "auth-connect-login"
+  harbor_t3_connect_status "${home}"
+  post_auth="${HARBOR_T3_CONNECT_AUTHENTICATED}"
+  harbor_log t3 "connect auth ${pre_auth} to ${post_auth} (login exited ${rc})"
+  case "${post_auth}" in
+    true) ;;
+    false)
+      harbor_die 1 t3.auth_incomplete "T3 Connect still reports authenticated=false after its own login exited ${rc}, so the login was not completed and there is no transition to record; the vendor's output above says what it asked for, and rerunning is safe: harbor auth connect; nothing was journaled"
+      ;;
+    *)
+      harbor_die 1 t3.auth_unverified "T3 Connect reported authenticated=${pre_auth} before its login and ${post_auth} after it (the login exited ${rc}), and Harbor journals a transition only when it read both ends of it, so nothing was written; rerun harbor auth connect once t3 answers its own status command"
+      ;;
+  esac
+  harbor_journal_create "${root}" auth connect created applied "\"${pre_auth}\"" "\"${post_auth}\""
+  entry="${HARBOR_JOURNAL_ENTRY}"
+  harbor_step "auth-connect-recorded"
+  harbor_msg "T3 Connect is authorized on this node; recorded the ${pre_auth} to ${post_auth} transition as $(basename "${entry}")"
+}
+# harbor_t3_connect_status HOME: only the pin's four measured fields are answers.
+# Other vendor fields may carry private bytes, so neither stdout nor inherited
+# xtrace may receive the body. SQLite warnings live on stderr, outside the JSON.
+harbor_t3_connect_status() {
+  local home="${1}" body key value xt=0
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
+  # stdout alone: the pinned CLI opens a SQLite database, so Node writes an
+  # ExperimentalWarning to stderr on every invocation and 2>&1 would hand it to
+  # the readers below. This is why the service adapter's capture rule does not
+  # carry over — it classifies human text, where the vendor's diagnostics are
+  # part of the answer, while this command's contract is JSON on stdout alone.
+  # Dropping stderr also drops harbor_t3_run's refusal when the installed version
+  # has drifted from the lock. That is deliberate and is the answer the service
+  # adapter already gives there: four unknowns, and unknown is an answer.
+  body="$(harbor_t3_run "${home}" connect status --json 2>/dev/null)" || :
+  # Judge the document's shape before reading a line out of it. Every reader below
+  # matches a whole line, and a prefix of a document satisfies a whole-line match
+  # exactly as well as the document does: a body truncated after its "linked" line
+  # still carries two intact booleans, and trusting them answers "already authorized
+  # and linked" about output the vendor never finished writing. That is the same
+  # blindness Correction 10 found in the engines parser -- a line at a time cannot
+  # see either end of what it is reading -- and it gets the same answer here.
+  # The emitter is JSON.stringify(x, null, 2), so a complete object is exactly "{"
+  # alone on the first line and "}" alone on the last. Anything else, truncated or
+  # never JSON at all, leaves all four unknown, and unknown is an answer.
+  case "$(printf '%s\n' "${body}" | sed -n '1p;$p' | tr -d '\n')" in
+    '{}') ;;
+    *) body="" ;;
+  esac
+  for key in desired authenticated linked; do
+    value="$(printf '%s\n' "${body}" | sed -En "s/^  \"${key}\": (true|false),?$/\1/p")"
+    case "${value}" in
+      true | false) ;;
+      *) value=unknown ;;
+    esac
+    # Assigned by name rather than indirectly: every other reader in lib/ spells
+    # its targets out, and two declarations of a key print two lines, which the
+    # fence above has already turned into unknown.
+    # shellcheck disable=SC2034
+    case "${key}" in
+      desired) HARBOR_T3_CONNECT_DESIRED="${value}" ;;
+      authenticated) HARBOR_T3_CONNECT_AUTHENTICATED="${value}" ;;
+      linked) HARBOR_T3_CONNECT_LINKED="${value}" ;;
+    esac
+  done
+  # Depth alone cannot distinguish another object's status: it must immediately
+  # follow relayClient's header, as it does in all three pinned schema variants.
+  value="$(printf '%s\n' "${body}" | sed -En '/^  "relayClient": [{]$/ {
+    n
+    s/^    "status": "(available|missing|unsupported)",?$/\1/p
+  }')"
+  case "${value}" in
+    available | missing | unsupported) ;;
+    *) value=unknown ;;
+  esac
+  # Consumed by the connect callers after this reader returns.
+  # shellcheck disable=SC2034
+  HARBOR_T3_CONNECT_RELAY="${value}"
+  unset body
+  [ "${xt}" = 0 ] || set -x
+  return 0
+}
 # harbor_t3_service_status HOME: the pinned formatter has no JSON mode and exits
 # zero in every state. Only its whole status lines decide the answer; an empty or
 # unfamiliar body is unknown, never evidence that a service is installed.

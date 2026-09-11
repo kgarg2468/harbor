@@ -557,6 +557,37 @@ harbor_t3_connect_status HOME
 
 Reading only four keys is not laziness: it is the spec's own instruction, and it means a vendor adding fields cannot change Harbor's classification.
 
+#### Measurement at the pin (t3@0.0.38), and three corrections it forces
+
+`t3 connect status --json` was run against the pin with an **isolated `--base-dir`**, never the real credential store, so nothing in this section required reading or writing a vendor credential. Measured output:
+
+```json
+{
+  "desired": false,
+  "authenticated": false,
+  "linked": false,
+  "cloudUserId": null,
+  "relayUrl": null,
+  "publishAgentActivity": false,
+  "relayClient": {
+    "status": "available",
+    "executablePath": "/opt/homebrew/bin/cloudflared",
+    "source": "path",
+    "version": "2026.5.2"
+  }
+}
+```
+
+**Correction 12 — the connect adapter must capture stdout only, never `2>&1`.** Every invocation at the pin writes `(node:NNNNN) ExperimentalWarning: SQLite is an experimental feature and might change at any time` to **stderr**, because the CLI opens a SQLite database under Node. Capturing `2>&1`, as the service adapter does, would put that text into the body being parsed and make the parse depend on the Node build's warning behaviour. The two adapters must not share a capture rule: the service adapter classifies human text, where the vendor's own diagnostics are part of the answer; this command has a JSON contract that lives on stdout alone. Confirmed by capture: stdout on its own parses as JSON, and stderr carries only the warning.
+
+**Correction 13 — `relayClient.status` is nested, so a flat extraction is wrong.** The plan says to reuse the anchored `sed` extraction `lib/journal.sh` uses, but that reader is written for **top-level** fields, and `status` is one of the most generic key names a vendor can add. The emitter is `JSON.stringify(status, null, 2)`, so the document is 2-space pretty-printed and `relayClient`'s own keys sit at **four** spaces. The relay reader therefore anchors to four-space depth inside the two-space-indented `"relayClient": {` header and requires `status` to be that block's **first** line — the same depth-and-adjacency rule Correction 10 arrived at for `engines.node`, and for the same reason: indentation carries no structure in JSON, so adjacency is what distinguishes a key from a same-named key somewhere else. `status` is the first key in **all three** schema variants, so this costs nothing in fidelity.
+
+**Correction 14a — a whole-line reader must judge the document's shape before reading a line out of it.** Every reader in this adapter matches a whole line, and a *prefix* of a document satisfies a whole-line match exactly as well as the document does. A body truncated after its `linked` line — a vendor killed mid-write by a signal, a full disk, an OOM — still carries two intact booleans, and trusting them answers "already authorized and linked" about output the vendor never finished. Reproduced: the truncated body yields `desired=true auth=true linked=true`. This is the same blindness correction 10 found in the engines parser, that a line at a time cannot see either end of what it is reading, and it takes the same answer. The emitter is `JSON.stringify(x, null, 2)`, so a complete object is exactly `{` alone on the first line and `}` alone on the last; anything else leaves all four `unknown`. Note this check is about truncation, not about depth — the three booleans are still anchored by indentation rather than depth, which is issue #121.
+
+**Correction 14 — the relay vocabulary is exactly three words.** `RelayClientStatusSchema` in the pinned bundle is a union of exactly `available` (with `executablePath`, `source`, `version`), `missing` (with `version`), and `unsupported` (with `platform`, `arch`, `version`). Anything outside those three is `unknown`, which is what "the vendor's own status word or `unknown`" means in the interface above. Note the three variants carry **different** sibling keys, so no reader may assume a fixed field order after `status`.
+
+**Fixture provenance.** `needs-login` and the relay variants are recorded from the pin directly. `healthy` and `needs-link` require an **authenticated** account, which cannot be produced without authorizing a real one, so they are constructed from `RelayClientStatusSchema` and the measured emitter rather than captured. The distinction is recorded in the fixture directory so a later reader does not mistake a constructed fixture for a measured one, and no fixture carries a real `cloudUserId` or `relayUrl`.
+
 **Tests.** Each fixture yields its recorded four values; `unparseable` and an empty body yield four `unknown`s; a body missing `relayClient` entirely yields `unknown` for the relay and the real values for the other three; a non-zero exit with a valid body still parses, and the test records that the body wins over the exit code here (unlike the service adapter) because this command has a documented JSON contract; the raw body never reaches stdout.
 
 **Commit:** `feat(t3): version-pinned connect status adapter`
@@ -575,6 +606,10 @@ Reading only four keys is not laziness: it is the spec's own instruction, and it
 **Tests.** `authenticated` false then true writes one `auth` entry and exits 0; false then still false writes nothing and exits 1 naming the rerun; already true with `linked` true is exit 0 with no entry and no vendor call; already true with `linked` false is exit 1 reporting `needs_connect_link` with no vendor call and no entry; `unknown` either side is exit 1 with no entry; root exits 3; the vendor's login output reaches stdout unchanged; no `t3 connect link` invocation appears in the shim log in any scenario.
 
 **Commit:** `feat(auth): T3 Connect login with the transition-only auth entry`
+
+**Correction 15 — the version lock must be loaded before the recovery scan, not after it.** This command opens the **operator** journal, which is the same journal a crashed `harbor provision` leaves a prepared `t3-service` entry in — that is precisely why the scan runs here at all. Deciding that entry goes through `harbor_observe_op_t3_service` to `harbor_t3_service_status`, which requires `t3_version`. Loading the lock after the scan therefore makes the scan die on the one journal state it exists to resolve, with `harbor: versions.unset: : t3_version is not pinned yet` — naming an empty lock path, because `HARBOR_VERSIONS_FILE` is unset too. Reproduced. Note that an in-process test cannot see this: the bats `setup()` loads the lock into the test shell, so the regression test runs the command in a fresh shell that has not, which is what the dispatcher does. `harbor_agents_auth` has the identical exposure and is filed as issue #119 rather than fixed here; the sturdier fix is a precondition inside `harbor_journal_recover`, since the reader registry is global.
+
+**Correction 16 — the login step carries no vendor label of its own.** `harbor_agents_auth_login` logs one, and `harbor_service_cmd` logs one, so copying the pattern looks right; both have a reason that does not hold here. The agents invoke their executable directly, and the service verbs are captured and classified by their callers, which is why that label has to precede the seam. This login goes through `harbor_t3_run`, which already emits exactly that line — and emits it *after* the version guard. A second label outside the seam would double the line on the normal path and, worse, would claim an invocation on the path where the guard refused one.
 
 ### Task 16: `lib/config.sh`
 
@@ -598,6 +633,14 @@ Validation: `connect` is the default and is accepted. `tailnet` is **refused wit
 **Tests.** Creation writes `0600` and one `created` entry; a rerun with the same mode writes an `observed` entry and does not rewrite the file; a rerun with a different mode writes a `modified` entry; `tailnet` exits 3 naming PR 5's command; an unknown mode exits 3; a `0644` file exits 3 before its contents are read, asserted by a fixture whose contents would otherwise parse; a missing file exits 3 naming `harbor provision`.
 
 **Commit:** `feat(config): the access_mode configuration file`
+
+**Correction 17 — `harbor_config_create` takes the state root as well.** The interface above says `harbor_config_create HOME MODE`, but the contract in the same paragraph requires the creation to be one journaled `file` entry, and `harbor_journal_create` is given the state root. The signature is `harbor_config_create STATE_ROOT HOME MODE`, matching every other journaled writer in `lib/`.
+
+**Correction 19 — the config path is Harbor's own, so a symlink at it is refused at both ends.** `harbor_observe_file` follows a link and would record the *target's* hash, while the rename replaces the link itself — the journal would describe a file the entry never touched. On the read side a link would let a file outside this path decide the access mode, and change without the journaled artifact changing with it. Ubuntu's `mv -f` into a link-to-directory is worse still: it moves the staged file *inside* that directory and leaves the configured path a directory symlink, which the entry would then mark applied. `lib/t3.sh` refuses a linked package for the same reason and `lib/ssh.sh` a linked `.ssh`, so this is the established rule rather than a new one.
+
+**Correction 20 — the staged file is created private and unclobbered, not widened then narrowed.** A `chmod` after the write leaves the file at the ambient umask until it lands, and if the `chmod` is what fails there is nothing left to narrow and a stray staged file is left behind. It is written under `umask 077` inside a subshell, its mode is then asserted rather than set, and every staging failure removes it. `set -C` covers the other half: the unlink and the redirection are two instants, and the agents run as this same operator, so a process that wins the gap by putting a symlink at the staged name would otherwise have the write follow it into an arbitrary operator-writable file. Testing that needs the window, not the timing — the test neutralizes the unlink and plants the link in its place, which is the state the race produces.
+
+**Correction 18 — the unknown-mode message must not name a mode this release refuses.** "Naming the file, the value, and the two words" is right as far as it goes, but `tailnet` is refused by the very function raising the message, so a typo would be answered by pointing at a value that fails on the next run too. The message names both words and says only `connect` can be provisioned by this release, which is the tailnet arm's own answer delivered one round trip earlier.
 
 ---
 

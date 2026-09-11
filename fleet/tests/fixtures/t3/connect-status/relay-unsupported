@@ -1,0 +1,14 @@
+{
+  "desired": true,
+  "authenticated": true,
+  "linked": false,
+  "cloudUserId": null,
+  "relayUrl": null,
+  "publishAgentActivity": false,
+  "relayClient": {
+    "status": "unsupported",
+    "platform": "sunos",
+    "arch": "sparc64",
+    "version": "2026.5.2"
+  }
+}

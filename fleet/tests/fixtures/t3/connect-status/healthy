@@ -1,0 +1,14 @@
+{
+  "desired": true,
+  "authenticated": true,
+  "linked": true,
+  "cloudUserId": "fixture-cloud-user",
+  "relayUrl": "https://relay.invalid/fixture",
+  "publishAgentActivity": true,
+  "relayClient": {
+    "status": "available",
+    "executablePath": "/usr/local/bin/cloudflared",
+    "source": "path",
+    "version": "2026.5.2"
+  }
+}

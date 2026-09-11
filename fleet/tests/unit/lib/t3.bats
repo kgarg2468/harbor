@@ -16,6 +16,8 @@ setup() {
   . "${HARBOR_ROOT}/lib/runtime.sh"
   # shellcheck source=lib/agents.sh
   . "${HARBOR_ROOT}/lib/agents.sh"
+  # shellcheck source=lib/auth.sh
+  . "${HARBOR_ROOT}/lib/auth.sh"
   fixture_state_root
   HARBOR_PID="$$"
   # The ambient HOME is a decoy for this whole file: it exists, it is not FIX_HOME,
@@ -1128,4 +1130,331 @@ engines_login_fixture() {
       rm -f "${FIX_ROOT}/journal/0001-runtime-install.json" "${FIX_ROOT}/journal/0001-t3-service.json"
     done
   done
+}
+
+fake_connect_t3() {
+  # Preserve the real version guard and argv seam while substituting vendor bytes.
+  local bin
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  cp "${HARBOR_ROOT}/tests/fixtures/t3/connect-status/${1}" "${BATS_TEST_TMPDIR}/connect-body"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "${1:-}" = --version ]; then echo "t3 v%s"; exit 0; fi\n' "${T3_VERSION}"
+    printf 'printf "%%s\\n" "$*" >"%s/connect-call"\n' "${BATS_TEST_TMPDIR}"
+    printf 'printf "%%s\\n" "$*" >>"%s/connect-calls"\n' "${BATS_TEST_TMPDIR}"
+    printf 'if [ "$*" = "connect login" ]; then\n'
+    printf '  printf "%%s\\n" "Visit https://vendor.example/activate" "Code: FIXTURE-1234"\n'
+    printf '  cp "%s/tests/fixtures/t3/connect-status/%s" "%s/connect-body"\n' "${HARBOR_ROOT}" "${3:-healthy}" "${BATS_TEST_TMPDIR}"
+    printf '  exit %s\nfi\n' "${4:-0}"
+    printf '[ "$*" = "connect status --json" ] || exit 97\n'
+    printf 'echo "ExperimentalWarning: SQLite" >&2\n'
+    printf 'cat "%s/connect-body"\nexit %s\n' "${BATS_TEST_TMPDIR}" "${2:-0}"
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+assert_connect_status() {
+  # Direct invocation keeps the result globals in this shell; capturing stdout in
+  # a file also proves no ignored vendor fields escape with the four answers.
+  local rc=0
+  harbor_t3_connect_status "${FIX_HOME}" >"${BATS_TEST_TMPDIR}/connect-output" || rc="$?"
+  assert_equal "${rc}" 0
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/connect-output")" ''
+  assert_equal "${HARBOR_T3_CONNECT_DESIRED}" "${1}"
+  assert_equal "${HARBOR_T3_CONNECT_AUTHENTICATED}" "${2}"
+  assert_equal "${HARBOR_T3_CONNECT_LINKED}" "${3}"
+  assert_equal "${HARBOR_T3_CONNECT_RELAY}" "${4}"
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/connect-call")" 'connect status --json'
+  assert_no_connect_link
+}
+
+@test "connect healthy yields its four recorded values without stdout" {
+  fake_connect_t3 healthy
+  assert_connect_status true true true available
+}
+
+@test "connect needs-link yields its four recorded values without stdout" {
+  fake_connect_t3 needs-link
+  assert_connect_status true true false available
+}
+
+@test "connect needs-login yields its four recorded values without stdout" {
+  fake_connect_t3 needs-login
+  assert_connect_status false false false available
+}
+
+@test "connect relay-missing yields its four recorded values without stdout" {
+  fake_connect_t3 relay-missing
+  assert_connect_status true true false missing
+}
+
+@test "connect relay-unsupported yields its four recorded values without stdout" {
+  fake_connect_t3 relay-unsupported
+  assert_connect_status true true false unsupported
+}
+
+@test "connect unparseable and empty bodies reset all four values to unknown" {
+  fake_connect_t3 healthy
+  assert_connect_status true true true available
+  fake_connect_t3 unparseable
+  assert_connect_status unknown unknown unknown unknown
+  : >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+}
+
+@test "connect missing relayClient preserves the three booleans" {
+  fake_connect_t3 healthy
+  printf '{\n  "desired": true,\n  "authenticated": false,\n  "linked": false\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status true false false unknown
+}
+
+@test "connect valid body wins over a nonzero exit" {
+  # The body wins over the exit code here, unlike the service adapter, because
+  # this command has a JSON contract.
+  fake_connect_t3 healthy 7
+  assert_connect_status true true true available
+}
+
+@test "connect top-level status cannot supply the relay value" {
+  fake_connect_t3 healthy
+  printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": false,\n  "status": "available"\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status true true false unknown
+}
+
+@test "connect relay requires the first line at four spaces and a known word" {
+  local relay
+  fake_connect_t3 healthy
+  for relay in '    "status": "future"' '  "status": "available"' '    "metadata": {\n    "status": "available"\n    }'; do
+    printf '{\n  "relayClient": {\n%b\n  }\n}\n' "${relay}" >"${BATS_TEST_TMPDIR}/connect-body"
+    assert_connect_status unknown unknown unknown unknown
+  done
+}
+
+@test "connect truncated output is unknown even when its boolean lines are intact" {
+  # A vendor killed mid-write emits a prefix. Every reader here matches a whole
+  # line, which a prefix satisfies, so without a shape check two intact booleans
+  # would answer "already authorized and linked" about output that never finished.
+  fake_connect_t3 healthy
+  printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": true,\n  "relayCli' \
+    >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+  # The closing brace alone is not enough either: it has to be the last line.
+  printf '{\n  "authenticated": true,\n}\n trailing\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+  # And the opening brace has to be the first line, so a preamble cannot be wrapped
+  # around a body that would otherwise read as authorized.
+  printf 'warning: something\n{\n  "authenticated": true\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+}
+
+@test "connect booleans require the exact measured whole lines" {
+  fake_connect_t3 healthy
+  printf '{\n    "desired": true,\n  "authenticated": "true",\n  "linked": true, extra\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+}
+
+@test "connect hides the raw body from inherited xtrace and restores it" {
+  fake_connect_t3 healthy
+  run bash -c '
+    for lib in log versions runtime agents t3; do . "${HARBOR_ROOT}/lib/${lib}.sh"; done
+    harbor_versions_load "${HARBOR_ROOT}/versions.lock"
+    set -x
+    harbor_t3_connect_status "${1}"
+    case "$-" in *x*) printf "trace-restored\\n" ;; esac
+  ' _ "${FIX_HOME}"
+  assert_success
+  assert_output --partial trace-restored
+  # A refutation against an empty trace passes for the wrong reason, so require
+  # the trace to have actually reached this call before believing the three
+  # below. Unlike the install captures this can assert on merged stderr: nothing
+  # on this function's paths prints the body, so there is no second source for
+  # the strings being refuted.
+  assert_output --partial '+ harbor_t3_connect_status'
+  refute_output --partial fixture-cloud-user
+  refute_output --partial relay.invalid
+  refute_output --partial ExperimentalWarning
+  assert_no_connect_link
+}
+
+assert_no_connect_link() {
+  refute grep -qF 'connect link' "${BATS_TEST_TMPDIR}/connect-calls"
+}
+
+connect_auth() {
+  # A run subshell does not reach the command's EXIT trap, so give its lock back.
+  run harbor_t3_connect "${FIX_ROOT}" "${FIX_HOME}"
+  harbor_lock_release "${FIX_ROOT}" 2>/dev/null || true
+}
+
+@test "auth connect: false then true journals exactly one applied auth entry" {
+  fake_connect_t3 needs-login 0 needs-link 7
+  connect_auth
+  assert_success
+  assert_output --partial 'recorded the false to true transition as 0001-auth.json'
+  assert_equal "$(journal_names)" 0001-auth.json
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 target)" '"connect"'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" '"false"'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 post_state)" '"true"'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" '"created"'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  harbor_journal_validate "${FIX_ROOT}/journal/0001-auth.json"
+  assert_no_connect_link
+  run cat "${BATS_TEST_TMPDIR}/connect-calls"
+  assert_output 'connect status --json
+connect login
+connect status --json'
+}
+
+@test "auth connect: false then false journals nothing and names the safe rerun" {
+  fake_connect_t3 needs-login 0 needs-login
+  connect_auth
+  assert_failure 1
+  assert_output --partial 'rerunning is safe: harbor auth connect'
+  assert_equal "$(journal_names)" ''
+  assert_no_connect_link
+}
+
+@test "auth connect: already authorized and linked runs no login and journals nothing" {
+  fake_connect_t3 healthy
+  connect_auth
+  assert_success
+  assert_output --partial 'already authorized and linked'
+  assert_equal "$(journal_names)" ''
+  assert_no_connect_link
+  run cat "${BATS_TEST_TMPDIR}/connect-calls"
+  assert_output 'connect status --json'
+}
+
+@test "auth connect: authorized but unlinked reports needs_connect_link without login or entry" {
+  fake_connect_t3 needs-link
+  connect_auth
+  assert_failure 1
+  assert_output --partial 't3.needs_connect_link:'
+  assert_output --partial 'link step is not in this release'
+  assert_output --partial 'harbor auth connect in a later release'
+  assert_equal "$(journal_names)" ''
+  assert_no_connect_link
+  run cat "${BATS_TEST_TMPDIR}/connect-calls"
+  assert_output 'connect status --json'
+}
+
+@test "auth connect: unknown before login refuses without login or entry" {
+  fake_connect_t3 unparseable
+  connect_auth
+  assert_failure 1
+  assert_output --partial 't3.auth_unverified:'
+  assert_equal "$(journal_names)" ''
+  assert_no_connect_link
+  run cat "${BATS_TEST_TMPDIR}/connect-calls"
+  assert_output 'connect status --json'
+}
+
+@test "auth connect: unknown after login refuses without an entry" {
+  fake_connect_t3 needs-login 0 unparseable
+  connect_auth
+  assert_failure 1
+  assert_output --partial 't3.auth_unverified:'
+  assert_equal "$(journal_names)" ''
+  assert_no_connect_link
+}
+
+@test "auth connect: root exits 3 before creating state or invoking the vendor" {
+  fake_connect_t3 needs-login
+  id() {
+    case "${1:-}" in
+      -u) printf '0\n' ;;
+      *) command id ${1+"$@"} ;;
+    esac
+  }
+  run harbor_t3_connect "${BATS_TEST_TMPDIR}/root-refused" "${FIX_HOME}"
+  assert_failure 3
+  assert_output --partial 'auth.root:'
+  assert [ ! -e "${BATS_TEST_TMPDIR}/root-refused" ]
+  assert [ ! -e "${BATS_TEST_TMPDIR}/connect-calls" ]
+  assert_equal "$(journal_names)" ''
+  unset -f id
+}
+
+@test "auth connect: login passes vendor stdout unchanged and returns its exit code" {
+  fake_connect_t3 needs-login 0 healthy 7
+  run --separate-stderr harbor_t3_connect_login "${FIX_HOME}"
+  assert_failure 7
+  assert_output 'Visit https://vendor.example/activate
+Code: FIXTURE-1234'
+  assert_no_connect_link
+}
+
+@test "auth connect: recovery decides a crashed provision's t3-service entry before the login" {
+  # The journal this command opens is the operator's own, so a provision that died
+  # between preparing the service entry and attesting it is the state auth connect
+  # starts in. That entry's reader needs the lock loaded; every other test here has
+  # an empty journal, where recovery returns without calling a reader and cannot
+  # tell whether the lock was loaded in time.
+  # A t3 that answers the service verb too. fake_connect_t3 exits 97 on anything but
+  # the connect verbs, which would make the reader below say "unknown" and prove
+  # nothing about ordering: an undecidable entry is what a refused vendor call looks
+  # like, and it is also what the unloaded lock would have produced.
+  local bin
+  fake_connect_t3 needs-login 0 healthy
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "${1:-}" = --version ]; then echo "t3 v%s"; exit 0; fi\n' "${T3_VERSION}"
+    printf 'printf "%%s\\n" "$*" >>"%s/connect-calls"\n' "${BATS_TEST_TMPDIR}"
+    printf 'if [ "$*" = "service status" ]; then\n'
+    printf '  cat "%s/tests/fixtures/t3/service-status/not-installed"\n  exit 0\nfi\n' "${HARBOR_ROOT}"
+    printf 'if [ "$*" = "connect login" ]; then\n'
+    printf '  cp "%s/tests/fixtures/t3/connect-status/healthy" "%s/connect-body"\n' "${HARBOR_ROOT}" "${BATS_TEST_TMPDIR}"
+    printf '  exit 0\nfi\n'
+    printf '[ "$*" = "connect status --json" ] || exit 97\n'
+    printf 'cat "%s/connect-body"\n' "${BATS_TEST_TMPDIR}"
+  } >"${bin}"
+  chmod 0755 "${bin}"
+  fake_systemctl active
+  fixture_entry "${FIX_ROOT}" 0001 t3-service t3code.service created prepared \
+    '"not-installed/active"' '"installed-current/active"'
+  # A fresh shell that has not loaded the lock, because setup() loaded it into this
+  # one and would answer the reader no matter when the command got round to it. The
+  # dispatcher reaches this command the same way: harbor auth connect loads nothing
+  # before it, so the lock is whatever the command itself arranges.
+  run bash -c '
+    for lib in log lock versions journal runtime agents auth t3; do . "${HARBOR_ROOT}/lib/${lib}.sh"; done
+    HARBOR_PID=$$
+    harbor_t3_connect "${1}" "${2}"' _ "${FIX_ROOT}" "${FIX_HOME}"
+  harbor_lock_release "${FIX_ROOT}" 2>/dev/null || true
+  assert_success
+  refute_output --partial 'versions.unset'
+  # Decided by reading the node, not skipped: the fake answers --version at the pin
+  # with no unit installed, which is the pre_state, so the entry reverts.
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted
+  assert_equal "$(journal_names)" '0001-t3-service.json
+0002-auth.json'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  assert_no_connect_link
+}
+
+@test "auth connect: the login is labelled in the log exactly once" {
+  # harbor_t3_run already names the vendor; a second label here would report one
+  # invocation as two, and would name one that the version guard had refused.
+  fake_connect_t3 needs-login 0 healthy
+  connect_auth
+  assert_success
+  assert_equal "$(grep -c 'connect login' "${FIX_ROOT}/harbor.log")" 2
+  assert_equal "$(grep -c 'vendor.*connect login' "${FIX_ROOT}/harbor.log")" 1
+}
+
+@test "auth connect: missing or nonexecutable t3 names harbor provision before creating state" {
+  local bin
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  run harbor_t3_connect "${BATS_TEST_TMPDIR}/not-installed" "${FIX_HOME}"
+  assert_failure 3
+  assert_output --partial 't3.not_installed:'
+  assert_output --partial 'harbor provision'
+  fake_connect_t3 needs-login
+  chmod 0644 "${bin}"
+  run harbor_t3_connect "${BATS_TEST_TMPDIR}/not-installed" "${FIX_HOME}"
+  assert_failure 3
+  assert [ ! -e "${BATS_TEST_TMPDIR}/not-installed" ]
+  assert [ ! -e "${BATS_TEST_TMPDIR}/connect-calls" ]
 }
