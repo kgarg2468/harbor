@@ -47,20 +47,34 @@ harbor_t3_package_dir() {
   printf '%s/node_modules/t3' "$(harbor_agents_prefix "${1}")"
 }
 # harbor_t3_package_engines HOME: the installed package's own engines.node range.
-# The pinned package uses two-space indentation: exact depths exclude nested
-# engines, and ASCII whitespace excludes locale-dependent non-JSON separators.
-# Formatting drift must fail closed rather than supply another object's range. No jq
+# This is a line reader standing in for a JSON reader, so its contract is the narrow
+# one that keeps that honest: it recognizes the pinned package's canonical block and
+# nothing else. The node line must be the line *immediately* inside the engines line,
+# at the pin's measured two- and four-space depths, because a range match anywhere
+# within an enclosing block accepts `.engines.metadata.node` as though it were
+# `.engines.node` — indentation carries no structure in JSON, so adjacency is what
+# distinguishes them here. ASCII space and tab are spelled out rather than using
+# [[:space:]], which is locale-dependent and admits U+00A0 as whitespace. Formatting
+# drift therefore fails closed rather than supplying some other object's range. No jq
 # is needed in lib/, which also runs on macOS before any bootstrap dependencies.
 # A missing or unreadable field is exit 2 naming the package, never an empty range.
 harbor_t3_package_engines() {
-  local package range
+  local package range newline
+  newline='
+'
   package="$(harbor_t3_package_dir "${1}")/package.json"
   # Refuse links before any reader can follow one into a credential store.
   [ ! -L "${package}" ] || harbor_die 2 t3.engines_unreadable "${package} is a symlink; rerun harbor provision to install the locked t3 package"
   [ -f "${package}" ] && [ -r "${package}" ] || harbor_die 2 t3.engines_unreadable "${package} is absent or unreadable; rerun harbor provision to install the locked t3 package"
-  range="$(sed -n '/^  "engines"[ 	]*:[ 	]*{[ 	]*$/,/^  }/ {
+  range="$(sed -n '/^  "engines"[ 	]*:[ 	]*{[ 	]*$/{
+    n
     s/^    "node"[ 	]*:[ 	]*"\([^"]*\)"[ 	]*,\{0,1\}[ 	]*$/\1/p
   }' "${package}")" || harbor_die 2 t3.engines_unreadable "${package} could not be read; rerun harbor provision to install the locked t3 package"
+  # Two canonical blocks would leave a newline here, and neither one can be called
+  # the package's requirement, so this refuses rather than taking the first.
+  case "${range}" in
+    *"${newline}"*) harbor_die 2 t3.engines_unreadable "${package} declares more than one engines.node range; rerun harbor provision to install the locked t3 package" ;;
+  esac
   [ -n "${range}" ] || harbor_die 2 t3.engines_unreadable "${package} carries no engines.node range; rerun harbor provision to install the locked t3 package"
   printf '%s' "${range}"
 }

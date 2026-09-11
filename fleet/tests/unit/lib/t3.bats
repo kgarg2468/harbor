@@ -957,6 +957,32 @@ engines_login_fixture() {
   assert_output --partial 'no engines.node range'
 }
 
+@test "regression: a node nested inside engines is not engines.node" {
+  # Valid JSON in which .engines.node is absent but .engines.metadata.node sits at
+  # the depth the pin uses. Indentation carries no structure, so only the node
+  # line's adjacency to the engines line separates this from the real package.
+  local package locked
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  locked="$(harbor_version_require t3_engines_node)"
+  mkdir -p "$(dirname "${package}")"
+  # The locked range, so a wrongly accepted value would also clear the drift check.
+  printf '{\n  "engines": {\n    "metadata": {\n    "node": "%s"\n    }\n  }\n}\n' "${locked}" >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'no engines.node range'
+}
+
+@test "regression: two canonical engines blocks are refused rather than resolved" {
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "engines": {\n    "node": ">=1.0.0"\n  },\n  "engines": {\n    "node": ">=2.0.0"\n  }\n}\n' >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'more than one engines.node range'
+  refute_output --partial '>=1.0.0'
+}
+
 @test "regression: symlinked package is refused without opening its target" {
   local package
   package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
