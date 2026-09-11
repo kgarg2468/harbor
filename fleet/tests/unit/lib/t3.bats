@@ -983,6 +983,20 @@ engines_login_fixture() {
   refute_output --partial '>=1.0.0'
 }
 
+@test "regression: a second block declaring an empty range is still a second block" {
+  # The empty range prints a blank line, and command substitution strips trailing
+  # newlines: the duplicate check has to survive the one duplicate that leaves no
+  # visible text behind, or it only catches the duplicates that were easy to see.
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "engines": {\n    "node": ">=1.0.0"\n  },\n  "engines": {\n    "node": ""\n  }\n}\n' >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'more than one engines.node range'
+  refute_output --partial '>=1.0.0'
+}
+
 @test "regression: symlinked package is refused without opening its target" {
   local package
   package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"

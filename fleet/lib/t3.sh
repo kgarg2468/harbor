@@ -69,12 +69,18 @@ harbor_t3_package_engines() {
   range="$(sed -n '/^  "engines"[ 	]*:[ 	]*{[ 	]*$/{
     n
     s/^    "node"[ 	]*:[ 	]*"\([^"]*\)"[ 	]*,\{0,1\}[ 	]*$/\1/p
-  }' "${package}")" || harbor_die 2 t3.engines_unreadable "${package} could not be read; rerun harbor provision to install the locked t3 package"
-  # Two canonical blocks would leave a newline here, and neither one can be called
-  # the package's requirement, so this refuses rather than taking the first.
+  }' "${package}" && printf .)" || harbor_die 2 t3.engines_unreadable "${package} could not be read; rerun harbor provision to install the locked t3 package"
+  # The sentinel preserves the trailing newlines command substitution would otherwise
+  # strip, and is appended with && so sed's own failure still reaches the refusal
+  # above. Without it a second block declaring an empty range prints a blank line that
+  # vanishes, and the count below would see one declaration where the package has two.
+  range="${range%.}"
+  # Each match printed its own line, so a second newline is a second declaration, and
+  # neither one can be called the package's requirement.
   case "${range}" in
-    *"${newline}"*) harbor_die 2 t3.engines_unreadable "${package} declares more than one engines.node range; rerun harbor provision to install the locked t3 package" ;;
+    *"${newline}"*"${newline}"*) harbor_die 2 t3.engines_unreadable "${package} declares more than one engines.node range; rerun harbor provision to install the locked t3 package" ;;
   esac
+  range="${range%"${newline}"}"
   [ -n "${range}" ] || harbor_die 2 t3.engines_unreadable "${package} carries no engines.node range; rerun harbor provision to install the locked t3 package"
   printf '%s' "${range}"
 }
