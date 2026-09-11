@@ -605,6 +605,10 @@ Reading only four keys is not laziness: it is the spec's own instruction, and it
 
 **Commit:** `feat(auth): T3 Connect login with the transition-only auth entry`
 
+**Correction 15 — the version lock must be loaded before the recovery scan, not after it.** This command opens the **operator** journal, which is the same journal a crashed `harbor provision` leaves a prepared `t3-service` entry in — that is precisely why the scan runs here at all. Deciding that entry goes through `harbor_observe_op_t3_service` to `harbor_t3_service_status`, which requires `t3_version`. Loading the lock after the scan therefore makes the scan die on the one journal state it exists to resolve, with `harbor: versions.unset: : t3_version is not pinned yet` — naming an empty lock path, because `HARBOR_VERSIONS_FILE` is unset too. Reproduced. Note that an in-process test cannot see this: the bats `setup()` loads the lock into the test shell, so the regression test runs the command in a fresh shell that has not, which is what the dispatcher does. `harbor_agents_auth` has the identical exposure and is filed as issue #119 rather than fixed here; the sturdier fix is a precondition inside `harbor_journal_recover`, since the reader registry is global.
+
+**Correction 16 — the login step carries no vendor label of its own.** `harbor_agents_auth_login` logs one, and `harbor_service_cmd` logs one, so copying the pattern looks right; both have a reason that does not hold here. The agents invoke their executable directly, and the service verbs are captured and classified by their callers, which is why that label has to precede the seam. This login goes through `harbor_t3_run`, which already emits exactly that line — and emits it *after* the version guard. A second label outside the seam would double the line on the normal path and, worse, would claim an invocation on the path where the guard refused one.
+
 ### Task 16: `lib/config.sh`
 
 **Files:**

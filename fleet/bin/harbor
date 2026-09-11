@@ -57,6 +57,9 @@ subcommands:
                                       logged-in transition the tool's own status command
                                       reported (design section 3.6); Harbor never logs
                                       either tool out and never reads its credentials
+  auth connect                        run T3 Connect's own login, attended, as the
+                                      operator, and journal only a false-to-true
+                                      authenticated transition its status reported
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
   service <start|stop|restart|status|logs>

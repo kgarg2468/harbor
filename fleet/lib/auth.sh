@@ -26,7 +26,7 @@ HARBOR_AUTH_PROBE_ACCEPTED="accepted"
 # tailscale up has returned, read every few seconds.
 HARBOR_AUTH_POLL_SECONDS=5
 HARBOR_AUTH_TIMEOUT_SECONDS=600
-HARBOR_AUTH_USAGE="usage: harbor auth tailscale [--tailscale-ssh] | harbor auth claude | harbor auth codex"
+HARBOR_AUTH_USAGE="usage: harbor auth tailscale [--tailscale-ssh] | harbor auth claude | harbor auth codex | harbor auth connect"
 # harbor_auth_refuse_root: exit 3 as root. The login URL binds this node to whoever
 # opens it, the state root this command takes its lock in is the operator's own, and
 # the daemon grant of design section 5.2 is what makes the unprivileged up possible at
@@ -270,7 +270,11 @@ harbor_auth_cmd() {
       return 0
       ;;
     connect)
-      harbor_die 3 usage "harbor auth ${tool} is not part of this release (design section 8, PR 4); ${HARBOR_AUTH_USAGE}"
+      shift
+      [ "$#" -eq 0 ] || harbor_die 3 usage "${HARBOR_AUTH_USAGE}"
+      harbor_state_root_for_principal
+      harbor_t3_connect "${HARBOR_STATE_ROOT}" "${HOME}"
+      return 0
       ;;
     *) harbor_die 3 usage "${HARBOR_AUTH_USAGE}" ;;
   esac

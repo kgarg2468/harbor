@@ -725,15 +725,13 @@ assert_url_only_on_terminal() {
   assert [ ! -e "${HARBOR_SHIM_LOG}" ]
 }
 
-@test "harbor auth: usage, the tool of a later step, and help name the commands" {
+@test "harbor auth: usage and help name the commands" {
   run env HOME="${FIX_HOME}" "${HARBOR}" auth
   assert_failure 3
   assert_output --partial "usage: harbor auth tailscale [--tailscale-ssh]"
   assert_output --partial "harbor auth claude"
   assert_output --partial "harbor auth codex"
-  run env HOME="${FIX_HOME}" "${HARBOR}" auth connect
-  assert_failure 3
-  assert_output --partial "harbor auth connect is not part of this release"
+  assert_output --partial "harbor auth connect"
   run env HOME="${FIX_HOME}" "${HARBOR}" auth github
   assert_failure 3
   assert_output --partial "usage: harbor auth tailscale"
@@ -743,6 +741,7 @@ assert_url_only_on_terminal() {
   assert_output --partial "auth tailscale [--tailscale-ssh]"
   assert_output --partial "auth claude"
   assert_output --partial "auth codex"
+  assert_output --partial "auth connect"
 }
 
 # ---- harbor auth claude and harbor auth codex ----------------------------------------
@@ -909,4 +908,61 @@ login status"
   assert_output --partial "usage: harbor auth"
   assert [ ! -e "${FIX_ROOT}" ]
   assert [ ! -e "$(agent_log)" ]
+}
+
+@test "harbor auth connect: dispatches login, journals authentication, and releases the operator lock" {
+  local bin version
+  . "${HARBOR_ROOT}/lib/t3.sh"
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  version="$(harbor_version_require t3_version)"
+  mkdir -p "$(dirname "${bin}")"
+  cp "${HARBOR_ROOT}/tests/fixtures/t3/connect-status/needs-login" "${BATS_TEST_TMPDIR}/connect-body"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "${1:-}" = --version ]; then echo "t3 v%s"; exit 0; fi\n' "${version}"
+    printf 'printf "%%s\\n" "$*" >>"%s/connect-calls"\n' "${BATS_TEST_TMPDIR}"
+    printf 'case "$*" in\n'
+    printf '  "connect status --json") cat "%s/connect-body" ;;\n' "${BATS_TEST_TMPDIR}"
+    printf '  "connect login")\n'
+    printf '    echo "Visit https://vendor.example/activate"\n'
+    printf '    cp "%s/tests/fixtures/t3/connect-status/needs-link" "%s/connect-body" ;;\n' "${HARBOR_ROOT}" "${BATS_TEST_TMPDIR}"
+    printf '  *) exit 97 ;;\nesac\n'
+  } >"${bin}"
+  chmod 0755 "${bin}"
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth connect
+  assert_success
+  assert_output --partial 'Visit https://vendor.example/activate'
+  assert_output --partial 'recorded the false to true transition'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 target)" '"connect"'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  harbor_journal_validate "${FIX_ROOT}/journal/0001-auth.json"
+  assert [ ! -e "${FIX_ROOT}/lock.d" ]
+  run ls -ld "${FIX_ROOT}" "${FIX_ROOT}/journal"
+  assert_line --index 0 --regexp '^drwx------'
+  assert_line --index 1 --regexp '^drwx------'
+  run ls -l "${FIX_ROOT}/harbor.log"
+  assert_output --regexp '^-rw-------'
+  refute grep -qF 'connect link' "${BATS_TEST_TMPDIR}/connect-calls"
+  run cat "${BATS_TEST_TMPDIR}/connect-calls"
+  assert_output 'connect status --json
+connect login
+connect status --json'
+}
+
+@test "harbor auth connect: extra arguments are usage errors before creating state" {
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth connect --force
+  assert_failure 3
+  assert_output --partial 'usage: harbor auth'
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth connect extra
+  assert_failure 3
+  assert_output --partial 'usage: harbor auth'
+  assert [ ! -e "${FIX_ROOT}" ]
+}
+
+@test "harbor auth connect: missing t3 names harbor provision" {
+  run env HOME="${FIX_HOME}" "${HARBOR}" auth connect
+  assert_failure 3
+  assert_output --partial 't3.not_installed:'
+  assert_output --partial 'harbor provision'
+  assert [ ! -e "${FIX_ROOT}" ]
 }
