@@ -281,7 +281,7 @@ jobs:
           process.stdout.write(lockDiff);
 
           // 5. Deterministic branch; the two blobs are named by their git ids.
-          const branch = `${branchPrefix}${provenance.version}`;
+          const branch = `${branchPrefix}${provenance.version}--${baseSha}`;
           const files = [
             { path: LOCK, bytes: Buffer.from(candidateLockText, "utf8") },
             { path: PROVENANCE, bytes: Buffer.from(provenanceText, "utf8") },
@@ -322,8 +322,8 @@ jobs:
             // Two matching blobs do not prove the head is the candidate: a
             // branch can carry them beside extra files or extra commits.
             // Require exactly the deterministic candidate commit: a single
-            // parent that is the trusted base commit or an ancestor of it on
-            // the base branch, and a tree that differs from that parent's
+            // parent that is the trusted base commit named by this branch,
+            // and a tree that differs from that parent's
             // tree in nothing but the two candidate blobs. Only such a head
             // is reused or gets its missing PR created; anything else is
             // refused before any write or dispatch.
@@ -335,11 +335,8 @@ jobs:
               fail(`${refuse} and that is not a single-parent commit; ${because}`);
             }
             const parentSha = parents[0].sha;
-            if (parentSha !== baseSha) {
-              const compare = await api("GET", `compare/${parentSha}...${baseSha}?per_page=1`);
-              if (compare?.status !== "ahead") fail(`${refuse} with parent ${parentSha}, which is not on ${baseBranch}; ${because}`);
-            }
-            const parentTree = parentSha === baseSha ? baseTree : (await api("GET", `git/commits/${parentSha}`))?.tree?.sha;
+            if (parentSha !== baseSha) fail(`${refuse} with parent ${parentSha}, not the branch's exact base ${baseSha}; ${because}`);
+            const parentTree = baseTree;
             const headTree = head.tree?.sha;
             if (!COMMIT_RE.test(parentTree ?? "") || !COMMIT_RE.test(headTree ?? "")) fail(`${refuse} and its tree or its parent's tree could not be read; ${because}`);
             const isPlainFile = (entry) => entry?.type === "blob" && entry?.mode === "100644";

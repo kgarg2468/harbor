@@ -1508,7 +1508,7 @@ describe("t3-managed-release workflow", () => {
     }
   });
 
-  it("triggers only on trusted-main lock/provenance pushes and workflow_dispatch without inputs", () => {
+  it("triggers only on trusted-main pushes and dispatch with an optional exact main SHA", () => {
     const on = blockAfter(lines, /^on:$/).block;
     const triggers = Object.keys(mapping(on, 2));
     assert.deepEqual(triggers.sort(), ["push", "workflow_dispatch"]);
@@ -1516,15 +1516,28 @@ describe("t3-managed-release workflow", () => {
     assert.match(push.join("\n"), /branches:\s*\[main\]/);
     const paths = push.filter((line) => /^\s+- /.test(line)).map((line) => line.trim().slice(2).replace(/^["']|["']$/g, ""));
     assert.deepEqual(paths.sort(), ["t3-reasoning/source.lock.json", "t3-reasoning/upstream-release.json"]);
-    assert.match(on.join("\n"), /^  workflow_dispatch: \{\}$/m, "workflow_dispatch takes no inputs");
+    const dispatch = blockAfter(on, /^  workflow_dispatch:$/).block;
+    const inputs = blockAfter(dispatch, /^    inputs:$/).block;
+    assert.deepEqual(Object.keys(mapping(inputs, 6)), ["expected_main_sha"]);
+    const expected = mapping(blockAfter(inputs, /^      expected_main_sha:$/).block, 8);
+    assert.equal(expected.required, "false");
+    assert.equal(expected.type, "string");
+    assert.match(text, /run-name:.*inputs\.expected_main_sha \|\| github\.sha/);
+    const guard = text.indexOf("Require expected main SHA before checkout");
+    assert.ok(guard > 0 && guard < text.indexOf("Check out trusted default-branch code"));
+    assert.match(text, /EXPECTED_MAIN_SHA: \$\{\{ inputs\.expected_main_sha \}\}/);
+    assert.match(text, /\[ "\$\{EXPECTED_MAIN_SHA\}" != "\$\{GITHUB_SHA\}" \]/);
     assert.doesNotMatch(text, /pull_request/);
-    assert.doesNotMatch(text, /inputs\./);
+    assert.deepEqual([...new Set(text.match(/inputs\.[a-z_]+/g))], ["inputs.expected_main_sha"]);
     assert.doesNotMatch(text, /github\.event\.inputs/);
   });
 
-  it("uses one fixed non-cancelling concurrency group and top-level contents: read", () => {
+  it("serializes all release revisions through publication without cancellation and keeps contents: read", () => {
     const concurrency = mapping(blockAfter(lines, /^concurrency:$/).block, 2);
-    assert.deepEqual(concurrency, { group: "t3-managed-release", "cancel-in-progress": "false" });
+    assert.deepEqual(concurrency, {
+      group: "t3-managed-release",
+      "cancel-in-progress": "false",
+    });
     const permissions = mapping(blockAfter(lines, /^permissions:$/).block, 2);
     assert.deepEqual(permissions, { contents: "read" });
   });
@@ -1590,7 +1603,10 @@ describe("t3-managed-release workflow", () => {
   it("resolves once, shares one descriptor/config artifact with every row, and preflights the tag", () => {
     const resolve = jobs.resolve.join("\n");
     assert.equal((resolve.match(/resolve-managed-release\.mjs/g) ?? []).length, 1);
-    assert.match(resolve, /--release-counter "\$\{GITHUB_RUN_NUMBER\}"/);
+    assert.match(resolve, /--release-counter "\$\{RELEASE_COUNTER\}"/);
+    assert.match(resolve, /git rev-list --count "\$\{GITHUB_SHA\}"/);
+    assert.match(resolve, /RELEASE_COUNTER=\$\(\(MAIN_COUNT \* 1000000000\)\)/);
+    assert.match(resolve, /RELEASE_COUNTER=\$\(\(RELEASE_COUNTER \+ GITHUB_RUN_NUMBER\)\)/);
     assert.match(resolve, /--builder-revision "\$\{GITHUB_SHA\}"/);
     assert.match(resolve, /--upstream-version "\$\{UPSTREAM_VERSION\}"/);
     assert.match(resolve, /--github-output "\$\{GITHUB_OUTPUT\}"/);

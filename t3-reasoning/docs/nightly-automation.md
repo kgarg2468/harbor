@@ -8,7 +8,7 @@ mutates nothing on GitHub and nothing in the checkout. The trusted workflows
 that run it on a schedule, propose the candidate PR, check the PR's exact
 head, and publish the four-artifact managed release once a candidate has
 merged are described at the end, together with the stages that remain
-boundaries (merge policy, signing, and installation).
+boundaries (signing and installation).
 
 ## What the helper does
 
@@ -190,13 +190,12 @@ node --test t3-reasoning/tests/discover-upstream-nightly.test.mjs
 
 ## Workflows
 
-Two workflows consume the report contract above, and a third publishes the
-managed release once a candidate has merged. All run only checked-in code
+Discovery and checker workflows consume the report contract above. A trusted
+promoter merges an exact clean candidate and dispatches managed publication. All run only checked-in code
 from the default branch, take their inputs as environment variables or API
 arguments (never shell interpolation), use action revisions pinned by full
-commit SHA, and check out with persisted credentials disabled. None signs,
-merges, installs, or changes a repository setting; only the release workflow
-builds and publishes.
+commit SHA, and check out with persisted credentials disabled. None signs, installs, or changes a repository setting; only the promoter
+merges and only the release workflow builds and publishes.
 
 ### Discovery: `.github/workflows/t3-managed-nightly-discovery.yml`
 
@@ -229,7 +228,7 @@ the checkout and requires `git status` to show nothing but them. The commit is
 created through the Git data API from the base commit's tree plus the two
 blobs (parent = the run's base commit), so nothing else can be pushed and no
 credential ever enters git configuration. The branch is deterministic,
-`t3/nightly-candidate/<upstream version>`, and is only ever created, never
+`t3/nightly-candidate/<upstream version>--<full base SHA>`, and is only ever created, never
 force-updated. A PR against `main` is opened and the checker is dispatched on
 `main` with the PR number and the exact pushed SHA, because a token-created
 push and PR do not launch the ordinary `push`/`pull_request` workflows.
@@ -237,8 +236,7 @@ push and PR do not launch the ordinary `push`/`pull_request` workflows.
 Rerun behavior for an existing candidate branch. Before the branch is reused
 in any way, its head must be proven to be exactly the deterministic candidate
 commit, read-only through the Git data API: a single-parent commit whose
-parent is the run's base commit or an ancestor of it on `main` (checked with
-the compare API), and whose tree differs from that parent's tree in nothing
+parent is exactly the run's base commit named by the branch, and whose tree differs from that parent's tree in nothing
 but the two candidate paths, each a plain `100644` blob with the expected id.
 Byte-identical candidate files alone are not enough, because a branch can
 carry them beside extra files or extra commits.
@@ -256,9 +254,13 @@ carry them beside extra files or extra commits.
 
 Not proposed automatically: a provenance-only bootstrap where the newest
 Nightly is the commit already pinned (commit `upstream-release.json` by hand),
-and a candidate that has gone stale because the default branch's catalog
-moved (close the PR, delete the branch, rerun). An older open candidate PR is
-not closed when a newer Nightly is proposed.
+and a candidate whose patch proof conflicts with the current catalog. Each
+new main SHA gets a distinct branch name, so daily discovery automatically
+regenerates a direct-parent candidate after a main advance without overwriting
+or depending on its stale branch or PR. Older candidates remain open for
+manual cleanup; the promoter ignores them and can promote the fresh candidate.
+The flat `--` delimiter also avoids Git ref file/directory collisions with
+legacy `<version>` branches, so they do not block a fresh candidate.
 
 Job permissions are `contents: write`, `pull-requests: write`, and
 `actions: write`; the token is supplied to `gh` only through the environment.
@@ -278,7 +280,7 @@ The `validate` job (`contents: read`, `pull-requests: read`):
    comes from the trusted checkout.
 3. Reads the PR through the API and requires it to be open, based on `main`,
    with base and head in this repository, `head.sha` equal to the input, and
-   a `t3/nightly-candidate/<version>` head branch.
+   a `t3/nightly-candidate/<version>--<full base SHA>` head branch.
 4. Requires the diff between the merge-base with `origin/main` and the head
    to be exactly `t3-reasoning/source.lock.json` (modified) and
    `t3-reasoning/upstream-release.json` (added or modified), both plain
@@ -307,17 +309,95 @@ explicit dispatch from discovery, so ordinary Harbor and fleet PRs never
 receive it. It is the status the candidate merge path must require on the
 PR's exact head SHA, not a required status check on `main` (see below).
 
+### Automatic promotion: `.github/workflows/t3-managed-nightly-promote.yml`
+
+The trusted main-only reconciler runs at minutes 8, 23, 38, and 53 each hour,
+plus `workflow_dispatch`, with fixed noncancelling concurrency. It runs
+`scripts/promote-nightly-candidate.mjs` from the exact workflow SHA and
+requires that SHA still be current main. Candidate objects are read only
+through GitHub APIs; no candidate checkout, hook, script, dependency, or
+binary executes. Permissions are contents/pull-requests/actions write and
+statuses/checks read, with no repository-setting changes.
+
+The promoter paginates open same-repository PRs and requires a GitHub Actions
+bot-created, open, nondraft candidate against current main. The branch must
+own the exact head and name the provenance version. That head must have one
+parent equal to current main (older candidates must be regenerated), and complete Git trees must differ from its parent
+in exactly the lock and provenance files as plain `100644` blobs. Blob sizes
+and Git hashes are checked. The lock must match both the parent and current
+main with only the commit line replaced. Trusted lock/provenance validators
+are reused, and the official published release, peeled tag, and newest
+Nightly listing must agree. A superseded or stale candidate stays pending.
+
+The latest exact-head candidate status must come from GitHub Actions and link
+to a successful, completed run of the exact trusted checker workflow,
+`workflow_dispatch` on main at the current base revision, with successful
+`validate` and `status` jobs from that run attempt. Missing or stale checker
+proof triggers a fresh checker dispatch; an active main checker suppresses
+repeat dispatch because its inputs are not exposed in the run listing. The
+branch version and full base SHA must match provenance and the single parent;
+the checker enforces the same binding against its merge-base.
+
+Greptile must authenticate as app id `867647`, check name `Greptile Review`.
+Its latest exact-head check must complete successfully with zero annotations,
+an empty paginated annotation listing, and the exact summary
+`2 files reviewed, 0 comments added.`. Any other grammar stays pending.
+All inline review comments and any `CHANGES_REQUESTED` review block promotion
+conservatively, including historical findings: these REST records do not
+expose a reliable app id. PR body prose is never a gate. Missing, delayed,
+unknown, failed, or truncated results never become success after a timeout.
+
+Every gate is read again immediately before a non-force Git ref update of
+`refs/heads/main` to the exact reviewed head. The candidate must directly
+descend from the expected main SHA. GitHub therefore rejects a concurrent
+divergent advance atomically as a non-fast-forward; the normal PR merge
+endpoint is not used. The promoter re-reads exact main and its reviewed tree.
+GitHub normally closes the PR when its commits reach main; any delayed open
+PR is explicitly closed only after repeating the exact-main/head proofs.
+
+The promoter explicitly dispatches `t3-managed-release.yml` on main with
+`expected_main_sha`, because a token-authored ref update suppresses the
+ordinary push event. No `check_run` event is required. If the ref update or
+dispatch response is lost, a later schedule recovers only when current main
+is exactly the reviewed candidate head, with its original single parent and
+checker revision. It repeats every provenance and review gate. Already-at-head
+recovery never repeats the ref write. Older or superseded candidates are not
+recovered automatically.
+
+Run listings filter exact `head_sha` and main branch (plus dispatch event for
+checker refresh), so unrelated lifetime history does not consume GitHub's
+1,000-result cap. Paginated totals must still match: more than 1,000 relevant
+runs or an ambiguous/truncated result stays pending. Active or successful
+release runs for the exact SHA suppress another dispatch; failed runs may be
+retried. Dispatches accepted but not yet visible can be repeated, but guarded
+release attempts use the same reserved counter-block base and repository-wide
+release concurrency. Once one publishes, the resolver rejects the same counter
+on any later attempt, even if public config changed; unchanged inputs also resolve
+the same immutable tag. Duplicate attempts cannot publish a second release.
+The expected-SHA guard still fails if dispatch resolves a moved main.
+
+Tests use an injected API, command runner, and clock, with no live mutations:
+
+```sh
+node --test t3-reasoning/tests/promote-nightly-candidate.test.mjs
+```
+
 ### Managed release publication: `.github/workflows/t3-managed-release.yml`
 
 Triggers: a push to `main` that changes `t3-reasoning/source.lock.json` or
 `t3-reasoning/upstream-release.json` (a merged candidate), and
-`workflow_dispatch` with no inputs, for a new attempt after a build failure
-or a public-config or builder change. Every job is gated on
+`workflow_dispatch` with optional `expected_main_sha`, for a new attempt
+after a build failure or a public-config or builder change. Automated
+promotion supplies the full expected SHA. The first resolve step fails before
+checkout or building when it differs from `github.sha`; the run name includes
+that expected SHA (or the workflow SHA for a manual rebuild). Every job is gated on
 `github.repository == 'kgarg2468/harbor'` and `github.ref ==
 'refs/heads/main'`; there is no pull-request trigger and no caller-supplied
-ref, repository, tag, or platform. The concurrency group is fixed and never
-cancels a run in progress. The top-level permission is `contents: read`;
-only the final `publish` job has `contents: write`.
+ref, repository, tag, or platform. One fixed repository-wide concurrency group
+serializes all release attempts from prior resolution through publication and never cancels
+a run in progress. Later main commits therefore cannot resolve the same prior
+while an earlier attempt is building and then publish out of order. The
+top-level permission is `contents: read`; only the final `publish` job has `contents: write`.
 
 Every Node step comes from `scripts/publish-managed-release.mjs`, whose
 subcommands are closed to `kgarg2468/harbor` and the `t3-managed-v` tag
@@ -367,9 +447,18 @@ time and exactly one well-formed `managed-release.json` asset with a
 positive size; that asset is downloaded by numeric id, its size and any
 reported digest must match the bytes, and the manifest must name the tag's
 version. The resolver then runs
-exactly once with the lock, the tracked upstream version, `github.run_number`
-as the counter, `github.sha` as the builder revision, the public config, and
-the prior manifest when one exists. `preflight` requires immutable releases
+exactly once with the lock, the tracked upstream version, `github.sha` as the
+builder revision, the public config, and
+the prior manifest when one exists. Guarded promotion uses
+`git rev-list --count "$GITHUB_SHA"` from the full-history exact checkout to
+reserve a block of 1,000,000,000 counters. Guarded attempts use `count *
+1,000,000,000`; manual/unguarded attempts add the positive `github.run_number`.
+Thus a manual rebuild immediately follows a guarded publication, repeated
+manual attempts increase, and the next main commit starts a greater block.
+Counts must be between 1 and 9,000,000; manual run numbers between 1 and
+999,999,999. The largest possible counter, 9,000,000,999,999,999, is below
+JavaScript's safe-integer maximum. Invalid, overflowing, or exhausted bounds
+fail before resolution. `preflight` requires immutable releases
 to be enabled (read with the Administration-read secret described above)
 and the intended tag to be absent from Git refs and from releases of every
 state, including drafts; a collision is refused, never reused or removed,
@@ -443,8 +532,10 @@ changed asset, a tag that does not resolve to `github.sha`) is reported
 against a release that is already visible. In every case the publisher sends
 the publish call at most once, retries nothing, and deletes, edits, or reuses
 nothing; a person inspects the release by its recorded id and exact tag and
-decides what follows. The next run consumes a new run number and therefore
-a new version and tag. The published release is the feed transaction:
+decides what follows. An unguarded manual run consumes a new run number and
+therefore a new offset within the same commit block, version, and tag.
+Guarded duplicate attempts retain their block-base counter and are refused after a successful publication; they
+never allocate a second release version for the same candidate. The published release is the feed transaction:
 clients see the previous immutable release until every artifact is present
 and the draft is published.
 
@@ -461,17 +552,11 @@ node --test t3-reasoning/tests/publish-managed-release.test.mjs
   while `default_workflow_permissions` remains `read`, so the discovery run
   opens its candidate PR with the workflow token. No separate automation
   identity exists; candidate PRs carry the token's identity.
-- Review and merge policy for bot-authored candidate PRs, including whether
-  Greptile reviews them. The merge path for these two-file PRs (a trusted
-  merge identity or a later merge automation) must require a `success`
-  `t3-managed-nightly-candidate` status on the PR's exact head SHA and merge
-  nothing else. That requirement belongs to the candidate merge path only: do
-  not add the context as a required status check in a `main` branch rule,
-  because ordinary PRs never receive it and such a rule would leave every
-  non-candidate PR waiting on a check that never reports. (A global required
-  check would first need a general workflow that reports a result for every
-  PR, which does not exist.) Auto-merge is disabled and no branch rules are
-  enforced today, so following a Nightly stops at an open, checked PR.
+- Greptile must actually review bot-created candidate heads and produce the
+  authenticated clean check described above. The promoter never bypasses a
+  missing review. Do not make the candidate context globally required on
+  main: ordinary Harbor and fleet PRs never receive it. The exact-head gate
+  belongs to this narrow candidate merge path.
 - Porting the newer reviewed source changes into the patch catalog. The helper
   proves only the catalog that is checked in; a `conflict` result is the
   signal that a patch needs to be re-ported by hand.
