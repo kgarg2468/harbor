@@ -1,7 +1,7 @@
 {
   "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
-  "commit": "3836890e4484406813997259efc69065b25ce698",
+  "commit": "c52b8d96e4b34201f19b5e5bb12c6b2a77bfaa9a",
   "patches": [
     {
       "id": "reasoning-full",
@@ -31,7 +31,7 @@
     {
       "id": "activity-wiring",
       "path": "patches/0009-activity-wiring.patch",
-      "sha256": "12da1c2183e966577fcc300f2144f507a17a4cef2ac4661208096defe31f7a84"
+      "sha256": "7ecae5e3e0ac7f60c2984bde46c3cdbe559499607918d2ba98ded868bc22cbfd"
     },
     {
       "id": "thread-fork-backend",
@@ -81,7 +81,7 @@
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "9ad1f47ae571ab26cc531ddf42af0eccd37d6d1962c182c1e64398c9765ec0ab"
+      "sha256": "43f176352f38e24ef35762d6a142e5246252b3c4d9ccf4f9540c0e138ad1967b"
     },
     {
       "id": "managed-release-feed",
@@ -96,7 +96,7 @@
     {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
-      "sha256": "83b5719e7afb6de4bdc5adea68e0bb33511aa12283c435e7ab5d070d998b7813"
+      "sha256": "ad954c7d6648ed5f5f4c20e914a3e48c3e4822c68dc4215c3d2144dc0a4c9d22"
     },
     {
       "id": "idle-preparation",
@@ -106,12 +106,12 @@
     {
       "id": "managed-server-composition",
       "path": "patches/0023-managed-server-composition.patch",
-      "sha256": "5f23d0ff1c1b5cc462fd69190a43aed0824230b6ec522ba9d1597c08ac5b2e31"
+      "sha256": "7e1919629ad92c0d528e710325f82a7ca41c4b10782e049c2f75e47451b763c9"
     },
     {
       "id": "live-admission",
       "path": "patches/0024-live-admission.patch",
-      "sha256": "d56dd9ec491a7750d74aa9501ee2cbe018c99379b7ec40f2ff7e9fa0d7323f5c"
+      "sha256": "531c856c8367812565c08fc4d2137c9636355918d6c731a41256d0d75de37f99"
     },
     {
       "id": "managed-desktop-identity",
@@ -126,7 +126,7 @@
     {
       "id": "managed-queue-controls",
       "path": "patches/0027-managed-queue-controls.patch",
-      "sha256": "9a8458d3f7d195b1d53428e6358999ec43ad181d1e8fa104d3d19c5d3f9a3d9e"
+      "sha256": "47f2a6fd924e314d1b3c77107a1a02cc9546f58a5b0e79489cba1b43cc12dad2"
     },
     {
       "id": "desktop-reservation-transport",
@@ -141,7 +141,7 @@
     {
       "id": "server-desktop-reservation-receiver",
       "path": "patches/0030-server-desktop-reservation-receiver.patch",
-      "sha256": "c1f39a144bfa1613349b4139b400a2527683ad8be4d799f20949f484fd907518"
+      "sha256": "101a35090f5ec97747bcd7435cbbc64b799af25a3a15c934d9544d37eefd357c"
     },
     {
       "id": "managed-presentation-identity",

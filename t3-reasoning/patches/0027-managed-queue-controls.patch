@@ -23,7 +23,7 @@ index 7262239577b482f84309654431c16c15349af272..efd4acb0d802ae680e2939e6949aaac4
      for (const method of ["server.notRegistered", "toString", "constructor"]) {
        expect(() => requiredScopeForRpcMethod(method)).toThrow(
 diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
-index a63b07f0adefc34b66f2b52c4b1e428069d6f569..1308f0edf5d76ec93a0661576908731e2e8b88f6 100644
+index d7d1be455fa1295d1951c23a41d09cd477eab3b9..472102d963a7c6e437c2fbb2c3390029f20d1ce9 100644
 --- a/apps/server/src/auth/RpcAuthorization.ts
 +++ b/apps/server/src/auth/RpcAuthorization.ts
 @@ -46,6 +46,9 @@ export const RPC_REQUIRED_SCOPES = {
@@ -36,8 +36,8 @@ index a63b07f0adefc34b66f2b52c4b1e428069d6f569..1308f0edf5d76ec93a0661576908731e
    [WS_METHODS.serverUpsertKeybinding]: AuthOrchestrationOperateScope,
    [WS_METHODS.serverRemoveKeybinding]: AuthOrchestrationOperateScope,
    [WS_METHODS.serverGetSettings]: AuthOrchestrationReadScope,
-@@ -146,6 +149,7 @@ export const RPC_REQUIRED_SCOPES = {
-   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
+@@ -155,6 +158,7 @@ export const RPC_REQUIRED_SCOPES = {
+   [WS_METHODS.subscribeDeviceState]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
 +  [WS_METHODS.subscribeManagedServerUpdate]: AuthOrchestrationReadScope,
@@ -1222,10 +1222,10 @@ index 055190bbb5185c17406a33901bdfd07828705c17..b0dbb99deb03498bd49fde1720da9de2
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab9083ec1922 100644
+index 582d052b8530b7c00f330c982087ac0a5d232fcf..b1f15ee40bdb08feb5dbd1d069081a112918c526 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
-@@ -191,6 +191,10 @@ import {
+@@ -206,6 +206,10 @@ import {
  import {
    ServerConfigStreamEvent,
    DesktopUpdateCommitInput,
@@ -1236,7 +1236,7 @@ index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab90
    ServerConfig,
    ServerProviderUpdateError,
    ServerProviderUpdateInput,
-@@ -321,6 +325,9 @@ export const WS_METHODS = {
+@@ -346,6 +350,9 @@ export const WS_METHODS = {
    serverUpdateServer: "server.updateServer",
    serverUpdateServerWithProgress: "server.updateServerWithProgress",
    serverCommitDesktopUpdate: "server.commitDesktopUpdate",
@@ -1246,15 +1246,15 @@ index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab90
    serverUpsertKeybinding: "server.upsertKeybinding",
    serverRemoveKeybinding: "server.removeKeybinding",
    serverGetSettings: "server.getSettings",
-@@ -381,6 +388,7 @@ export const WS_METHODS = {
-   subscribeDiscoveredLocalServers: "subscribeDiscoveredLocalServers",
+@@ -407,6 +414,7 @@ export const WS_METHODS = {
+   subscribeDeviceState: "subscribeDeviceState",
    subscribeServerConfig: "subscribeServerConfig",
    subscribeServerLifecycle: "subscribeServerLifecycle",
 +  subscribeManagedServerUpdate: "subscribeManagedServerUpdate",
    subscribeAuthAccess: "subscribeAuthAccess",
    subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
    subscribeResourceTelemetry: "subscribeResourceTelemetry",
-@@ -516,6 +524,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
+@@ -542,6 +550,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
    error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
  });
 
@@ -1288,7 +1288,7 @@ index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab90
  const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
    payload: Schema.Struct({}),
    success: ServerSettings,
-@@ -1177,6 +1212,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
+@@ -1256,6 +1291,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
    stream: true,
  });
 
@@ -1303,7 +1303,7 @@ index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab90
  const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
    payload: Schema.Struct({}),
    success: AuthAccessStreamEvent,
-@@ -1216,6 +1259,9 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -1295,6 +1338,9 @@ export const WsRpcGroup = RpcGroup.make(
    WsServerUpdateServerRpc,
    WsServerUpdateServerWithProgressRpc,
    WsServerCommitDesktopUpdateRpc,
@@ -1313,8 +1313,8 @@ index 2fabc9cbecb3308c4a341a8a9f4361099f4c049f..eb8abc8cca9739f12f71ccb5ae8cab90
    WsServerUpsertKeybindingRpc,
    WsServerRemoveKeybindingRpc,
    WsServerGetSettingsRpc,
-@@ -1311,6 +1357,7 @@ export const WsRpcGroup = RpcGroup.make(
-   WsSubscribeDiscoveredLocalServersRpc,
+@@ -1399,6 +1445,7 @@ export const WsRpcGroup = RpcGroup.make(
+   WsSubscribeDeviceStateRpc,
    WsSubscribeServerConfigRpc,
    WsSubscribeServerLifecycleRpc,
 +  WsSubscribeManagedServerUpdateRpc,

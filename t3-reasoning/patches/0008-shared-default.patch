@@ -55,10 +55,10 @@ index 6769586f7fa86fe74d153d207f904b8266ad7243..fa1d7577ccef2700e230c80d937d9dd8
        </SidebarProvider>
      </PanelAnimationSuppressionProvider>
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d3e48e7df 100644
+index 283e85365667422da088ab65223e764107d852f3..e5741d5a4b595e290011141d25c5b8d783ddfb7b 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -217,6 +217,7 @@ import {
+@@ -221,6 +221,7 @@ import {
    CheckCircle2Icon,
    ChevronDownIcon,
    GitBranchIcon,
@@ -66,7 +66,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
    Minimize2Icon,
    PaperclipIcon,
    WifiOffIcon,
-@@ -311,7 +312,13 @@ import {
+@@ -315,7 +316,13 @@ import {
  } from "@t3tools/client-runtime/state/threads";
  import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
  import { vcsEnvironment } from "../state/vcs";
@@ -81,7 +81,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
  import {
    useProject,
    useProjects,
-@@ -842,6 +849,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -849,6 +856,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
    const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
    const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
    const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
@@ -91,7 +91,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
    const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
    const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
    const projectRef = serverThread
-@@ -1000,7 +1010,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1007,7 +1017,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
    );
 
    const splitTerminal = useCallback(() => {
@@ -100,7 +100,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        return;
      }
      const terminalId = nextTerminalId(allocatableTerminalIds);
-@@ -1021,6 +1031,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1028,6 +1038,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      bumpFocusRequestId,
      cwd,
      effectiveWorktreePath,
@@ -108,7 +108,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      runtimeEnv,
      storeSplitTerminal,
      threadId,
-@@ -1028,7 +1039,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1035,7 +1046,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      openTerminal,
    ]);
    const splitTerminalVertical = useCallback(() => {
@@ -117,7 +117,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        return;
      }
      const terminalId = nextTerminalId(allocatableTerminalIds);
-@@ -1049,6 +1060,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1056,6 +1067,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      bumpFocusRequestId,
      cwd,
      effectiveWorktreePath,
@@ -125,7 +125,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      openTerminal,
      runtimeEnv,
      storeSplitTerminalVertical,
-@@ -1057,7 +1069,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1064,7 +1076,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
    ]);
 
    const createNewTerminal = useCallback(() => {
@@ -134,7 +134,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        return;
      }
      const terminalId = nextTerminalId(allocatableTerminalIds);
-@@ -1078,6 +1090,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1085,6 +1097,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      cwd,
      effectiveWorktreePath,
      allocatableTerminalIds,
@@ -142,7 +142,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      runtimeEnv,
      storeNewTerminal,
      threadId,
-@@ -1454,6 +1467,14 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1461,6 +1474,14 @@ export default function ChatView(props: ChatViewProps) {
    const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
    const { environments } = useEnvironments();
    const primaryEnvironment = usePrimaryEnvironment();
@@ -157,7 +157,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
    const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
    const environmentById = useMemo(
      () => new Map(environments.map((environment) => [environment.environmentId, environment])),
-@@ -3630,6 +3651,10 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3637,6 +3658,10 @@ export default function ChatView(props: ChatViewProps) {
        if (!activeThreadId || !activeProject) {
          return;
        }
@@ -168,7 +168,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
        if (!cwdForOpen) {
          return;
-@@ -3671,6 +3696,11 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3678,6 +3703,11 @@ export default function ChatView(props: ChatViewProps) {
        if (!activeThreadRef || hasReachedSplitLimit || !activeThreadId || !activeProject) {
          return;
        }
@@ -180,7 +180,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
        if (!cwdForOpen) {
          return;
-@@ -3714,6 +3744,9 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3721,6 +3751,9 @@ export default function ChatView(props: ChatViewProps) {
      if (!activeThreadRef || !activeThreadId || !activeProject) {
        return;
      }
@@ -190,7 +190,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
      if (!cwdForOpen) {
        return;
-@@ -3790,6 +3823,13 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3797,6 +3830,13 @@ export default function ChatView(props: ChatViewProps) {
        },
      ) => {
        if (!activeThreadId || !activeProject || !activeThread) return;
@@ -204,7 +204,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        if (options?.rememberAsLastInvoked !== false) {
          setLastInvokedScriptByProjectId((current) => {
            if (current[activeProject.id] === script.id) return current;
-@@ -4096,7 +4136,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4103,7 +4143,7 @@ export default function ChatView(props: ChatViewProps) {
    );
    const createBrowserSurface = useCallback(
      (profileId?: string) => {
@@ -213,7 +213,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        void addBrowserSurface({
          threadRef: activeThreadRef,
          openPreview,
-@@ -4115,7 +4155,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4122,7 +4162,7 @@ export default function ChatView(props: ChatViewProps) {
          }
        });
      },
@@ -222,9 +222,9 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
    );
    const addDiffSurface = useCallback(() => {
      if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-@@ -4313,7 +4353,9 @@ export default function ChatView(props: ChatViewProps) {
-     }
-   }, [activeThreadRef]);
+@@ -4390,7 +4430,9 @@ export default function ChatView(props: ChatViewProps) {
+     previewPanelOpen,
+   ]);
    const addTerminalSurface = useCallback(() => {
 -    if (!activeThreadRef || !activeThreadId || !activeProject) return;
 +    if (!activeThreadRef || !activeThreadId || !activeProject || newWorkBlockedMessage !== null) {
@@ -233,7 +233,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      const cwd = gitCwd ?? activeProject.workspaceRoot;
      const terminalId = nextTerminalId(allocatableActiveTerminalIds);
      useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
-@@ -4338,6 +4380,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4415,6 +4457,7 @@ export default function ChatView(props: ChatViewProps) {
      activeThreadWorktreePath,
      allocatableActiveTerminalIds,
      gitCwd,
@@ -241,7 +241,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      openTerminal,
    ]);
    const splitPanelTerminal = useCallback(
-@@ -4351,6 +4394,9 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4428,6 +4471,9 @@ export default function ChatView(props: ChatViewProps) {
        ) {
          return;
        }
@@ -251,7 +251,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        const terminalId = nextTerminalId(allocatableActiveTerminalIds);
        const cwd = gitCwd ?? activeProject.workspaceRoot;
        useRightPanelStore
-@@ -5882,12 +5928,32 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5959,12 +6005,32 @@ export default function ChatView(props: ChatViewProps) {
      selectedProvider,
    ]);
    const handleRestoreThreadBranch = useCallback(() => {
@@ -285,7 +285,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
    const feedbackBannerItems = useMemo(
      () =>
        feedbackSubmissions.flatMap((submission) => {
-@@ -5904,6 +5970,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5981,6 +6047,7 @@ export default function ChatView(props: ChatViewProps) {
      [feedbackSubmissions, routeThreadKey],
    );
    const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
@@ -293,7 +293,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      const backgroundLivenessItems =
        backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
      const resumeCompactionItems =
-@@ -5916,6 +5983,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -5993,6 +6060,7 @@ export default function ChatView(props: ChatViewProps) {
        return [
          ...feedbackBannerItems,
          ...usageLimitsItems,
@@ -301,7 +301,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
          ...systemComposerBannerItems,
          ...backgroundLivenessItems,
          ...resumeCompactionItems,
-@@ -5926,6 +5994,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6003,6 +6071,7 @@ export default function ChatView(props: ChatViewProps) {
      return [
        ...feedbackBannerItems,
        ...usageLimitsItems,
@@ -309,7 +309,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
        ...systemComposerBannerItems,
        ...backgroundLivenessItems,
        ...resumeCompactionItems,
-@@ -6192,6 +6261,8 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6269,6 +6338,8 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.split") {
          event.preventDefault();
          event.stopPropagation();
@@ -318,7 +318,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
          if (terminalFocusOwner === "right-panel") {
            splitPanelTerminal();
            return;
-@@ -6206,6 +6277,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6283,6 +6354,7 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.splitVertical") {
          event.preventDefault();
          event.stopPropagation();
@@ -326,7 +326,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
          if (terminalFocusOwner === "right-panel") {
            splitPanelTerminal("vertical");
            return;
-@@ -6232,6 +6304,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6309,6 +6381,7 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.new") {
          event.preventDefault();
          event.stopPropagation();
@@ -334,7 +334,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
          if (terminalFocusOwner === "right-panel") {
            addTerminalSurface();
            return;
-@@ -6293,6 +6366,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6370,6 +6443,7 @@ export default function ChatView(props: ChatViewProps) {
      requestCloseTerminal,
      requestClosePanelTerminal,
      createNewTerminal,
@@ -342,7 +342,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      setTerminalOpen,
      runProjectScript,
      splitTerminal,
-@@ -6450,6 +6524,22 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6527,6 +6601,22 @@ export default function ChatView(props: ChatViewProps) {
        notifyDirectAnnotationAttached();
        return;
      }
@@ -365,7 +365,7 @@ index f1b5afba94e9a78ce9888f807ba2427659df9519..945895c86d17d9dd9149bd23f69c411d
      if (needsLoadBalancing) {
        toastManager.add({
          type: "warning",
-@@ -8395,11 +8485,15 @@ export default function ChatView(props: ChatViewProps) {
+@@ -8509,11 +8599,15 @@ export default function ChatView(props: ChatViewProps) {
                              isConnecting={isConnecting}
                              isSendBusy={isSendBusy}
                              sendDisabledReason={

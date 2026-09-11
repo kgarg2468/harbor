@@ -3987,10 +3987,10 @@ index 1ce1a396796f9ee9fd296e8e558505ae2992f7b7..ac75ecc17a4c03fefe76add970b7f4ab
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/ProviderService.ts b/apps/server/src/provider/Layers/ProviderService.ts
-index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947ee31346d2 100644
+index d04dcae7f1266a8a2a51e60c0757d5e13fb42c19..affae4e26d867d2a68ce2f24e620160957a9517b 100644
 --- a/apps/server/src/provider/Layers/ProviderService.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.ts
-@@ -40,10 +40,10 @@ import { resolveProjectAgentBrowserAccess } from "@t3tools/shared/serverSettings
+@@ -41,11 +41,11 @@ import { resolveProjectAgentBrowserAccess } from "@t3tools/shared/serverSettings
  import * as DateTime from "effect/DateTime";
  import * as Deferred from "effect/Deferred";
  import * as Effect from "effect/Effect";
@@ -3998,11 +3998,12 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
  import * as FileSystem from "effect/FileSystem";
  import * as Layer from "effect/Layer";
  import * as Option from "effect/Option";
+ import * as Path from "effect/Path";
 -import * as PubSub from "effect/PubSub";
  import * as Ref from "effect/Ref";
  import * as Schema from "effect/Schema";
  import * as SchemaIssue from "effect/SchemaIssue";
-@@ -68,6 +68,7 @@ import {
+@@ -73,6 +73,7 @@ import {
    ProviderValidationError,
    ProviderWorkspaceMissingError,
  } from "../Errors.ts";
@@ -4010,7 +4011,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
  import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
  import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
  import * as ProviderService from "../Services/ProviderService.ts";
-@@ -79,6 +80,8 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+@@ -84,6 +85,8 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
  import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
  import * as ServerSettings from "../../serverSettings.ts";
  import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -4019,7 +4020,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
  const isModelSelection = Schema.is(ModelSelection);
  const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-@@ -225,16 +228,42 @@ function compactAccessibilityForPrompt(
+@@ -230,16 +233,42 @@ function compactAccessibilityForPrompt(
  /** How long a manual context compaction may run before ProviderService gives up on it. */
  const COMPACTION_COMPLETION_TIMEOUT = "10 minutes";
 
@@ -4063,10 +4064,10 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
  /**
   * Hook for tests that want to override the canonical event logger pulled
   * from `ProviderEventLoggers`. Production wiring leaves this undefined and
-@@ -478,7 +507,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
-   const issueMcpCredential =
+@@ -484,7 +513,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
    const fileSystem = yield* FileSystem.FileSystem;
+   const pathService = yield* Path.Path;
 -  const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 +  const activity = yield* UpdateActivity;
 +  // Every canonical event is owned by each required consumer until that
@@ -4083,7 +4084,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
    const pendingCompactions = new Map<ThreadId, PendingCompaction>();
    const timedOutNativeCompactions = new Set<ThreadId>();
    const settleCompaction = (threadId: ThreadId, pending: PendingCompaction, terminal: string) =>
-@@ -903,6 +943,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -953,6 +993,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
      );
 
@@ -4094,7 +4095,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
    const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
      Effect.succeed(event).pipe(
        Effect.tap((canonicalEvent) =>
-@@ -910,8 +954,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -960,8 +1004,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
            ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId)
            : Effect.void,
        ),
@@ -4119,7 +4120,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
      );
 
    const isCompactedEvent = (
-@@ -973,6 +1031,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1023,6 +1081,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        yield* publishRuntimeEvent(compactedEvent);
      });
 
@@ -4166,7 +4167,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
    const requireBindingInstanceId = (
      operation: string,
      payload: {
-@@ -1017,13 +1115,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1067,13 +1165,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        });
      });
 
@@ -4187,7 +4188,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
      Effect.gen(function* () {
        const canonicalEvent = yield* Effect.sync(() =>
          correlateRuntimeEventWithInstance(source, event),
-@@ -1049,16 +1148,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1099,16 +1198,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
          timedOutNativeCompactions.delete(canonicalEvent.threadId)
        ) {
          yield* publishRuntimeEvent(canonicalEvent);
@@ -4207,7 +4208,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
        }
        if (pendingCompaction.native) {
          const compacted = isCompactedEvent(canonicalEvent);
-@@ -1068,19 +1167,49 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1118,19 +1217,49 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
          );
          if (terminal !== null)
            yield* settleCompaction(canonicalEvent.threadId, pendingCompaction, terminal);
@@ -4260,7 +4261,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
    // `subscribedAdapters` is our source-of-truth for "which instance adapters
    // are currently wired into the runtime event bus". It both tracks the set
    // of live subscriptions (so `reconcileInstanceSubscriptions` can diff and
-@@ -1097,12 +1226,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1147,12 +1276,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      Effect.map((map) => Array.from(map.entries())),
    );
 
@@ -4338,7 +4339,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
    const reconcileInstanceSubscriptions = Effect.gen(function* () {
      const previous = yield* Ref.get(subscribedAdapters);
      const currentIds = yield* registry.listInstances();
-@@ -1115,15 +1308,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1165,15 +1358,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
        const adapter = adapterOption.value;
        next.set(id, adapter);
        if (previous.get(id) !== adapter) {
@@ -4362,7 +4363,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
        }
      }
      yield* Ref.set(subscribedAdapters, next);
-@@ -1739,10 +1931,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1789,10 +1981,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
            detail: "Context compaction is already in progress.",
          });
        }
@@ -4378,7 +4379,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
        });
        const awaitNativeCompaction = (start: Effect.Effect<void, ProviderAdapterError>) =>
          start.pipe(
-@@ -1785,18 +1981,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1835,18 +2031,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                  threadId,
                  input: compaction.command,
                  ...(modelSelection !== undefined ? { modelSelection } : {}),
@@ -4401,7 +4402,7 @@ index 5b9059bfa6435d8df9f9c445a9b0f7769c5867d8..3e9760a0642e3826942b17f350ee947e
                return yield* awaitFallbackCompaction;
              })
        ).pipe(Effect.ensuring(clearPending));
-@@ -2266,12 +2455,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -2316,12 +2505,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      assertConversationRollbackSupported,
      rollbackConversation,
      uploadFeedback,
@@ -5494,10 +5495,10 @@ index 01f2dd96b18f6b2e262e16649e6977574c69d435..532e17f74dae94f7d5c765c94274baaa
              ...options?.layers?.orchestrationEngine,
            }),
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 3831763a3eac52b03b3a4301737dcdf161a4ea4f..c5b9f49f2ec008d9ba518c58ddb27bd243e9cad3 100644
+index e3b42a2637a1149f0d1d9658a23041623056ab86..ff8342eb538a782d9b0c473af4920191c161cbf1 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -129,6 +129,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+@@ -131,6 +131,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
  import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
  import * as UsageService from "./usage/UsageService.ts";
  import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
@@ -5505,7 +5506,7 @@ index 3831763a3eac52b03b3a4301737dcdf161a4ea4f..c5b9f49f2ec008d9ba518c58ddb27bd2
  import {
    clearPersistedServerRuntimeState,
    makePersistedServerRuntimeState,
-@@ -469,6 +470,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -477,6 +478,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    Layer.provideMerge(GitLayerLive),
    Layer.provideMerge(VcsLayerLive),
    Layer.provideMerge(ProviderRuntimeLayerLive),
@@ -5513,7 +5514,7 @@ index 3831763a3eac52b03b3a4301737dcdf161a4ea4f..c5b9f49f2ec008d9ba518c58ddb27bd2
 +  // Memoized here, at the shared composition, so each requirer sees the same
 +  // instance; a per-service provide would split the count.
 +  Layer.provideMerge(UpdateActivityLive),
-   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
+   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
    Layer.provideMerge(PersistenceLayerLive),
    // Both read a user-owned file out of the state directory and stream changes
 diff --git a/apps/server/src/serverRuntimeStartup.reconcile.test.ts b/apps/server/src/serverRuntimeStartup.reconcile.test.ts

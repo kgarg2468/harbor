@@ -1,8 +1,8 @@
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 1f4083d1..5e3a4591 100644
+index f9099d670cef414c773c2c94c528f4eada847d01..cd4a33b75fca125a6ab7aa5a0d42fa553cff5480 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -55,10 +55,12 @@ import { assert, it } from "@effect/vitest";
+@@ -56,10 +56,12 @@ import { assert, it } from "@effect/vitest";
  import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
  import * as Clock from "effect/Clock";
  import * as Config from "effect/Config";
@@ -15,7 +15,7 @@ index 1f4083d1..5e3a4591 100644
  import * as FileSystem from "effect/FileSystem";
  import * as Fiber from "effect/Fiber";
  import * as Layer from "effect/Layer";
-@@ -68,6 +70,7 @@ import * as PubSub from "effect/PubSub";
+@@ -69,6 +71,7 @@ import * as PubSub from "effect/PubSub";
  import * as Ref from "effect/Ref";
  import * as Queue from "effect/Queue";
  import * as Schema from "effect/Schema";
@@ -23,14 +23,12 @@ index 1f4083d1..5e3a4591 100644
  import * as Stream from "effect/Stream";
  import * as TestClock from "effect/testing/TestClock";
  import * as Tracer from "effect/Tracer";
-@@ -95,9 +98,34 @@ const decodeTransferShellSnapshot = Schema.decodeUnknownEffect(
- );
- const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
- 
-+import packageJson from "../package.json" with { type: "json" };
+@@ -99,7 +102,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as ServerConfig from "./config.ts";
+ import * as DeviceService from "./device/DeviceService.ts";
 -import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
++import packageJson from "../package.json" with { type: "json" };
 +import {
 +  HTTP_ROUTER_CONFIG,
 +  makeManagedUpdateRuntimeLayer,
@@ -59,10 +57,10 @@ index 1f4083d1..5e3a4591 100644
  import {
    isThreadDetailEvent,
    resolveAvailableEditorsForConfig,
-@@ -11362,6 +11390,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
+@@ -11427,6 +11455,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
    );
  });
- 
+
 +// The production managed-update composition, built over fakes at the exact
 +// layer boundary `server.ts` uses. No transport consumes `QueuedUpdate` yet, so
 +// caller independence is proven with short-lived caller scopes rather than
@@ -496,7 +494,7 @@ index 7e4543a5..bbd73aec 100644
  import * as Stream from "effect/Stream";
  import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
  import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
- 
+
 +import packageJson from "../package.json" with { type: "json" };
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
@@ -547,7 +545,7 @@ index 7e4543a5..bbd73aec 100644
 @@ -418,6 +443,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
    ),
  );
- 
+
 +/**
 + * Managed releases ship exactly two server artifacts. Every other host keeps a
 + * dormant queue whose exact-version resolver fails; there is no fallback
@@ -696,7 +694,7 @@ index 7e4543a5..bbd73aec 100644
 @@ -744,19 +902,24 @@ export const makeServerLayer = Layer.unwrap(
        }),
      );
- 
+
 -    const runtimeServicesLive = ServerRuntimeStartup.layerWithOptions({
 -      activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
 -      abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
@@ -728,6 +726,6 @@ index 7e4543a5..bbd73aec 100644
 +      }),
 +      ManagedUpdateRuntimeLive,
 +    ).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
- 
+
      const routesLayer = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(launcherLayer)), {
        disableLogger: !config.logWebSocketEvents,

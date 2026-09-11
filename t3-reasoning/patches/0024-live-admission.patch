@@ -1438,7 +1438,7 @@ index 74a1b4939f1af18399f243eb0ed86253cccba204..0c191e5bdc5e1c0e30c5f71a8d9154db
 +export * from "./updateAdmission.ts";
  export * from "./rpc.ts";
 diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
-index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..055190bbb5185c17406a33901bdfd07828705c17 100644
+index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd30fc1588 100644
 --- a/packages/contracts/src/rpc.test.ts
 +++ b/packages/contracts/src/rpc.test.ts
 @@ -2,7 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
@@ -1451,7 +1451,7 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..055190bbb5185c17406a33901bdfd078
 
  /**
   * The client always sends `environmentThemes`, including to servers built
-@@ -29,3 +30,157 @@ describe("subscribeServerConfig payload compatibility", () => {
+@@ -29,3 +30,166 @@ describe("subscribeServerConfig payload compatibility", () => {
      expect(decoded).toEqual({});
    });
  });
@@ -1517,6 +1517,11 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..055190bbb5185c17406a33901bdfd078
 +    "preview.resize",
 +    "preview.refresh",
 +    "preview.close",
++    "device.configure",
++    "device.open",
++    "device.close",
++    "device.shutdown",
++    "device.action",
 +  ];
 +  const excluded = [
 +    // Reads.
@@ -1568,6 +1573,9 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..055190bbb5185c17406a33901bdfd078
 +    "review.getDiffFileContents",
 +    "terminal.attach",
 +    "preview.list",
++    "device.list",
++    "device.detail",
++    "device.testHost",
 +    "preview.reportStatus",
 +    // Update control: these drive maintenance and can never wait on it.
 +    "server.updateServer",
@@ -1578,6 +1586,7 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..055190bbb5185c17406a33901bdfd078
 +    "previewAutomation.respond",
 +    "previewAutomation.focusHost",
 +    // Subscriptions.
++    "subscribeDeviceState",
 +    "provider.auth.subscribe",
 +    "provider.install.subscribe",
 +    "pullRequests.subscribeRefreshes",
@@ -1610,10 +1619,10 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..055190bbb5185c17406a33901bdfd078
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f4361099f4c049f 100644
+index 5e11aeb28fa367bad0cb5f14a7003e7ead885081..21fcac3367517841f988b8a5119e8bd5d6aeaaed 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
-@@ -235,6 +235,7 @@ import {
+@@ -250,6 +250,7 @@ import {
    SourceControlRepositoryInfo,
    SourceControlRepositoryLookupInput,
  } from "./sourceControl.ts";
@@ -1621,7 +1630,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
  import { VcsError } from "./vcs.ts";
 
  export const WS_METHODS = {
-@@ -389,13 +390,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
+@@ -415,13 +416,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
    payload: ServerUpsertKeybindingInput,
    success: ServerUpsertKeybindingResult,
    error: Schema.Union([KeybindingsConfigError, EnvironmentAuthorizationError]),
@@ -1637,7 +1646,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
    payload: Schema.Struct({}),
-@@ -424,13 +425,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
+@@ -450,13 +451,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
    }),
    success: ServerProviderUpdatedPayload,
    error: Schema.Union([EnvironmentAuthorizationError, ProviderSetupError]),
@@ -1653,7 +1662,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const ProviderSetupRpcError = Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]);
 
-@@ -438,31 +439,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
+@@ -464,31 +465,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
    payload: ProviderConsumeResetCreditInput,
    success: ProviderConsumeResetCreditResult,
    error: Schema.Union([ProviderSetupError, UsageLimitSourceError, EnvironmentAuthorizationError]),
@@ -1690,7 +1699,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsProviderAuthSubscribeRpc = Rpc.make(WS_METHODS.providerAuthSubscribe, {
    payload: ProviderSetupInput,
-@@ -475,13 +476,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
+@@ -501,13 +502,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
    payload: ProviderSetupInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
@@ -1706,7 +1715,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsProviderInstallSubscribeRpc = Rpc.make(WS_METHODS.providerInstallSubscribe, {
    payload: ProviderSetupInput,
-@@ -494,7 +495,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
+@@ -520,7 +521,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
    payload: ProviderSetupInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
@@ -1715,7 +1724,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsServerUpdateServerRpc = Rpc.make(WS_METHODS.serverUpdateServer, {
    payload: ServerSelfUpdateInput,
-@@ -525,7 +526,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
+@@ -551,7 +552,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
    payload: Schema.Struct({ patch: ServerSettingsPatch }),
    success: ServerSettings,
    error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
@@ -1724,7 +1733,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
    payload: Schema.Struct({}),
-@@ -592,7 +593,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
+@@ -618,7 +619,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
    payload: ServerSignalProcessInput,
    success: ServerSignalProcessResult,
    error: EnvironmentAuthorizationError,
@@ -1733,7 +1742,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsCloudGetRelayClientStatusRpc = Rpc.make(WS_METHODS.cloudGetRelayClientStatus, {
    payload: Schema.Struct({}),
-@@ -605,7 +606,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
+@@ -631,7 +632,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
    success: RelayClientInstallProgressEventSchema,
    error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
    stream: true,
@@ -1742,7 +1751,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
    payload: ClientActivityReportInput,
-@@ -692,49 +693,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
+@@ -718,49 +719,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
    payload: PullRequestActionInput,
    success: Schema.Void,
    error: PullRequestRpcError,
@@ -1800,7 +1809,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsPullRequestsInvalidateRpc = Rpc.make(WS_METHODS.pullRequestsInvalidate, {
    payload: PullRequestInvalidateInput,
-@@ -764,7 +765,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
+@@ -790,7 +791,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
    payload: PullRequestReviewerRequestInput,
    success: Schema.Void,
    error: PullRequestRpcError,
@@ -1809,7 +1818,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  /** Read when the label menu opens, for the same reason the reviewer candidates are. */
  const WsPullRequestsLabelCandidatesRpc = Rpc.make(WS_METHODS.pullRequestsLabelCandidates, {
-@@ -777,7 +778,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
+@@ -803,7 +804,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
    payload: PullRequestLabelChangeInput,
    success: Schema.Void,
    error: PullRequestRpcError,
@@ -1818,7 +1827,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsSourceControlLookupRepositoryRpc = Rpc.make(WS_METHODS.sourceControlLookupRepository, {
    payload: SourceControlRepositoryLookupInput,
-@@ -789,13 +790,13 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
+@@ -815,13 +816,13 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
    payload: SourceControlCloneRepositoryInput,
    success: SourceControlCloneRepositoryResult,
    error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
@@ -1834,7 +1843,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
    payload: ProjectSearchEntriesInput,
-@@ -825,12 +826,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
+@@ -851,12 +852,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
    payload: ProjectWriteFileInput,
    success: ProjectWriteFileResult,
    error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
@@ -1849,7 +1858,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
    payload: FilesystemBrowseInput,
-@@ -853,7 +854,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
+@@ -879,7 +880,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
      AgentSessionScanError,
      EnvironmentAuthorizationError,
    ]),
@@ -1858,7 +1867,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
    payload: AssetCreateUrlInput,
-@@ -865,18 +866,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
+@@ -891,18 +892,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
    payload: AttachmentCreateUploadUrlInput,
    success: AttachmentCreateUploadUrlResult,
    error: Schema.Union([AttachmentUploadSigningKeyError, EnvironmentAuthorizationError]),
@@ -1880,7 +1889,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
    payload: VcsStatusInput,
-@@ -889,7 +890,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
+@@ -915,7 +916,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
    payload: VcsPullInput,
    success: VcsPullResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
@@ -1889,7 +1898,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
    payload: VcsStatusInput,
-@@ -902,7 +903,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+@@ -928,7 +929,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
    success: GitActionProgressEvent,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
    stream: true,
@@ -1898,7 +1907,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
    payload: GitPullRequestRefInput,
-@@ -914,7 +915,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
+@@ -940,7 +941,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
    payload: GitPreparePullRequestThreadInput,
    success: GitPreparePullRequestThreadResult,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
@@ -1907,7 +1916,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
    payload: VcsListRefsInput,
-@@ -926,29 +927,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
+@@ -952,29 +953,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
    payload: VcsCreateWorktreeInput,
    success: VcsCreateWorktreeResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
@@ -1942,7 +1951,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  /**
   * Ephemeral live diff preview for compact/mobile surfaces.
-@@ -971,7 +972,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
+@@ -997,7 +998,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
    payload: TerminalOpenInput,
    success: TerminalSessionSnapshot,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
@@ -1951,7 +1960,7 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
    payload: TerminalAttachInput,
-@@ -983,56 +984,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
+@@ -1009,56 +1010,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
  const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
    payload: TerminalWriteInput,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
@@ -2018,7 +2027,44 @@ index 76cca2562afc23a35b595aee3382ef5a18ef77ee..2fabc9cbecb3308c4a341a8a9f436109
 
  const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
    payload: PreviewListInput,
-@@ -1082,7 +1083,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
+@@ -1120,23 +1121,23 @@ const WsDeviceConfigureRpc = Rpc.make(WS_METHODS.deviceConfigure, {
+   payload: DeviceConfigureInput,
+   success: DeviceServiceState,
+   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+
+ const WsDeviceOpenRpc = Rpc.make(WS_METHODS.deviceOpen, {
+   payload: DeviceOpenInput,
+   success: DeviceSession,
+   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+
+ const WsDeviceCloseRpc = Rpc.make(WS_METHODS.deviceClose, {
+   payload: DeviceCloseInput,
+   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+
+ const WsDeviceShutdownRpc = Rpc.make(WS_METHODS.deviceShutdown, {
+   payload: DeviceShutdownInput,
+   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+
+ const WsDeviceDetailRpc = Rpc.make(WS_METHODS.deviceDetail, {
+   payload: DeviceDetailInput,
+@@ -1148,7 +1149,7 @@ const WsDeviceActionRpc = Rpc.make(WS_METHODS.deviceAction, {
+   payload: DeviceActionInput,
+   success: DeviceDetail,
+   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+
+ const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
+   payload: Schema.Struct({}),
+@@ -1161,7 +1162,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
    payload: ClientOrchestrationCommand,
    success: OrchestrationRpcSchemas.dispatchCommand.output,
    error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
