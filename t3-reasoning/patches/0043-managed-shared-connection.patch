@@ -1,0 +1,645 @@
+diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
+--- a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
++++ b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
+@@ -271,8 +271,11 @@
+           yield* Deferred.succeed(f.ensureRelease, undefined);
+           assert.deepEqual(yield* Fiber.join(ensuring), bootstrap);
+           const result = yield* f.lifecycle.tryFreeze;
+-          assert.equal(result._tag, "unsupported");
+-          if (result._tag === "unsupported") assert.include(result.reason, "restart T3 Code");
++          assert.equal(result._tag, "frozen");
++          if (result._tag === "frozen") {
++            assert.deepEqual(result.backends.runs, []);
++            yield* result.backends.release;
++          }
+         }),
+       ),
+   );
+@@ -307,7 +310,9 @@
+         assert.equal((yield* f.lifecycle.tryFreeze)._tag, "busy");
+         yield* Deferred.succeed(f.disconnectRelease, undefined);
+         yield* Fiber.join(disconnect);
+-        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        const idle = yield* f.lifecycle.tryFreeze;
++        assert.equal(idle._tag, "frozen");
++        if (idle._tag === "frozen") yield* idle.backends.release;
+         const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
+         yield* Deferred.await(f.cleanupEntered);
+         assert.isTrue(f.ownerPresent());
+@@ -325,6 +330,8 @@
+   it.effect("retention lets waiting SSH teardown settle while new ensure stays excluded", () =>
+     withSshFixture((f) =>
+       Effect.gen(function* () {
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* f.environment.ensureEnvironment(target);
+         const frozen = yield* f.lifecycle.tryFreeze;
+         if (frozen._tag !== "frozen") return assert.fail("expected freeze");
+         const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
+@@ -411,7 +418,9 @@
+         yield* f.environment.ensureEnvironment(target);
+         yield* saved.removeEnvironment(savedRecord.environmentId);
+         assert.deepEqual(yield* saved.getRegistry, []);
+-        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        const idle = yield* f.lifecycle.tryFreeze;
++        assert.equal(idle._tag, "frozen");
++        if (idle._tag === "frozen") yield* idle.backends.release;
+         assert.isTrue(f.ownerPresent());
+       }),
+     ),
+@@ -470,23 +479,23 @@
+     ),
+ );
+ 
+-it.effect(
+-  "interrupted ensure keeps the conservative owner and releases its operation for cleanup",
+-  () =>
+-    withSshFixture((f) =>
+-      Effect.gen(function* () {
+-        const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
+-        yield* Deferred.await(f.ensureEntered);
+-        yield* Fiber.interrupt(ensuring);
+-        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
+-        const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
+-        yield* Deferred.await(f.cleanupEntered);
+-        assert.isTrue(f.ownerPresent());
+-        yield* Deferred.succeed(f.cleanupRelease, undefined);
+-        yield* Fiber.join(closing);
+-        assert.isFalse(f.ownerPresent());
+-      }),
+-    ),
++it.effect("interrupted ensure keeps the scoped owner and releases its operation for cleanup", () =>
++  withSshFixture((f) =>
++    Effect.gen(function* () {
++      const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++      yield* Deferred.await(f.ensureEntered);
++      yield* Fiber.interrupt(ensuring);
++      const idle = yield* f.lifecycle.tryFreeze;
++      assert.equal(idle._tag, "frozen");
++      if (idle._tag === "frozen") yield* idle.backends.release;
++      const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
++      yield* Deferred.await(f.cleanupEntered);
++      assert.isTrue(f.ownerPresent());
++      yield* Deferred.succeed(f.cleanupRelease, undefined);
++      yield* Fiber.join(closing);
++      assert.isFalse(f.ownerPresent());
++    }),
++  ),
+ );
+ 
+ for (const maxOps of [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
+@@ -498,7 +507,9 @@
+           Array.from({ length: 10 }, () => f.environment.ensureEnvironment(target)),
+           { concurrency: "unbounded" },
+         );
+-        assert.equal((yield* f.lifecycle.tryFreeze)._tag, "unsupported");
++        const idle = yield* f.lifecycle.tryFreeze;
++        assert.equal(idle._tag, "frozen");
++        if (idle._tag === "frozen") yield* idle.backends.release;
+         yield* Deferred.succeed(f.cleanupRelease, undefined);
+         yield* Scope.close(f.scope, Exit.void);
+         const frozen = yield* f.lifecycle.tryFreeze;
+@@ -508,3 +519,49 @@
+     ).pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, maxOps)),
+   );
+ }
++
++for (const outcome of ["release", "reject", "abort"] as const) {
++  it.effect(`settled tunnel survives provisional freeze ${outcome}`, () =>
++    withSshFixture((f) =>
++      Effect.gen(function* () {
++        yield* Deferred.succeed(f.ensureRelease, undefined);
++        yield* f.environment.ensureEnvironment(target);
++        const snapshotEntered = yield* Deferred.make<void>();
++        const removeOtherOwner =
++          outcome === "release"
++            ? Effect.void
++            : yield* f.lifecycle.addOwner(
++                outcome === "reject"
++                  ? Effect.succeed({ _tag: "unsupported", reason: "another owner" })
++                  : Deferred.succeed(snapshotEntered, undefined).pipe(Effect.andThen(Effect.never)),
++              );
++        if (outcome === "abort") {
++          const freeze = yield* f.lifecycle.tryFreeze.pipe(Effect.forkChild);
++          yield* Deferred.await(snapshotEntered);
++          yield* Fiber.interrupt(freeze);
++        } else {
++          const frozen = yield* f.lifecycle.tryFreeze;
++          assert.equal(frozen._tag, outcome === "release" ? "frozen" : "unsupported");
++          if (frozen._tag === "frozen") {
++            assert.deepEqual(frozen.backends.runs, []);
++            const ensure = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
++            const disconnect = yield* f.environment
++              .disconnectEnvironment(target)
++              .pipe(Effect.forkChild);
++            yield* Effect.yieldNow;
++            assert.isUndefined(ensure.pollUnsafe());
++            assert.isFalse(yield* Deferred.isDone(f.disconnectEntered));
++            assert.isFalse(yield* Deferred.isDone(f.cleanupEntered));
++            yield* Fiber.interrupt(ensure);
++            yield* Fiber.interrupt(disconnect);
++            yield* frozen.backends.release;
++          }
++        }
++        assert.isFalse(yield* Deferred.isDone(f.cleanupEntered));
++        assert.isFalse(yield* Deferred.isDone(f.disconnectEntered));
++        assert.isTrue(f.ownerPresent());
++        yield* removeOtherOwner;
++      }),
++    ),
++  );
++}
+diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
+--- a/apps/desktop/src/ssh/DesktopSshEnvironment.ts
++++ b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
+@@ -213,9 +213,9 @@
+             if (--activeOperations === 0) Deferred.doneUnsafe(drained, Effect.void);
+           }),
+       );
+-    // The SSH package owns alias resolution, reconnects, and tunnel scopes. Keep
+-    // a conservative owner for its entire scope once ensure may create a process;
+-    // a disconnect or a deleted saved record cannot prove that scope is empty.
++    // A settled SSH tunnel forwards traffic but owns no backend reservation work.
++    // Keep its scope for normal shutdown; provisional freezes must not close it.
++    // Ensures, disconnects, and scope cleanup remain guarded lifecycle mutations.
+     const managerScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
+       lifecycle.withTeardown(
+         Effect.gen(function* () {
+@@ -234,21 +234,13 @@
+           Effect.suspend(() =>
+             marked
+               ? Effect.void
+-              : lifecycle
+-                  .addOwner(
+-                    Effect.succeed({
+-                      _tag: "unsupported",
+-                      reason:
+-                        "Desktop SSH ownership cannot reserve idle work for an update. Finish SSH work and restart T3 Code before retrying the update.",
+-                    }),
+-                  )
+-                  .pipe(
+-                    Effect.map((remove) => {
+-                      removeOwner = remove;
+-                      marked = true;
+-                    }),
+-                    Effect.asVoid,
+-                  ),
++              : lifecycle.addOwner(Effect.succeed({ _tag: "stopped" })).pipe(
++                  Effect.map((remove) => {
++                    removeOwner = remove;
++                    marked = true;
++                  }),
++                  Effect.asVoid,
++                ),
+           ),
+         ),
+       ),
+diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
+--- a/packages/ssh/src/tunnel.test.ts
++++ b/packages/ssh/src/tunnel.test.ts
+@@ -1,3 +1,11 @@
++// @effect-diagnostics nodeBuiltinImport:off - executes the generated remote shell against real files and loopback HTTP.
++import * as NodeAssert from "node:assert/strict";
++import * as NodeFSP from "node:fs/promises";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import * as NodeHttp from "node:http";
++import * as NodeChildProcess from "node:child_process";
++import * as NodeUtil from "node:util";
+ import { assert, describe, it } from "@effect/vitest";
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import * as NetService from "@t3tools/shared/Net";
+@@ -13,6 +21,7 @@
+ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+ 
++import { remoteStateKey } from "./command.ts";
+ import { SshPasswordPrompt } from "./auth.ts";
+ import { SshCommandError } from "./errors.ts";
+ import {
+@@ -588,3 +597,283 @@
+       }),
+   );
+ });
++
++const pairingTarget = { alias: "fixture", hostname: "fixture", username: null, port: null };
++const pairingKey = remoteStateKey(pairingTarget);
++const managedVersion = "0.0.15-nightly.20260910.1507.managed.1.p123456789abc";
++async function managedPairingFixture(
++  test: (f: {
++    home: string;
++    root: string;
++    state: string;
++    runtime: string;
++    port: number;
++    run: () => Promise<{ stdout: string; stderr: string }>;
++    environment: { serverVersion: string; capabilities: { managedUpdateQueue: boolean } };
++    response: { status: number; body: string | undefined; delay: boolean };
++  }) => Promise<void>,
++) {
++  const home = await NodeFSP.realpath(
++    await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "ssh-managed-pairing-")),
++  );
++  const environment = { serverVersion: managedVersion, capabilities: { managedUpdateQueue: true } };
++  const response = { status: 200, body: undefined as string | undefined, delay: false };
++  const server = NodeHttp.createServer((request, res) => {
++    assert.equal(request.url, "/.well-known/t3/environment");
++    if (response.delay) return;
++    res.statusCode = response.status;
++    res.setHeader("content-type", "application/json");
++    res.setHeader("location", "http://example.invalid/never-follow");
++    res.end(response.body ?? JSON.stringify(environment));
++  });
++  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
++  const address = server.address();
++  if (!address || typeof address === "string") throw new Error("missing port");
++  const port = address.port;
++  const root = NodePath.join(home, ".t3/runtime/versions", managedVersion);
++  const state = NodePath.join(home, ".t3/runtime/service-state.json");
++  const runtime = NodePath.join(home, ".t3/userdata/server-runtime.json");
++  try {
++    await NodeFSP.mkdir(NodePath.join(root, "node_modules/t3/dist"), { recursive: true });
++    await NodeFSP.mkdir(NodePath.dirname(runtime), { recursive: true });
++    await NodeFSP.mkdir(NodePath.join(home, `.t3/ssh-launch/${pairingKey}`), { recursive: true });
++    await NodeFSP.mkdir(NodePath.join(home, "bin"));
++    await NodeFSP.symlink(process.execPath, NodePath.join(home, "bin/node"));
++    for (const tool of ["t3", "npm", "npx"]) {
++      await NodeFSP.writeFile(NodePath.join(home, "bin", tool), "#!/bin/sh\necho fallback\n", {
++        mode: 0o755,
++      });
++    }
++    await NodeFSP.writeFile(state, JSON.stringify({ protocol: 2, activeVersion: managedVersion }));
++    await NodeFSP.writeFile(
++      runtime,
++      JSON.stringify({
++        version: 1,
++        pid: process.pid,
++        port,
++        origin: `http://127.0.0.1:${port}`,
++        startedAt: "2026-09-10T00:00:00.000Z",
++      }),
++    );
++    await NodeFSP.writeFile(NodePath.join(home, `.t3/ssh-launch/${pairingKey}/port`), String(port));
++    await NodeFSP.writeFile(
++      NodePath.join(home, `.t3/ssh-launch/${pairingKey}/managed`),
++      "external\n",
++    );
++    await NodeFSP.writeFile(NodePath.join(root, ".install-complete"), `${managedVersion}\n`);
++    await NodeFSP.writeFile(
++      NodePath.join(root, ".managed-artifact.json"),
++      JSON.stringify({
++        schemaVersion: 1,
++        version: managedVersion,
++        launcherProtocol: 2,
++        platform: "linux",
++        arch: "x64",
++        releaseArtifactId: "managed-server-linux-x64",
++        artifactId: `managed-server-linux-x64@sha256:${"a".repeat(64)}`,
++        archiveSha256: "a".repeat(64),
++        archiveBytes: 100,
++        manifestSha256: "b".repeat(64),
++        releaseInputSha256: "123456789abc" + "c".repeat(52),
++      }),
++    );
++    await NodeFSP.writeFile(
++      NodePath.join(root, "node_modules/t3/package.json"),
++      JSON.stringify({ name: "t3", version: managedVersion }),
++    );
++    await NodeFSP.writeFile(
++      NodePath.join(root, "node_modules/t3/dist/bin.mjs"),
++      "console.log(JSON.stringify(process.argv.slice(2)))",
++    );
++    const script = buildRemotePairingScript(pairingTarget, { packageSpec: `t3@${managedVersion}` });
++    await test({
++      home,
++      root,
++      state,
++      runtime,
++      port,
++      environment,
++      response,
++      run: () =>
++        NodeUtil.promisify(NodeChildProcess.execFile)("/bin/sh", ["-c", script], {
++          env: { HOME: home, PATH: `${home}/bin:/usr/bin:/bin` },
++          timeout: 10000,
++        }),
++    });
++  } finally {
++    server.closeAllConnections();
++    await new Promise<void>((resolve) => server.close(() => resolve()));
++    await NodeFSP.rm(home, { recursive: true, force: true });
++  }
++}
++
++it("pairs through the verified live managed CLI before PATH or npm", async () => {
++  await managedPairingFixture(async (f) => {
++    const result = await f.run();
++    assert.deepEqual(JSON.parse(result.stdout), [
++      "auth",
++      "pairing",
++      "create",
++      "--base-dir",
++      `${f.home}/.t3`,
++      "--json",
++    ]);
++  });
++});
++
++for (const mismatch of [
++  "state-json",
++  "state-version",
++  "pending",
++  "runtime-json",
++  "dead-pid",
++  "port",
++  "live-version",
++  "capability",
++  "sentinel",
++  "artifact",
++  "package",
++  "entry-symlink",
++  "directory-symlink",
++  "state-symlink",
++  "sentinel-symlink",
++  "artifact-symlink",
++  "runtime-symlink",
++  "package-symlink",
++  "redirect",
++  "http-json",
++  "http-oversize",
++  "http-timeout",
++  "committed-mismatch",
++  "artifact-identity",
++  "artifact-field-type",
++] as const) {
++  it(`fails closed before fallback for managed ${mismatch}`, async () => {
++    await managedPairingFixture(async (f) => {
++      if (mismatch === "state-json") await NodeFSP.writeFile(f.state, '{"activeVersion":"managed"');
++      if (mismatch === "state-version")
++        await NodeFSP.writeFile(
++          f.state,
++          JSON.stringify({ protocol: 2, activeVersion: "../../managed.escape" }),
++        );
++      if (mismatch === "pending")
++        await NodeFSP.writeFile(
++          f.state,
++          JSON.stringify({
++            protocol: 2,
++            activeVersion: managedVersion,
++            update: { status: "pending", targetVersion: managedVersion },
++          }),
++        );
++      if (mismatch === "runtime-json") await NodeFSP.writeFile(f.runtime, "null");
++      if (mismatch === "dead-pid")
++        await NodeFSP.writeFile(
++          f.runtime,
++          JSON.stringify({
++            version: 1,
++            pid: 2147483647,
++            startedAt: "2026-09-10T00:00:00.000Z",
++            port: f.port,
++            origin: `http://127.0.0.1:${f.port}`,
++          }),
++        );
++      if (mismatch === "port")
++        await NodeFSP.writeFile(`${f.home}/.t3/ssh-launch/${pairingKey}/port`, "1");
++      if (mismatch === "live-version") f.environment.serverVersion = "0.0.1";
++      if (mismatch === "capability") f.environment.capabilities.managedUpdateQueue = false;
++      if (mismatch === "sentinel")
++        await NodeFSP.writeFile(`${f.root}/.install-complete`, "other\n");
++      if (mismatch === "artifact")
++        await NodeFSP.writeFile(
++          `${f.root}/.managed-artifact.json`,
++          JSON.stringify({ schemaVersion: 1, version: "other", launcherProtocol: 2 }),
++        );
++      if (mismatch === "package")
++        await NodeFSP.writeFile(
++          `${f.root}/node_modules/t3/package.json`,
++          JSON.stringify({ name: "t3", version: "other" }),
++        );
++      if (mismatch === "entry-symlink") {
++        await NodeFSP.rename(`${f.root}/node_modules/t3/dist/bin.mjs`, `${f.home}/entry.mjs`);
++        await NodeFSP.symlink(`${f.home}/entry.mjs`, `${f.root}/node_modules/t3/dist/bin.mjs`);
++      }
++      if (mismatch === "directory-symlink") {
++        await NodeFSP.rename(f.root, `${f.home}/elsewhere`);
++        await NodeFSP.symlink(`${f.home}/elsewhere`, f.root);
++      }
++      for (const [kind, file] of [
++        ["state-symlink", f.state],
++        ["runtime-symlink", f.runtime],
++        ["sentinel-symlink", `${f.root}/.install-complete`],
++        ["artifact-symlink", `${f.root}/.managed-artifact.json`],
++        ["package-symlink", `${f.root}/node_modules/t3/package.json`],
++      ]) {
++        if (mismatch === kind) {
++          await NodeFSP.rename(file!, `${f.home}/linked-record`);
++          await NodeFSP.symlink(`${f.home}/linked-record`, file!);
++        }
++      }
++      if (mismatch === "redirect") f.response.status = 302;
++      if (mismatch === "http-json") f.response.body = "null";
++      if (mismatch === "http-oversize") f.response.body = "x".repeat(65537);
++      if (mismatch === "http-timeout") f.response.delay = true;
++      if (mismatch === "committed-mismatch")
++        await NodeFSP.writeFile(
++          f.state,
++          JSON.stringify({
++            protocol: 2,
++            activeVersion: managedVersion,
++            update: {
++              id: "update",
++              status: "committed",
++              fromVersion: managedVersion,
++              targetVersion: "other",
++            },
++          }),
++        );
++      if (mismatch === "artifact-field-type") {
++        const record = JSON.parse(
++          await NodeFSP.readFile(`${f.root}/.managed-artifact.json`, "utf8"),
++        );
++        record.manifestSha256 = ["b".repeat(64)];
++        await NodeFSP.writeFile(`${f.root}/.managed-artifact.json`, JSON.stringify(record));
++      }
++      if (mismatch === "artifact-identity") {
++        const record = JSON.parse(
++          await NodeFSP.readFile(`${f.root}/.managed-artifact.json`, "utf8"),
++        );
++        record.releaseInputSha256 = "a".repeat(64);
++        await NodeFSP.writeFile(`${f.root}/.managed-artifact.json`, JSON.stringify(record));
++      }
++      await NodeAssert.rejects(f.run(), /Managed SSH pairing runtime validation failed/);
++    });
++  });
++}
++
++it("keeps ordinary target CLI fallback when no managed service is recorded", async () => {
++  await managedPairingFixture(async (f) => {
++    await NodeFSP.rm(f.state);
++    assert.equal((await f.run()).stdout.trim(), "fallback");
++  });
++});
++
++it("accepts committed managed state and retains ordinary version fallback", async () => {
++  await managedPairingFixture(async (f) => {
++    await NodeFSP.writeFile(
++      f.state,
++      JSON.stringify({
++        protocol: 2,
++        activeVersion: managedVersion,
++        update: {
++          id: "update",
++          status: "committed",
++          fromVersion: managedVersion,
++          targetVersion: managedVersion,
++        },
++      }),
++    );
++    assert.equal(JSON.parse((await f.run()).stdout)[0], "auth");
++    await NodeFSP.writeFile(f.state, JSON.stringify({ protocol: 2, activeVersion: "0.0.15" }));
++    assert.equal((await f.run()).stdout.trim(), "fallback");
++  });
++});
+diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
+--- a/packages/ssh/src/tunnel.ts
++++ b/packages/ssh/src/tunnel.ts
+@@ -402,10 +402,131 @@
+ }
+ `;
+ 
++// Pairing must use the exact committed boot-service installation, which may be
++// private and unavailable from npm. This read-only proof never controls the service.
++const REMOTE_MANAGED_PAIRING_SCRIPT = String.raw`
++const fs = require("node:fs");
++const path = require("node:path");
++const http = require("node:http");
++const base = path.resolve(process.argv[2]);
++const portFile = process.argv[3];
++const statePath = path.join(base, "runtime/service-state.json");
++const fail = (reason) => { throw new Error(reason); };
++const checked = (file, directory = false) => {
++  const relative = path.relative(base, file);
++  if (relative.startsWith("..") || path.isAbsolute(relative)) fail("path escapes managed base");
++  let cursor = base;
++  const parts = relative ? relative.split(path.sep) : [];
++  for (let index = -1; index < parts.length; index++) {
++    if (index >= 0) cursor = path.join(cursor, parts[index]);
++    const stat = fs.lstatSync(cursor);
++    const dir = index < parts.length - 1 || directory;
++    if (stat.isSymbolicLink() || !(dir ? stat.isDirectory() : stat.isFile())) fail("non-regular managed path: " + cursor);
++  }
++  if (fs.realpathSync(file) !== file) fail("managed path is not canonical");
++  return file;
++};
++const read = (file) => {
++  checked(file);
++  if (fs.statSync(file).size > 65536) fail("managed record is too large");
++  return new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(file));
++};
++const object = (text) => {
++  const value = JSON.parse(text);
++  if (!value || typeof value !== "object" || Array.isArray(value)) fail("expected JSON object");
++  return value;
++};
++const managed = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-nightly\.[1-9]\d{7}\.(?:0|[1-9]\d*)\.managed\.(?:0|[1-9]\d*)\.p[0-9a-f]{12}$/;
++(async () => {
++  try { fs.lstatSync(statePath); } catch (error) {
++    if (error.code === "ENOENT") return;
++    throw error;
++  }
++  const stateText = read(statePath);
++  const state = object(stateText);
++  if (typeof state.activeVersion !== "string") fail("missing active version");
++  if (!state.activeVersion.includes("managed") && !JSON.stringify(state.update ?? {}).includes("managed")) return;
++  const version = state.activeVersion;
++  if (state.protocol !== 2 || !managed.test(version) || version.trim() !== version) fail("invalid managed service state");
++  if (state.update !== undefined && (!state.update || state.update.status !== "committed" ||
++      state.update.targetVersion !== version || typeof state.update.id !== "string" || !state.update.id.trim() ||
++      typeof state.update.fromVersion !== "string" || !managed.test(state.update.fromVersion))) fail("service update is not committed");
++  const root = path.join(base, "runtime/versions", version);
++  checked(root, true);
++  const record = object(read(path.join(root, ".managed-artifact.json")));
++  if (record.schemaVersion !== 1 || record.version !== version || record.launcherProtocol !== 2) fail("managed artifact version mismatch");
++  const digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
++  const target = record.platform === "linux" && record.arch === "x64" ? "managed-server-linux-x64"
++    : record.platform === "darwin" && record.arch === "arm64" ? "managed-server-darwin-arm64" : undefined;
++  if (!target || record.releaseArtifactId !== target || !digest(record.archiveSha256) ||
++      !digest(record.manifestSha256) || !digest(record.releaseInputSha256) ||
++      !Number.isSafeInteger(record.archiveBytes) || record.archiveBytes <= 0 ||
++      record.artifactId !== target + "@sha256:" + record.archiveSha256 ||
++      !version.endsWith(".p" + record.releaseInputSha256.slice(0, 12))) fail("invalid managed artifact identity");
++  if (read(path.join(root, ".install-complete")) !== version + "\n") fail("install sentinel mismatch");
++  const pkg = object(read(path.join(root, "node_modules/t3/package.json")));
++  if (pkg.name !== "t3" || pkg.version !== version) fail("package version mismatch");
++  const entry = checked(path.join(root, "node_modules/t3/dist/bin.mjs"));
++  const runtime = object(read(path.join(base, "userdata/server-runtime.json")));
++  if (runtime.version !== 1 || !Number.isSafeInteger(runtime.pid) || runtime.pid <= 0 ||
++      !Number.isInteger(runtime.port) || runtime.port < 1 || runtime.port > 65535 || typeof runtime.origin !== "string" ||
++      typeof runtime.startedAt !== "string" || !runtime.startedAt.trim()) fail("invalid runtime record");
++  const origin = new URL(runtime.origin);
++  if (origin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(origin.hostname) ||
++      origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash ||
++      Number(origin.port || 80) !== runtime.port) fail("runtime origin mismatch");
++  process.kill(runtime.pid, 0);
++  if (read(portFile).trim() !== String(runtime.port)) fail("SSH port does not match managed runtime");
++  const environment = await new Promise((resolve, reject) => {
++    const request = http.get({ hostname: "127.0.0.1", port: runtime.port,
++      path: "/.well-known/t3/environment", agent: false }, (response) => {
++      if (response.statusCode !== 200) { response.resume(); reject(new Error("managed environment request failed")); return; }
++      let bytes = 0;
++      const chunks = [];
++      response.on("data", (chunk) => {
++        bytes += chunk.length;
++        if (bytes > 65536) { response.destroy(new Error("managed environment is too large")); return; }
++        chunks.push(chunk);
++      });
++      response.on("error", reject);
++      response.on("end", () => {
++        try { resolve(object(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)))); }
++        catch (error) { reject(error); }
++      });
++    });
++    const timer = setTimeout(() => request.destroy(new Error("managed environment request timed out")), 3000);
++    request.on("error", reject);
++    request.on("close", () => clearTimeout(timer));
++  });
++  if (environment.serverVersion !== version || environment.capabilities?.managedUpdateQueue !== true) fail("live managed server version or capability mismatch");
++  // Recheck launcher state after the probe; do not pair across a committed update.
++  if (read(statePath) !== stateText) fail("managed service state changed during pairing");
++  process.stdout.write(entry);
++})().catch((error) => {
++  process.stderr.write("Managed SSH pairing runtime validation failed: " + error.message + "\n");
++  process.exitCode = 1;
++});
++`;
++
+ const REMOTE_RUNNER_SCRIPT = `#!/bin/sh
+ set -eu
+ @@T3_NODE_ENV_SCRIPT@@
+ ensure_remote_node_path || true
++if [ "\${1:-}" = "auth" ] && [ "\${2:-}" = "pairing" ] && [ -e "$HOME/.t3/runtime/service-state.json" -o -L "$HOME/.t3/runtime/service-state.json" ]; then
++  if ! command -v node >/dev/null 2>&1; then
++    printf 'Managed SSH pairing runtime validation failed: node is unavailable.\\n' >&2
++    exit 1
++  fi
++  if ! T3_MANAGED_ENTRY="$(node - "$HOME/.t3" "$(dirname "$0")/port" <<'NODE'
++@@T3_MANAGED_PAIRING_SCRIPT@@
++NODE
++  )"; then
++    exit 1
++  fi
++  if [ -n "$T3_MANAGED_ENTRY" ]; then
++    exec node "$T3_MANAGED_ENTRY" "$@"
++  fi
++fi
+ T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
+ if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
+   if ! command -v node >/dev/null 2>&1; then
+@@ -656,6 +777,7 @@
+   return stripTrailingNewlines(
+     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
+       T3_PACKAGE_SPEC: packageSpec,
++      T3_MANAGED_PAIRING_SCRIPT: REMOTE_MANAGED_PAIRING_SCRIPT,
+       T3_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
+       T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
+     }),
