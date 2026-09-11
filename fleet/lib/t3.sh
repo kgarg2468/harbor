@@ -47,17 +47,19 @@ harbor_t3_package_dir() {
   printf '%s/node_modules/t3' "$(harbor_agents_prefix "${1}")"
 }
 # harbor_t3_package_engines HOME: the installed package's own engines.node range.
-# The pinned package is pretty-printed JSON. Anchor both keys to line starts, since
-# a string cannot contain a raw newline, and read node only inside engines: a volta
-# block elsewhere in the package must never become the runtime requirement. No jq
+# The pinned package uses two-space indentation: exact depths exclude nested
+# engines, and ASCII whitespace excludes locale-dependent non-JSON separators.
+# Formatting drift must fail closed rather than supply another object's range. No jq
 # is needed in lib/, which also runs on macOS before any bootstrap dependencies.
 # A missing or unreadable field is exit 2 naming the package, never an empty range.
 harbor_t3_package_engines() {
   local package range
   package="$(harbor_t3_package_dir "${1}")/package.json"
+  # Refuse links before any reader can follow one into a credential store.
+  [ ! -L "${package}" ] || harbor_die 2 t3.engines_unreadable "${package} is a symlink; rerun harbor provision to install the locked t3 package"
   [ -f "${package}" ] && [ -r "${package}" ] || harbor_die 2 t3.engines_unreadable "${package} is absent or unreadable; rerun harbor provision to install the locked t3 package"
-  range="$(sed -n '/^[[:space:]]*"engines"[[:space:]]*:[[:space:]]*{[[:space:]]*$/,/^[[:space:]]*}/ {
-    s/^[[:space:]]*"node"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p
+  range="$(sed -n '/^  "engines"[ 	]*:[ 	]*{[ 	]*$/,/^  }/ {
+    s/^    "node"[ 	]*:[ 	]*"\([^"]*\)"[ 	]*,\{0,1\}[ 	]*$/\1/p
   }' "${package}")" || harbor_die 2 t3.engines_unreadable "${package} could not be read; rerun harbor provision to install the locked t3 package"
   [ -n "${range}" ] || harbor_die 2 t3.engines_unreadable "${package} carries no engines.node range; rerun harbor provision to install the locked t3 package"
   printf '%s' "${range}"
@@ -111,7 +113,7 @@ harbor_t3_reader() {
 harbor_t3_install() {
   local root="${1}" home="${2}"
   local locked method spec prefix bin
-  local pre pre_json ownership entry post out
+  local pre pre_json ownership entry post out xt=0 rc=0
   locked="$(harbor_version_require t3_version)" || exit "$?"
   method="$(harbor_version_require t3_install)" || exit "$?"
   case "${method}" in
@@ -151,10 +153,19 @@ harbor_t3_install() {
   # is folded onto one line for the same reason harbor_node_operator_probe folds its
   # probe output, and it reaches the terminal only, never the log, since harbor_die
   # logs the id and the exit code and not the message.
+  # Vendor output may contain private bytes; keep every expansion off xtrace.
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
   if ! out="$(npm install --global --prefix "${prefix}" "${spec}" 2>&1)"; then
     out="$(printf '%s' "${out}" | tr '\n\r' '  ')"
-    harbor_die 2 t3.install_failed "npm install --global --prefix ${prefix} ${spec} failed: ${out}; $(basename "${entry}") stays prepared, rerun after fixing the cause"
+    # Isolate the fatal diagnostic so cleanup can restore the caller's trace.
+    (harbor_die 2 t3.install_failed "npm install --global --prefix ${prefix} ${spec} failed: ${out}; $(basename "${entry}") stays prepared, rerun after fixing the cause") || rc="$?"
+    unset out
+    [ "${xt}" = 0 ] || set -x
+    exit "${rc}"
   fi
+  unset out
+  [ "${xt}" = 0 ] || set -x
   harbor_step "t3-installed"
   post="$(harbor_t3_installed_version "${home}")" || exit "$?"
   if [ "${post}" != "${locked}" ]; then
@@ -202,10 +213,20 @@ harbor_service_cmd() {
 # zero in every state. Only its whole status lines decide the answer; an empty or
 # unfamiliar body is unknown, never evidence that a service is installed.
 harbor_t3_service_status() {
-  local home="${1}" locked body rc=0 word=unknown newline xt=0
+  local home="${1}" locked installed body rc=0 word=unknown matches=0 newline xt=0
   newline='
 '
   locked="$(harbor_version_require t3_version)" || exit "$?"
+  # Finish the pin assertion before capturing: Harbor's version diagnostic can
+  # quote status-shaped bytes that were never a service status answer.
+  installed="$(harbor_t3_installed_version "${home}" 2>/dev/null)" || {
+    printf unknown
+    return 0
+  }
+  [ "${installed}" = "${locked}" ] || {
+    printf unknown
+    return 0
+  }
   # As with agent auth status, keep the vendor body out of inherited xtrace.
   case "$-" in *x*) xt=1 ;; esac
   [ "${xt}" = 0 ] || set +x
@@ -213,14 +234,34 @@ harbor_t3_service_status() {
   # Surround the body with newlines so a neighbouring path cannot supply a phrase.
   case "${newline}${body}${newline}" in
     # service-status/installed-current: the CLI version must agree with the lock.
-    *"${newline}  Status: installed · t3@${locked}${newline}"*) word="installed-current" ;;
-    # service-status/update-pending
-    *"${newline}  Status: needs an update or repair${newline}"*) word="update-pending" ;;
-    # service-status/not-installed
-    *"${newline}  Status: not installed${newline}"*) word="not-installed" ;;
-    # service-status/unsupported
-    *"${newline}  Status: unavailable on this machine${newline}"*) word=unsupported ;;
+    *"${newline}  Status: installed · t3@${locked}${newline}"*)
+      word="installed-current"
+      matches=$((matches + 1))
+      ;;
   esac
+  case "${newline}${body}${newline}" in
+    # service-status/update-pending
+    *"${newline}  Status: needs an update or repair${newline}"*)
+      word="update-pending"
+      matches=$((matches + 1))
+      ;;
+  esac
+  case "${newline}${body}${newline}" in
+    # service-status/not-installed
+    *"${newline}  Status: not installed${newline}"*)
+      word="not-installed"
+      matches=$((matches + 1))
+      ;;
+  esac
+  case "${newline}${body}${newline}" in
+    # service-status/unsupported
+    *"${newline}  Status: unavailable on this machine${newline}"*)
+      word=unsupported
+      matches=$((matches + 1))
+      ;;
+  esac
+  # Contradictory declarations cannot attest either state.
+  [ "${matches}" = 1 ] || word=unknown
   unset body
   [ "${xt}" = 0 ] || set -x
   harbor_log t3 "service status is ${word}; t3 exited ${rc}"
@@ -231,21 +272,23 @@ harbor_t3_service_status() {
 harbor_t3_service_healthy() {
   local active
   [ "$(harbor_t3_service_status "${1}")" = installed-current ] || return 1
-  active="$(HOME="${1}" systemctl --user is-active t3code.service 2>/dev/null)" || return 1
+  active="$(HOME="${1}" systemctl --user is-active t3code.service 2>/dev/null)" || :
   [ "${active}" = active ]
 }
 # The t3-service op has its own observer; recovery supplies the explicit operator
 # home through the same context as the CLI readers, never the ambient HOME.
 harbor_observe_op_t3_service() {
-  local home state
+  local home state active
   home="$(harbor_agents_home)" || exit "$?"
   state="$(harbor_t3_service_status "${home}")" || exit "$?"
-  printf '"%s"' "$(harbor_json_escape "${state}")"
+  active="$(HOME="${home}" systemctl --user is-active t3code.service 2>/dev/null)" || :
+  [ -n "${active}" ] || harbor_die 3 t3.service_activity "systemctl could not answer the t3 service activity; recovery cannot observe the state"
+  printf '"%s"' "$(harbor_json_escape "${state}/${active}")"
 }
 # harbor_t3_service_install STATE_ROOT HOME: the vendor owns the unit lifecycle.
 # Prepare before invoking it and attest applied only when both readings agree.
 harbor_t3_service_install() {
-  local root="${1}" home="${2}" pre ownership entry out post active active_rc=0
+  local root="${1}" home="${2}" pre ownership entry out post active active_rc=0 xt=0 rc=0
   # shellcheck disable=SC2034
   HARBOR_AGENTS_HOME="${home}"
   pre="$(harbor_t3_service_status "${home}")" || exit "$?"
@@ -253,22 +296,38 @@ harbor_t3_service_install() {
   # would write names a transition out of a state Harbor never read. Installing over
   # it would leave the journal vouching for a before that was a guess.
   [ "${pre}" != unknown ] || harbor_die 3 t3.service_unknown "t3 service status did not answer with a state this pinned build recognizes, so Harbor will not install over it: the entry would record a transition out of a state it never read; ask t3 itself with 'harbor service status' and rerun harbor provision once it answers; nothing was installed or journaled"
-  if [ "${pre}" = installed-current ] && harbor_t3_service_healthy "${home}"; then
+  [ "${pre}" != unsupported ] || harbor_die 3 t3.service_unsupported "t3 service is unavailable on this platform; nothing was installed or journaled"
+  # Nonzero exits still answer inactive or failed; no output means we could not
+  # ask, and must not invent an activity that recovery could later match.
+  active="$(HOME="${home}" systemctl --user is-active t3code.service 2>/dev/null)" || :
+  [ -n "${active}" ] || harbor_die 3 t3.service_activity "systemctl could not answer the t3 service activity; nothing was installed or journaled"
+  # Returning early for installed-current/active makes pre_state differ from
+  # post_state by construction whenever an entry is written, including repairs.
+  if [ "${pre}/${active}" = installed-current/active ]; then
     return 0
   fi
   ownership=modified
   [ "${pre}" != not-installed ] || ownership=created
-  harbor_journal_create "${root}" t3-service t3code.service "${ownership}" prepared "\"$(harbor_json_escape "${pre}")\"" '"installed-current"' || exit "$?"
+  harbor_journal_create "${root}" t3-service t3code.service "${ownership}" prepared "\"$(harbor_json_escape "${pre}/${active}")\"" '"installed-current/active"' || exit "$?"
   entry="${HARBOR_JOURNAL_ENTRY}"
   harbor_step "t3-service-prepared"
+  # Vendor output may contain private bytes; keep every expansion off xtrace.
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
   if ! out="$(harbor_t3_run "${home}" service install 2>&1)"; then
     out="$(printf '%s' "${out}" | tr '\n\r' '  ')"
-    harbor_die 2 t3.service_install_failed "t3 service install failed: ${out}; $(basename "${entry}") stays prepared, rerun after fixing the cause"
+    # Isolate the fatal diagnostic so cleanup can restore the caller's trace.
+    (harbor_die 2 t3.service_install_failed "t3 service install failed: ${out}; $(basename "${entry}") stays prepared, rerun after fixing the cause") || rc="$?"
+    unset out
+    [ "${xt}" = 0 ] || set -x
+    exit "${rc}"
   fi
+  unset out
+  [ "${xt}" = 0 ] || set -x
   harbor_step "t3-service-installed"
   post="$(harbor_t3_service_status "${home}")" || exit "$?"
   active="$(HOME="${home}" systemctl --user is-active t3code.service 2>/dev/null)" || active_rc="$?"
-  if [ "${post}" != installed-current ] || [ "${active}" != active ] || [ "${active_rc}" != 0 ]; then
+  if [ "${post}" != installed-current ] || [ "${active}" != active ]; then
     harbor_die 2 t3.service_verify "after t3 service install: service status=${post}, is-active=${active} (exit ${active_rc}); $(basename "${entry}") stays prepared"
   fi
   harbor_journal_set_phase "${entry}" applied || exit "$?"

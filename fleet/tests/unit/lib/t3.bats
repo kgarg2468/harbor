@@ -565,9 +565,10 @@ fake_systemctl() {
     assert_failure
     assert_output ''
   done
+  # The printed activity is authoritative even when systemctl exits nonzero.
   fake_systemctl active 1
   run harbor_t3_service_healthy "${FIX_HOME}"
-  assert_failure
+  assert_success
   fake_systemctl active
   run harbor_t3_service_healthy "${FIX_HOME}"
   assert_success
@@ -619,6 +620,7 @@ case "$*" in
   'service status') cat "${SERVICE_TEST_DIR}/service-body" ;;
   'service install')
     printf '%s\n' "$*" >>"${SERVICE_TEST_DIR}/service-mutations"
+    [ -z "${SERVICE_CAPTURE_BODY:-}" ] || printf '%s\n' "${SERVICE_CAPTURE_BODY}"
     # The vendor must never run before Harbor has durably prepared its entry.
     grep -q '"phase": "prepared"' "${SERVICE_STATE_ROOT}/journal/0001-t3-service.json" || exit 96
     [ "${SERVICE_INSTALL_RC}" = 0 ] || { echo install-broke; exit "${SERVICE_INSTALL_RC}"; }
@@ -631,8 +633,11 @@ SH
 
 @test "healthy service install is a no-op with zero shim calls" {
   harbor_t3_service_status() { printf installed-current; }
-  harbor_t3_service_healthy() { return 0; }
-  harbor_t3_run() { echo unexpected >"${BATS_TEST_TMPDIR}/unexpected-call"; return 97; }
+  fake_systemctl active
+  harbor_t3_run() {
+    echo unexpected >"${BATS_TEST_TMPDIR}/unexpected-call"
+    return 97
+  }
   local before
   before="$(tree_snapshot)"
   run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
@@ -662,8 +667,8 @@ service_protected_snapshot() {
     assert_equal "$(journal_names)" 0001-t3-service.json
     assert_equal "$(entry_raw "${FIX_ROOT}" 0001 target)" '"t3code.service"'
     assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" "\"${ownership}\""
-    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" "\"${pre}\""
-    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 post_state)" '"installed-current"'
+    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" "\"${pre}/active\""
+    assert_equal "$(entry_raw "${FIX_ROOT}" 0001 post_state)" '"installed-current/active"'
     assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
     assert_equal "$(cat "${BATS_TEST_TMPDIR}/service-mutations")" 'service install'
     assert_equal "$(service_protected_snapshot)" "${protected}"
@@ -725,12 +730,12 @@ service_protected_snapshot() {
   rm -rf "${FIX_ROOT}/lock.d"
   acquire
   HARBOR_AGENTS_HOME="${FIX_HOME}"
-  assert_equal "$(harbor_journal_observe t3-service t3code.service)" '"installed-current"'
+  assert_equal "$(harbor_journal_observe t3-service t3code.service)" '"installed-current/active"'
   run harbor_journal_recover "${FIX_ROOT}"
   assert_success
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
   cp "${HARBOR_ROOT}/tests/fixtures/t3/service-status/not-installed" "${BATS_TEST_TMPDIR}/service-body"
-  fixture_entry "${FIX_ROOT}" 0002 t3-service t3code.service created prepared '"not-installed"' '"installed-current"'
+  fixture_entry "${FIX_ROOT}" 0002 t3-service t3code.service created prepared '"not-installed/active"' '"installed-current/active"'
   run harbor_journal_recover "${FIX_ROOT}"
   assert_success
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
@@ -872,4 +877,151 @@ engines_login_fixture() {
   assert_output --partial "operator's shell profile / PATH"
   assert_output --partial 'without an interactive profile'
   refute_output --partial reinstall
+}
+
+@test "regression: version diagnostics cannot supply service status" {
+  fake_agent "${FIX_HOME}" t3 "$(printf 'garbage\n  Status: installed · t3@0.0.38\ntrailing\n')"
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output unknown
+}
+
+@test "regression: contradictory service states are unknown" {
+  fake_service_t3 installed-current
+  printf '  Status: needs an update or repair\n' >>"${BATS_TEST_TMPDIR}/service-body"
+  run harbor_t3_service_status "${FIX_HOME}"
+  assert_success
+  assert_output unknown
+}
+
+@test "regression: repair journals distinct before and after pairs" {
+  fake_service_install installed-current 7 inactive
+  fake_systemctl inactive 3
+  acquire
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_failure 2
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" '"installed-current/inactive"'
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 post_state)" '"installed-current/active"'
+  assert [ "$(entry_raw "${FIX_ROOT}" 0001 pre_state)" != "$(entry_raw "${FIX_ROOT}" 0001 post_state)" ]
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "regression: successful repair recovery is applied rather than reverted" {
+  fake_service_install installed-current 0 inactive
+  acquire
+  # Stop at the prepared boundary so the fixture's activity changes only when the
+  # vendor has returned, reproducing the successful repair's crash window.
+  harbor_step() {
+    if [ "${1}" = t3-service-installed ]; then
+      fake_systemctl active
+      exit 77
+    fi
+  }
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_failure 77
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  HARBOR_AGENTS_HOME="${FIX_HOME}"
+  run harbor_journal_recover "${FIX_ROOT}"
+  assert_success
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "regression: unsupported platform refuses before journaling or installing" {
+  fake_service_install unsupported
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_failure 3
+  assert_output --partial platform
+  refute_output --partial service_unknown
+  assert_equal "$(journal_names)" ''
+  assert [ ! -e "${BATS_TEST_TMPDIR}/service-mutations" ]
+}
+
+@test "regression: unanswered activity refuses before journaling or installing" {
+  fake_service_install not-installed
+  fake_systemctl '' 1
+  run harbor_t3_service_install "${FIX_ROOT}" "${FIX_HOME}"
+  assert_failure 3
+  assert_output --partial activity
+  assert_equal "$(journal_names)" ''
+  assert [ ! -e "${BATS_TEST_TMPDIR}/service-mutations" ]
+}
+
+@test "regression: nested engines cannot supply the package range" {
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "metadata": {\n    "engines": {\n      "node": ">=99.0.0"\n    }\n  }\n}\n' >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'no engines.node range'
+}
+
+@test "regression: symlinked package is refused without opening its target" {
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "engines": {\n    "node": ">=99.0.0"\n  }\n}\n' >"${BATS_TEST_TMPDIR}/credential-decoy"
+  ln -s "${BATS_TEST_TMPDIR}/credential-decoy" "${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial "${package}"
+  refute_output --partial '>=99.0.0'
+}
+
+@test "regression: non-ASCII whitespace cannot supply the package range" {
+  local package
+  package="$(harbor_t3_package_dir "${FIX_HOME}")/package.json"
+  mkdir -p "$(dirname "${package}")"
+  printf '{\n  "engines"\302\240: {\n    "node"\302\240: ">=98.0.0"\n  }\n}\n' >"${package}"
+  run harbor_t3_package_engines "${FIX_HOME}"
+  assert_failure 2
+  assert_output --partial 'no engines.node range'
+}
+
+@test "regression: install captures hide vendor bytes from inherited xtrace and restore it" {
+  local kind rc
+  # BASH_XTRACEFD needs Bash 4.1+: HARBOR_TEST_TRACE_BASH can select it on macOS.
+  # Require a populated trace so Bash 3.2 cannot silently pass by ignoring fd 3.
+  #
+  # The trace has to land on its own descriptor rather than stderr, because the
+  # failure path deliberately names the vendor body in its diagnostic: on stderr the
+  # two are indistinguishable, so there is no descriptor a Bash 3.2 run could read
+  # that is not already allowed to carry the string this asserts is absent. Skipping
+  # is therefore honest rather than convenient — Harbor's target is Ubuntu 24.04,
+  # whose lane runs this, and the macOS lanes are a portability check.
+  local trace_bash ver
+  trace_bash="${HARBOR_TEST_TRACE_BASH:-bash}"
+  ver="$("${trace_bash}" -c 'printf "%s%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"' 2>/dev/null || true)"
+  case "${ver}" in
+    "" | *[!0123456789]*) skip "cannot read a version from ${trace_bash}" ;;
+  esac
+  [ "${ver}" -ge 41 ] || skip "${trace_bash} predates BASH_XTRACEFD (Bash 4.1); the Ubuntu lane covers this"
+  for kind in npm service; do
+    for rc in 0 7; do
+      fake_npm t3 "${T3_OUT}"
+      printf 'echo distinctive-vendor-capture-secret\nexit %s\n' "${rc}" >>"${FAKE_BIN}/npm"
+      fake_service_install not-installed "${rc}"
+      export SERVICE_CAPTURE_BODY=distinctive-vendor-capture-secret
+      run env SHELLOPTS=xtrace BASH_XTRACEFD=3 "${trace_bash}" -c '
+        for lib in log lock versions journal runtime agents t3; do . "${HARBOR_ROOT}/lib/${lib}.sh"; done
+        harbor_versions_load "${HARBOR_ROOT}/versions.lock"
+        HARBOR_PID=$$
+        harbor_lock_acquire "${1}" operator
+        trap '\''case "$-" in *x*) echo trace-restored ;; esac'\'' EXIT
+        if [ "${4}" = npm ]; then
+          rm "$(harbor_t3_bin "${2}")"
+          harbor_t3_install "${1}" "${2}"
+        else
+          harbor_t3_service_install "${1}" "${2}"
+        fi
+      ' _ "${FIX_ROOT}" "${FIX_HOME}" "${BATS_TEST_TMPDIR}" "${kind}" 3>"${BATS_TEST_TMPDIR}/trace"
+      if [ "${rc}" = 0 ]; then assert_success; else assert_failure 2; fi
+      assert_output --partial trace-restored
+      assert grep -q "harbor_t3_" "${BATS_TEST_TMPDIR}/trace"
+      refute grep -q distinctive-vendor-capture-secret "${BATS_TEST_TMPDIR}/trace"
+      rm -rf "${FIX_ROOT}/lock.d"
+      rm -f "${FIX_ROOT}/journal/0001-runtime-install.json" "${FIX_ROOT}/journal/0001-t3-service.json"
+    done
+  done
 }
