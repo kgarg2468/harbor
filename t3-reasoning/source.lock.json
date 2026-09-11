@@ -214,6 +214,11 @@
       "sha256": "f2df32effc4b1d154acbd0dffc03e3e8afa01c882816263dd9923b5e1c0bf68a"
     },
     {
+      "id": "desktop-cleanup-retry",
+      "path": "patches/0045-desktop-cleanup-retry.patch",
+      "sha256": "141b25805d082f14fce48727b54ceea75f2070eedb8fd67e146df34359677e48"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "d7e315b874a6ca42be6f73a89003174c368b28aa5cc6d889532682fe3a2a741b"
@@ -261,7 +266,8 @@
       "managed-desktop-routing",
       "managed-desktop-scheduler",
       "managed-shared-connection",
-      "external-reconnect"
+      "external-reconnect",
+      "desktop-cleanup-retry"
     ],
     "reasoning": [
       "reasoning-full",
@@ -305,6 +311,7 @@
       "managed-desktop-scheduler",
       "managed-shared-connection",
       "external-reconnect",
+      "desktop-cleanup-retry",
       "reasoning-identity"
     ]
   }

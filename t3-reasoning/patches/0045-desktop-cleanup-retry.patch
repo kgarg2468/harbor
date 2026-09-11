@@ -1,0 +1,70 @@
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+index e3443c49..eca72c8b 100644
+--- a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+@@ -179,6 +179,46 @@ describe("managed desktop artifact preparation", () => {
+     await handoff.cleanup();
+     await expect(fs.stat(handoff.stagedBundle)).rejects.toThrow();
+   });
++  it("uses bounded native removal retries for owned scratch and staging cleanup", async () => {
++    const f = await fixture();
++    const removals: Array<Parameters<typeof fs.rm>> = [];
++    f.seams.fs = {
++      ...fs,
++      rm: async (...args) => {
++        removals.push(args);
++        return fs.rm(...args);
++      },
++    };
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    const scratch = path.join(
++      f.root,
++      (await fs.readdir(f.root)).find((name) => name.startsWith("managed-desktop-"))!,
++    );
++    const options = { recursive: true, force: true, maxRetries: 5, retryDelay: 200 };
++    const handoff = await p.claim(token);
++    expect(removals).toEqual([[scratch, options]]);
++    await expect(fs.stat(scratch)).rejects.toThrow();
++    await handoff.cleanup();
++    expect(removals).toEqual([[scratch, options], [handoff.stagedBundle, options]]);
++    await expect(fs.stat(handoff.stagedBundle)).rejects.toThrow();
++    expect((await fs.stat(f.installed)).isDirectory()).toBe(true);
++  });
++  it("propagates permanent owned cleanup failures", async () => {
++    const f = await fixture();
++    const failure = Object.assign(new Error("cleanup denied"), { code: "EACCES" });
++    f.seams.fs = {
++      ...fs,
++      rm: async () => {
++        throw failure;
++      },
++    };
++    const p = f.make();
++    const token = await p.prepare(f.descriptor);
++    await expect(p.cancel(token)).rejects.toBe(failure);
++    expect(p.isPrepared(token)).toBe(false);
++    expect((await fs.stat(f.installed)).isDirectory()).toBe(true);
++  });
+   it("preserves an inode-substituted extraction directory during claim cleanup", async () => {
+     const f = await fixture();
+     const p = f.make();
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+index d09f1d68..1acced82 100644
+--- a/apps/desktop/src/updates/ManagedDesktopArtifact.ts
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+@@ -331,7 +331,13 @@ export function createManagedDesktopArtifactPreparer(
+               stat.ino === owner.ino &&
+               (await io.realpath(owner.entry)) === owner.real
+             )
+-              await io.rm(owner.entry, { recursive: true, force: true });
++              // Native extraction can leave transient ENOTEMPTY/EBUSY cleanup failures.
++              await io.rm(owner.entry, {
++                recursive: true,
++                force: true,
++                maxRetries: 5,
++                retryDelay: 200,
++              });
+           } catch (error) {
+             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+           }
