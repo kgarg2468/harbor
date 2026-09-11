@@ -751,7 +751,6 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
   const { formatManagedReleaseVersion, checkAgainstPriorRelease } =
     await import("../scripts/resolve-managed-release.mjs");
   const run = promisify(execFile);
-  const actual = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
   const workflow = await readFile(
     new URL("../../.github/workflows/t3-managed-release.yml", import.meta.url),
     "utf8",
@@ -765,9 +764,31 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
       .join("\n");
   const dir = await mkdtemp(`${tmpdir()}/t3-counter-`);
   try {
+    await run("git", ["init", "--quiet", dir]);
+    await run(
+      "git",
+      [
+        "-c",
+        "user.name=Counter Test",
+        "-c",
+        "user.email=counter-test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "--quiet",
+        "-m",
+        "Counter fixture",
+      ],
+      { cwd: dir },
+    );
+    const actual = (
+      await run("git", ["rev-parse", "HEAD"], { cwd: dir })
+    ).stdout.trim();
     const counters = [];
     for (const runNumber of ["100", "101"]) {
       await run("bash", ["-c", script], {
+        cwd: dir,
         env: {
           ...process.env,
           EXPECTED_MAIN_SHA: actual,
@@ -822,6 +843,7 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
     let previous = first;
     for (const runNumber of ["102", "103"]) {
       await run("bash", ["-c", script], {
+        cwd: dir,
         env: {
           ...process.env,
           EXPECTED_MAIN_SHA: "",
@@ -849,6 +871,7 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
     for (const runNumber of ["0", "1000000000", "-1", "01", "9e2"]) {
       await assert.rejects(
         run("bash", ["-c", script], {
+          cwd: dir,
           env: {
             ...process.env,
             EXPECTED_MAIN_SHA: "",
@@ -873,6 +896,7 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
       GITHUB_ENV: `${dir}/bound`,
     };
     await run("bash", ["-c", script], {
+      cwd: dir,
       env: { ...boundedEnv, FAKE_COUNT: "9000000" },
     });
     const maximum = Number(
@@ -883,6 +907,7 @@ test("guarded duplicate dispatches have one counter and cannot publish twice", a
     for (const count of ["0", "9000001", "10000000", "99999999999999999999"]) {
       await assert.rejects(
         run("bash", ["-c", script], {
+          cwd: dir,
           env: { ...boundedEnv, FAKE_COUNT: count },
         }),
       );
