@@ -39,6 +39,8 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/runtime.sh"
 # shellcheck source=lib/agents.sh
 . "${HARBOR_ROOT}/lib/agents.sh"
+# shellcheck source=lib/t3.sh
+. "${HARBOR_ROOT}/lib/t3.sh"
 # shellcheck source=lib/auth.sh
 . "${HARBOR_ROOT}/lib/auth.sh"
 harbor_usage() {
@@ -57,6 +59,8 @@ subcommands:
                                       either tool out and never reads its credentials
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
+  service <start|stop|restart|status|logs>
+                                      print and run the vendor service command
   help                                print this text
 
 Exit codes: 0 success, 1 degraded, 2 broken, 3 precondition or usage, 4 interrupted.
@@ -84,6 +88,14 @@ case "${harbor_cmd}" in
   auth)
     shift
     harbor_auth_cmd ${1+"$@"}
+    ;;
+  service)
+    shift
+    # A vendor failure is a pass-through result, not a Harbor ERR diagnostic.
+    harbor_service_rc=0
+    harbor_service_cmd ${1+"$@"} || harbor_service_rc="$?"
+    HARBOR_COMPLETED=1
+    exit "${harbor_service_rc}"
     ;;
   journal)
     shift
