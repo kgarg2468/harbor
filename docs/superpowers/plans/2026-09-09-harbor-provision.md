@@ -632,6 +632,10 @@ Validation: `connect` is the default and is accepted. `tailnet` is **refused wit
 
 **Commit:** `feat(config): the access_mode configuration file`
 
+**Correction 17 — `harbor_config_create` takes the state root as well.** The interface above says `harbor_config_create HOME MODE`, but the contract in the same paragraph requires the creation to be one journaled `file` entry, and `harbor_journal_create` is given the state root. The signature is `harbor_config_create STATE_ROOT HOME MODE`, matching every other journaled writer in `lib/`.
+
+**Correction 18 — the unknown-mode message must not name a mode this release refuses.** "Naming the file, the value, and the two words" is right as far as it goes, but `tailnet` is refused by the very function raising the message, so a typo would be answered by pointing at a value that fails on the next run too. The message names both words and says only `connect` can be provisioned by this release, which is the tailnet arm's own answer delivered one round trip earlier.
+
 ---
 
 ## Slice 4e: provision, the record, and the lanes
