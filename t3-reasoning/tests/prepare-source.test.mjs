@@ -1054,6 +1054,26 @@ describe("source.lock.json", () => {
     return [...patchText.matchAll(/^diff --git a\/(\S+) b\//gm)].map((match) => match[1]).sort();
   }
 
+  it("ships the verified managed shared connection patch in both variants", async () => {
+    const lock = JSON.parse(await readFile(lockFile, "utf8"));
+    const patch = lock.patches.find((entry) => entry.id === "managed-shared-connection");
+    assert.ok(patch);
+    assert.equal(patch.path, "patches/0043-managed-shared-connection.patch");
+    const content = await readFile(path.join(componentDir, patch.path), "utf8");
+    assert.equal(sha256(content), patch.sha256);
+    assert.deepEqual(patchedFiles(content), [
+      "apps/desktop/src/ssh/DesktopSshEnvironment.test.ts",
+      "apps/desktop/src/ssh/DesktopSshEnvironment.ts",
+      "packages/ssh/src/tunnel.test.ts",
+      "packages/ssh/src/tunnel.ts",
+    ]);
+    for (const variant of ["managed-nightly", "reasoning"]) {
+      assert.equal(lock.variants[variant].filter((id) => id === patch.id).length, 1);
+      assert.ok(lock.variants[variant].indexOf(patch.id) > lock.variants[variant].indexOf("managed-desktop-scheduler"));
+      assert.ok(!lock.variants[variant].includes("thread-fork-backend"));
+    }
+  });
+
   it("is a version 2 lock whose catalog checksums match the patch files", async () => {
     const lock = JSON.parse(await readFile(lockFile, "utf8"));
     assert.equal(lock.version, 2);
@@ -1109,6 +1129,16 @@ describe("source.lock.json", () => {
         ]) {
           const result = await prepare({ lock: lockFile, destination, repository: localUpstream, variant });
           assert.equal(result.code, 0, result.stderr);
+        }
+        for (const destination of [nightly, reasoning]) {
+          const tunnel = await readFile(path.join(destination, "packages/ssh/src/tunnel.ts"), "utf8");
+          const ssh = await readFile(path.join(destination, "apps/desktop/src/ssh/DesktopSshEnvironment.ts"), "utf8");
+          assert.match(tunnel, /Managed SSH pairing runtime validation failed/);
+          assert.match(tunnel, /environment\.serverVersion !== version/);
+          assert.match(tunnel, /phase = "final managed filesystem proof failed"/);
+          assert.match(tunnel, /for \(const \[file, proof\] of identities\) checked\(file, proof\.directory\)/);
+          assert.match(ssh, /Effect\.succeed\(\{ _tag: "stopped" \}\)/);
+          assert.doesNotMatch(ssh, /Desktop SSH ownership cannot reserve/);
         }
         const lock = JSON.parse(await readFile(lockFile, "utf8"));
         const nightlyProvenance = await readProvenance(nightly);

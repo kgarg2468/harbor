@@ -204,6 +204,11 @@
       "sha256": "4258c59d80c8a278cc7892576f2f1a0585fc1a9efb2f87b3712e39d755c10537"
     },
     {
+      "id": "managed-shared-connection",
+      "path": "patches/0043-managed-shared-connection.patch",
+      "sha256": "25aa3c68da3169d6cabc13c14669fd98ab3f07c272b1ca1e505cd89928e65768"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "d7e315b874a6ca42be6f73a89003174c368b28aa5cc6d889532682fe3a2a741b"
@@ -249,7 +254,8 @@
       "desktop-update-report-ack",
       "managed-desktop-installer",
       "managed-desktop-routing",
-      "managed-desktop-scheduler"
+      "managed-desktop-scheduler",
+      "managed-shared-connection"
     ],
     "reasoning": [
       "reasoning-full",
@@ -291,6 +297,7 @@
       "managed-desktop-installer",
       "managed-desktop-routing",
       "managed-desktop-scheduler",
+      "managed-shared-connection",
       "reasoning-identity"
     ]
   }
