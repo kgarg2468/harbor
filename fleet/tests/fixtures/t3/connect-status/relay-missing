@@ -1,0 +1,12 @@
+{
+  "desired": true,
+  "authenticated": true,
+  "linked": false,
+  "cloudUserId": null,
+  "relayUrl": null,
+  "publishAgentActivity": false,
+  "relayClient": {
+    "status": "missing",
+    "version": "2026.5.2"
+  }
+}

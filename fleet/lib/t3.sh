@@ -249,6 +249,55 @@ harbor_service_cmd() {
   printf 'harbor: running %q service %q\n' "${bin}" "${verb}" >&2
   harbor_t3_run "${HOME}" service "${verb}"
 }
+# harbor_t3_connect_status HOME: only the pin's four measured fields are answers.
+# Other vendor fields may carry private bytes, so neither stdout nor inherited
+# xtrace may receive the body. SQLite warnings live on stderr, outside the JSON.
+harbor_t3_connect_status() {
+  local home="${1}" body key value xt=0
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
+  # stdout alone: the pinned CLI opens a SQLite database, so Node writes an
+  # ExperimentalWarning to stderr on every invocation and 2>&1 would hand it to
+  # the readers below. This is why the service adapter's capture rule does not
+  # carry over — it classifies human text, where the vendor's diagnostics are
+  # part of the answer, while this command's contract is JSON on stdout alone.
+  # Dropping stderr also drops harbor_t3_run's refusal when the installed version
+  # has drifted from the lock. That is deliberate and is the answer the service
+  # adapter already gives there: four unknowns, and unknown is an answer.
+  body="$(harbor_t3_run "${home}" connect status --json 2>/dev/null)" || :
+  for key in desired authenticated linked; do
+    value="$(printf '%s\n' "${body}" | sed -En "s/^  \"${key}\": (true|false),?$/\1/p")"
+    case "${value}" in
+      true | false) ;;
+      *) value=unknown ;;
+    esac
+    # Assigned by name rather than indirectly: every other reader in lib/ spells
+    # its targets out, and two declarations of a key print two lines, which the
+    # fence above has already turned into unknown.
+    # shellcheck disable=SC2034
+    case "${key}" in
+      desired) HARBOR_T3_CONNECT_DESIRED="${value}" ;;
+      authenticated) HARBOR_T3_CONNECT_AUTHENTICATED="${value}" ;;
+      linked) HARBOR_T3_CONNECT_LINKED="${value}" ;;
+    esac
+  done
+  # Depth alone cannot distinguish another object's status: it must immediately
+  # follow relayClient's header, as it does in all three pinned schema variants.
+  value="$(printf '%s\n' "${body}" | sed -En '/^  "relayClient": [{]$/ {
+    n
+    s/^    "status": "(available|missing|unsupported)",?$/\1/p
+  }')"
+  case "${value}" in
+    available | missing | unsupported) ;;
+    *) value=unknown ;;
+  esac
+  # Consumed by the connect callers after this reader returns.
+  # shellcheck disable=SC2034
+  HARBOR_T3_CONNECT_RELAY="${value}"
+  unset body
+  [ "${xt}" = 0 ] || set -x
+  return 0
+}
 # harbor_t3_service_status HOME: the pinned formatter has no JSON mode and exits
 # zero in every state. Only its whole status lines decide the answer; an empty or
 # unfamiliar body is unknown, never evidence that a service is installed.

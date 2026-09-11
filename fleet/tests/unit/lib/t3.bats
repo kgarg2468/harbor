@@ -1129,3 +1129,124 @@ engines_login_fixture() {
     done
   done
 }
+
+fake_connect_t3() {
+  # Preserve the real version guard and argv seam while substituting vendor bytes.
+  local bin
+  bin="$(harbor_t3_bin "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  cp "${HARBOR_ROOT}/tests/fixtures/t3/connect-status/${1}" "${BATS_TEST_TMPDIR}/connect-body"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "${1:-}" = --version ]; then echo "t3 v%s"; exit 0; fi\n' "${T3_VERSION}"
+    printf 'printf "%%s\\n" "$*" >"%s/connect-call"\n' "${BATS_TEST_TMPDIR}"
+    printf '[ "$*" = "connect status --json" ] || exit 97\n'
+    printf 'echo "ExperimentalWarning: SQLite" >&2\n'
+    printf 'cat "%s/connect-body"\nexit %s\n' "${BATS_TEST_TMPDIR}" "${2:-0}"
+  } >"${bin}"
+  chmod 0755 "${bin}"
+}
+
+assert_connect_status() {
+  # Direct invocation keeps the result globals in this shell; capturing stdout in
+  # a file also proves no ignored vendor fields escape with the four answers.
+  local rc=0
+  harbor_t3_connect_status "${FIX_HOME}" >"${BATS_TEST_TMPDIR}/connect-output" || rc="$?"
+  assert_equal "${rc}" 0
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/connect-output")" ''
+  assert_equal "${HARBOR_T3_CONNECT_DESIRED}" "${1}"
+  assert_equal "${HARBOR_T3_CONNECT_AUTHENTICATED}" "${2}"
+  assert_equal "${HARBOR_T3_CONNECT_LINKED}" "${3}"
+  assert_equal "${HARBOR_T3_CONNECT_RELAY}" "${4}"
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/connect-call")" 'connect status --json'
+}
+
+@test "connect healthy yields its four recorded values without stdout" {
+  fake_connect_t3 healthy
+  assert_connect_status true true true available
+}
+
+@test "connect needs-link yields its four recorded values without stdout" {
+  fake_connect_t3 needs-link
+  assert_connect_status true true false available
+}
+
+@test "connect needs-login yields its four recorded values without stdout" {
+  fake_connect_t3 needs-login
+  assert_connect_status false false false available
+}
+
+@test "connect relay-missing yields its four recorded values without stdout" {
+  fake_connect_t3 relay-missing
+  assert_connect_status true true false missing
+}
+
+@test "connect relay-unsupported yields its four recorded values without stdout" {
+  fake_connect_t3 relay-unsupported
+  assert_connect_status true true false unsupported
+}
+
+@test "connect unparseable and empty bodies reset all four values to unknown" {
+  fake_connect_t3 healthy
+  assert_connect_status true true true available
+  fake_connect_t3 unparseable
+  assert_connect_status unknown unknown unknown unknown
+  : >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+}
+
+@test "connect missing relayClient preserves the three booleans" {
+  fake_connect_t3 healthy
+  printf '{\n  "desired": true,\n  "authenticated": false,\n  "linked": false\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status true false false unknown
+}
+
+@test "connect valid body wins over a nonzero exit" {
+  # The body wins over the exit code here, unlike the service adapter, because
+  # this command has a JSON contract.
+  fake_connect_t3 healthy 7
+  assert_connect_status true true true available
+}
+
+@test "connect top-level status cannot supply the relay value" {
+  fake_connect_t3 healthy
+  printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": false,\n  "status": "available"\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status true true false unknown
+}
+
+@test "connect relay requires the first line at four spaces and a known word" {
+  local relay
+  fake_connect_t3 healthy
+  for relay in '    "status": "future"' '  "status": "available"' '    "metadata": {\n    "status": "available"\n    }'; do
+    printf '{\n  "relayClient": {\n%b\n  }\n}\n' "${relay}" >"${BATS_TEST_TMPDIR}/connect-body"
+    assert_connect_status unknown unknown unknown unknown
+  done
+}
+
+@test "connect booleans require the exact measured whole lines" {
+  fake_connect_t3 healthy
+  printf '{\n    "desired": true,\n  "authenticated": "true",\n  "linked": true, extra\n}\n' >"${BATS_TEST_TMPDIR}/connect-body"
+  assert_connect_status unknown unknown unknown unknown
+}
+
+@test "connect hides the raw body from inherited xtrace and restores it" {
+  fake_connect_t3 healthy
+  run bash -c '
+    for lib in log versions runtime agents t3; do . "${HARBOR_ROOT}/lib/${lib}.sh"; done
+    harbor_versions_load "${HARBOR_ROOT}/versions.lock"
+    set -x
+    harbor_t3_connect_status "${1}"
+    case "$-" in *x*) printf "trace-restored\\n" ;; esac
+  ' _ "${FIX_HOME}"
+  assert_success
+  assert_output --partial trace-restored
+  # A refutation against an empty trace passes for the wrong reason, so require
+  # the trace to have actually reached this call before believing the three
+  # below. Unlike the install captures this can assert on merged stderr: nothing
+  # on this function's paths prints the body, so there is no second source for
+  # the strings being refuted.
+  assert_output --partial '+ harbor_t3_connect_status'
+  refute_output --partial fixture-cloud-user
+  refute_output --partial relay.invalid
+  refute_output --partial ExperimentalWarning
+}
