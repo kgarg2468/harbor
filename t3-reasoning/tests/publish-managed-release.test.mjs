@@ -1534,7 +1534,7 @@ describe("t3-managed-release workflow", () => {
 
   it("uses one fixed non-cancelling concurrency group and top-level contents: read", () => {
     const concurrency = mapping(blockAfter(lines, /^concurrency:$/).block, 2);
-    assert.deepEqual(concurrency, { group: "t3-managed-release", "cancel-in-progress": "false" });
+    assert.deepEqual(concurrency, { group: "t3-managed-release-${{ inputs.expected_main_sha || github.sha }}", "cancel-in-progress": "false" });
     const permissions = mapping(blockAfter(lines, /^permissions:$/).block, 2);
     assert.deepEqual(permissions, { contents: "read" });
   });
@@ -1600,7 +1600,9 @@ describe("t3-managed-release workflow", () => {
   it("resolves once, shares one descriptor/config artifact with every row, and preflights the tag", () => {
     const resolve = jobs.resolve.join("\n");
     assert.equal((resolve.match(/resolve-managed-release\.mjs/g) ?? []).length, 1);
-    assert.match(resolve, /--release-counter "\$\{GITHUB_RUN_NUMBER\}"/);
+    assert.match(resolve, /--release-counter "\$\{RELEASE_COUNTER\}"/);
+    assert.match(resolve, /git rev-list --count "\$\{GITHUB_SHA\}"/);
+    assert.match(resolve, /RELEASE_COUNTER="\$\{GITHUB_RUN_NUMBER\}"/);
     assert.match(resolve, /--builder-revision "\$\{GITHUB_SHA\}"/);
     assert.match(resolve, /--upstream-version "\$\{UPSTREAM_VERSION\}"/);
     assert.match(resolve, /--github-output "\$\{GITHUB_OUTPUT\}"/);

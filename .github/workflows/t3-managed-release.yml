@@ -4,7 +4,8 @@ run-name: t3-managed-release ${{ inputs.expected_main_sha || github.sha }}
 # Trusted default-branch publication of one immutable managed T3 release.
 # One resolve job on Ubuntu proves the checked-in lock, patches, and upstream
 # provenance, re-reads the official upstream release and tag, fixes the
-# managed version with the existing resolver (run number as the counter, the
+# managed version with the existing resolver (commit count for guarded
+# promotion, otherwise run number as the counter; the
 # exact workflow SHA as the builder revision, the newest published immutable
 # managed release as the prior), and refuses any tag collision before native
 # build time is spent. Four static matrix rows each prepare a fresh source
@@ -40,9 +41,10 @@ on:
 permissions:
   contents: read
 
-# One publication at a time; a run that is already publishing must finish.
+# Serialize attempts for the exact SHA, including duplicate dispatches.
+# A run that is already publishing must finish.
 concurrency:
-  group: t3-managed-release
+  group: t3-managed-release-${{ inputs.expected_main_sha || github.sha }}
   cancel-in-progress: false
 
 env:
@@ -83,6 +85,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -151,10 +154,19 @@ jobs:
         id: resolve
         env:
           PRIOR_MANIFEST: ${{ steps.prior.outputs.prior_manifest }}
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
         run: |
           set -euo pipefail
+          RELEASE_COUNTER="${GITHUB_RUN_NUMBER}"
+          if [ -n "${EXPECTED_MAIN_SHA}" ]; then
+            [ "$(git rev-parse --is-shallow-repository)" = "false" ]
+            [ "$(git rev-parse HEAD)" = "${EXPECTED_MAIN_SHA}" ]
+            RELEASE_COUNTER="$(git rev-list --count "${GITHUB_SHA}")"
+            [[ "${RELEASE_COUNTER}" =~ ^[1-9][0-9]*$ ]]
+          fi
+          echo "RELEASE_COUNTER=${RELEASE_COUNTER}" >> "${GITHUB_ENV}"
           UPSTREAM_VERSION="$(node -p 'JSON.parse(require("node:fs").readFileSync("t3-reasoning/upstream-release.json", "utf8")).version')"
-          args=(--lock t3-reasoning/source.lock.json --upstream-version "${UPSTREAM_VERSION}" --release-counter "${GITHUB_RUN_NUMBER}" --builder-revision "${GITHUB_SHA}" --public-config "${RUNNER_TEMP}/release-inputs/public-config.json" --output "${RUNNER_TEMP}/release-inputs/descriptor.json" --github-output "${GITHUB_OUTPUT}")
+          args=(--lock t3-reasoning/source.lock.json --upstream-version "${UPSTREAM_VERSION}" --release-counter "${RELEASE_COUNTER}" --builder-revision "${GITHUB_SHA}" --public-config "${RUNNER_TEMP}/release-inputs/public-config.json" --output "${RUNNER_TEMP}/release-inputs/descriptor.json" --github-output "${GITHUB_OUTPUT}")
           if [ -n "${PRIOR_MANIFEST}" ]; then
             args+=(--prior-release "${PRIOR_MANIFEST}")
           fi
@@ -178,7 +190,7 @@ jobs:
             echo
             echo "- version: \`${RELEASE_VERSION}\`"
             echo "- builder revision: \`${GITHUB_SHA}\`"
-            echo "- release counter: ${GITHUB_RUN_NUMBER}"
+            echo "- release counter: ${RELEASE_COUNTER}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       # The only input the build rows and the publish job share: the resolved

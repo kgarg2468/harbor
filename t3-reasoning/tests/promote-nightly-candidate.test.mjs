@@ -87,7 +87,7 @@ import { createHash } from "node:crypto";
 const ROOT = "/repos/kgarg2468/harbor";
 const MAIN = "a".repeat(40);
 const HEAD = "b".repeat(40);
-const MERGE = "c".repeat(40);
+const MERGE = HEAD;
 const UPSTREAM = "d".repeat(40);
 const BOT = { id: 41898282, login: "github-actions[bot]", type: "Bot" };
 const LOCK = "t3-reasoning/source.lock.json";
@@ -152,7 +152,7 @@ async function fixture() {
   };
   addCommit(MAIN, oldTree, []);
   addCommit(HEAD, newTree, [MAIN]);
-  addCommit(MERGE, newTree, [MAIN, HEAD]);
+
   let current = MAIN;
   let merged = false;
   const pr = {
@@ -255,11 +255,11 @@ async function fixture() {
   data.set(`${ROOT}/pulls/1/comments?per_page=100`, [[]]);
   data.set(`${ROOT}/pulls/1/reviews?per_page=100`, [[]]);
   data.set(
-    `${ROOT}/actions/workflows/${CHECKER}/runs?branch=main&event=workflow_dispatch&per_page=100`,
+    `${ROOT}/actions/workflows/${CHECKER}/runs?branch=main&event=workflow_dispatch&head_sha=${MAIN}&per_page=100`,
     [{ total_count: 0, workflow_runs: [] }],
   );
   data.set(
-    `${ROOT}/actions/workflows/${RELEASE}/runs?branch=main&per_page=100`,
+    `${ROOT}/actions/workflows/${RELEASE}/runs?branch=main&head_sha=${MERGE}&per_page=100`,
     [{ total_count: 0, workflow_runs: [] }],
   );
   const writes = [];
@@ -271,7 +271,7 @@ async function fixture() {
     if (override !== undefined) return override;
     if (options.method) {
       writes.push({ endpoint, ...options });
-      if (endpoint.endsWith("/merge")) {
+      if (endpoint.endsWith("/git/refs/heads/main")) {
         current = MERGE;
         merged = true;
         Object.assign(pr, {
@@ -280,7 +280,10 @@ async function fixture() {
           merged_by: BOT,
           merge_commit_sha: MERGE,
         });
-        return { merged: true, sha: MERGE };
+        return {
+          ref: "refs/heads/main",
+          object: { type: "commit", sha: MERGE },
+        };
       }
       return null;
     }
@@ -337,7 +340,7 @@ test("safe candidate merges exact head then explicitly dispatches guarded releas
   assert.deepEqual(
     f.writes.map((x) => x.body),
     [
-      { sha: HEAD, merge_method: "merge" },
+      { sha: HEAD, force: false },
       { ref: "main", inputs: { expected_main_sha: MERGE } },
     ],
   );
@@ -490,7 +493,7 @@ test("merge conflicts and rejected SHA never dispatch release", async (t) => {
     await t.test(String(response), async () => {
       const f = await fixture();
       f.intercept = (endpoint) => {
-        if (endpoint.endsWith("/merge")) {
+        if (endpoint.endsWith("/git/refs/heads/main")) {
           if (response instanceof Error) throw response;
           return response;
         }
@@ -510,7 +513,10 @@ test("lost dispatch recovers current bot merge and dedupes active or successful 
   f.intercept = () => undefined;
   const recovered = await reconcile({ ...f.options, trustedSha: MERGE });
   assert.equal(recovered.status, "release-dispatched");
-  assert.equal(f.writes.filter((x) => x.endpoint.endsWith("/merge")).length, 1);
+  assert.equal(
+    f.writes.filter((x) => x.endpoint.endsWith("/git/refs/heads/main")).length,
+    1,
+  );
   for (const [status, conclusion] of [
     ["queued", null],
     ["in_progress", null],
@@ -520,7 +526,7 @@ test("lost dispatch recovers current bot merge and dedupes active or successful 
       const g = await fixture();
       g.recover();
       g.data.set(
-        `${ROOT}/actions/workflows/${RELEASE}/runs?branch=main&per_page=100`,
+        `${ROOT}/actions/workflows/${RELEASE}/runs?branch=main&head_sha=${MERGE}&per_page=100`,
         [
           {
             total_count: 1,
@@ -627,4 +633,192 @@ test("release shell guard accepts exact/manual SHA and rejects wrong SHA before 
         env: { GITHUB_SHA: MAIN, EXPECTED_MAIN_SHA: expected },
       }),
     );
+});
+
+test("concurrent divergent main advance is rejected atomically at ref write", async () => {
+  const f = await fixture();
+  let landed = false;
+  f.intercept = (endpoint, options) => {
+    if (endpoint.endsWith("/git/refs/heads/main")) {
+      assert.equal(options.method, "PATCH");
+      assert.equal(options.body.force, false);
+      assert.equal(options.body.sha, HEAD);
+      // Simulated GitHub ref CAS: current main diverged after last GET.
+      throw new Error("422 Update is not a fast forward");
+    }
+    if (options.method) landed = true;
+  };
+  await assert.rejects(reconcile(f.options), /not a fast forward/);
+  assert.equal(landed, false);
+  assert.deepEqual(f.writes, []);
+});
+
+test("run queries exclude more than 1000 unrelated historical runs", async () => {
+  const f = await fixture();
+  f.recover();
+  f.intercept = (endpoint) => {
+    if (endpoint.includes("/runs?")) {
+      if (!endpoint.includes("head_sha="))
+        return [
+          {
+            total_count: 1001,
+            workflow_runs: Array.from({ length: 1000 }, (_, id) => ({
+              id,
+              head_sha: UPSTREAM,
+            })),
+          },
+        ];
+      assert.match(endpoint, /head_sha=[a-f0-9]{40}/);
+    }
+  };
+  assert.equal(
+    (await reconcile({ ...f.options, trustedSha: HEAD })).status,
+    "release-dispatched",
+  );
+});
+
+test("lost fast-forward response recovers without another ref write", async () => {
+  const f = await fixture();
+  const api = async (endpoint, options) => {
+    const result = await f.api(endpoint, options);
+    if (endpoint.endsWith("/git/refs/heads/main"))
+      throw new Error("lost ref response");
+    return result;
+  };
+  await assert.rejects(reconcile({ ...f.options, api }), /lost ref response/);
+  assert.equal(
+    (await reconcile({ ...f.options, trustedSha: HEAD })).status,
+    "release-dispatched",
+  );
+  assert.equal(
+    f.writes.filter((w) => w.endpoint.endsWith("/git/refs/heads/main")).length,
+    1,
+  );
+});
+
+test("already-at-head reconciles delayed PR closure without another ref update", async () => {
+  const f = await fixture();
+  f.recover();
+  Object.assign(f.pr, { state: "open", merged: false, merge_commit_sha: null });
+  f.intercept = (endpoint, options) => {
+    if (endpoint.startsWith(`${ROOT}/pulls?state=open`)) return [[f.pr]];
+    if (endpoint === `${ROOT}/pulls/1` && options.method === "PATCH") {
+      assert.deepEqual(options.body, { state: "closed" });
+      f.pr.state = "closed";
+      return structuredClone(f.pr);
+    }
+  };
+  assert.equal(
+    (await reconcile({ ...f.options, trustedSha: HEAD })).status,
+    "release-dispatched",
+  );
+  assert.equal(f.pr.state, "closed");
+  assert.equal(
+    f.writes.filter((w) => w.endpoint.endsWith("/git/refs/heads/main")).length,
+    0,
+  );
+});
+
+test("run cap ambiguity on the exact SHA fails closed", async () => {
+  const f = await fixture();
+  f.recover();
+  f.intercept = (endpoint) =>
+    endpoint.includes(`${RELEASE}/runs?`)
+      ? [
+          {
+            total_count: 1001,
+            workflow_runs: Array.from({ length: 1000 }, (_, id) => ({
+              id,
+              head_sha: HEAD,
+              status: "completed",
+              conclusion: "failure",
+            })),
+          },
+        ]
+      : undefined;
+  await assert.rejects(
+    reconcile({ ...f.options, trustedSha: HEAD }),
+    /truncated listing/,
+  );
+  assert.deepEqual(f.writes, []);
+});
+
+test("guarded duplicate dispatches have one counter and cannot publish twice", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { formatManagedReleaseVersion, checkAgainstPriorRelease } =
+    await import("../scripts/resolve-managed-release.mjs");
+  const run = promisify(execFile);
+  const actual = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
+  const workflow = await readFile(
+    new URL("../../.github/workflows/t3-managed-release.yml", import.meta.url),
+    "utf8",
+  );
+  const script =
+    /          RELEASE_COUNTER="\$\{GITHUB_RUN_NUMBER\}"[\s\S]*?(?=          UPSTREAM_VERSION=)/
+      .exec(workflow)[0]
+      .split("\n")
+      .map((line) => line.slice(10))
+      .join("\n");
+  const dir = await mkdtemp(`${tmpdir()}/t3-counter-`);
+  try {
+    const counters = [];
+    for (const runNumber of ["100", "101"]) {
+      await run("bash", ["-c", script], {
+        env: {
+          ...process.env,
+          EXPECTED_MAIN_SHA: actual,
+          GITHUB_SHA: actual,
+          GITHUB_RUN_NUMBER: runNumber,
+          GITHUB_ENV: `${dir}/${runNumber}`,
+        },
+      });
+      counters.push(
+        Number(
+          (await readFile(`${dir}/${runNumber}`, "utf8")).trim().split("=")[1],
+        ),
+      );
+    }
+    assert.equal(counters[0], counters[1]);
+    assert.ok(counters[0] > 0);
+    const version = "0.0.0-nightly.20991231.1";
+    const releaseVersion = formatManagedReleaseVersion(
+      version,
+      counters[0],
+      "a".repeat(64),
+    );
+    assert.equal(
+      formatManagedReleaseVersion(version, counters[1], "a".repeat(64)),
+      releaseVersion,
+    );
+    const first = {
+      releaseVersion,
+      upstreamVersion: version,
+      upstreamCommit: UPSTREAM,
+      releaseCounter: counters[0],
+    };
+    let publications = 0;
+    checkAgainstPriorRelease(first, null);
+    publications++;
+    // Even changed config/digest cannot escape the same guarded counter.
+    assert.throws(() => {
+      checkAgainstPriorRelease(
+        {
+          ...first,
+          releaseVersion: formatManagedReleaseVersion(
+            version,
+            counters[1],
+            "b".repeat(64),
+          ),
+        },
+        first,
+      );
+      publications++;
+    }, /does not increase/);
+    assert.equal(publications, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

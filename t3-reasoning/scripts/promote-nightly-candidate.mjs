@@ -67,7 +67,11 @@ export function createApi(run = defaultRun) {
         if (typeof value === "object")
           for (const [name, entry] of Object.entries(value))
             args.push("-f", `${key}[${name}]=${entry}`);
-        else args.push("-f", `${key}=${value}`);
+        else
+          args.push(
+            typeof value === "boolean" ? "-F" : "-f",
+            `${key}=${value}`,
+          );
       }
     const { stdout } = await run("gh", args, {
       env: { GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
@@ -214,11 +218,11 @@ async function inspect(api, number, main, { recovery = false } = {}) {
   );
   if (recovery)
     requireGate(
-      pr.state === "closed" &&
-        pr.merged === true &&
-        bot(pr.merged_by) &&
-        pr.merge_commit_sha === main,
-      "not the current bot merge",
+      pr.head.sha === main &&
+        ["open", "closed"].includes(pr.state) &&
+        (pr.merged !== true ||
+          (bot(pr.merged_by) && pr.merge_commit_sha === main)),
+      "not the current candidate fast-forward",
     );
   else {
     requireGate(
@@ -244,13 +248,15 @@ async function inspect(api, number, main, { recovery = false } = {}) {
   if (recovery) {
     mainTree = await tree(api, main);
     requireGate(
-      mainTree.commit.parents.length === 2 &&
-        mainTree.commit.parents[1].sha === pr.head.sha &&
-        sha(mainTree.commit.parents[0].sha),
-      "merge ancestry does not identify candidate",
+      main === pr.head.sha && mainTree.commit.parents.length === 1,
+      "fast-forward ancestry does not identify candidate",
     );
-    base = mainTree.commit.parents[0].sha;
+    base = parentSha;
   }
+  requireGate(
+    parentSha === base,
+    "candidate must directly descend from current main",
+  );
   const ancestry = await api(`${ROOT}/compare/${parentSha}...${base}`);
   requireGate(
     ancestry?.merge_base_commit?.sha === parentSha &&
@@ -437,7 +443,7 @@ async function review(api, candidate) {
 async function refreshChecker(api, candidate) {
   const runs = await readPages(
     api,
-    `${ROOT}/actions/workflows/${CHECKER}/runs?branch=main&event=workflow_dispatch&per_page=100`,
+    `${ROOT}/actions/workflows/${CHECKER}/runs?branch=main&event=workflow_dispatch&head_sha=${candidate.base}&per_page=100`,
     "workflow_runs",
   );
   // Existing checker runs do not expose dispatch inputs. Any active main run
@@ -461,7 +467,7 @@ async function refreshChecker(api, candidate) {
 async function dispatchRelease(api, main) {
   const runs = await readPages(
     api,
-    `${ROOT}/actions/workflows/${RELEASE}/runs?branch=main&per_page=100`,
+    `${ROOT}/actions/workflows/${RELEASE}/runs?branch=main&head_sha=${main}&per_page=100`,
     "workflow_runs",
   );
   if (
@@ -487,6 +493,44 @@ async function dispatchRelease(api, main) {
   return "release-dispatched";
 }
 
+async function finishPromotion(api, number, main, results, now) {
+  const candidate = await inspect(api, number, main, { recovery: true });
+  requireGate(
+    (await checker(api, candidate)) && (await review(api, candidate)),
+    "recovery gates pending",
+  );
+  requireGate((await currentMain(api)) === main, "main moved during recovery");
+  const fresh = await inspect(api, number, main, { recovery: true });
+  requireGate(
+    fresh.head === candidate.head &&
+      (await checker(api, fresh)) &&
+      (await review(api, fresh)),
+    "recovery gates moved",
+  );
+  if (fresh.pr.state === "open") {
+    // GitHub usually closes a PR when its commits reach the base. Reconcile
+    // delayed PR bookkeeping explicitly, only after proving exact main/head.
+    requireGate(
+      (await currentMain(api)) === main,
+      "main moved before PR close",
+    );
+    await api(`${ROOT}/pulls/${number}`, {
+      method: "PATCH",
+      body: { state: "closed" },
+    });
+    const closed = await api(`${ROOT}/pulls/${number}`);
+    requireGate(
+      closed.state === "closed" && closed.head?.sha === main,
+      "PR closure pending",
+    );
+  }
+  return {
+    checkedAt: now().toISOString(),
+    results,
+    status: await dispatchRelease(api, main),
+  };
+}
+
 export async function reconcile({
   api = createApi(),
   trustedSha = process.env.GITHUB_SHA,
@@ -504,6 +548,8 @@ export async function reconcile({
     `${ROOT}/pulls?state=open&base=main&per_page=100`,
   );
   for (const row of open.filter((p) => p.head?.ref?.startsWith(PREFIX))) {
+    if (row.head.sha === main)
+      return finishPromotion(api, row.number, main, results, now);
     let candidate;
     try {
       candidate = await inspect(api, row.number, main);
@@ -526,7 +572,7 @@ export async function reconcile({
         continue;
       }
       // Re-read every gate, including release/tag and both verdicts, immediately
-      // before the merge. Merge API independently rejects an unexpected head.
+      // before the fast-forward. GitHub rejects a divergent main atomically.
       requireGate((await currentMain(api)) === main, "main moved before merge");
       const fresh = await inspect(api, row.number, main);
       requireGate(
@@ -544,63 +590,35 @@ export async function reconcile({
       });
       continue;
     }
-    // A transport error can mean the merge happened. Do not dispatch here;
-    // next reconciliation identifies the actual bot merge from main ancestry.
-    const merged = await api(`${ROOT}/pulls/${row.number}/merge`, {
-      method: "PUT",
-      body: { sha: candidate.head, merge_method: "merge" },
+    // A non-force ref update is atomic: head has precisely one parent, the
+    // expected main, so a concurrent divergent advance is not a fast-forward.
+    // Lost responses recover from main === head, without repeating the write.
+    const updated = await api(`${ROOT}/git/refs/heads/main`, {
+      method: "PATCH",
+      body: { sha: candidate.head, force: false },
     });
     requireGate(
-      merged?.merged === true && sha(merged.sha),
-      "merge failed or returned no exact SHA",
+      updated?.ref === "refs/heads/main" &&
+        updated.object?.type === "commit" &&
+        updated.object.sha === candidate.head,
+      "fast-forward failed or returned a different SHA",
     );
     requireGate(
-      (await currentMain(api)) === merged.sha,
-      "main advanced after merge",
+      (await currentMain(api)) === candidate.head,
+      "main advanced after fast-forward",
     );
-    const recovered = await inspect(api, row.number, merged.sha, {
-      recovery: true,
-    });
-    requireGate(
-      (await checker(api, recovered)) && (await review(api, recovered)),
-      "post-merge gates moved",
-    );
-    return {
-      checkedAt: now().toISOString(),
-      results,
-      status: await dispatchRelease(api, merged.sha),
-    };
+    return finishPromotion(api, row.number, candidate.head, results, now);
   }
-  // A successful bot merge followed by a lost dispatch has no open PR. Only
-  // the candidate merged at CURRENT main may be recovered; never older work.
+  // A successful fast-forward followed by a lost dispatch usually has a
+  // closed PR. Only the candidate at CURRENT main may recover; never older work.
   const closed = await readPages(
     api,
     `${ROOT}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100`,
   );
   for (const row of closed.filter(
-    (p) => p.merge_commit_sha === main && p.head?.ref?.startsWith(PREFIX),
+    (p) => p.head?.sha === main && p.head?.ref?.startsWith(PREFIX),
   )) {
-    const candidate = await inspect(api, row.number, main, { recovery: true });
-    requireGate(
-      (await checker(api, candidate)) && (await review(api, candidate)),
-      "recovery gates pending",
-    );
-    requireGate(
-      (await currentMain(api)) === main,
-      "main moved during recovery",
-    );
-    const fresh = await inspect(api, row.number, main, { recovery: true });
-    requireGate(
-      fresh.head === candidate.head &&
-        (await checker(api, fresh)) &&
-        (await review(api, fresh)),
-      "recovery gates moved",
-    );
-    return {
-      checkedAt: now().toISOString(),
-      results,
-      status: await dispatchRelease(api, main),
-    };
+    return finishPromotion(api, row.number, main, results, now);
   }
   return { checkedAt: now().toISOString(), results, status: "pending" };
 }

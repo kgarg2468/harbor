@@ -319,7 +319,7 @@ statuses/checks read, with no repository-setting changes.
 The promoter paginates open same-repository PRs and requires a GitHub Actions
 bot-created, open, nondraft candidate against current main. The branch must
 own the exact head and name the provenance version. That head must have one
-parent on main ancestry, and complete Git trees must differ from its parent
+parent equal to current main (older candidates must be regenerated), and complete Git trees must differ from its parent
 in exactly the lock and provenance files as plain `100644` blobs. Blob sizes
 and Git hashes are checked. The lock must match both the parent and current
 main with only the commit line replaced. Trusted lock/provenance validators
@@ -342,24 +342,34 @@ conservatively, including historical findings: these REST records do not
 expose a reliable app id. PR body prose is never a gate. Missing, delayed,
 unknown, failed, or truncated results never become success after a timeout.
 
-Every gate is read again immediately before a merge request with explicit
-head SHA. After merging, the promoter authenticates the bot merge, its two
-parents, and its exact resulting tree before dispatching
-`t3-managed-release.yml` on main with `expected_main_sha`. This explicit
-workflow dispatch is necessary because a merge with `GITHUB_TOKEN` suppresses
-the ordinary push-triggered release event. No `check_run` event is required.
+Every gate is read again immediately before a non-force Git ref update of
+`refs/heads/main` to the exact reviewed head. The candidate must directly
+descend from the expected main SHA. GitHub therefore rejects a concurrent
+divergent advance atomically as a non-fast-forward; the normal PR merge
+endpoint is not used. The promoter re-reads exact main and its reviewed tree.
+GitHub normally closes the PR when its commits reach main; any delayed open
+PR is explicitly closed only after repeating the exact-main/head proofs.
 
-If the merge succeeds but its response or release dispatch is lost, a later
-scheduled run recovers only a bot-merged candidate whose merge commit is
-still current main. It repeats provenance, ancestry, checker, and review
-proofs. Active or successful release runs for that exact main SHA suppress
-another dispatch; failed runs may be retried. An older merge after main has
-advanced, a merge with additional tree changes, or a newer upstream Nightly
-is not recovered automatically. GitHub offers no atomic base-SHA merge guard
-or dispatch idempotency key: head SHA is guarded by the merge API, main is
-re-read around the write, and the release input fails closed if dispatch
-resolves a moved main. A dispatch invisible in the API can be retried by a
-later schedule; publication retains its existing immutable-tag safeguards.
+The promoter explicitly dispatches `t3-managed-release.yml` on main with
+`expected_main_sha`, because a token-authored ref update suppresses the
+ordinary push event. No `check_run` event is required. If the ref update or
+dispatch response is lost, a later schedule recovers only when current main
+is exactly the reviewed candidate head, with its original single parent and
+checker revision. It repeats every provenance and review gate. Already-at-head
+recovery never repeats the ref write. Older or superseded candidates are not
+recovered automatically.
+
+Run listings filter exact `head_sha` and main branch (plus dispatch event for
+checker refresh), so unrelated lifetime history does not consume GitHub's
+1,000-result cap. Paginated totals must still match: more than 1,000 relevant
+runs or an ambiguous/truncated result stays pending. Active or successful
+release runs for the exact SHA suppress another dispatch; failed runs may be
+retried. Dispatches accepted but not yet visible can be repeated, but guarded
+release attempts use the same full-history commit-count counter and exact-SHA
+concurrency. Once one publishes, the resolver rejects the same counter on any
+later attempt, even if public config changed; unchanged inputs also resolve
+the same immutable tag. Duplicate attempts cannot publish a second release.
+The expected-SHA guard still fails if dispatch resolves a moved main.
 
 Tests use an injected API, command runner, and clock, with no live mutations:
 
@@ -378,8 +388,9 @@ checkout or building when it differs from `github.sha`; the run name includes
 that expected SHA (or the workflow SHA for a manual rebuild). Every job is gated on
 `github.repository == 'kgarg2468/harbor'` and `github.ref ==
 'refs/heads/main'`; there is no pull-request trigger and no caller-supplied
-ref, repository, tag, or platform. The concurrency group is fixed and never
-cancels a run in progress. The top-level permission is `contents: read`;
+ref, repository, tag, or platform. The concurrency group keys the exact
+expected SHA (or workflow SHA for manual runs) and never cancels a run in
+progress. The top-level permission is `contents: read`;
 only the final `publish` job has `contents: write`.
 
 Every Node step comes from `scripts/publish-managed-release.mjs`, whose
@@ -430,9 +441,12 @@ time and exactly one well-formed `managed-release.json` asset with a
 positive size; that asset is downloaded by numeric id, its size and any
 reported digest must match the bytes, and the manifest must name the tag's
 version. The resolver then runs
-exactly once with the lock, the tracked upstream version, `github.run_number`
-as the counter, `github.sha` as the builder revision, the public config, and
-the prior manifest when one exists. `preflight` requires immutable releases
+exactly once with the lock, the tracked upstream version, `github.sha` as the
+builder revision, the public config, and
+the prior manifest when one exists. Guarded promotion uses
+`git rev-list --count "$GITHUB_SHA"` from the full-history exact checkout as
+its monotone deterministic counter; manual/unguarded runs retain
+`github.run_number`. `preflight` requires immutable releases
 to be enabled (read with the Administration-read secret described above)
 and the intended tag to be absent from Git refs and from releases of every
 state, including drafts; a collision is refused, never reused or removed,
@@ -506,8 +520,10 @@ changed asset, a tag that does not resolve to `github.sha`) is reported
 against a release that is already visible. In every case the publisher sends
 the publish call at most once, retries nothing, and deletes, edits, or reuses
 nothing; a person inspects the release by its recorded id and exact tag and
-decides what follows. The next run consumes a new run number and therefore
-a new version and tag. The published release is the feed transaction:
+decides what follows. An unguarded manual run consumes a new run number and
+therefore a new version and tag. Guarded duplicate attempts retain their
+commit-count counter and are refused after a successful publication; they
+never allocate a second release version for the same candidate. The published release is the feed transaction:
 clients see the previous immutable release until every artifact is present
 and the draft is published.
 
