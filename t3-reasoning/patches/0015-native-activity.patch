@@ -6401,7 +6401,7 @@ index 744eefe052534a09a7d1fb55aebe774159de7750..f8367b668a6a7c651e1f2d21c4e8efda
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26adec189925 100644
+index 28b88a60f349c21a4726e1f1dce15366122cbb7f..6b13d08eb6d6de1bd71c4a9823b6877d4c2cea73 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 @@ -19,11 +19,13 @@ import {
@@ -6418,17 +6418,16 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
  import * as Layer from "effect/Layer";
  import * as Queue from "effect/Queue";
  import * as Ref from "effect/Ref";
-@@ -39,7 +41,18 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
- import { buildCodexInitializeParams } from "./CodexProvider.ts";
- import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
- import { expandHomePath } from "../../pathExpansion.ts";
+@@ -43,6 +45,17 @@ import {
+   buildCodexDeveloperInstructions,
+   type T3CodeToolAvailability,
+ } from "../CodexDeveloperInstructions.ts";
 +import type {
 +  ActivityBlocker,
 +  ActivityLease,
 +  UpdateActivityShape,
 +  UpdateActivityUnavailableError,
 +} from "../../updateActivity.ts";
- import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 +import { makeOwnedEventSource, type RequiredOwnedSubscription } from "../ownedEventSource.ts";
 +import type {
 +  ProviderIdleRetirementRefusal,
@@ -6437,7 +6436,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
  const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
  const PROVIDER = ProviderDriverKind.make("codex");
-@@ -74,6 +87,11 @@ const CodexUserInputAnswerObject = Schema.Struct({
+@@ -87,6 +100,11 @@ const CodexUserInputAnswerObject = Schema.Struct({
  });
  const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
  const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
@@ -6449,10 +6448,10 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
  const NullableMcpElicitationString = Schema.NullOr(Schema.String);
  const McpElicitationMetadata = Schema.Struct({
    app: Schema.optionalKey(NullableMcpElicitationString),
-@@ -173,6 +191,13 @@ export interface CodexSessionRuntimeOptions {
-    * access; the credential's own capability decides the developer prompt.
-    */
-   readonly browserToolsAvailable?: boolean;
+@@ -181,6 +199,13 @@ export interface CodexSessionRuntimeOptions {
+   readonly appServerArgs?: ReadonlyArray<string>;
+   /** Capabilities the session's `t3-code` MCP credential grants; drives the prompt blocks. */
+   readonly mcpCapabilities?: ReadonlySet<string>;
 +  /**
 +   * Update-activity registry for native ownership. When present, every raw
 +   * notification, emitted event, accepted root turn, live child turn and
@@ -6463,7 +6462,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
  }
 
  export interface CodexSessionRuntimeSendTurnInput {
-@@ -221,11 +246,36 @@ export interface CodexSessionRuntimeShape {
+@@ -229,11 +254,36 @@ export interface CodexSessionRuntimeShape {
      answers: ProviderUserInputAnswers,
    ) => Effect.Effect<void, CodexSessionRuntimeError>;
    readonly events: Stream.Stream<ProviderEvent, never>;
@@ -6500,7 +6499,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
    | CodexSessionRuntimePendingApprovalNotFoundError
    | CodexSessionRuntimePendingUserInputNotFoundError
    | CodexSessionRuntimeInvalidUserInputAnswersError
-@@ -1186,6 +1236,326 @@ function parseThreadSnapshot(
+@@ -1194,6 +1244,326 @@ function parseThreadSnapshot(
    };
  }
 
@@ -6827,7 +6826,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
  export const makeCodexSessionRuntime = (
    options: CodexSessionRuntimeOptions,
  ): Effect.Effect<
-@@ -1195,9 +1565,27 @@ export const makeCodexSessionRuntime = (
+@@ -1203,9 +1573,27 @@ export const makeCodexSessionRuntime = (
  > =>
    Effect.gen(function* () {
      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -6857,7 +6856,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
      const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
      const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
-@@ -1208,6 +1596,46 @@ export const makeCodexSessionRuntime = (
+@@ -1216,6 +1604,46 @@ export const makeCodexSessionRuntime = (
      const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
      const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
      const closedRef = yield* Ref.make(false);
@@ -6904,7 +6903,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
 
      // `~` is not shell-expanded when env vars are set via
      // `child_process.spawn`; `expandHomePath` lets a configured
-@@ -1234,7 +1662,7 @@ export const makeCodexSessionRuntime = (
+@@ -1242,7 +1670,7 @@ export const makeCodexSessionRuntime = (
          }),
        )
        .pipe(
@@ -6913,7 +6912,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
          Effect.mapError(
            (cause) =>
              new CodexErrors.CodexAppServerSpawnError({
-@@ -1244,14 +1672,17 @@ export const makeCodexSessionRuntime = (
+@@ -1252,14 +1680,17 @@ export const makeCodexSessionRuntime = (
          ),
        );
 
@@ -6936,7 +6935,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
      const randomUUIDv4 = (purpose: CodexErrors.CodexAppServerIdentifierPurpose) =>
        crypto.randomUUIDv4.pipe(
-@@ -1278,7 +1709,33 @@ export const makeCodexSessionRuntime = (
+@@ -1286,7 +1717,33 @@ export const makeCodexSessionRuntime = (
        updatedAt: sessionCreatedAt,
      } satisfies ProviderSession;
      const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
@@ -6971,7 +6970,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
 
      const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
        Effect.gen(function* () {
-@@ -1351,6 +1808,36 @@ export const makeCodexSessionRuntime = (
+@@ -1359,6 +1816,36 @@ export const makeCodexSessionRuntime = (
          return next;
        });
 
@@ -7008,7 +7007,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      const emitCollabChildMetadataUpdated = Effect.fn(
        "CodexSessionRuntime.emitCollabChildMetadataUpdated",
      )(function* (agentThreadId: string) {
-@@ -1633,11 +2120,7 @@ export const makeCodexSessionRuntime = (
+@@ -1641,11 +2128,7 @@ export const makeCodexSessionRuntime = (
                  ? ((notification.params as { turn: { id: string } }).turn.id as string)
                  : undefined;
              if (childTurnId) {
@@ -7021,7 +7020,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              }
              yield* emitEvent({
                kind: "notification",
-@@ -1649,11 +2132,6 @@ export const makeCodexSessionRuntime = (
+@@ -1657,11 +2140,6 @@ export const makeCodexSessionRuntime = (
              return true;
            }
            case "turn/completed":
@@ -7033,7 +7032,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              yield* emitEvent({
                kind: "notification",
                threadId: options.threadId,
-@@ -1664,6 +2142,9 @@ export const makeCodexSessionRuntime = (
+@@ -1672,6 +2150,9 @@ export const makeCodexSessionRuntime = (
                  turn: notification.params.turn,
                },
              });
@@ -7043,7 +7042,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              return true;
            case "thread/status/changed":
              yield* emitEvent({
-@@ -1706,11 +2187,6 @@ export const makeCodexSessionRuntime = (
+@@ -1714,11 +2195,6 @@ export const makeCodexSessionRuntime = (
              // The child is gone: drop its live-turn entry so a later Stop
              // doesn't waste a turn/interrupt RPC on a closed thread before
              // reaching the parent (review finding).
@@ -7055,7 +7054,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              yield* markCollabChildClosed(child.agentThreadId);
              yield* emitEvent({
                kind: "notification",
-@@ -1719,6 +2195,7 @@ export const makeCodexSessionRuntime = (
+@@ -1727,6 +2203,7 @@ export const makeCodexSessionRuntime = (
                method: "collabAgent/closed",
                payload: childIdentity,
              });
@@ -7063,7 +7062,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              return true;
            case "error": {
              // A child error must surface as a failed agent, not vanish into
-@@ -1733,11 +2210,6 @@ export const makeCodexSessionRuntime = (
+@@ -1741,11 +2218,6 @@ export const makeCodexSessionRuntime = (
              if (willRetry) {
                return true;
              }
@@ -7075,7 +7074,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              yield* emitEvent({
                kind: "notification",
                threadId: options.threadId,
-@@ -1748,6 +2220,7 @@ export const makeCodexSessionRuntime = (
+@@ -1756,6 +2228,7 @@ export const makeCodexSessionRuntime = (
                  status: { type: "systemError" },
                },
              });
@@ -7083,7 +7082,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              return true;
            }
            default:
-@@ -1820,21 +2293,16 @@ export const makeCodexSessionRuntime = (
+@@ -1828,21 +2301,16 @@ export const makeCodexSessionRuntime = (
                    ? (notification.params as { turn: { id: string } }).turn.id
                    : undefined;
                if (foreignTurnId) {
@@ -7114,7 +7113,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
              }
            }
            yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
-@@ -1885,8 +2353,54 @@ export const makeCodexSessionRuntime = (
+@@ -1893,8 +2361,54 @@ export const makeCodexSessionRuntime = (
              : {}),
            ...(payload !== undefined ? { payload } : {}),
          });
@@ -7169,7 +7168,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      const currentSessionProviderThreadId = Effect.map(Ref.get(sessionRef), currentProviderThreadId);
 
      yield* client.handleServerNotification("thread/started", (payload) =>
-@@ -2005,7 +2519,7 @@ export const makeCodexSessionRuntime = (
+@@ -2013,7 +2527,7 @@ export const makeCodexSessionRuntime = (
          return {
            decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
          } satisfies EffectCodexSchema.CommandExecutionRequestApprovalResponse;
@@ -7178,7 +7177,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      );
 
      yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
-@@ -2063,7 +2577,7 @@ export const makeCodexSessionRuntime = (
+@@ -2071,7 +2585,7 @@ export const makeCodexSessionRuntime = (
          return {
            decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
          } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
@@ -7187,7 +7186,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      );
 
      yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
-@@ -2128,7 +2642,7 @@ export const makeCodexSessionRuntime = (
+@@ -2136,7 +2650,7 @@ export const makeCodexSessionRuntime = (
            ),
          );
          return toMcpElicitationResponse(payload, resolved);
@@ -7196,7 +7195,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      );
 
      yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
-@@ -2178,17 +2692,28 @@ export const makeCodexSessionRuntime = (
+@@ -2186,17 +2700,28 @@ export const makeCodexSessionRuntime = (
              ),
            ),
          } satisfies EffectCodexSchema.ToolRequestUserInputResponse;
@@ -7228,7 +7227,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
          ),
        );
 
-@@ -2200,9 +2725,9 @@ export const makeCodexSessionRuntime = (
+@@ -2208,9 +2733,9 @@ export const makeCodexSessionRuntime = (
        { concurrency: 1, discard: true },
      );
 
@@ -7241,7 +7240,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      );
 
      const stderrRemainderRef = yield* Ref.make("");
-@@ -2238,32 +2763,73 @@ export const makeCodexSessionRuntime = (
+@@ -2246,32 +2771,73 @@ export const makeCodexSessionRuntime = (
        Effect.forkIn(runtimeScope),
      );
 
@@ -7338,7 +7337,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
 
      const start = Effect.fn("CodexSessionRuntime.start")(function* () {
        yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-@@ -2306,25 +2872,179 @@ export const makeCodexSessionRuntime = (
+@@ -2314,25 +2880,179 @@ export const makeCodexSessionRuntime = (
        return providerThreadId;
      });
 
@@ -7531,7 +7530,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
      });
 
      return {
-@@ -2332,48 +3052,105 @@ export const makeCodexSessionRuntime = (
+@@ -2340,49 +3060,106 @@ export const makeCodexSessionRuntime = (
        getSession: Ref.get(sessionRef),
        compactThread: Effect.gen(function* () {
          const providerThreadId = yield* readProviderThreadId;
@@ -7583,9 +7582,18 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
 -            // Derived from the session's own credential rather than the
 -            // setting, so the prompt describes the tools this turn actually
 -            // has even if the setting changed after the session started.
--            browserToolsAvailable:
--              hasConfiguredMcpServer(options.appServerArgs) &&
--              (options.browserToolsAvailable ?? true),
+-            browserToolsAvailable: configuredMcpToolAvailability(
+-              options.appServerArgs,
+-              options.mcpCapabilities,
+-            ),
+-          });
+-          const rawResponse = yield* client.raw.request("turn/start", params);
+-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
+-            Effect.mapError((error) =>
+-              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+-                "decode-response-payload",
+-                error,
+-                { method: "turn/start" },
 +          const issueTurnStart = Effect.gen(function* () {
 +            if (hasConfiguredMcpServer(options.appServerArgs)) {
 +              yield* client.request("config/mcpServer/reload", undefined).pipe(
@@ -7608,21 +7616,14 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
 +              // Derived from the session's own credential rather than the
 +              // setting, so the prompt describes the tools this turn actually
 +              // has even if the setting changed after the session started.
-+              browserToolsAvailable:
-+                hasConfiguredMcpServer(options.appServerArgs) &&
-+                (options.browserToolsAvailable ?? true),
++              browserToolsAvailable: configuredMcpToolAvailability(
++                options.appServerArgs,
++                options.mcpCapabilities,
+               ),
+-            ),
 +            });
 +            return params;
-           });
--          const rawResponse = yield* client.raw.request("turn/start", params);
--          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
--            Effect.mapError((error) =>
--              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
--                "decode-response-payload",
--                error,
--                { method: "turn/start" },
--              ),
--            ),
++          });
 +          // The call lease exists before any RPC and becomes the returned
 +          // turn's lease; a sealed or closed registry refuses the submission
 +          // here, before anything reaches the server. Only a call that never
@@ -7671,7 +7672,7 @@ index ff15997af7558ebff60f997cf87bf23539c6b03b..dc9f28ccc6802d4e6a0fe0dbbf4a26ad
            );
            const turnId = TurnId.make(response.turn.id);
            yield* updateSession(sessionRef, (session) => ({
-@@ -2513,7 +3290,23 @@ export const makeCodexSessionRuntime = (
+@@ -2522,7 +3299,23 @@ export const makeCodexSessionRuntime = (
              },
            });
          }),
@@ -9428,10 +9429,10 @@ index 0000000000000000000000000000000000000000..d340e237bdee782a5e364c7d2b288ae2
 +  };
 +};
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index c5b9f49f2ec008d9ba518c58ddb27bd243e9cad3..423eea141351c01308ea4abe3b51a053770b15bd 100644
+index ff8342eb538a782d9b0c473af4920191c161cbf1..45f1351f839ccfcecae17601b7b2269557f3f0d0 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -470,10 +470,6 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -478,10 +478,6 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    Layer.provideMerge(GitLayerLive),
    Layer.provideMerge(VcsLayerLive),
    Layer.provideMerge(ProviderRuntimeLayerLive),
@@ -9439,10 +9440,10 @@ index c5b9f49f2ec008d9ba518c58ddb27bd243e9cad3..423eea141351c01308ea4abe3b51a053
 -  // Memoized here, at the shared composition, so each requirer sees the same
 -  // instance; a per-service provide would split the count.
 -  Layer.provideMerge(UpdateActivityLive),
-   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
+   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
    Layer.provideMerge(PersistenceLayerLive),
    // Both read a user-owned file out of the state directory and stream changes
-@@ -488,6 +484,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -496,6 +492,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // `providerInstances` hydration merges `settings.providers.<kind>`
    // with explicit `providerInstances` entries on boot.
    Layer.provideMerge(ProviderInstanceRegistryHydrationLive),

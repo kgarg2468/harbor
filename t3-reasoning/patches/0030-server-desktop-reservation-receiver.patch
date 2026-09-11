@@ -14,7 +14,7 @@ index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d6305
  import * as Option from "effect/Option";
  import * as Stream from "effect/Stream";
 +import * as TestClock from "effect/testing/TestClock";
- 
+
  import * as ServerConfig from "../config.ts";
  import * as DesktopTelemetryReceiver from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
 @@ -39,8 +41,10 @@ function report(
@@ -40,7 +40,7 @@ index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d6305
      state,
    };
  }
- 
+
 +const downloaded = makeState({ status: "downloaded", downloadedVersion: "1.2.4" });
 +
  interface HarnessOptions {
@@ -62,7 +62,7 @@ index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d6305
 +  /** Refuses the commit control write as a transport failure. */
 +  readonly commitWriteFails?: boolean;
  }
- 
+
 +/**
 + * The receiver as the desktop sees it: every `desktopUpdates` subscription is
 + * answered by the next command sent, so a command dispatched without a prior
@@ -109,7 +109,7 @@ index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d6305
 +    Effect.sync(() => {
 +      acceptances.push(label);
 +    });
- 
+
    const service = yield* DesktopAppUpdate.make().pipe(
      Effect.provide(
        Layer.mergeAll(
@@ -152,7 +152,7 @@ index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d6305
 -  return { service };
 +  return { service, acceptances, onHandoffAccepted };
  });
- 
+
 +const isSettled = (fiber: Fiber.Fiber<unknown, unknown>) =>
 +  Effect.sync(() => fiber.pollUnsafe() !== undefined);
 +
@@ -173,7 +173,7 @@ index ea89f45e6dd8d1d3bf57cfe0e9339f54a79a09e6..ab8eb92fb93dbb0b8441d928850d6305
 @@ -179,33 +233,6 @@ it.layer(NodeServices.layer)("desktop app update", (it) => {
      }),
    );
- 
+
 -  it.effect("replays a retained commit failure for the preparation token", () =>
 -    Effect.gen(function* () {
 -      const { service } = yield* makeHarness({
@@ -605,7 +605,7 @@ index 1e7b54b2474b81c927e25540ec505ec804d8d416..b7dd7080dc28356935bf1f449cb43ab7
 -        "The desktop app failed to install the update.",
 -    );
    });
- 
+
    return DesktopAppUpdate.of({ available, run, commit });
 diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.test.ts
 index 50c8ea2b76324a1d11cd7fb682263be698bebc73..4307c88cae5a277086ecd63037cff3492cfd9791 100644
@@ -617,7 +617,7 @@ index 50c8ea2b76324a1d11cd7fb682263be698bebc73..4307c88cae5a277086ecd63037cff349
  import * as NodeFS from "node:fs";
  import * as NodeOS from "node:os";
  import * as NodePath from "node:path";
- 
+
 +import * as NodeServices from "@effect/platform-node/NodeServices";
 +import * as NodeStream from "@effect/platform-node/NodeStream";
  import { it } from "@effect/vitest";
@@ -644,7 +644,7 @@ index 50c8ea2b76324a1d11cd7fb682263be698bebc73..4307c88cae5a277086ecd63037cff349
 +import * as Stream from "effect/Stream";
 +import * as Ndjson from "effect/unstable/encoding/Ndjson";
  import { assert, describe, expect } from "vite-plus/test";
- 
+
 +import * as ServerConfig from "../config.ts";
 +import * as ServerSettings from "../serverSettings.ts";
  import {
@@ -979,7 +979,7 @@ index 1297b3bdf7655a78a7406dcc4a4f76c6af317952..c613172f066aec28bc3ef23eb6a35809
 @@ -147,6 +151,11 @@ export interface DesktopTelemetryReceiverHealth {
    readonly lastError: Option.Option<string>;
  }
- 
+
 +/** Answers one desktop reservation command; the server-scoped reservation owner. */
 +export type DesktopUpdateReservationHandler = (
 +  command: DesktopUpdateReservationCommand,
@@ -1002,7 +1002,7 @@ index 1297b3bdf7655a78a7406dcc4a4f76c6af317952..c613172f066aec28bc3ef23eb6a35809
 +    readonly isDesktopUpdateReservationCommitted: (attemptId: string) => Effect.Effect<boolean>;
    }
  >()("t3/resourceTelemetry/DesktopTelemetryReceiver") {}
- 
+
 @@ -330,7 +347,12 @@ export function requireDesktopTelemetryWriteProgress(
  export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")(function* () {
    const config = yield* ServerConfig;
@@ -1052,7 +1052,7 @@ index 1297b3bdf7655a78a7406dcc4a4f76c6af317952..c613172f066aec28bc3ef23eb6a35809
 @@ -527,6 +575,15 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
            );
          }
- 
+
 +        // Forked, not awaited: the reader must stay free to deliver the
 +        // abort or commit that settles this very command.
 +        if (message.type === "desktopUpdateReservation") {
@@ -1075,7 +1075,7 @@ index 1297b3bdf7655a78a7406dcc4a4f76c6af317952..c613172f066aec28bc3ef23eb6a35809
 +      Effect.sync(() => committedAttempts.has(attemptId)),
    });
  });
- 
+
 @@ -712,6 +773,8 @@ export const layerTest = (
            latest: Option.none<DesktopUpdateStatusReport>(),
            changes: Stream.empty,
@@ -1086,10 +1086,10 @@ index 1297b3bdf7655a78a7406dcc4a4f76c6af317952..c613172f066aec28bc3ef23eb6a35809
      }),
    );
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb12109fc15 100644
+index 978701307582edbd9151b6105600bdf6daeec2bc..c552c1cde253762be50c18e3200197873879a304 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -11,6 +11,10 @@ import {
+@@ -12,6 +12,10 @@ import {
    AuthTokenExchangeGrantType,
    CommandId,
    DEFAULT_SERVER_SETTINGS,
@@ -1100,15 +1100,15 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
    type DpopFailureReason,
    EnvironmentId,
    EventId,
-@@ -104,6 +108,7 @@ import packageJson from "../package.json" with { type: "json" };
- import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
- import * as ServerConfig from "./config.ts";
+@@ -106,6 +110,7 @@ import * as ServerConfig from "./config.ts";
+ import * as DeviceService from "./device/DeviceService.ts";
+ import packageJson from "../package.json" with { type: "json" };
  import {
 +  DesktopUpdateReservationLayerLive,
    HTTP_ROUTER_CONFIG,
    makeManagedUpdateRuntimeLayer,
    makeRoutesLayer,
-@@ -119,6 +124,7 @@ import {
+@@ -121,6 +126,7 @@ import {
  } from "./cloud/managedReleaseSource.ts";
  import { ManagedArtifactSourceError, type ManagedRuntimeStager } from "./cloud/managedRuntime.ts";
  import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
@@ -1116,7 +1116,7 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
  import type { ProviderIdleRetirementResult } from "./provider/Services/ProviderAdapter.ts";
  import {
    type ProviderIdlePreparationResult,
-@@ -11426,6 +11432,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11491,6 +11497,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
    const MANAGED_UNKNOWN = "0.0.38-nightly.20260906.1.managed.3.p6d1933416d7a";
    const NOT_PREPARED = "busy: idle providers are not prepared";
    const ADMISSION_BUSY = "client commands or another maintenance own update admission";
@@ -1142,10 +1142,10 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
 +    reason === undefined
 +      ? { version: 1, type: "desktopUpdateReservationReply", attemptId, status }
 +      : { version: 1, type: "desktopUpdateReservationReply", attemptId, status, reason };
- 
+
    /** A distinguishable selection whose source and archive are never meant to be touched. */
    const makeSelection = (version: string, cut: number): ManagedReleaseSelection => ({
-@@ -11457,7 +11485,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11522,7 +11550,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
     * Builds `makeManagedUpdateRuntimeLayer` the way production does, over a
     * temp base directory, a fake exact resolver, fake launcher, fake provider
     * hooks, and the real gates, in a manually owned server scope. `hold`
@@ -1156,10 +1156,10 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
     */
    const makeManagedFixture = Effect.fn("makeManagedFixture")(function* (input: {
      readonly hold: (targetVersion: string) => Effect.Effect<void>;
-@@ -11532,16 +11562,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11597,16 +11627,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
          }),
      });
- 
+
 +    const registered: Array<DesktopTelemetryReceiver.DesktopUpdateReservationHandler> = [];
 +    const receiverLayer = DesktopTelemetryReceiver.layerTest({
 +      registerDesktopUpdateReservationHandler: (handler) =>
@@ -1192,7 +1192,7 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
          Layer.provideMerge(Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer)),
          Layer.provide(Layer.mergeAll(providerLayer, launcherLayer)),
        ),
-@@ -11557,10 +11599,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11622,10 +11664,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
        coordinator: Context.get(context, IdleUpdateCoordinator.IdleUpdateCoordinator),
        activity: Context.get(context, UpdateActivity),
        admission: Context.get(context, UpdateAdmission.UpdateAdmission),
@@ -1210,7 +1210,7 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
        closeServer: Scope.close(serverScope, Exit.void),
      };
    });
- 
+
 +  /** Both gates open and the coordinator idle. */
 +  const assertGatesOpen = Effect.fn("assertGatesOpen")(function* (fixture: {
 +    readonly activity: UpdateActivity["Service"];
@@ -1247,16 +1247,16 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
    const untouched: ManagedCalls = {
      resolve: [],
      stage: 0,
-@@ -11667,6 +11753,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11732,6 +11818,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
            yield* Effect.yieldNow;
- 
+
            assert.deepStrictEqual(fixture.calls, untouched);
 +          // Exactly one reservation owner registered once on the shared receiver.
 +          assert.strictEqual(fixture.registered.length, 1);
            assert.include(yield* fixture.queue.getState, {
              stage: "current",
              installedVersion: packageJson.version,
-@@ -11831,6 +11919,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -11896,6 +11984,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
        }),
      ),
    );
@@ -1467,7 +1467,7 @@ index 6b3ac219e7e7998b1424015c3b57aff8462641f9..c6383c63b8f1a761cee7cf3c0a82fcb1
 +    ),
 +  );
  });
- 
+
  // The WebSocket surface of the managed update queue: one durable subscription
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
 index 2f9ceb27f3f9339e5c9353f7ddba3014f851fa08..a412c53bc2a233e15eaf2e9d3e5435c599e94119 100644
@@ -1484,7 +1484,7 @@ index 2f9ceb27f3f9339e5c9353f7ddba3014f851fa08..a412c53bc2a233e15eaf2e9d3e5435c5
 @@ -517,6 +518,36 @@ export const makeManagedUpdateRuntimeLayer = (input: {
      ),
    );
- 
+
 +/**
 + * The desktop's reserve/abort/commit commands, answered by one server-scoped
 + * reservation owner over the coordinator and preparation owner the managed
@@ -1545,4 +1545,4 @@ index 2f9ceb27f3f9339e5c9353f7ddba3014f851fa08..a412c53bc2a233e15eaf2e9d3e5435c5
 +    ).pipe(Layer.provideMerge(managedUpdateRuntimeLayer));
    }),
  );
- 
+
