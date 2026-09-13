@@ -11,7 +11,7 @@
 # so a Ctrl-C at the terminal cannot kill the fleet, an ignored signal cannot be
 # trapped or reset by the shell that inherits it, and a test that asserts Harbor's INT
 # handling therefore cannot run under parallel at all. Two phases rather than a skip,
-# so the assertion still runs somewhere.
+# so the assertion still runs.
 #
 # Where parallel is absent there is a single serial phase, byte for byte the lane that
 # ran before this script learned about jobs. That is the case CI runners must survive
@@ -30,32 +30,69 @@ if [ "$#" -eq 0 ]; then
   set -- -r "${root}/tests/unit"
 fi
 
-# A caller who named a job count is answered with it, phases and all: passing --jobs
-# through to the parallel phase and leaving the serial one alone would silently ignore
-# half of what was asked for.
-caller_chose_jobs=0
-for arg in "$@"; do
+# Before any rewriting, and with the caller's arguments exactly as they were given: a
+# caller who asks for jobs on a machine without parallel is told so by Bats, which
+# owns that dependency, rather than being quietly given a serial lane that answers a
+# question they did not ask.
+if ! command -v parallel >/dev/null 2>&1; then
+  exec /bin/bash "${bats}" --print-output-on-failure "$@"
+fi
+
+# A job count the caller named belongs to the concurrent phase, not to a single
+# unfiltered run: passing it straight through would put the needs-signals test back
+# under parallel, where its INT assertion cannot pass, which is the whole reason the
+# serial phase exists. So the flag is lifted out here and reapplied to phase one only.
+# Bats takes -j and --jobs with the value as a separate argument and accepts no
+# --jobs=N or -jN form, so those two spellings are the whole vocabulary.
+# The loop rotates the positional parameters, shifting from the front and appending
+# what it keeps, which rewrites the list without an array.
+argc="$#"
+i=0
+want_value=0
+caller_jobs=""
+while [ "${i}" -lt "${argc}" ]; do
+  arg="${1}"
+  shift
+  i=$((i + 1))
+  if [ "${want_value}" = 1 ]; then
+    want_value=0
+    caller_jobs="${arg}"
+    continue
+  fi
   case "${arg}" in
-    --jobs | -j | -j?*) caller_chose_jobs=1 ;;
+    -j | --jobs)
+      want_value=1
+      continue
+      ;;
   esac
+  set -- "$@" "${arg}"
 done
 
-jobs="${HARBOR_JOBS:-}"
+# Enumerated digits rather than [0-9], because a bracket range resolves by the
+# locale's collating order and this value goes on to a command line. A -j whose value
+# is missing or not a count is not a job count, and is left to the defaults below.
+case "${caller_jobs}" in
+  '' | *[!0123456789]*) caller_jobs="" ;;
+esac
+jobs="${caller_jobs}"
 if [ -z "${jobs}" ]; then
-  # hw.ncpu on Darwin, nproc on Linux, and one job if neither answers. Enumerated
-  # digits rather than [0-9], because a bracket range resolves by the locale's
-  # collating order and this value goes on to a command line.
+  jobs="${HARBOR_JOBS:-}"
+fi
+if [ -z "${jobs}" ]; then
+  # hw.ncpu on Darwin, nproc on Linux, and one job if neither answers.
   jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || printf 1)"
 fi
 case "${jobs}" in
   '' | 0 | *[!0123456789]*) jobs=1 ;;
 esac
 
-if [ "${caller_chose_jobs}" = 1 ] || [ "${jobs}" = 1 ] || ! command -v parallel >/dev/null 2>&1; then
+# One job is not concurrency, so it takes the serial lane whole rather than a
+# concurrent phase of one and an empty tag-filtered second pass.
+if [ "${jobs}" = 1 ]; then
   exec /bin/bash "${bats}" --print-output-on-failure "$@"
 fi
 
-# Both phases run even when the first one fails, because a red parallel phase is the
+# Both phases run even when the first one fails, because a red concurrent phase is the
 # moment the serial result is most worth having, and the exit code is the first
 # failure rather than the last phase to finish.
 concurrent=0
