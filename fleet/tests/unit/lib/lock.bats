@@ -229,8 +229,10 @@ contender() {
   # contender OUTFILE: a background library-level acquisition of FIX_ROOT that
   # pauses at lock-acquired. env execs bash, so CONTENDER_PID is the acquiring
   # process and its EXIT trap releases the lock when the test resumes it.
+  # It opens the command log the real commands open, so the two tests below can
+  # wait on the step line the way tests/unit/bin/contention.bats does.
   env HARBOR_TEST_HOOKS=1 HARBOR_PAUSE_AFTER=lock-acquired \
-    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; set -euo pipefail; HARBOR_PID=$$; harbor_install_traps; harbor_lock_acquire "$1" operator; HARBOR_COMPLETED=1; exit 0' _ "${FIX_ROOT}" >"${1}" 2>&1 3>&- &
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; . "${HARBOR_ROOT}/lib/lock.sh"; set -euo pipefail; HARBOR_PID=$$; harbor_install_traps; harbor_log_open "$1/harbor.log" 0600; harbor_lock_acquire "$1" operator; HARBOR_COMPLETED=1; exit 0' _ "${FIX_ROOT}" >"${1}" 2>&1 3>&- &
   CONTENDER_PID=$!
   PAUSED_PIDS="${PAUSED_PIDS} ${CONTENDER_PID}"
 }
@@ -457,6 +459,14 @@ contender() {
   pa="${CONTENDER_PID}"
   contender "${BATS_TEST_TMPDIR}/b.out"
   pb="${CONTENDER_PID}"
+  # The loser's exit is not the moment the winner is quiescent, which is why this
+  # test's own last assertion accepts lock.gate_busy as well as lock.busy: exclusion
+  # happens at the gate mkdir, so the loser can be gone while the winner is still
+  # several steps short of writing lock.d/holder. harbor_step logs before it pauses
+  # and lock-acquired is stepped after the gate release, so that line is exactly the
+  # state the two assertions below describe. Same fix, and same reasoning, as the
+  # binary-level pair in tests/unit/bin/contention.bats.
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   wait_for_one_exit "${pa}" "${pb}"
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -e "${FIX_ROOT}/reclaim.d" ]
@@ -487,6 +497,10 @@ contender() {
   pa="${CONTENDER_PID}"
   contender "${BATS_TEST_TMPDIR}/b.out"
   pb="${CONTENDER_PID}"
+  # Same reason as the test above, and one window wider here: the winner renames
+  # lock.d aside to archive it before making its own, so a stale reclaim has a moment
+  # in which lock.d does not exist at all.
+  wait_for_log_step "${FIX_ROOT}" lock-acquired
   wait_for_one_exit "${pa}" "${pb}"
   assert [ -f "${FIX_ROOT}/lock.d/holder" ]
   assert [ ! -e "${FIX_ROOT}/reclaim.d" ]
