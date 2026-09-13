@@ -183,6 +183,15 @@ setup() {
   assert_equal "${stderr_lines[1]}" 'harbor: next: harbor journal resolve 0001 --reverted'
 }
 
+# Tagged because of the INT half below, which tests/run_unit.sh runs serially. Bats
+# implements --jobs by shelling out to GNU parallel, and parallel starts every job
+# with SIGINT ignored so that a Ctrl-C at the terminal cannot kill the fleet. A signal
+# ignored when a shell starts cannot be trapped or reset, so bash silently declines
+# the INT trap -- trap -p INT prints nothing -- and the kill below is discarded, the
+# sleep runs out, and the shell prints survived and exits 2. That is a fact about the
+# runner, not about lib/log.sh: TERM and HUP are not ignored and their tests pass in
+# parallel unchanged. Tagging rather than skipping, so the assertion still runs.
+# bats test_tags=needs-signals
 @test "INT and TERM exit 4 and print the interrupted JSON object under HARBOR_JSON=1" {
   run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_JSON=1; kill -TERM $$; sleep 5; echo survived'
   assert_equal "${status}" 4

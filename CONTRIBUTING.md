@@ -51,6 +51,18 @@ On macOS the runner pins `PATH` so Bats executes under `/bin/bash` 3.2, which is
 `macos-14` job in CI does. Run the suite on both an Ubuntu machine and a Mac before opening a
 PR when you touched `fleet/lib/` or `fleet/bin/`.
 
+Install GNU parallel and the lane runs concurrently, one job per core: about eight minutes
+instead of about thirty on a ten-core machine. It is optional, and the runner detects it —
+without it the lane is serial, exactly as it was before. `HARBOR_JOBS=1` forces serial when
+reproducing a failure, and any `-j` you pass yourself is used as given.
+
+A handful of tests need a signal disposition of their own and cannot run concurrently, because
+Bats implements `--jobs` through GNU parallel and parallel starts every job with `SIGINT`
+ignored so a Ctrl-C cannot kill the fleet — and a shell cannot trap a signal that was already
+ignored when it started. Those tests carry `# bats test_tags=needs-signals` and the runner
+gives them a second, serial phase. Tag a new test that way if it asserts on `INT`; `TERM` and
+`HUP` pass through parallel untouched and need nothing.
+
 ## Commit and PR conventions
 
 - Conventional prefixes: `feat:`, `fix:`, `test:`, `docs:`, `ci:`, `chore:`.
