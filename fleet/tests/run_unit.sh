@@ -49,6 +49,7 @@ fi
 argc="$#"
 i=0
 want_value=0
+caller_gave_jobs=0
 caller_jobs=""
 while [ "${i}" -lt "${argc}" ]; do
   arg="${1}"
@@ -62,18 +63,28 @@ while [ "${i}" -lt "${argc}" ]; do
   case "${arg}" in
     -j | --jobs)
       want_value=1
+      caller_gave_jobs=1
       continue
       ;;
   esac
   set -- "$@" "${arg}"
 done
 
-# Enumerated digits rather than [0-9], because a bracket range resolves by the
-# locale's collating order and this value goes on to a command line. A -j whose value
-# is missing or not a count is not a job count, and is left to the defaults below.
-case "${caller_jobs}" in
-  '' | *[!0123456789]*) caller_jobs="" ;;
-esac
+# Refused rather than defaulted. The flag has been lifted out of the list by now, so
+# falling through to HARBOR_JOBS or the CPU count would run a lane at a concurrency
+# nobody asked for and report nothing about it -- and the one reason to name -j by
+# hand is to control concurrency while reproducing a failure, which is exactly when a
+# silently substituted count makes the result a lie. Enumerated digits rather than
+# [0-9], because a bracket range resolves by the locale's collating order.
+if [ "${caller_gave_jobs}" = 1 ]; then
+  case "${caller_jobs}" in
+    '' | 0 | *[!0123456789]*)
+      printf '%s: -j takes a positive whole number of jobs, got %s\n' \
+        "${0}" "${caller_jobs:-no value}" >&2
+      exit 3
+      ;;
+  esac
+fi
 jobs="${caller_jobs}"
 if [ -z "${jobs}" ]; then
   jobs="${HARBOR_JOBS:-}"
