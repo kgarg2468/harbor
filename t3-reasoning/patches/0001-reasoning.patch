@@ -1,8 +1,8 @@
 diff --git a/apps/mobile/src/lib/threadActivity.test.ts b/apps/mobile/src/lib/threadActivity.test.ts
-index 46a79b70acd2cf64c7c053f49138a83032ae02bf..85500af2b4a729b7cc3cf14f8f91d094e3d77d2b 100644
+index 4e301288c94f9dc7143f24fe0cf9259ef73cf353..6b72327aed6aa194eb7f8cfbf7a1da3ff3cc9600 100644
 --- a/apps/mobile/src/lib/threadActivity.test.ts
 +++ b/apps/mobile/src/lib/threadActivity.test.ts
-@@ -3315,6 +3315,28 @@ describe("quiet timeline: nested agents", () => {
+@@ -3330,6 +3330,28 @@ describe("quiet timeline: nested agents", () => {
        },
      ]);
    });
@@ -29,13 +29,13 @@ index 46a79b70acd2cf64c7c053f49138a83032ae02bf..85500af2b4a729b7cc3cf14f8f91d094
 +    expect(buildThreadFeed(thread)).toEqual([]);
 +  });
  });
-
+ 
  it("accepts ready attachment-only answers while preserving selected options", () => {
 diff --git a/apps/mobile/src/lib/threadActivity.ts b/apps/mobile/src/lib/threadActivity.ts
-index 7f0241f949c32dedb323b235909ef1d9a7fbc80d..190527ec7494d94fd10f96f05bd7d76b1a7d791c 100644
+index f1550042eae8a9b17aade09254fefa0e3fdebc09..f3bb93bc618528f8899182af9dd38e6a2062357c 100644
 --- a/apps/mobile/src/lib/threadActivity.ts
 +++ b/apps/mobile/src/lib/threadActivity.ts
-@@ -4,7 +4,11 @@ import {
+@@ -5,7 +5,11 @@ import {
    requestKindFromRequestType,
    type PendingApproval,
  } from "@t3tools/client-runtime/pending-requests";
@@ -48,7 +48,7 @@ index 7f0241f949c32dedb323b235909ef1d9a7fbc80d..190527ec7494d94fd10f96f05bd7d76b
  import type {
    OrchestrationLatestTurn,
    OrchestrationThread,
-@@ -2178,12 +2182,13 @@ export function buildThreadFeed(
+@@ -2188,12 +2192,13 @@ export function buildThreadFeed(
      readonly localMessages?: ReadonlyArray<OrchestrationThread["messages"][number]>;
    },
  ): ThreadFeedEntry[] {
@@ -61,17 +61,17 @@ index 7f0241f949c32dedb323b235909ef1d9a7fbc80d..190527ec7494d94fd10f96f05bd7d76b
    const oldestLoadedMessageCreatedAt =
 -    options?.loadedMessages !== undefined ? (loadedMessages[0]?.createdAt ?? null) : null;
 +    options?.loadedMessages !== undefined ? (sourceMessages[0]?.createdAt ?? null) : null;
-   const activityEntries = getThreadFeedActivityEntries(thread.activities);
-   const entries = Arr.sortWith(
-     [
+   const activityEntries = getThreadFeedActivityEntries(thread.activities).filter(
+     (entry) =>
+       oldestLoadedMessageCreatedAt === null || entry.createdAt >= oldestLoadedMessageCreatedAt,
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
-index b88f7f012d4619dcebc633fe5fb103bd2f720ee7..94f126c22af518a88085d5ebb43e5eff0383bcd7 100644
+index 07fb9cdcc0cdba6dbc885a6187e60609d9babbd7..c1c6a8446a6a33fa89e8b4886832755e21573068 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 @@ -534,6 +534,26 @@ describe("CheckpointReactor", () => {
          checkpointTurnCount: 0,
        });
-
+ 
 +      yield* harness.engine.dispatch({
 +        type: "thread.message.assistant.complete",
 +        commandId: CommandId.make("cmd-checkpoint-answer-complete"),
@@ -104,7 +104,7 @@ index b88f7f012d4619dcebc633fe5fb103bd2f720ee7..94f126c22af518a88085d5ebb43e5eff
            { path: "large.txt", kind: "modified", additions: largeFileLineCount, deletions: 0 },
            { path: "README.md", kind: "modified", additions: 1, deletions: 1 },
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index d4d6b94098089a85456900a282ba82ee40105d80..2a3768e181d7dbad433b5efb2c1428e066829bce 100644
+index 9cfcc2e74915f827ecf451d4ccc3b129c5d0e986..147c36aaa8b4b99b739dbc1dd52b4539a72b24e4 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -3,10 +3,12 @@ import {
@@ -140,10 +140,10 @@ index d4d6b94098089a85456900a282ba82ee40105d80..2a3768e181d7dbad433b5efb2c1428e0
 +            entry.turnId === input.turnId,
 +        )?.id ??
        MessageId.make(`assistant:${input.turnId}`);
-
+ 
      yield* orchestrationEngine.dispatch({
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-index a038a5662169571b76452e0b53b219275cc11147..68a8a91f42dc18d1d90d32ab9b07acd49a067237 100644
+index 21c95142929f0bd8579f8f9057e3568a5c65d7ea..f3df59a8e173522a5812710edea4ff1cbfa68ad8 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 @@ -366,8 +366,9 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -178,19 +178,19 @@ index a038a5662169571b76452e0b53b219275cc11147..68a8a91f42dc18d1d90d32ab9b07acd4
 +        SELECT assistant_message_id AS "assistantMessageId" FROM projection_turns
 +      `;
 +      assert.deepEqual(turnRows, []);
-
+ 
        const stateRows = yield* sql<{
          readonly projector: string;
-@@ -3729,7 +3738,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -3762,7 +3771,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
      }),
    );
-
+ 
 -  it.effect("does not fallback-retain messages whose turnId is removed by revert", () =>
 +  it.effect("removes reasoning messages whose turnId is removed by revert", () =>
      Effect.gen(function* () {
        const projectionPipeline = yield* OrchestrationProjectionPipeline;
        const eventStore = yield* OrchestrationEventStore;
-@@ -3888,6 +3897,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -3921,6 +3930,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
            threadId: ThreadId.make("thread-revert"),
            messageId: MessageId.make("assistant-remove"),
            role: "assistant",
@@ -198,10 +198,10 @@ index a038a5662169571b76452e0b53b219275cc11147..68a8a91f42dc18d1d90d32ab9b07acd4
            text: "removed",
            turnId: TurnId.make("turn-2"),
            streaming: false,
-@@ -3936,6 +3946,861 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
+@@ -3969,6 +3979,861 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
    );
  });
-
+ 
 +it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-revert-reasoning-")))(
 +  "OrchestrationProjectionPipeline revert reasoning retention",
 +  (it) => {
@@ -1061,7 +1061,7 @@ index a038a5662169571b76452e0b53b219275cc11147..68a8a91f42dc18d1d90d32ab9b07acd4
    "OrchestrationProjectionPipeline pending turn cleanup",
    (it) => {
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
-index e303e73237295dede596f97bdcb7124612035ded..a0ba9068688c4b4c9490cbc0b6b7370cb2181651 100644
+index 7e1710a760ecf59e1564307e53ce1e0e20ec8a2d..60b1b6d0e573fb1689725e98ad412d6140bcde19 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.ts
 @@ -5,6 +5,7 @@ import {
@@ -1088,25 +1088,25 @@ index e303e73237295dede596f97bdcb7124612035ded..a0ba9068688c4b4c9490cbc0b6b7370c
            !retainedMessageIds.has(message.messageId) &&
            (message.turnId === null || retainedTurnIds.has(message.turnId)),
        )
-@@ -1129,6 +1132,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+@@ -1137,6 +1140,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                threadId: event.payload.threadId,
                turnId: event.payload.turnId,
                role: event.payload.role,
 +              ...(event.payload.channel !== undefined ? { channel: event.payload.channel } : {}),
                text: event.payload.text,
                ...(attachments !== undefined ? { attachments: [...attachments] } : {}),
-               createdAt: event.payload.createdAt,
-@@ -1157,6 +1161,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+               ...(event.payload.context !== undefined ? { context: event.payload.context } : {}),
+@@ -1166,6 +1170,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
              threadId: event.payload.threadId,
              turnId: event.payload.turnId,
              role: event.payload.role,
 +            ...(event.payload.channel !== undefined ? { channel: event.payload.channel } : {}),
              text: nextText,
              ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
-             isStreaming: false,
-@@ -1551,7 +1556,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
+             ...((event.payload.context ?? previousMessage?.context) !== undefined
+@@ -1563,7 +1568,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
          }
-
+ 
          case "thread.message-sent": {
 -          if (event.payload.turnId === null || event.payload.role !== "assistant") {
 +          if (
@@ -1118,10 +1118,10 @@ index e303e73237295dede596f97bdcb7124612035ded..a0ba9068688c4b4c9490cbc0b6b7370c
            }
            // A completed assistant message only settles the turn once the
 diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
-index 5849123c55d67af04a77b6264c42824dadb7f972..fe570374b859ec3d066fb8a7789673c1099110ae 100644
+index 7ffd333b289350185054d2ca2e36dff414235832..831f45eee03d08e30111d317b999d51400ceba01 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts
-@@ -187,21 +187,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+@@ -244,21 +244,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
            thread_id,
            turn_id,
            role,
@@ -1165,9 +1165,9 @@ index 5849123c55d67af04a77b6264c42824dadb7f972..fe570374b859ec3d066fb8a7789673c1
 +            '2026-02-24T00:00:05.000Z'
 +          )
        `;
-
+ 
        yield* sql`
-@@ -431,6 +445,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+@@ -488,6 +502,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
            titleRegeneration: null,
            deletedAt: null,
            messages: [
@@ -1185,10 +1185,10 @@ index 5849123c55d67af04a77b6264c42824dadb7f972..fe570374b859ec3d066fb8a7789673c1
                id: asMessageId("message-1"),
                role: "assistant",
 diff --git a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
-index 066c60760ca52f7bf94a69cd552346cd1111bf32..b1ce818e5d0dd944f1b756bee5f4b8d51cee0508 100644
+index eaad35d2e067010916edce1a97a89fce85cbd105..2793a65d7e0c8b80b2ade48f3758b23bbef1cd3c 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
-@@ -7,6 +7,7 @@ import {
+@@ -8,6 +8,7 @@ import {
    MessageId,
    NonNegativeInt,
    OrchestrationCheckpointFile,
@@ -1196,55 +1196,55 @@ index 066c60760ca52f7bf94a69cd552346cd1111bf32..b1ce818e5d0dd944f1b756bee5f4b8d5
    OrchestrationProposedPlanId,
    OrchestrationReadModel,
    OrchestrationThreadSearchSource,
-@@ -110,6 +111,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
+@@ -111,6 +112,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
  const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
    Struct.assign({
      isStreaming: Schema.Number,
 +    channel: Schema.NullOr(OrchestrationMessageChannel),
      attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+     context: Schema.NullOr(Schema.fromJsonString(OrchestrationMessageContext)),
    }),
- );
-@@ -674,6 +676,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+@@ -684,6 +686,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
 +          channel,
            text,
            attachments_json AS "attachments",
-           is_streaming AS "isStreaming",
-@@ -1267,6 +1270,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+           context_json AS "context",
+@@ -1280,6 +1283,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
          thread_id AS "threadId",
          turn_id AS "turnId",
          role,
 +        channel,
          text,
          attachments_json AS "attachments",
-         is_streaming AS "isStreaming",
-@@ -1299,6 +1303,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+         context_json AS "context",
+@@ -1313,6 +1317,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
 +          channel,
            text,
            attachments_json AS "attachments",
-           is_streaming AS "isStreaming",
-@@ -1677,6 +1682,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
+           context_json AS "context",
+@@ -1692,6 +1697,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
 +          channel,
            text,
            attachments_json AS "attachments",
-           is_streaming AS "isStreaming",
-@@ -2086,6 +2092,7 @@ pending_approval_requests AS (
+           context_json AS "context",
+@@ -2102,6 +2108,7 @@ pending_approval_requests AS (
                  threadMessages.push({
                    id: row.messageId,
                    role: row.role,
 +                  ...(row.channel !== null ? { channel: row.channel } : {}),
                    text: row.text,
                    ...(row.attachments !== null ? { attachments: row.attachments } : {}),
-                   turnId: row.turnId,
-@@ -3442,6 +3449,7 @@ pending_approval_requests AS (
+                   ...(row.context !== null ? { context: row.context } : {}),
+@@ -3480,6 +3487,7 @@ pending_approval_requests AS (
            const message = {
              id: row.messageId,
              role: row.role,
@@ -1253,10 +1253,10 @@ index 066c60760ca52f7bf94a69cd552346cd1111bf32..b1ce818e5d0dd944f1b756bee5f4b8d5
              turnId: row.turnId,
              streaming: row.isStreaming === 1,
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-index d93fec5a3cf68655a5e2fea4be3974243b79da5a..51aef1fb89b226c76e41fb4428179fcb9f8f2249 100644
+index 52ab3d5e808f0b3a8a94d49894438c7716f765f5..7f9796461cd58f935c1397a3ddcdc1f221c037f4 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-@@ -1477,6 +1477,17 @@ describe("ProviderCommandReactor", () => {
+@@ -1675,6 +1675,17 @@ describe("ProviderCommandReactor", () => {
          createdAt: now,
        }),
      );
@@ -1275,7 +1275,7 @@ index d93fec5a3cf68655a5e2fea4be3974243b79da5a..51aef1fb89b226c76e41fb4428179fcb
        harness.engine.dispatch({
          type: "thread.message.assistant.delta",
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index 6df08bfadb9c77d3fef31bbd371b51ac54de76a7..85379729197d7cbcf54fc7f53bbf35a5cf0ec1ea 100644
+index cdaadba1a96d894c3304ea946cf58336cda763e2..a9481d1502ebef35970e278473c4212a119dcc4c 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 @@ -1,5 +1,7 @@
@@ -1286,15 +1286,15 @@ index 6df08bfadb9c77d3fef31bbd371b51ac54de76a7..85379729197d7cbcf54fc7f53bbf35a5
    CommandId,
    EventId,
    type ModelSelection,
-@@ -116,12 +118,13 @@ const FIRST_USER_CONTEXT_TRUNCATION_MARKER = "\n[First user message truncated]";
-
+@@ -119,12 +121,13 @@ const FIRST_USER_CONTEXT_TRUNCATION_MARKER = "\n[First user message truncated]";
+ 
  type ThreadTitleMessage = {
    readonly role: "user" | "assistant" | "system";
 +  readonly channel?: OrchestrationMessageChannel | undefined;
    readonly text: string;
    readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
  };
-
+ 
  function formatThreadTitleSection(message: ThreadTitleMessage): string | undefined {
 -  if (message.role === "system") {
 +  if (message.role === "system" || isReasoningMessage(message)) {
@@ -1302,7 +1302,7 @@ index 6df08bfadb9c77d3fef31bbd371b51ac54de76a7..85379729197d7cbcf54fc7f53bbf35a5
    }
    const text = assistantCitationsToPlainText(message.text).trim();
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb79d263d5 100644
+index c22cf3e53bea7c7604aa267234378cb845ddd22d..a0174a4e97ade8c756369d61ad0f0a6de5d7bd5f 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -22,6 +22,7 @@ import {
@@ -1313,8 +1313,8 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
    ThreadId,
    TurnId,
  } from "@t3tools/contracts";
-@@ -234,7 +235,10 @@ async function waitForThread(
-
+@@ -237,7 +238,10 @@ async function waitForThread(
+ 
  describe("ProviderRuntimeIngestion", () => {
    let runtime: ManagedRuntime.ManagedRuntime<
 -    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
@@ -1325,17 +1325,24 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
      unknown
    > | null = null;
    let scope: Scope.Closeable | null = null;
-@@ -297,7 +301,8 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -300,6 +304,7 @@ describe("ProviderRuntimeIngestion", () => {
          });
        }),
      ).pipe(Layer.provide(projectionSnapshotLayer));
--    const layer = ProviderRuntimeIngestionLive.pipe(
 +    const serverSettingsLayer = makeTestServerSettingsLayer(options?.serverSettings);
+     // Real clock plus an offset the test can advance, so delivery pacing in
+     // ingestion can be driven without sleeping. Sleeps stay real.
+     let clockOffsetMs = 0;
+@@ -316,7 +321,7 @@ describe("ProviderRuntimeIngestion", () => {
+       monotonicTimeNanos: realClock.monotonicTimeNanos,
+       sleep: (duration) => realClock.sleep(duration),
+     };
+-    const layer = ProviderRuntimeIngestionLive.pipe(
 +    const ingestionLayer = ProviderRuntimeIngestionLive.pipe(
+       Layer.provide(Layer.succeed(Clock.Clock, shiftedClock)),
        Layer.provideMerge(orchestrationLayer),
        Layer.provideMerge(ingestionProjectionSnapshotLayer),
-       // Single shared liveness instance across ingestion (writer), the
-@@ -306,18 +311,20 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -326,18 +331,20 @@ describe("ProviderRuntimeIngestion", () => {
        Layer.provideMerge(ThreadPlanProgress.layer),
        Layer.provideMerge(SqlitePersistenceMemory),
        Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
@@ -1357,7 +1364,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
      scope = await Effect.runPromise(Scope.make("sequential"));
      await testRuntime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
      const drain = () => testRuntime.runPromise(ingestion.drain);
-@@ -395,6 +402,8 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -418,6 +425,8 @@ describe("ProviderRuntimeIngestion", () => {
        emitAndDrain,
        sqlCount: sqlCounter.count,
        setProviderSession: provider.setSession,
@@ -1366,16 +1373,16 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
        drain,
      };
    }
-@@ -1322,7 +1331,7 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -1345,7 +1354,7 @@ describe("ProviderRuntimeIngestion", () => {
      const harness = await createHarness();
      const initial = await harness.readModel();
-
+ 
 -    for (const streamKind of ["reasoning_text", "command_output", "file_change_output"] as const) {
 +    for (const streamKind of ["command_output", "file_change_output"] as const) {
        harness.emit({
          type: "content.delta",
          eventId: asEventId(`evt-ignored-${streamKind}`),
-@@ -4366,4 +4375,926 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -4528,6 +4537,931 @@ describe("ProviderRuntimeIngestion", () => {
      expect(thread.session?.status).toBe("error");
      expect(thread.session?.lastError).toBe("runtime still processed");
    });
@@ -1391,8 +1398,11 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
 +      createdAt: "2026-05-01T00:00:00.000Z",
 +      threadId: asThreadId("thread-1"),
 +      turnId,
-+      payload: { streamKind: "reasoning_summary_text", delta: "Inspecting files" },
++      payload: { streamKind: "reasoning_summary_text", delta: "Inspecting files\n\n" },
 +    });
++    await harness.drain();
++    const bufferedThread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
++    expect(bufferedThread?.messages.filter((message) => message.channel === "reasoning")).toEqual([]);
 +    harness.emit({
 +      type: "content.delta",
 +      eventId: asEventId("evt-answer-after-reasoning"),
@@ -1437,7 +1447,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
 +      return reasoning.length === 2 && reasoning.every((message) => !message.streaming);
 +    });
 +    expect(thread.messages.map((message) => [message.channel, message.text])).toEqual([
-+      ["reasoning", "Inspecting files"],
++      ["reasoning", "Inspecting files\n\n"],
 +      [undefined, "Answer"],
 +      ["reasoning", "Checking results"],
 +    ]);
@@ -2302,11 +2312,13 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
 +    ]);
 +  });
  });
+ 
+ describe("splitBufferedAssistantText", () => {
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6f459c8a7 100644
+index 8126537bd9f7fdbd9df987badfffa5d4a1bc9c2b..71a75e854cc4bc36ac8c64b350d0418d528fa9db 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-@@ -8,6 +8,7 @@ import {
+@@ -8,12 +8,14 @@ import {
    CheckpointRef,
    classifyTaskAgentKind,
    EventId,
@@ -2314,7 +2326,14 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
    isToolLifecycleItemType,
    ThreadId,
    type ThreadTokenUsageSnapshot,
-@@ -36,7 +37,10 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
+   TurnId,
+   type OrchestrationCheckpointSummary,
+   type OrchestrationThreadActivity,
++  type ProjectId,
+   type ProviderRuntimeEvent,
+   RuntimeRequestId,
+ } from "@t3tools/contracts";
+@@ -37,7 +39,10 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
  import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
  import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
  import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
@@ -2326,10 +2345,10 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
  import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
  import { ProjectionThreadProposedPlanRepository } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
  import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
-@@ -97,6 +101,17 @@ interface AssistantSegmentState {
+@@ -99,6 +104,17 @@ interface AssistantSegmentState {
    activeMessageId: MessageId | null;
  }
-
+ 
 +interface ReasoningSegmentState {
 +  turnId: TurnId | null;
 +  nextSegmentIndex: number;
@@ -2344,10 +2363,10 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
  const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
  const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
  const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
-@@ -138,6 +153,25 @@ function sameId(left: string | null | undefined, right: string | null | undefine
+@@ -145,6 +161,25 @@ function sameId(left: string | null | undefined, right: string | null | undefine
    return left === right;
  }
-
+ 
 +function nextReasoningSegmentIndex(
 +  messages: ReadonlyArray<Pick<ProjectionThreadMessage, "messageId" | "channel">>,
 +  threadId: ThreadId,
@@ -2370,22 +2389,25 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
  function hasCheckpointForTurn(
    checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
    turnId: TurnId,
-@@ -915,6 +949,11 @@ const make = Effect.gen(function* () {
+@@ -974,6 +1009,14 @@ const make = Effect.gen(function* () {
        Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
      );
-
+ 
 +  // Read per event: the setting can change between turns.
-+  const getAssistantDeliveryMode = Effect.map(serverSettingsService.getSettings, (settings) =>
-+    settings.enableLegacyTokenStreaming ? "streaming" : "buffered",
-+  );
++  const getAssistantDeliveryMode = (projectId: ProjectId) =>
++    Effect.map(serverSettingsService.getSettings, (settings) =>
++      resolveProjectSettings(settings, projectId).settings.enableLegacyTokenStreaming
++        ? "streaming"
++        : "buffered",
++    );
 +
    const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
      capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
      timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
-@@ -936,6 +975,16 @@ const make = Effect.gen(function* () {
+@@ -1001,6 +1044,16 @@ const make = Effect.gen(function* () {
        ),
    });
-
+ 
 +  const reasoningSegmentByThreadId = yield* Cache.make<ThreadId, ReasoningSegmentState>({
 +    capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
 +    timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
@@ -2399,10 +2421,10 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
    const bufferedProposedPlanById = yield* Cache.make<string, { text: string; createdAt: string }>({
      capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
      timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
-@@ -981,6 +1030,26 @@ const make = Effect.gen(function* () {
+@@ -1046,6 +1099,26 @@ const make = Effect.gen(function* () {
      );
    });
-
+ 
 +  const nextMessageStamp = Effect.fn("nextMessageStamp")(function* (
 +    threadId: ThreadId,
 +    intendedAt: string,
@@ -2426,7 +2448,31 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
    const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
      Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
        Effect.flatMap((existingIds) =>
-@@ -1173,7 +1242,7 @@ const make = Effect.gen(function* () {
+@@ -1167,7 +1240,7 @@ const make = Effect.gen(function* () {
+       });
+     });
+ 
+-  const appendBufferedAssistantText = (messageId: MessageId, delta: string, atMillis: number) =>
++  const appendBufferedAssistantText = (messageId: MessageId, delta: string, atMillis?: number) =>
+     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
+       Effect.flatMap((existingText) =>
+         Effect.gen(function* () {
+@@ -1182,9 +1255,12 @@ const make = Effect.gen(function* () {
+           const lastDeliveredAt = Option.getOrUndefined(
+             yield* Cache.getOption(lastAssistantDeliveryAtByMessageId, messageId),
+           );
++          // Reasoning bursts omit the clock to retain completion/spill-only
++          // delivery; paragraph pacing applies to visible assistant answers.
+           const paced =
+-            lastDeliveredAt === undefined ||
+-            atMillis - lastDeliveredAt >= MIN_ASSISTANT_DELIVERY_INTERVAL_MS;
++            atMillis !== undefined &&
++            (lastDeliveredAt === undefined ||
++              atMillis - lastDeliveredAt >= MIN_ASSISTANT_DELIVERY_INTERVAL_MS);
+           if (
+             paced &&
+             hasRenderableAssistantText(ready) &&
+@@ -1264,7 +1340,7 @@ const make = Effect.gen(function* () {
          messageId: input.messageId,
          delta: bufferedText,
          ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2435,7 +2481,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
        });
        return true;
      });
-@@ -1240,7 +1309,7 @@ const make = Effect.gen(function* () {
+@@ -1331,7 +1407,7 @@ const make = Effect.gen(function* () {
            messageId: input.messageId,
            delta: text,
            ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2443,8 +2489,8 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +          createdAt: yield* nextMessageStamp(input.threadId, input.createdAt),
          });
        }
-
-@@ -1251,7 +1320,7 @@ const make = Effect.gen(function* () {
+ 
+@@ -1342,7 +1418,7 @@ const make = Effect.gen(function* () {
            threadId: input.threadId,
            messageId: input.messageId,
            ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2453,10 +2499,10 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
          });
        }
        yield* clearAssistantMessageState(input.messageId);
-@@ -1299,6 +1368,141 @@ const make = Effect.gen(function* () {
+@@ -1390,6 +1466,141 @@ const make = Effect.gen(function* () {
        }
      });
-
+ 
 +  const getReasoningSegmentState = (threadId: ThreadId) =>
 +    Cache.getOption(reasoningSegmentByThreadId, threadId).pipe(Effect.map(Option.getOrUndefined));
 +
@@ -2595,7 +2641,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
    const finalizeBufferedProposedPlan = Effect.fn("finalizeBufferedProposedPlan")(function* (input: {
      event: ProviderRuntimeEvent;
      threadId: ThreadId;
-@@ -1374,6 +1578,9 @@ const make = Effect.gen(function* () {
+@@ -1465,6 +1676,9 @@ const make = Effect.gen(function* () {
              : Effect.void,
          { concurrency: 1 },
        ).pipe(Effect.asVoid);
@@ -2605,8 +2651,8 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
        yield* Effect.forEach(
          proposedPlanKeys,
          (key) =>
-@@ -1476,7 +1683,12 @@ const make = Effect.gen(function* () {
-
+@@ -1567,7 +1781,12 @@ const make = Effect.gen(function* () {
+ 
    const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
      Effect.gen(function* () {
 -      if (event.type === "content.delta" && event.payload.streamKind !== "assistant_text") {
@@ -2618,11 +2664,11 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +      ) {
          return;
        }
-
-@@ -1554,6 +1766,31 @@ const make = Effect.gen(function* () {
+ 
+@@ -1645,6 +1864,31 @@ const make = Effect.gen(function* () {
            ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
            : null;
-
+ 
 +      const terminalSessionState =
 +        event.type === "session.state.changed" &&
 +        !sessionStatusAllowsActiveTurn(
@@ -2651,7 +2697,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
        if (
          event.type === "session.started" ||
          event.type === "session.state.changed" ||
-@@ -1588,14 +1825,9 @@ const make = Effect.gen(function* () {
+@@ -1679,14 +1923,9 @@ const make = Effect.gen(function* () {
          const nextActiveTurnId =
            event.type === "turn.started"
              ? (eventTurnId ?? null)
@@ -2668,7 +2714,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
          const lastError =
            event.type === "session.state.changed" && event.payload.state === "error"
              ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-@@ -1652,11 +1884,22 @@ const make = Effect.gen(function* () {
+@@ -1743,11 +1982,22 @@ const make = Effect.gen(function* () {
          event.type === "content.delta" && event.payload.streamKind === "assistant_text"
            ? event.payload.delta
            : undefined;
@@ -2680,7 +2726,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +          : undefined;
        const proposedPlanDelta =
          event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
-
+ 
        if (assistantDelta && assistantDelta.length > 0) {
          const turnId = toTurnId(event.turnId);
 +        yield* finalizeActiveReasoningSegment({
@@ -2691,19 +2737,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
          const assistantMessageId = yield* getOrCreateAssistantMessageId({
            threadId: thread.id,
            event,
-@@ -1666,10 +1909,7 @@ const make = Effect.gen(function* () {
-           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
-         }
-
--        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
--          serverSettingsService.getSettings,
--          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
--        );
-+        const assistantDeliveryMode = yield* getAssistantDeliveryMode;
-         if (assistantDeliveryMode === "buffered") {
-           const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
-           if (spillChunk.length > 0) {
-@@ -1680,7 +1920,7 @@ const make = Effect.gen(function* () {
+@@ -1780,7 +2030,7 @@ const make = Effect.gen(function* () {
                messageId: assistantMessageId,
                delta: spillChunk,
                ...(turnId ? { turnId } : {}),
@@ -2712,16 +2746,16 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
              });
            }
          } else {
-@@ -1691,8 +1931,64 @@ const make = Effect.gen(function* () {
+@@ -1791,17 +2041,84 @@ const make = Effect.gen(function* () {
              messageId: assistantMessageId,
              delta: assistantDelta,
              ...(turnId ? { turnId } : {}),
 -            createdAt: now,
 +            createdAt: yield* nextMessageStamp(thread.id, now),
-+          });
-+        }
-+      }
-+
+           });
+         }
+       }
+ 
 +      if (reasoningDelta && reasoningDelta.length > 0) {
 +        const turnId = toTurnId(event.turnId) ?? activeTurnId;
 +        const openSegment = yield* getReasoningSegmentState(thread.id);
@@ -2741,7 +2775,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +            turnId,
 +          });
 +        }
-+        const deliveryMode = yield* getAssistantDeliveryMode;
++        const deliveryMode = yield* getAssistantDeliveryMode(thread.projectId);
 +        const reasoningState = yield* getOrCreateReasoningSegment({
 +          threadId: thread.id,
 +          turnId,
@@ -2767,7 +2801,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +            channel: "reasoning",
 +            ...(turnId !== null ? { turnId } : {}),
 +            createdAt: yield* nextMessageStamp(thread.id, buffered ? active.firstDeltaAt : now),
-           });
++          });
 +          // A projected segment gets a completion even when its text is whitespace only.
 +          if (!active.hasProjectedMessage) {
 +            yield* Cache.set(reasoningSegmentByThreadId, thread.id, {
@@ -2775,10 +2809,12 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +              active: { ...active, hasProjectedMessage: true },
 +            });
 +          }
-         }
-       }
-
-@@ -1702,15 +1998,23 @@ const make = Effect.gen(function* () {
++        }
++      }
++
+       const pauseForUserTurnId =
+         event.type === "request.opened" ||
+         (event.type === "user-input.requested" && event.payload.responseMode !== "message")
            ? toTurnId(event.turnId)
            : undefined;
        if (pauseForUserTurnId) {
@@ -2796,18 +2832,8 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
          const hasProjectedMessage = yield* projectionThreadMessages.hasAssistantMessageForTurn({
            threadId: thread.id,
            turnId: pauseForUserTurnId,
-           streamingOnly: true,
-         });
--        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
--          serverSettingsService.getSettings,
--          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
--        );
-+        const assistantDeliveryMode = yield* getAssistantDeliveryMode;
-         const flushedMessageIds =
-           assistantDeliveryMode === "buffered"
-             ? yield* flushBufferedAssistantMessagesForTurn({
-@@ -1767,6 +2071,11 @@ const make = Effect.gen(function* () {
-
+@@ -1870,6 +2187,11 @@ const make = Effect.gen(function* () {
+ 
        if (assistantCompletion) {
          const turnId = toTurnId(event.turnId);
 +        yield* finalizeActiveReasoningSegment({
@@ -2818,9 +2844,9 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
          const activeAssistantMessageId = turnId
            ? yield* getActiveAssistantMessageIdForTurn(thread.id, turnId)
            : Option.none<MessageId>();
-@@ -2127,6 +2436,13 @@ const make = Effect.gen(function* () {
+@@ -2230,6 +2552,13 @@ const make = Effect.gen(function* () {
        }
-
+ 
        const activities = runtimeEventToActivities(activityEvent, taskTitle);
 +      if (activities.length > 0) {
 +        yield* finalizeActiveReasoningSegment({
@@ -2832,7 +2858,7 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
        yield* Effect.forEach(activities, (activity) =>
          providerCommandId(event, "thread-activity-append").pipe(
            Effect.flatMap((commandId) =>
-@@ -2140,6 +2456,10 @@ const make = Effect.gen(function* () {
+@@ -2243,6 +2572,10 @@ const make = Effect.gen(function* () {
            ),
          ),
        ).pipe(Effect.asVoid);
@@ -2841,13 +2867,13 @@ index 8d34fee4f9817e5d42dc436c2519b70e6cea1b39..d21ffcb005b2d7855860f464518fcde6
 +        lastMessageStampMsByThreadId.delete(thread.id);
 +      }
      });
-
+ 
    const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
-index c0787a18d096673991252fb247dfe274c0f01d99..bd49fd84551409e8b6a922f1c87757299fa1ccb9 100644
+index 4cc5676cc730bcad222eca9039a428a6668f56c1..fe2d87a3a154b6786773674f6db3c90ad073f144 100644
 --- a/apps/server/src/orchestration/decider.ts
 +++ b/apps/server/src/orchestration/decider.ts
-@@ -1779,6 +1779,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+@@ -1782,6 +1782,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
            threadId: command.threadId,
            messageId: command.messageId,
            role: "assistant",
@@ -2855,7 +2881,7 @@ index c0787a18d096673991252fb247dfe274c0f01d99..bd49fd84551409e8b6a922f1c8775729
            text: command.delta,
            turnId: command.turnId ?? null,
            streaming: true,
-@@ -1812,6 +1813,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+@@ -1815,6 +1816,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
            threadId: command.threadId,
            messageId: command.messageId,
            role: "assistant",
@@ -2878,7 +2904,7 @@ index 39aaacd8739d4451150126b4d85ba5f06bf6bc7c..2aa35a09f916792feb6dd6321a837c40
  import * as Effect from "effect/Effect";
 -import { it as effectIt } from "@effect/vitest";
  import { describe, expect, it } from "vite-plus/test";
-
+ 
  import { createEmptyReadModel, projectEvent } from "./projector.ts";
 @@ -661,6 +661,7 @@ describe("orchestration projector", () => {
              threadId: "thread-1",
@@ -2897,7 +2923,7 @@ index 39aaacd8739d4451150126b4d85ba5f06bf6bc7c..2aa35a09f916792feb6dd6321a837c40
              turnId: "turn-1",
              streaming: false,
 @@ -697,12 +699,13 @@ describe("orchestration projector", () => {
-
+ 
      const message = afterComplete.threads[0]?.messages[0];
      expect(message?.id).toBe("assistant:msg-1");
 +    expect(message?.channel).toBe("reasoning");
@@ -2905,12 +2931,12 @@ index 39aaacd8739d4451150126b4d85ba5f06bf6bc7c..2aa35a09f916792feb6dd6321a837c40
      expect(message?.streaming).toBe(false);
      expect(message?.updatedAt).toBe(completeAt);
    });
-
+ 
 -  it("prunes reverted turn messages from in-memory thread snapshot", async () => {
 +  it("prunes reverted reasoning messages from in-memory thread snapshot", async () => {
      const createdAt = "2026-02-23T10:00:00.000Z";
      const model = createEmptyReadModel(createdAt);
-
+ 
 @@ -838,6 +841,7 @@ describe("orchestration projector", () => {
            threadId: "thread-1",
            messageId: "assistant-msg-2",
@@ -2922,7 +2948,7 @@ index 39aaacd8739d4451150126b4d85ba5f06bf6bc7c..2aa35a09f916792feb6dd6321a837c40
 @@ -1070,6 +1074,798 @@ describe("orchestration projector", () => {
      ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
    });
-
+ 
 +  // Regression: retainThreadMessagesAfterRevert counts a kept turn's
 +  // channel=reasoning message as the turn's assistant, so the turnless
 +  // substantive assistant is never recovered through the fallback scan and
@@ -3719,7 +3745,7 @@ index 39aaacd8739d4451150126b4d85ba5f06bf6bc7c..2aa35a09f916792feb6dd6321a837c40
      const createdAt = "2026-03-01T10:00:00.000Z";
      const model = createEmptyReadModel(createdAt);
 diff --git a/apps/server/src/orchestration/projector.ts b/apps/server/src/orchestration/projector.ts
-index 02435ea5ba4488a8f07526b7d6aa82b39120473c..fff2028515d908aa11b2b048faf70c3755a8ef95 100644
+index 546256dd36bcf4c19a7246e6e31150027438eaed..7dc3fe3b747c041bcee4bbff52d053edb47c5543 100644
 --- a/apps/server/src/orchestration/projector.ts
 +++ b/apps/server/src/orchestration/projector.ts
 @@ -245,6 +245,7 @@ function retainThreadMessagesAfterRevert(
@@ -3745,8 +3771,8 @@ index 02435ea5ba4488a8f07526b7d6aa82b39120473c..fff2028515d908aa11b2b048faf70c37
 +            ...(payload.channel !== undefined ? { channel: payload.channel } : {}),
              text: payload.text,
              ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
-             turnId: payload.turnId,
-@@ -781,6 +784,7 @@ export function projectEvent(
+             ...(payload.context !== undefined ? { context: payload.context } : {}),
+@@ -782,6 +785,7 @@ export function projectEvent(
                      streaming: message.streaming,
                      updatedAt: message.updatedAt,
                      turnId: message.turnId,
@@ -3755,10 +3781,10 @@ index 02435ea5ba4488a8f07526b7d6aa82b39120473c..fff2028515d908aa11b2b048faf70c37
                        ? { attachments: message.attachments }
                        : {}),
 diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
-index 12f4db91fe0b7527256fcaf4a223bd6f857b18f2..0f6c2c7422671d51b05f67b56f1844d414fe952c 100644
+index 87a15b95e41336016981b439ab890aa57b56cda7..ce46ebe72d6d6dd7a7e70b0964a7f73957d663dc 100644
 --- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
 +++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.test.ts
-@@ -276,4 +276,59 @@ layer("ProjectionThreadMessageRepository", (it) => {
+@@ -324,4 +324,59 @@ layer("ProjectionThreadMessageRepository", (it) => {
        );
      }),
    );
@@ -3819,16 +3845,16 @@ index 12f4db91fe0b7527256fcaf4a223bd6f857b18f2..0f6c2c7422671d51b05f67b56f1844d4
 +  );
  });
 diff --git a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
-index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a09159f2a250 100644
+index 28aeb6d794e95a53de96f0ef785ebfe6762b7d24..3b33078e082c432d7317f3c207b1f28510258355 100644
 --- a/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
 +++ b/apps/server/src/persistence/Layers/ProjectionThreadMessages.ts
 @@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
  import * as Option from "effect/Option";
  import * as Schema from "effect/Schema";
  import * as Struct from "effect/Struct";
--import { ChatAttachment } from "@t3tools/contracts";
-+import { ChatAttachment, OrchestrationMessageChannel } from "@t3tools/contracts";
-
+-import { ChatAttachment, OrchestrationMessageContext } from "@t3tools/contracts";
++import { ChatAttachment, OrchestrationMessageChannel, OrchestrationMessageContext } from "@t3tools/contracts";
+ 
  import { toPersistenceSqlError } from "../Errors.ts";
  import {
 @@ -22,6 +22,7 @@ import {
@@ -3837,9 +3863,9 @@ index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a091
      isStreaming: Schema.Number,
 +    channel: Schema.NullOr(OrchestrationMessageChannel),
      attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+     context: Schema.NullOr(Schema.fromJsonString(OrchestrationMessageContext)),
    }),
- );
-@@ -35,6 +36,7 @@ function toProjectionThreadMessage(
+@@ -36,6 +37,7 @@ function toProjectionThreadMessage(
      threadId: row.threadId,
      turnId: row.turnId,
      role: row.role,
@@ -3847,15 +3873,15 @@ index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a091
      text: row.text,
      isStreaming: row.isStreaming === 1,
      createdAt: row.createdAt,
-@@ -57,6 +59,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -60,6 +62,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id,
            turn_id,
            role,
 +          channel,
            text,
            attachments_json,
-           is_streaming,
-@@ -68,6 +71,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           context_json,
+@@ -72,6 +75,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            ${row.threadId},
            ${row.turnId},
            ${row.role},
@@ -3863,7 +3889,7 @@ index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a091
            ${row.text},
            COALESCE(
              ${nextAttachmentsJson},
-@@ -86,6 +90,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -98,6 +102,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id = excluded.thread_id,
            turn_id = excluded.turn_id,
            role = excluded.role,
@@ -3871,23 +3897,23 @@ index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a091
            text = excluded.text,
            attachments_json = COALESCE(
              excluded.attachments_json,
-@@ -109,6 +114,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -126,6 +131,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id,
            turn_id,
            role,
 +          channel,
            text,
            attachments_json,
-           is_streaming,
-@@ -120,6 +126,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           context_json,
+@@ -138,6 +144,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            ${row.threadId},
            ${row.turnId},
            ${row.role},
 +          ${row.channel ?? null},
            ${row.text},
            ${nextAttachmentsJson},
-           1,
-@@ -131,6 +138,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           ${nextContextJson},
+@@ -150,6 +157,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id = excluded.thread_id,
            turn_id = excluded.turn_id,
            role = excluded.role,
@@ -3895,24 +3921,24 @@ index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a091
            text = projection_thread_messages.text || excluded.text,
            attachments_json = COALESCE(
              excluded.attachments_json,
-@@ -152,6 +160,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -175,6 +183,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
 +          channel,
            text,
            attachments_json AS "attachments",
-           is_streaming AS "isStreaming",
-@@ -163,6 +172,8 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+           context_json AS "context",
+@@ -187,6 +196,8 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
        `,
    });
-
+ 
 +  // Reasoning rows share the assistant role but are not answers; counting one
 +  // would let ingestion treat an answer completion as redundant and drop it.
    const hasProjectionThreadAssistantMessageRow = SqlSchema.findOne({
      Request: HasProjectionThreadAssistantMessageInput,
      Result: ProjectionThreadMessageExistsDbRowSchema,
-@@ -174,6 +185,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -198,6 +209,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            WHERE thread_id = ${threadId}
              AND turn_id = ${turnId}
              AND role = 'assistant'
@@ -3920,22 +3946,22 @@ index eae7189de5b24496d75289edd9a5f3457414c50c..4637c0ce5b81113e865f01e97161a091
              AND (${streamingOnly ? 1 : 0} = 0 OR is_streaming = 1)
            LIMIT 1
          ) AS "exists"
-@@ -190,6 +202,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
+@@ -214,6 +226,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
            thread_id AS "threadId",
            turn_id AS "turnId",
            role,
 +          channel,
            text,
            attachments_json AS "attachments",
-           is_streaming AS "isStreaming",
+           context_json AS "context",
 diff --git a/apps/server/src/persistence/Migrations.ts b/apps/server/src/persistence/Migrations.ts
-index a728e6e6e22e485a8f9e824c4ce4aaee272725ed..2c6f2a636b0adb8d6fe8a8da7bfdc2a614f53465 100644
+index 4adb98cc60f4e9c3ecd54126e7c8683d14af3d13..979fb72de4d7d5e5f55687c541e8de4a0b4db971 100644
 --- a/apps/server/src/persistence/Migrations.ts
 +++ b/apps/server/src/persistence/Migrations.ts
 @@ -11,6 +11,12 @@
  import * as Migrator from "effect/unstable/sql/Migrator";
  import * as Effect from "effect/Effect";
-
+ 
 +import {
 +  ensureReasoningSchema,
 +  LEGACY_REASONING_MIGRATION_ID,
@@ -3945,7 +3971,7 @@ index a728e6e6e22e485a8f9e824c4ce4aaee272725ed..2c6f2a636b0adb8d6fe8a8da7bfdc2a6
  // Import all migrations statically
  import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
  import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
-@@ -155,15 +161,41 @@ export interface RunMigrationsOptions {
+@@ -157,15 +163,41 @@ export interface RunMigrationsOptions {
   *
   * Returns array of [id, name] tuples for migrations that were run.
   *
@@ -4373,33 +4399,33 @@ index 0000000000000000000000000000000000000000..d953ba2f3ea0287f8c004a769af5d561
 +  return true;
 +});
 diff --git a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
-index a7e258ad5dc095929c5eacdf3ed854dd81d292ab..8c246e5477bcb878d60cdefab92f3267cb54e29f 100644
+index e3e5b6e5151d0a22bdae1226780fbca4b8e91e04..69ea557bd7ed25b618b23b34915ab2252aaec223 100644
 --- a/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
 +++ b/apps/server/src/persistence/Services/ProjectionThreadMessages.ts
-@@ -10,6 +10,7 @@ import {
-   ChatAttachment,
+@@ -11,6 +11,7 @@ import {
    MessageId,
+   OrchestrationMessageContext,
    OrchestrationMessageRole,
 +  OrchestrationMessageChannel,
    ThreadId,
    TurnId,
    IsoDateTime,
-@@ -27,6 +28,7 @@ export const ProjectionThreadMessage = Schema.Struct({
+@@ -28,6 +29,7 @@ export const ProjectionThreadMessage = Schema.Struct({
    threadId: ThreadId,
    turnId: Schema.NullOr(TurnId),
    role: OrchestrationMessageRole,
 +  channel: Schema.optional(OrchestrationMessageChannel),
    text: Schema.String,
    attachments: Schema.optional(Schema.Array(ChatAttachment)),
-   isStreaming: Schema.Boolean,
+   context: Schema.optional(OrchestrationMessageContext),
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-index 5422a8730f276a8307d3f67d692b271ed967742e..cbdfa5fdd56abdc09672b2ccc17e5d1df7f31193 100644
+index 38bdb7f1f2e79226c6c6a0fb7a27efeffc7428e2..4544e645f68f479122238a93527080f26e062a8a 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-@@ -576,6 +576,50 @@ describe("ClaudeAdapterLive", () => {
+@@ -606,6 +606,50 @@ describe("ClaudeAdapterLive", () => {
      );
    });
-
+ 
 +  it.effect("requests summarized thinking display by default", () => {
 +    const harness = makeHarness();
 +    return Effect.gen(function* () {
@@ -4448,10 +4474,10 @@ index 5422a8730f276a8307d3f67d692b271ed967742e..cbdfa5fdd56abdc09672b2ccc17e5d1d
      const harness = makeHarness();
      return Effect.gen(function* () {
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index 81a4a197e9dbd663177333ce12d1c176335e9892..54131df6eff5cacd7d107c4a474ac3c8c5df3020 100644
+index fc52fe38dc682ab0aba01d7f32ff8ef2d6761502..2648c8a27545660e3d2961f7b1c29e5fbe6501ad 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-@@ -4693,6 +4693,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4740,6 +4740,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
          ...(newSessionId ? { sessionId: newSessionId } : {}),
          includePartialMessages: true,
@@ -4461,10 +4487,10 @@ index 81a4a197e9dbd663177333ce12d1c176335e9892..54131df6eff5cacd7d107c4a474ac3c8
          onUserDialog,
          supportedDialogKinds: ["resume_return"],
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-index 3385137a2dae0564b2e7b76bd80d4770b809be6e..744eefe052534a09a7d1fb55aebe774159de7750 100644
+index c6257221c73733cd3be8f8fd5f4735a0ac8bd0f8..bbfbb80818bdd7a4d5000c80a618deb51067ca4d 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-@@ -116,6 +116,7 @@ describe("buildTurnStartParams", () => {
+@@ -207,6 +207,7 @@ describe("buildTurnStartParams", () => {
        ],
        model: "gpt-5.3-codex",
        effort: "medium",
@@ -4472,7 +4498,7 @@ index 3385137a2dae0564b2e7b76bd80d4770b809be6e..744eefe052534a09a7d1fb55aebe7741
        collaborationMode: {
          mode: "plan",
          settings: {
-@@ -165,6 +166,7 @@ describe("buildTurnStartParams", () => {
+@@ -256,6 +257,7 @@ describe("buildTurnStartParams", () => {
          },
        ],
        model: "gpt-5.3-codex",
@@ -4480,7 +4506,7 @@ index 3385137a2dae0564b2e7b76bd80d4770b809be6e..744eefe052534a09a7d1fb55aebe7741
        collaborationMode: {
          mode: "default",
          settings: {
-@@ -216,6 +218,7 @@ describe("buildTurnStartParams", () => {
+@@ -307,6 +309,7 @@ describe("buildTurnStartParams", () => {
              text: "Ship it",
            },
          ],
@@ -4488,7 +4514,7 @@ index 3385137a2dae0564b2e7b76bd80d4770b809be6e..744eefe052534a09a7d1fb55aebe7741
        });
      }),
    );
-@@ -242,6 +245,7 @@ describe("buildTurnStartParams", () => {
+@@ -333,6 +336,7 @@ describe("buildTurnStartParams", () => {
            text: "Review",
          },
        ],
@@ -4497,10 +4523,10 @@ index 3385137a2dae0564b2e7b76bd80d4770b809be6e..744eefe052534a09a7d1fb55aebe7741
    });
  });
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index 2ec77ecb7000d3155df86a6042edb90146e07602..ff15997af7558ebff60f997cf87bf23539c6b03b 100644
+index a04db1405912bab73d7af3a134126cb2ecef9bc4..253be452f6a2ec6c07349b2a8aa7e99aa3e50466 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-@@ -643,6 +643,8 @@ export function buildTurnStartParams(input: {
+@@ -651,6 +651,8 @@ export function buildTurnStartParams(input: {
      ...(input.model ? { model: input.model } : {}),
      ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
      ...(input.effort ? { effort: input.effort } : {}),
@@ -4510,10 +4536,10 @@ index 2ec77ecb7000d3155df86a6042edb90146e07602..ff15997af7558ebff60f997cf87bf235
    }).pipe(
      Effect.mapError((cause) =>
 diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
-index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055d6ab8a58 100644
+index 5fbc686227d9c4e2a41c54833d782929ebd96b56..a14d918d087c5da64c32f14f1854db09f2a5e96c 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
 +++ b/apps/web/src/components/chat/MessagesTimeline.logic.test.ts
-@@ -24,10 +24,12 @@ import {
+@@ -25,10 +25,12 @@ import {
    deriveMessagesTimelineRowsWithState,
    liveWorkEntryLabel,
    normalizeCompactToolLabel,
@@ -4526,10 +4552,10 @@ index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055
    type MessagesTimelineRow,
    type MessagesTimelineRowsProjection,
    workEntryDisplayLabel,
-@@ -807,6 +809,29 @@ describe("work entry labels", () => {
+@@ -808,6 +810,29 @@ describe("work entry labels", () => {
    );
  });
-
+ 
 +describe("reasoning disclosure expansion", () => {
 +  it("defaults to the message streaming state when the user has not toggled it", () => {
 +    const overrides = new Map();
@@ -4556,10 +4582,10 @@ index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055
  describe("shouldPreserveAssistantLineBreaks", () => {
    it("preserves Claude insight formatting without changing regular markdown", () => {
      expect(
-@@ -892,7 +917,10 @@ describe("computeMessageDurationStart", () => {
+@@ -893,7 +918,10 @@ describe("computeMessageDurationStart", () => {
      );
    });
-
+ 
 -  it("does not advance the boundary for a streaming message", () => {
 +  it.each([
 +    { label: "streaming", streaming: true },
@@ -4568,7 +4594,7 @@ index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055
      const result = computeMessageDurationStart([
        {
          id: "u1",
-@@ -904,9 +932,10 @@ describe("computeMessageDurationStart", () => {
+@@ -905,9 +933,10 @@ describe("computeMessageDurationStart", () => {
        {
          id: "a1",
          role: "assistant",
@@ -4580,10 +4606,10 @@ index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055
        },
        {
          id: "a2",
-@@ -1543,6 +1572,489 @@ describe("deriveMessagesTimelineRows", () => {
+@@ -1672,6 +1701,489 @@ describe("deriveMessagesTimelineRows", () => {
      expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-1", "assistant-final-entry"]);
    });
-
+ 
 +  it("anchors the turn fold at leading reasoning and folds it with the rest of the turn", () => {
 +    const rows = deriveMessagesTimelineRows({
 +      timelineEntries: [
@@ -5070,7 +5096,7 @@ index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055
    it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
      // A steer ends the previous turn early: its only message completes the
      // instant it is created, and trailing work entries land after it. The
-@@ -2485,6 +2997,21 @@ describe("deriveMessagesTimelineRows", () => {
+@@ -2615,6 +3127,21 @@ describe("deriveMessagesTimelineRows", () => {
              streaming: false,
            },
          },
@@ -5092,18 +5118,18 @@ index 0c5e53261b4fe4b7aa48d2f63a7e990fcb37985c..cb2309366d067a3760bedc755a030055
        ],
        expandedTurnIds: new Set(["turn-1" as never]),
        isWorking: false,
-@@ -2498,7 +3025,8 @@ describe("deriveMessagesTimelineRows", () => {
+@@ -2628,7 +3155,8 @@ describe("deriveMessagesTimelineRows", () => {
          row.kind === "message" && row.message.role === "assistant",
      );
-
+ 
 -    expect(assistantRows.map((row) => row.showAssistantMeta)).toEqual([false, true]);
 +    expect(assistantRows.map((row) => row.showAssistantMeta)).toEqual([false, true, false]);
 +    expect(assistantRows.map((row) => row.showAssistantCopyButton)).toEqual([false, true, false]);
    });
-
+ 
    it("withholds assistant metadata while the active turn is still in progress", () => {
 diff --git a/apps/web/src/components/chat/MessagesTimeline.logic.ts b/apps/web/src/components/chat/MessagesTimeline.logic.ts
-index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b948dbc3b 100644
+index 8dcb539fb024f2534277f0f234a7564552d12c27..5f3869c85a77cd5269a7731e03d42cb1eac2f13e 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.logic.ts
 +++ b/apps/web/src/components/chat/MessagesTimeline.logic.ts
 @@ -28,7 +28,13 @@ import {
@@ -5119,12 +5145,12 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
 +  type TurnId,
 +} from "@t3tools/contracts";
  import { formatWorkspaceRelativePath } from "../../filePathDisplay";
-
+ 
  const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 @@ -168,6 +174,24 @@ export function shouldPreserveAssistantLineBreaks(text: string): boolean {
    return /^★ Insight(?:\s|─)/mu.test(text);
  }
-
+ 
 +export function resolveReasoningDisclosureExpanded(
 +  overrides: ReadonlyMap<MessageId, boolean>,
 +  messageId: MessageId,
@@ -5171,11 +5197,11 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
 +    if (message.role !== "assistant" || isReasoningMessage(message)) {
        continue;
      }
-
+ 
 @@ -528,6 +553,15 @@ function timelineEntryTurnId(entry: TimelineEntry): TurnId | null {
    return entry.kind === "work" ? (entry.entry.turnId ?? null) : null;
  }
-
+ 
 +function isEmptyCompletedReasoningEntry(entry: TimelineEntry): boolean {
 +  return (
 +    entry.kind === "message" &&
@@ -5188,7 +5214,7 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
  /**
   * A promptless provider restart replaces the native turn without adding a
   * user message. Keep every provider turn since the latest user message in one
-@@ -870,10 +904,17 @@ export function deriveMessagesTimelineRows(input: {
+@@ -873,10 +907,17 @@ export function deriveMessagesTimelineRows(input: {
        : {},
    });
    const nextRows: MessagesTimelineRow[] = [];
@@ -5208,7 +5234,7 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
    const unsettledTurnId = deriveUnsettledTurnId(
      input.latestTurn ?? null,
      input.runningTurnId ?? null,
-@@ -884,7 +925,7 @@ export function deriveMessagesTimelineRows(input: {
+@@ -887,7 +928,7 @@ export function deriveMessagesTimelineRows(input: {
      isWorking: input.isWorking,
    });
    const foldsByAnchorEntryId = deriveTurnFolds({
@@ -5217,10 +5243,10 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
      terminalAssistantMessageIds,
      latestTurn: input.latestTurn ?? null,
      unfoldedTurnIds: activeVisualResponseTurnIds,
-@@ -898,9 +939,9 @@ export function deriveMessagesTimelineRows(input: {
+@@ -901,9 +942,9 @@ export function deriveMessagesTimelineRows(input: {
      }
    }
-
+ 
 -  let activeTurnHeaderIndex = input.timelineEntries.length;
 +  let activeTurnHeaderIndex = timelineEntries.length;
    if (input.isWorking) {
@@ -5229,7 +5255,7 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
      activeTurnHeaderIndex = latestUserMessageIndex + 1;
    }
    const entryBelongsToActiveTurn = (entry: TimelineEntry, index: number) =>
-@@ -912,9 +953,21 @@ export function deriveMessagesTimelineRows(input: {
+@@ -915,9 +956,21 @@ export function deriveMessagesTimelineRows(input: {
      unsettledTurnId !== null &&
      entry.toolLifecycleStatus === "inProgress" &&
      entry.turnId === unsettledTurnId;
@@ -5253,10 +5279,10 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
      if (
        !entryBelongsToActiveTurn(entry, index) ||
        entry.kind !== "work" ||
-@@ -995,8 +1048,8 @@ export function deriveMessagesTimelineRows(input: {
+@@ -1006,8 +1059,8 @@ export function deriveMessagesTimelineRows(input: {
      );
    };
-
+ 
 -  for (let index = 0; index < input.timelineEntries.length; index += 1) {
 -    const timelineEntry = input.timelineEntries[index];
 +  for (let index = 0; index < timelineEntries.length; index += 1) {
@@ -5264,7 +5290,7 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
      if (!timelineEntry) {
        continue;
      }
-@@ -1055,8 +1108,8 @@ export function deriveMessagesTimelineRows(input: {
+@@ -1076,8 +1129,8 @@ export function deriveMessagesTimelineRows(input: {
        }
        const groupedEntries = [timelineEntry.entry];
        let cursor = index + 1;
@@ -5275,10 +5301,10 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
          if (
            !nextEntry ||
            nextEntry.kind !== "work" ||
-@@ -1225,10 +1278,14 @@ export function deriveMessagesTimelineRows(input: {
+@@ -1247,10 +1300,14 @@ export function deriveMessagesTimelineRows(input: {
      });
    }
-
+ 
 -  if (input.isWorking && activeTurnHeaderIndex === input.timelineEntries.length) {
 +  if (input.isWorking && activeTurnHeaderIndex === timelineEntries.length) {
      appendWorkingRow();
@@ -5293,17 +5319,18 @@ index 0082c7dd227c984c6c18d80ee670cfe29055321c..b9fb9e0a69e722f54ae4a1cb0d6e8b1b
        kind: "thinking",
        id: LIVE_ACTIVITY_ROW_ID,
 diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
-index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e2a547e37 100644
+index 084287080bd9819cc0804a19fe9b5a323f25b6f9..1487ce65ec3c878ef4ff55726760f6cd0dd9284f 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.tsx
 +++ b/apps/web/src/components/chat/MessagesTimeline.tsx
-@@ -1,5 +1,6 @@
- import { GitPullRequestIcon } from "lucide-react";
+@@ -12,6 +12,7 @@ import {
+ } from "./timelineMinimapItems";
  import {
+   COMPOSER_CONTEXT_KINDS,
 +  isReasoningMessage,
    type AssistantCitation,
    type EnvironmentId,
    type MessageId,
-@@ -139,6 +140,7 @@ import {
+@@ -166,6 +167,7 @@ import {
    type MessagesTimelineRowsProjection,
    liveWorkEntryLabel,
    resolveAssistantMessageCopyState,
@@ -5311,7 +5338,7 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
    resolveTimelineIsAtEnd,
    resolveTimelineMinimapHasPersistentGutter,
    resolveTimelineMinimapCurrentIndex,
-@@ -150,6 +152,7 @@ import {
+@@ -177,6 +179,7 @@ import {
    resolveWorkGroupScrollIndex,
    shouldFollowWorkGroupAppend,
    shouldPreserveAssistantLineBreaks,
@@ -5319,9 +5346,9 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
    toolGroupAction,
    workEntryDisplayLabel,
    workEntryIsVisibleInGroup,
-@@ -220,6 +223,12 @@ interface TimelineRowSharedState {
-   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
+@@ -272,6 +275,12 @@ interface TimelineRowSharedState {
    onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
+   onToggleSpawnRow: (entryId: string, expanded: boolean) => void;
    workGroupViewState: WorkGroupViewState;
 +  reasoningExpansionOverrides: ReadonlyMap<MessageId, boolean>;
 +  onToggleReasoningDisclosure: (
@@ -5330,11 +5357,11 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
 +    anchorKey: string,
 +  ) => void;
    agentPanelModel: AgentPanelModel;
+   expandedSpawnEntryIds: ReadonlySet<string>;
    onOpenAgents: () => void;
- }
-@@ -417,6 +426,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -519,6 +528,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
      () => ({ scrollPositions: new Map(), expandedEntries: new Set() }),
-     [routeThreadKey],
+     [listIdentityKey],
    );
 +  const [reasoningExpansionOverrides, setReasoningExpansionOverrides] = useState<
 +    ReadonlyMap<MessageId, boolean>
@@ -5342,7 +5369,7 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
    const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
    const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
    const disclosureAnchorKeyRef = useRef<string | null>(null);
-@@ -504,6 +516,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -621,6 +633,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
      },
      [expandedWorkGroupIds, suspendEndScrollMaintenanceForDisclosure],
    );
@@ -5355,48 +5382,39 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
 +    },
 +    [suspendEndScrollMaintenanceForDisclosure],
 +  );
-
+ 
    // An in-session interrupt leaves its turn expanded so the user keeps their
    // place; the next turn (or a reload, since this is local state) folds it.
-@@ -759,6 +780,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
-       onToggleWorkGroup,
+@@ -902,6 +923,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
        onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
+       onToggleSpawnRow,
        workGroupViewState,
 +      reasoningExpansionOverrides,
 +      onToggleReasoningDisclosure,
-       agentPanelModel,
+       agentPanelModel: agentPanelModel ?? EMPTY_AGENT_PANEL_MODEL,
+       expandedSpawnEntryIds: paintedExpandedSpawnEntryIds,
        onOpenAgents,
-     }),
-@@ -783,6 +806,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
-       onToggleWorkGroup,
+@@ -929,6 +952,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
        suspendEndScrollMaintenanceForDisclosure,
+       onToggleSpawnRow,
        workGroupViewState,
 +      reasoningExpansionOverrides,
 +      onToggleReasoningDisclosure,
        agentPanelModel,
+       paintedExpandedSpawnEntryIds,
        onOpenAgents,
-     ],
-@@ -909,7 +934,9 @@ function keyExtractor(item: MessagesTimelineRow) {
+@@ -1060,7 +1085,9 @@ function keyExtractor(item: MessagesTimelineRow) {
  }
-
+ 
  function getItemType(item: MessagesTimelineRow) {
 -  return item.kind === "message" ? `message:${item.message.role}` : item.kind;
 +  return item.kind === "message"
 +    ? `message:${isReasoningMessage(item.message) ? "reasoning" : item.message.role}`
 +    : item.kind;
  }
-
- interface TimelineMinimapItem {
-@@ -960,7 +987,7 @@ function resolveFinalAssistantTextForTurn(
-     if (row.message.role === "user") {
-       break;
-     }
--    if (row.message.role === "assistant") {
-+    if (row.message.role === "assistant" && !isReasoningMessage(row.message)) {
-       finalAssistantText = row.message.text ?? null;
-     }
-   }
-@@ -1310,7 +1337,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
+ 
+ interface TimelinePositionState {
+@@ -1415,7 +1442,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
        {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
        {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
        {row.kind === "message" && row.message.role === "assistant" ? (
@@ -5409,10 +5427,10 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
        ) : null}
        {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
        {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
-@@ -1651,6 +1682,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
+@@ -1879,6 +1910,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
    );
  }
-
+ 
 +function ReasoningTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
 +  const ctx = use(TimelineRowCtx);
 +  const streaming = row.message.streaming;
@@ -5454,8 +5472,44 @@ index 7764f64ea4b6295fa8832707deb4b6b84b669f89..09017480620a4e6629be66d2864ecb3e
  function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
    const ctx = use(TimelineRowCtx);
    const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+diff --git a/apps/web/src/components/chat/timelineMinimapItems.test.ts b/apps/web/src/components/chat/timelineMinimapItems.test.ts
+index f7c40aa712065312ce1122a57a3950ab4a35f2f1..89f864faeace9d78dea33f09fa66b783b8d4954d 100644
+--- a/apps/web/src/components/chat/timelineMinimapItems.test.ts
++++ b/apps/web/src/components/chat/timelineMinimapItems.test.ts
+@@ -29,6 +29,13 @@ function rows(
+ }
+ 
+ describe("timeline minimap previews", () => {
++  it("keeps reasoning bursts out of the answer preview", () => {
++    const source = rows([["user", "Question"], ["assistant", "Answer"], ["assistant", "Thinking"]]);
++    const last = source[2]!;
++    if (last.kind !== "message") throw new Error("expected message");
++    last.message = { ...last.message, channel: "reasoning" };
++    expect(deriveTimelineMinimapItems(source)[0]?.assistantText).toBe("Answer");
++  });
+   it("previews the last assistant response before the next prompt and retains jump targets", () => {
+     const source = rows([
+       ["user", "  Inspect\n this  "],
+diff --git a/apps/web/src/components/chat/timelineMinimapItems.ts b/apps/web/src/components/chat/timelineMinimapItems.ts
+index 0a37c686e780f13f9b1fcdae7c585f3d5332287a..6bf9bf9064bab2d11386e97defc383efb25c5e92 100644
+--- a/apps/web/src/components/chat/timelineMinimapItems.ts
++++ b/apps/web/src/components/chat/timelineMinimapItems.ts
+@@ -1,3 +1,4 @@
++import { isReasoningMessage } from "@t3tools/contracts";
+ import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
+ 
+ export interface TimelineMinimapItem {
+@@ -41,7 +42,7 @@ function resolveFinalAssistantTextForTurn(
+     if (row.message.role === "user") {
+       break;
+     }
+-    if (row.message.role === "assistant") {
++    if (row.message.role === "assistant" && !isReasoningMessage(row.message)) {
+       finalAssistantText = row.message.text ?? null;
+     }
+   }
 diff --git a/docs/README.md b/docs/README.md
-index 2d4809b7003ac99b03780ffebe095f6a80b59fe4..ec556adf4889d870af118765118484ba44b0e522 100644
+index 4691e6f83c8e8e5589c8c28223a7d63843288488..b6e863ac6425f0dfe22da6e89d581852ccdae603 100644
 --- a/docs/README.md
 +++ b/docs/README.md
 @@ -5,6 +5,7 @@
@@ -5467,13 +5521,13 @@ index 2d4809b7003ac99b03780ffebe095f6a80b59fe4..ec556adf4889d870af118765118484ba
  - [Terminal history](./user/terminal.md)
  - [Source control](./user/source-control.md)
 diff --git a/docs/internals/glossary.md b/docs/internals/glossary.md
-index 44fe73a9750937bbf2c2ebb1980192d177db6352..2d4ebf4697842d9dd5592fdc4048088f97e76c4c 100644
+index 019c9d53023a855dd9eae694fdcee3c83618f811..087bebae9b1156426f9c5726b25d851496d30494 100644
 --- a/docs/internals/glossary.md
 +++ b/docs/internals/glossary.md
 @@ -5,17 +5,18 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
-
+ 
  ## Workspace and conversation
-
+ 
 -| Term           | Meaning                                                                                           |
 -| -------------- | ------------------------------------------------------------------------------------------------- |
 -| Environment    | One running server and the machine, credentials, workspace access, and state it owns.             |
@@ -5497,9 +5551,9 @@ index 44fe73a9750937bbf2c2ebb1980192d177db6352..2d4ebf4697842d9dd5592fdc4048088f
 +| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                                                                                                                   |
 +| Reasoning      | An assistant message with `channel: "reasoning"`, one burst of provider thinking. It never settles a turn, binds a checkpoint, or seeds a thread title; check it with `isReasoningMessage`. |
 +| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.                                                                                                       |
-
+ 
  ## Orchestration
-
+ 
 diff --git a/docs/user/providers-claude.md b/docs/user/providers-claude.md
 index 6d3ee3b16300cf04d1e6c5a4d29a9169a7ec7e7a..f0ec3b5da9155291427b53cec3564f2a9163f0d9 100644
 --- a/docs/user/providers-claude.md
@@ -5507,7 +5561,7 @@ index 6d3ee3b16300cf04d1e6c5a4d29a9169a7ec7e7a..f0ec3b5da9155291427b53cec3564f2a
 @@ -53,6 +53,12 @@ You can also send `/compact` in an existing conversation. Web and desktop offer
  a large older thread. See [commands and skills](./composer.md#commands-and-skills)
  for using composer commands.
-
+ 
 +## Thinking
 +
 +Claude's thinking appears in the thread timeline as **Thought** rows. Recent Claude
@@ -5515,7 +5569,7 @@ index 6d3ee3b16300cf04d1e6c5a4d29a9169a7ec7e7a..f0ec3b5da9155291427b53cec3564f2a
 +and that summary is what you read. See [reasoning in a thread](./reasoning.md).
 +
  ## Usage limits
-
+ 
  If your Claude subscription runs out of usage mid-turn, the thread shows which
 diff --git a/docs/user/reasoning.md b/docs/user/reasoning.md
 new file mode 100644
@@ -5547,10 +5601,10 @@ index 0000000000000000000000000000000000000000..64a8d2fa4bc47dddf8b9df852f6a9f4b
 +For Claude, what you read is a summary of the thinking rather than the model's raw words. Recent
 +Claude Code versions do not hand out raw thinking, so T3 Code asks for the summarized form.
 diff --git a/packages/client-runtime/src/state/threadReducer.test.ts b/packages/client-runtime/src/state/threadReducer.test.ts
-index 5b70ca9ef0aa794d8e180d0c6653e0b23fc8a52c..0e50409e501e19465916bcf7246fc097e6ce4df1 100644
+index dbee48d7808cb8db8d5af09bf40ed0900a2100d2..398b7a3a848ab138cdc6f1cbef5774453bbbe5d8 100644
 --- a/packages/client-runtime/src/state/threadReducer.test.ts
 +++ b/packages/client-runtime/src/state/threadReducer.test.ts
-@@ -837,6 +837,58 @@ describe("applyThreadDetailEvent", () => {
+@@ -928,6 +928,58 @@ describe("applyThreadDetailEvent", () => {
          expect(result.thread.checkpoints[0]?.assistantMessageId).toBe("msg-2");
        }
      });
@@ -5607,12 +5661,12 @@ index 5b70ca9ef0aa794d8e180d0c6653e0b23fc8a52c..0e50409e501e19465916bcf7246fc097
 +      }
 +    });
    });
-
+ 
    describe("thread.session-set", () => {
-@@ -1479,6 +1531,295 @@ describe("applyThreadDetailEvent", () => {
+@@ -1570,6 +1622,295 @@ describe("applyThreadDetailEvent", () => {
        }
      });
-
+ 
 +    // Combined regression: the retained assistant count must skip imported
 +    // messages AND reasoning messages. Either exclusion alone lets the turnless
 +    // substantive answer for the kept turn be dropped on revert.
@@ -5906,7 +5960,7 @@ index 5b70ca9ef0aa794d8e180d0c6653e0b23fc8a52c..0e50409e501e19465916bcf7246fc097
        const threadWithData: OrchestrationThread = {
          ...baseThread,
 diff --git a/packages/client-runtime/src/state/threadReducer.ts b/packages/client-runtime/src/state/threadReducer.ts
-index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d5e334250 100644
+index 82084e6d1f3546ce925821babe7fcaeea9979e17..1060527ce5d69a197aa76bb1ce08072373699924 100644
 --- a/packages/client-runtime/src/state/threadReducer.ts
 +++ b/packages/client-runtime/src/state/threadReducer.ts
 @@ -14,7 +14,7 @@ import type {
@@ -5916,7 +5970,7 @@ index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d
 -import { isImportedAgentSessionMessageId } from "@t3tools/contracts";
 +import { isImportedAgentSessionMessageId, isReasoningMessage } from "@t3tools/contracts";
  import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
-
+ 
  export type ThreadDetailReducerResult =
 @@ -376,6 +376,7 @@ export function applyThreadDetailEvent(
        const message: OrchestrationMessage = {
@@ -5927,14 +5981,14 @@ index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d
          ...(event.payload.attachments !== undefined
            ? { attachments: event.payload.attachments }
 @@ -399,6 +400,7 @@ export function applyThreadDetailEvent(
-                       ? message.text
-                       : entry.text,
-                   streaming: message.streaming,
-+                  ...(message.channel !== undefined ? { channel: message.channel } : {}),
-                   ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
-                   ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
-                   ...(message.attachments !== undefined
-@@ -421,6 +423,7 @@ export function applyThreadDetailEvent(
+               ? message.text
+               : entry.text,
+           streaming: message.streaming,
++          ...(message.channel !== undefined ? { channel: message.channel } : {}),
+           ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
+           ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
+           ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+@@ -420,6 +422,7 @@ export function applyThreadDetailEvent(
        const latestTurn = reuseLatestTurn(
          thread.latestTurn,
          event.payload.role === "assistant" &&
@@ -5942,7 +5996,7 @@ index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d
            event.payload.turnId !== null &&
            (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
            ? {
-@@ -453,7 +456,9 @@ export function applyThreadDetailEvent(
+@@ -452,7 +455,9 @@ export function applyThreadDetailEvent(
        // Rebind checkpoint assistant message IDs for assistant messages. The
        // helper hands back the same array when the entry is already bound.
        const checkpoints =
@@ -5953,7 +6007,7 @@ index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d
            ? rebindCheckpointAssistantMessage(
                thread.checkpoints,
                event.payload.turnId,
-@@ -835,6 +840,7 @@ function retainMessagesAfterRevert(
+@@ -834,6 +839,7 @@ function retainMessagesAfterRevert(
        (message) =>
          message.role === role &&
          !isImportedAgentSessionMessageId(message.id) &&
@@ -5961,7 +6015,7 @@ index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d
          retainedMessageIds.has(message.id),
      ).length;
      const missingCount = Math.max(0, turnCount - retainedCount);
-@@ -842,6 +848,7 @@ function retainMessagesAfterRevert(
+@@ -841,6 +847,7 @@ function retainMessagesAfterRevert(
        .filter(
          (message) =>
            message.role === role &&
@@ -5970,13 +6024,13 @@ index ce9aa94b1f062578607e931ab5835a5d3ec25dce..f0caacc8b7383689784bd2e9ef12e70d
            (message.turnId === null || retainedTurnIds.has(message.turnId)),
        )
 diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
-index 56a29b8f65f0d0f6b6cd9528f6cd692917905524..46e91b6b87ca1bdb9b6253d32dd5d20e24224e3c 100644
+index 774a630ad44bdf607d2a485c593ff88789dfe825..d72ed5453026f7648220a48653b6994a5757129a 100644
 --- a/packages/contracts/src/orchestration.ts
 +++ b/packages/contracts/src/orchestration.ts
-@@ -483,9 +483,13 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
+@@ -493,9 +493,13 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
  export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
  export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
-
+ 
 +export const OrchestrationMessageChannel = Schema.Literal("reasoning");
 +export type OrchestrationMessageChannel = typeof OrchestrationMessageChannel.Type;
 +
@@ -5986,11 +6040,11 @@ index 56a29b8f65f0d0f6b6cd9528f6cd692917905524..46e91b6b87ca1bdb9b6253d32dd5d20e
 +  channel: Schema.optional(OrchestrationMessageChannel),
    text: Schema.String,
    attachments: Schema.optional(Schema.Array(ChatAttachment)),
-   turnId: Schema.NullOr(TurnId),
-@@ -495,6 +499,12 @@ export const OrchestrationMessage = Schema.Struct({
+   context: Schema.optional(OrchestrationMessageContext),
+@@ -506,6 +510,12 @@ export const OrchestrationMessage = Schema.Struct({
  });
  export type OrchestrationMessage = typeof OrchestrationMessage.Type;
-
+ 
 +export function isReasoningMessage(message: {
 +  readonly channel?: OrchestrationMessageChannel | undefined;
 +}): boolean {
@@ -5999,8 +6053,8 @@ index 56a29b8f65f0d0f6b6cd9528f6cd692917905524..46e91b6b87ca1bdb9b6253d32dd5d20e
 +
  export const OrchestrationProposedPlanId = TrimmedNonEmptyString;
  export type OrchestrationProposedPlanId = typeof OrchestrationProposedPlanId.Type;
-
-@@ -1377,6 +1387,7 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
+ 
+@@ -1399,6 +1409,7 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
    threadId: ThreadId,
    messageId: MessageId,
    delta: Schema.String,
@@ -6008,7 +6062,7 @@ index 56a29b8f65f0d0f6b6cd9528f6cd692917905524..46e91b6b87ca1bdb9b6253d32dd5d20e
    turnId: Schema.optional(TurnId),
    createdAt: IsoDateTime,
  });
-@@ -1386,6 +1397,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
+@@ -1408,6 +1419,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
    commandId: CommandId,
    threadId: ThreadId,
    messageId: MessageId,
@@ -6016,11 +6070,11 @@ index 56a29b8f65f0d0f6b6cd9528f6cd692917905524..46e91b6b87ca1bdb9b6253d32dd5d20e
    turnId: Schema.optional(TurnId),
    createdAt: IsoDateTime,
  });
-@@ -1717,6 +1729,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
+@@ -1739,6 +1751,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
    threadId: ThreadId,
    messageId: MessageId,
    role: OrchestrationMessageRole,
 +  channel: Schema.optional(OrchestrationMessageChannel),
    text: Schema.String,
    attachments: Schema.optional(Schema.Array(ChatAttachment)),
-   turnId: Schema.NullOr(TurnId),
+   context: Schema.optional(OrchestrationMessageContext),

@@ -584,10 +584,10 @@ index a55f70ff6c9f45c7d4490beb3ff99f1169291cba..5f7de2e289f3a0b6a8676caffbdfbb99
      }),
    );
 diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
-index 51c567175c482b0c52030966951614bc56bd68fe..3ba5b6851836138dc919212cf97df97a663de63a 100644
+index 3370154db8d67b52395b360b198b7731d0f0ad1e..6e7c291aa3df2c661a204a75bda682143b4d0c9f 100644
 --- a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
 +++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
-@@ -48,6 +48,9 @@ export function desktopUpdateProgressStage(
+@@ -48,6 +48,9 @@ function desktopUpdateProgressStage(
    }
  }
  
@@ -659,10 +659,10 @@ index 51c567175c482b0c52030966951614bc56bd68fe..3ba5b6851836138dc919212cf97df97a
  
  export const layer = Layer.effect(DesktopAppUpdate, make());
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index c6383c63b8f1a761cee7cf3c0a82fcb12109fc15..f1b82fd27d33e5b14e66ba28f626fd2c0521c69a 100644
+index 2989cab246d055e2254a544c5d61c3d09cb6af0a..94776fdbd349e44004db54dc11b9a2a55d70acc3 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -56,7 +56,7 @@ import {
+@@ -57,7 +57,7 @@ import {
  } from "@t3tools/shared/dpop";
  import { RELAY_HEALTH_REQUEST_TYP, RELAY_MINT_REQUEST_TYP } from "@t3tools/shared/relayJwt";
  import * as RelayClient from "@t3tools/shared/relayClient";
@@ -671,7 +671,7 @@ index c6383c63b8f1a761cee7cf3c0a82fcb12109fc15..f1b82fd27d33e5b14e66ba28f626fd2c
  import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
  import * as Clock from "effect/Clock";
  import * as Config from "effect/Config";
-@@ -111,6 +111,7 @@ import {
+@@ -120,6 +120,7 @@ import {
    DesktopUpdateReservationLayerLive,
    HTTP_ROUTER_CONFIG,
    makeManagedUpdateRuntimeLayer,
@@ -679,7 +679,7 @@ index c6383c63b8f1a761cee7cf3c0a82fcb12109fc15..f1b82fd27d33e5b14e66ba28f626fd2c
    makeRoutesLayer,
    makeSelectionBoundManagedRuntimeResolver,
    resolveManagedServerTarget,
-@@ -13158,3 +13159,40 @@ it.layer(NodeServices.layer)("update admission over the transports", (it) => {
+@@ -13440,3 +13441,40 @@ it.layer(NodeServices.layer)("update admission over the transports", (it) => {
        }).pipe(Effect.provide(NodeHttpServer.layerTest)),
    );
  });
@@ -721,10 +721,10 @@ index c6383c63b8f1a761cee7cf3c0a82fcb12109fc15..f1b82fd27d33e5b14e66ba28f626fd2c
 +  });
 +});
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index a412c53bc2a233e15eaf2e9d3e5435c599e94119..f147d71fd24101d1bfe1d154c4e90daa8f869420 100644
+index 374ce429a58af44716beeebf87ae6c6e0e66443d..24a7126a7874b300991236ed7e26326ea01a6ac9 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -118,12 +118,13 @@ import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
+@@ -127,12 +127,13 @@ import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
  import * as IdleUpdatePreparation from "./cloud/idleUpdatePreparation.ts";
  import { makeManagedCandidateProcess } from "./cloud/managedCandidateProcess.ts";
  import * as ManagedNightlyUpdate from "./cloud/managedNightlyUpdate.ts";
@@ -739,7 +739,7 @@ index a412c53bc2a233e15eaf2e9d3e5435c599e94119..f147d71fd24101d1bfe1d154c4e90daa
  import * as ManagedQueuedUpdate from "./cloud/managedQueuedUpdate.ts";
  import {
    ManagedArtifactSourceError,
-@@ -498,19 +499,49 @@ export const makeSelectionBoundManagedRuntimeResolver =
+@@ -557,19 +558,49 @@ export const makeSelectionBoundManagedRuntimeResolver =
   * the enclosing layer scope. Exported only so the server test can build this
   * exact production boundary over fakes.
   */
@@ -790,7 +790,7 @@ index a412c53bc2a233e15eaf2e9d3e5435c599e94119..f147d71fd24101d1bfe1d154c4e90daa
      }),
    ).pipe(
      Layer.provideMerge(
-@@ -567,10 +598,30 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -626,10 +657,30 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
      const linuxLibc =
        platform === "linux" ? yield* ResourceMonitorBinary.ResourceMonitorHostLinuxLibc : undefined;
      const hostTarget = resolveManagedServerTarget(platform, architecture, linuxLibc);
@@ -822,7 +822,7 @@ index a412c53bc2a233e15eaf2e9d3e5435c599e94119..f147d71fd24101d1bfe1d154c4e90daa
        const unsupported = new ManagedArtifactSourceError({
          reason: `managed server updates are unsupported on ${platform}-${architecture}${
            linuxLibc === undefined ? "" : `-${linuxLibc}`
-@@ -602,12 +653,19 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -661,12 +712,19 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
        });
      }
  
@@ -842,7 +842,7 @@ index a412c53bc2a233e15eaf2e9d3e5435c599e94119..f147d71fd24101d1bfe1d154c4e90daa
      });
      // Same queue, coordinator and preparation owner as the runtime layer for
      // both the nightly scheduler and the desktop reservation owner; the
-@@ -615,6 +673,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -674,6 +732,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
      // receiver from the runtime dependencies' one `DesktopTelemetryReceiverLayerLive`.
      return Layer.mergeAll(
        ManagedNightlyUpdate.layer({
@@ -850,7 +850,7 @@ index a412c53bc2a233e15eaf2e9d3e5435c599e94119..f147d71fd24101d1bfe1d154c4e90daa
          installedVersion: packageJson.version,
          discoveryInterval: Duration.hours(4),
          preparationRetryInterval: Duration.seconds(30),
-@@ -974,7 +1033,7 @@ export const makeServerLayer = Layer.unwrap(
+@@ -1034,7 +1093,7 @@ const makeServerLayer = Layer.unwrap(
            { concurrency: "unbounded" },
          ).pipe(Effect.asVoid),
        }),

@@ -702,7 +702,7 @@ index 5d8e50cb7a1dd5e70331a35677355cd1dfe7f6b3..ba4944f347b20f701cc9512fabd3bdbc
 +++ b/apps/server/src/updateActivity.test.ts
 @@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
  import * as Scope from "effect/Scope";
-
+ 
  import {
 +  type ActivitySeal,
    make,
@@ -715,12 +715,12 @@ index 5d8e50cb7a1dd5e70331a35677355cd1dfe7f6b3..ba4944f347b20f701cc9512fabd3bdbc
 -    return claim as { readonly status: "sealed"; readonly seal: { release: () => void } };
 +    return claim as { readonly status: "sealed"; readonly seal: ActivitySeal };
    });
-
+ 
  it.effect(
 @@ -279,6 +280,75 @@ it.effect(
      }),
  );
-
+ 
 +it.effect(
 +  "armIdleShutdown authorizes only through the live seal and release clears it before reopening",
 +  () =>
@@ -798,7 +798,7 @@ index 22990993102d5bff7645b3aaa2c77deba8da47ba..d4c07c5fcf297b4403d8c8739ab1fb43
 --- a/apps/server/src/updateActivity.ts
 +++ b/apps/server/src/updateActivity.ts
 @@ -30,6 +30,12 @@ export interface ActivityBlocker {
-
+ 
  export interface ActivitySeal {
    readonly release: () => void;
 +  /**
@@ -808,7 +808,7 @@ index 22990993102d5bff7645b3aaa2c77deba8da47ba..d4c07c5fcf297b4403d8c8739ab1fb43
 +   */
 +  readonly armIdleShutdown: () => void;
  }
-
+ 
  export interface UpdateActivityState {
 @@ -37,6 +43,13 @@ export interface UpdateActivityState {
    readonly revision: number;
@@ -822,7 +822,7 @@ index 22990993102d5bff7645b3aaa2c77deba8da47ba..d4c07c5fcf297b4403d8c8739ab1fb43
 +   */
 +  readonly idleShutdownAuthorized: boolean;
  }
-
+ 
  export class UpdateActivityUnavailableError extends Schema.TaggedError<UpdateActivityUnavailableError>()(
 @@ -93,6 +106,7 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
      let revision = 0;
@@ -831,14 +831,14 @@ index 22990993102d5bff7645b3aaa2c77deba8da47ba..d4c07c5fcf297b4403d8c8739ab1fb43
 +    let idleShutdownAuthorized = false;
      const blockers = new Set<{ readonly reason: string }>();
      const waiters = new Set<Deferred.Deferred<UpdateActivityState>>();
-
+ 
 @@ -101,6 +115,7 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
        revision,
        outstanding,
        blockers: Array.from(blockers, (blocker) => blocker.reason),
 +      idleShutdownAuthorized,
      });
-
+ 
      const bump = (): void => {
 @@ -187,19 +202,28 @@ export const make = (): Effect.Effect<UpdateActivityShape, never, Scope.Scope> =
        sealToken = token;
@@ -864,7 +864,7 @@ index 22990993102d5bff7645b3aaa2c77deba8da47ba..d4c07c5fcf297b4403d8c8739ab1fb43
          },
        } as const;
      });
-
+ 
 +    // Closing keeps an armed authorization readable for shutdown finalizers
 +    // that run after this registry; it never reopens the registry.
      yield* Effect.addFinalizer(() =>
@@ -877,7 +877,7 @@ index be80fad6db9aa4343264a3b256f7aa2d5d6dacfc..8d756f1e35ec93dfa0d5ebaa6154a12c
 @@ -6,7 +6,12 @@ import * as Exit from "effect/Exit";
  import * as Fiber from "effect/Fiber";
  import * as Scope from "effect/Scope";
-
+ 
 -import { make, UpdateAdmissionClosedError, type UpdateAdmissionShape } from "./updateAdmission.ts";
 +import {
 +  type HandoffMaintenanceControl,
@@ -885,13 +885,13 @@ index be80fad6db9aa4343264a3b256f7aa2d5d6dacfc..8d756f1e35ec93dfa0d5ebaa6154a12c
 +  UpdateAdmissionClosedError,
 +  type UpdateAdmissionShape,
 +} from "./updateAdmission.ts";
-
+ 
  /**
   * Forks a command that stays admitted until `release` completes, then waits
 @@ -46,6 +51,23 @@ const forkTryClaim = Effect.fn("forkTryClaim")(function* (admission: UpdateAdmis
    return { fiber, started, finish };
  });
-
+ 
 +/** Forks a handoff claim whose callback hands out its control, signals `started`, and blocks until `finish`. */
 +const forkHandoffClaim = Effect.fn("forkHandoffClaim")(function* (admission: UpdateAdmissionShape) {
 +  const started = yield* Deferred.make<HandoffMaintenanceControl>();
@@ -1122,7 +1122,7 @@ index 0eb1f3f2d117f539925c0f043b909057760f384a..f081d4d2a199ad4ed19ff9dc0d75730a
 @@ -31,6 +31,17 @@ export type UpdateMaintenanceClaim<A> =
    | { readonly status: "busy" }
    | { readonly status: "ran"; readonly value: A };
-
+ 
 +/** Control handed to a `tryWithHandoffMaintenance` callback while it owns the gate. */
 +export interface HandoffMaintenanceControl {
 +  /**
@@ -1152,11 +1152,11 @@ index 0eb1f3f2d117f539925c0f043b909057760f384a..f081d4d2a199ad4ed19ff9dc0d75730a
 +  ) => Effect.Effect<UpdateMaintenanceClaim<A>, E, R>;
    readonly state: Effect.Effect<UpdateAdmissionState>;
  }
-
+ 
 @@ -140,6 +160,44 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
        )
        .pipe(Effect.map(Option.getOrElse((): UpdateMaintenanceClaim<A> => busy)));
-
+ 
 +  // Same permit and counter as above, but the permit is taken by hand so a
 +  // retained claim can simply never give it back. Acquisition, the in-flight
 +  // check, the close and the cleanup all run under the mask; only the callback
@@ -1201,7 +1201,7 @@ index 0eb1f3f2d117f539925c0f043b909057760f384a..f081d4d2a199ad4ed19ff9dc0d75730a
 @@ -150,7 +208,13 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
      Effect.suspend(() => (drained === undefined ? Effect.void : Deferred.interrupt(drained))),
    );
-
+ 
 -  return UpdateAdmission.of({ withAdmission, withMaintenance, tryWithMaintenance, state });
 +  return UpdateAdmission.of({
 +    withAdmission,
@@ -1211,5 +1211,5 @@ index 0eb1f3f2d117f539925c0f043b909057760f384a..f081d4d2a199ad4ed19ff9dc0d75730a
 +    state,
 +  });
  });
-
+ 
  export const layer = Layer.effect(UpdateAdmission, make());

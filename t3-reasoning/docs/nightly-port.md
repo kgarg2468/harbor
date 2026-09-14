@@ -10,26 +10,111 @@ maintenance record for the current pin.
 | Item | Value |
 | --- | --- |
 | Upstream repository | `https://github.com/pingdotgg/t3code.git` |
-| Upstream commit | `98469159dd9e162a9c2f5cc4bbb2fbe89b3c4f67` |
-| Upstream tag at that commit | `v0.0.39-nightly.20260906.1316` |
-| Patch `reasoning-full` | `patches/0001-reasoning.patch` (35 files) |
+| Upstream commit | `c07575f573dd3a1af4f734297d17f7c951c95f10` |
+| Upstream tag at that commit | `v0.0.41-nightly.20260914.1687` |
+| Patch `reasoning-full` | `patches/0001-reasoning.patch` (37 files) |
 | Patch `desktop-runtime-common` | `patches/0002-desktop-runtime-common.patch` (4 files) |
-| Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (7 files) |
+| Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (13 files) |
 | Upstream license | `UPSTREAM-LICENSE` (MIT, T3 Tools Inc., copied unchanged) |
 
-The current port preserves upstream's repository-backed runtime ingestion,
-imported-history revert behavior, and shared mobile request helpers. Reasoning
-rows do not count as substantive assistant replies, including when a buffered
-delta and its completion carry different turn metadata. Migration preflight
-keeps the current CLI imports; the identity patch omits an upstream-removed
-helper test. The other common patches apply unchanged.
+The current port was verified on 2026-09-14 against official release
+`388118886`, published at `2026-09-14T02:43:52Z`. The previous lock pinned
+`17f8e2a8acba76d5516e0a52c85bf802b0e17892` (Nightly 20260913.1646).
+All 43 active patches were replayed in order and exported as incremental
+full-index diffs. The inactive thread-fork catalog entry and both variants'
+patch selections are unchanged.
 
-The tag was confirmed at this commit on 2026-09-06. The Reasoning patch was
-exported from source commit `351dff8d9f2cbf7e3825fecebebd9009e8e7b82c`
-over that upstream parent. Both catalog variants prepare; they differ only
-in the seven current identity files, with identical server, web, and shared
-package sources. The initial import history below remains provenance for the
-original feature baseline.
+The complete Reasoning tree is represented by single-parent source port commit
+`b30702c889b2f7d2406540759a969c7b1050127d` over the new upstream commit.
+This source commit is a provenance record in the throwaway working clone;
+the checksummed patches are Harbor's reproducible artifact.
+
+### Changes for Nightly 20260914.1687
+
+- The ingestion harness combines upstream's shifted test clock with the
+  Reasoning settings layer, so paragraph delivery and reasoning remain testable.
+- Upstream assistant paragraph/code-block pacing retains its server clock.
+  Reasoning bursts retain completion/spill-only buffering by omitting the
+  optional pacing clock. A regression assertion checks that even a complete
+  reasoning paragraph stays buffered before the answer begins.
+- The new two-pane connection settings and icon picker retain shared-default
+  status and controls. The selected connection receives the shared-default
+  callbacks; host administration continues to use the platform primary.
+- The remaining refreshed patches carry new context and blob ids without
+  changing their variant membership or enabling inactive features.
+
+Both variants prepare through the checksum-validating CLI. Their tree ids are
+`800a4347f0d7208dd2c76d4783f3c1ddcd2e2f62` (Reasoning) and
+`eece6f827f99db1f6141e14bdc09acc8a4783085` (managed Nightly). The prepared
+Reasoning tree matches the source port commit. Exactly the 13 identity files
+differ; server, web and shared package sources match between variants.
+
+Validation for this port:
+
+- Node 24.13.1 component suite: 374 passing tests, including the opt-in real
+  variant proof; four live-server smoke tests skipped because no server binary
+  was supplied. Markdown lint passes.
+- Focused upstream suites: 1,010 passing tests across 17 suites. The 91-test
+  ingestion suite passed again after the buffering regression assertion.
+- Contracts, client-runtime, server and web typechecks pass. The exported
+  source delta passes `git diff --check`.
+- Dependencies installed frozen with Node 24.13.1 and pnpm 11.10.0. No dependency
+  lock changes are included. No app was built, installed or deployed.
+
+### Previous Nightly 20260913.1646 port
+
+The previous port moved from `c52b8d96e4b34201f19b5e5bb12c6b2a77bfaa9a`
+(Nightly 20260911.1520) to `17f8e2a8acba76d5516e0a52c85bf802b0e17892`.
+Its single-parent source port commit was
+`1ae2dc87ac10b48f981f79f3415e0c146ba87c7b`. The resolutions and evidence below
+are retained as history and remain part of the current feature baseline.
+
+### Conflict resolutions for Nightly 20260913.1646
+
+- The optimized single-pass thread reducer keeps message context and adds
+  reasoning channel propagation. Contracts retain the upstream context fields.
+- Provider ingestion keeps project-specific streaming preferences for both
+  assistant and reasoning delivery. Mobile preserves answer folding and clips
+  activities using the original loaded-message boundary.
+- Web minimap reasoning exclusion follows upstream's extracted helper, with a
+  regression test. The timeline retains upstream agent-panel defaults.
+- Activity tracking wraps upstream compaction and queued-turn resumption;
+  neither the queue nor its completion acknowledgement is discarded.
+- Shared-default selection follows the new sidebar header and connection toggle
+  UI, preserving project permission and target-environment draft defaults.
+- Native activity ownership coexists with Codex paginated history/revert and
+  Claude's turn-start cursor UUIDs and session-history support.
+- Preview mutations retain website-icon presentation and hold admission through
+  the complete operation, including recording artifact transfer. Reads remain
+  available during maintenance.
+- The desktop installer helper is added alongside upstream's new permission
+  preload. Identity tests retain the new frame-source CSP assertion.
+
+Both variants prepare through the normal checksum-validating CLI. Their tree
+ids are `214c26f3de8122cec2770b267d585feb99c49c7f` (Reasoning) and
+`51af81a723ce9d80c5b40505c619ecf159ded8ba` (managed Nightly). The Reasoning
+prepared tree matches the source port commit exactly. The variant difference
+is exactly the 13 identity patch files; server, web and shared packages match.
+
+Validation for this port:
+
+- Node 24.13.1 component suite: 374 passing tests, including the opt-in real
+  variant proof; four live-server smoke tests skipped because no server binary
+  was supplied. Markdown lint passes.
+- Focused upstream suites: 979 passing tests across the reducer, contracts,
+  settings, web timeline/minimap, mobile feed, provider ingestion/commands,
+  persistence, Claude/Codex runtimes, settlement, preview handlers and desktop
+  identity/artifact tests. The preview suite was rerun after correcting a
+  schema dependency-list syntax error found by the first run.
+- Contracts, client-runtime, server and web typechecks pass. The exported
+  source delta passes `git diff --check`; patch-file context lines themselves
+  necessarily retain their single-space unified-diff prefix.
+- Dependencies installed with Node 24.13.1 and pnpm 11.10.0. No dependency
+  lock changes are included. No app was built, installed or deployed.
+
+The historical sections below describe the initial feature import and earlier
+verification. Later active patches extend that baseline; use the source lock
+for the complete current stack.
 
 ## Provenance
 
@@ -241,7 +326,7 @@ port.
 
 ## Moving to the next Nightly
 
-Updates are not automatic. Nothing discovers new Nightlies. To port:
+Discovery checks published Nightlies but does not resolve patch conflicts. To port:
 
 1. Pick the new upstream Nightly tag and resolve it to its full commit SHA.
 2. Change `commit` in `source.lock.json` to that SHA and run
@@ -252,9 +337,12 @@ Updates are not automatic. Nothing discovers new Nightlies. To port:
    the `reasoning` variant's patches with `git apply --3way`, resolve the
    conflicts, and commit the result as a single port commit on top of the new
    upstream commit.
-4. Re-export the three patches with the commands above, update their
+4. Re-export each active patch against its immediately preceding tree; keep
+   the original three-patch split described above. Update their
    `sha256` values in the `patches` catalog of `source.lock.json`, and update
    the pin table in this document.
+   Never fold later active patches into the original three patches or enable
+   inactive catalog entries while porting.
 5. Run `prepare-source --variant reasoning` again and confirm the prepared
    tree matches the new port commit: stage everything in the checkout,
    compare `git write-tree` against the port commit's tree id. Prepare

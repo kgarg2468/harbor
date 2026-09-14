@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index f9099d670cef414c773c2c94c528f4eada847d01..cd4a33b75fca125a6ab7aa5a0d42fa553cff5480 100644
+index 902ea5e6fcfd4ca7e55b6c61b2da04c9bf4364b6..7bf54e51cb30791bc0d28064d72e36de4480e87d 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -56,10 +56,12 @@ import { assert, it } from "@effect/vitest";
@@ -23,7 +23,7 @@ index f9099d670cef414c773c2c94c528f4eada847d01..cd4a33b75fca125a6ab7aa5a0d42fa55
  import * as Stream from "effect/Stream";
  import * as TestClock from "effect/testing/TestClock";
  import * as Tracer from "effect/Tracer";
-@@ -99,7 +102,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
+@@ -106,7 +109,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as ServerConfig from "./config.ts";
  import * as DeviceService from "./device/DeviceService.ts";
@@ -57,10 +57,10 @@ index f9099d670cef414c773c2c94c528f4eada847d01..cd4a33b75fca125a6ab7aa5a0d42fa55
  import {
    isThreadDetailEvent,
    resolveAvailableEditorsForConfig,
-@@ -11427,6 +11455,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
+@@ -11644,6 +11672,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
    );
  });
-
+ 
 +// The production managed-update composition, built over fakes at the exact
 +// layer boundary `server.ts` uses. No transport consumes `QueuedUpdate` yet, so
 +// caller independence is proven with short-lived caller scopes rather than
@@ -482,10 +482,10 @@ index f9099d670cef414c773c2c94c528f4eada847d01..cd4a33b75fca125a6ab7aa5a0d42fa55
    "reports thread HTTP and WebSocket transfer budgets",
    () =>
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 7e4543a5..bbd73aec 100644
+index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6d86be2f4 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -4,11 +4,13 @@ import * as Duration from "effect/Duration";
+@@ -8,11 +8,13 @@ import * as Duration from "effect/Duration";
  import * as Deferred from "effect/Deferred";
  import * as Effect from "effect/Effect";
  import * as Layer from "effect/Layer";
@@ -494,12 +494,12 @@ index 7e4543a5..bbd73aec 100644
  import * as Stream from "effect/Stream";
  import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
  import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
-
+ 
 +import packageJson from "../package.json" with { type: "json" };
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
  import * as ServerConfig from "./config.ts";
-@@ -112,6 +114,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
+@@ -121,6 +123,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
  import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
  import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
  import * as CloudCliState from "./cloud/CliState.ts";
@@ -523,7 +523,7 @@ index 7e4543a5..bbd73aec 100644
  import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
  import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
  import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
-@@ -128,12 +147,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+@@ -137,12 +156,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
  import * as UsageService from "./usage/UsageService.ts";
  import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
  import { UpdateActivityLive } from "./updateActivity.ts";
@@ -542,10 +542,10 @@ index 7e4543a5..bbd73aec 100644
  import * as NetService from "@t3tools/shared/Net";
  import * as RelayClient from "@t3tools/shared/relayClient";
  import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
-@@ -418,6 +443,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
+@@ -478,6 +503,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
    ),
  );
-
+ 
 +/**
 + * Managed releases ship exactly two server artifacts. Every other host keeps a
 + * dormant queue whose exact-version resolver fails; there is no fallback
@@ -682,7 +682,7 @@ index 7e4543a5..bbd73aec 100644
  const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
    // Subscribes to `account.rate-limits.updated` so usage bars track live
    // telemetry instead of waiting for the next status probe.
-@@ -485,7 +643,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -545,7 +703,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // driver context the registry captures for later `reconcile` calls. A
    // per-service provide, or one nested inside hydration, would split the
    // count.
@@ -691,10 +691,10 @@ index 7e4543a5..bbd73aec 100644
  ).pipe(
    Layer.provideMerge(AntigravityInstallation.layer),
    // Shared native/canonical NDJSON writers used by both the per-instance
-@@ -744,19 +902,24 @@ export const makeServerLayer = Layer.unwrap(
+@@ -805,19 +963,24 @@ const makeServerLayer = Layer.unwrap(
        }),
      );
-
+ 
 -    const runtimeServicesLive = ServerRuntimeStartup.layerWithOptions({
 -      activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
 -      abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
@@ -726,6 +726,6 @@ index 7e4543a5..bbd73aec 100644
 +      }),
 +      ManagedUpdateRuntimeLive,
 +    ).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
-
+ 
      const routesLayer = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(launcherLayer)), {
        disableLogger: !config.logWebSocketEvents,

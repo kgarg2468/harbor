@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
-index e3443c49..eca72c8b 100644
+index e3443c494f23d3c263e7701de7d5e3d179e6d3c0..eca72c8b1b3e726b770ec9a49ac93c1d157dc4e4 100644
 --- a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
 +++ b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
 @@ -179,6 +179,46 @@ describe("managed desktop artifact preparation", () => {
@@ -50,7 +50,7 @@ index e3443c49..eca72c8b 100644
      const f = await fixture();
      const p = f.make();
 diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
-index d09f1d68..1acced82 100644
+index d09f1d686c8bebbe581e156c9b49521263f56b4d..1acced8266706c7a87c58006c48c9336650ee15b 100644
 --- a/apps/desktop/src/updates/ManagedDesktopArtifact.ts
 +++ b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
 @@ -331,7 +331,13 @@ export function createManagedDesktopArtifactPreparer(

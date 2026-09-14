@@ -552,7 +552,7 @@ index ab8eb92fb93dbb0b8441d928850d630571422881..a55f70ff6c9f45c7d4490beb3ff99f11
        const error = yield* service
          .commit(prepared.desktopUpdateToken ?? "missing", onHandoffAccepted)
 diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
-index b7dd7080dc28356935bf1f449cb43ab73caacf62..51c567175c482b0c52030966951614bc56bd68fe 100644
+index f97d6b9f2c2ed73bfcae998833e8f44a5c5cba01..3370154db8d67b52395b360b198b7731d0f0ad1e 100644
 --- a/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
 +++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.ts
 @@ -1,6 +1,7 @@

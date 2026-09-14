@@ -21,7 +21,7 @@ index 817e20775f08cefa5c5763ef3892235c274d51ea..0736529edf3e0f3b61b4ce4e70e3cef7
      const appLayer = HttpRouter.serve(routesLayer, {
        disableListenLog: true,
 diff --git a/apps/server/src/http.ts b/apps/server/src/http.ts
-index 290b73b48514c69c28933700adfd21ffc4d73f9c..1fcef30f0760403cf2c894eddac0b7d28a2bcd14 100644
+index 4d2dac735425bac5c45f28719975c2aaa19af969..d5b0564671de0ce321144e4fd8f813696ffc6319 100644
 --- a/apps/server/src/http.ts
 +++ b/apps/server/src/http.ts
 @@ -47,6 +47,7 @@ import {
@@ -29,13 +29,13 @@ index 290b73b48514c69c28933700adfd21ffc4d73f9c..1fcef30f0760403cf2c894eddac0b7d2
  import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
  import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
 +import * as UpdateAdmission from "./updateAdmission.ts";
-
+ 
  const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
  const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
-@@ -429,12 +430,26 @@ export const attachmentUploadRouteLayer = HttpRouter.add(
+@@ -430,12 +431,26 @@ export const attachmentUploadRouteLayer = HttpRouter.add(
        });
      }
-
+ 
 -    // Keep the request stream in the route scope until the response is sent.
 -    const bodyPull = yield* Stream.toPull(request.stream);
 -    const stored = yield* storeAttachmentUpload(claims, Stream.fromPull(Effect.succeed(bodyPull)));
@@ -64,9 +64,9 @@ index 290b73b48514c69c28933700adfd21ffc4d73f9c..1fcef30f0760403cf2c894eddac0b7d2
 +      .pipe(Effect.catchTag("UpdateAdmissionClosedError", HttpServerRespondable.toResponse));
    }),
  );
-
+ 
 diff --git a/apps/server/src/mcp/McpHttpServer.test.ts b/apps/server/src/mcp/McpHttpServer.test.ts
-index 89e53bf48be3ed0f7362efb46ca4082a53a3a8b3..8ba9dc32bf6e6607f11b307c2d013845ffde85d0 100644
+index 0c14927001e103b57aaa1c4065ba7bde30296ba6..d15da056c122e0801d55d16dcff88293bb466cdd 100644
 --- a/apps/server/src/mcp/McpHttpServer.test.ts
 +++ b/apps/server/src/mcp/McpHttpServer.test.ts
 @@ -5,6 +5,7 @@ import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3to
@@ -82,7 +82,7 @@ index 89e53bf48be3ed0f7362efb46ca4082a53a3a8b3..8ba9dc32bf6e6607f11b307c2d013845
  import * as McpInvocationContext from "./McpInvocationContext.ts";
  import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 +import * as UpdateAdmission from "../updateAdmission.ts";
-
+ 
  const environmentId = EnvironmentId.make("environment-mcp-test");
  const threadId = ThreadId.make("thread-mcp-test");
 @@ -50,6 +52,7 @@ const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
@@ -93,7 +93,7 @@ index 89e53bf48be3ed0f7362efb46ca4082a53a3a8b3..8ba9dc32bf6e6607f11b307c2d013845
  );
  const PullRequestsTestLayer = McpHttpServer.PullRequestsToolkitRegistrationLive.pipe(
    Layer.provideMerge(McpServer.McpServer.layer),
-@@ -747,3 +750,112 @@ it.effect("registers annotated tools and preserves authenticated request context
+@@ -766,3 +769,112 @@ it.effect("registers annotated tools and preserves authenticated request context
      }),
    ).pipe(Effect.provide(TestLayer)),
  );
@@ -207,117 +207,26 @@ index 89e53bf48be3ed0f7362efb46ca4082a53a3a8b3..8ba9dc32bf6e6607f11b307c2d013845
 +  ).pipe(Effect.provide(TestLayer)),
 +);
 diff --git a/apps/server/src/mcp/toolkits/preview/handlers.ts b/apps/server/src/mcp/toolkits/preview/handlers.ts
-index d34c2d3ba3afc70035ae2a06bbd3bf4f79afef0a..476795ba4270e5048bf034302a66f9fd96958896 100644
+index caa4cbd157cf9bf3a431ae07c8f3fca441e41c89..ab434e1d0700f8ed3c726c7d93c9e1849429b140 100644
 --- a/apps/server/src/mcp/toolkits/preview/handlers.ts
 +++ b/apps/server/src/mcp/toolkits/preview/handlers.ts
-@@ -16,6 +16,8 @@ import {
-   type PreviewAutomationSnapshot,
-   type PreviewAutomationStatus,
-   type PreviewTabId,
-+  type PreviewAutomationError,
-+  type UpdateAdmissionClosedError,
- } from "@t3tools/contracts";
-
- import {
-@@ -28,6 +30,7 @@ import { resolveAttachmentRelativePath } from "../../../attachmentPaths.ts";
- import * as ServerConfig from "../../../config.ts";
- import * as McpInvocationContext from "../../McpInvocationContext.ts";
- import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+@@ -1,3 +1,4 @@
 +import * as UpdateAdmission from "../../../updateAdmission.ts";
- import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
-
- /**
-@@ -49,38 +52,63 @@ export function normalizePreviewOpenInput(
-   };
- }
-
--const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
-+interface TargetedInput {
-+  readonly tabId?: PreviewTabId | undefined;
-+  readonly [key: string]: unknown;
-+}
-+
-+const brokerRequest = Effect.fn("PreviewToolkit.brokerRequest")(function* (
-   operation: PreviewAutomationOperation,
--  input: unknown,
-+  input: TargetedInput,
-   timeoutMs?: number,
--  tabId?: PreviewTabId,
--): Effect.fn.Return<
--  A,
--  import("@t3tools/contracts").PreviewAutomationError,
--  McpInvocationContext.McpInvocationContext | PreviewAutomationBroker.PreviewAutomationBroker
--> {
-+) {
-   const scope = yield* McpInvocationContext.requireMcpCapability("preview");
--  const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
--  return yield* broker.invoke<A>({
-+  const { tabId, ...operationInput } = input;
-+  return {
-     scope,
-     operation,
--    input,
-+    input: operationInput,
-     ...(timeoutMs === undefined ? {} : { timeoutMs }),
-     ...(tabId === undefined ? {} : { tabId }),
--  });
-+  };
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
+ import * as Schema from "effect/Schema";
+@@ -186,27 +187,34 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
+   return { ...recording, id: finalId, path: finalPath };
  });
-
--const invokeTargeted = <A>(
-+/** Observes the page; stays available while the server is closed for maintenance. */
-+const invokeRead = Effect.fn("PreviewToolkit.invokeRead")(function* <A>(
-   operation: PreviewAutomationOperation,
--  input: {
--    readonly tabId?: PreviewTabId | undefined;
--    readonly [key: string]: unknown;
--  },
-+  input: TargetedInput,
-   timeoutMs?: number,
--) => {
--  const { tabId, ...operationInput } = input;
--  return invoke<A>(operation, operationInput, timeoutMs, tabId);
--};
-+): Effect.fn.Return<
-+  A,
-+  PreviewAutomationError,
-+  McpInvocationContext.McpInvocationContext | PreviewAutomationBroker.PreviewAutomationBroker
-+> {
-+  const request = yield* brokerRequest(operation, input, timeoutMs);
-+  const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
-+  return yield* broker.invoke<A>(request);
-+});
+ 
++const withMutationAdmission = <A, E, R>(work: Effect.Effect<A, E, R>) =>
++  Effect.flatMap(UpdateAdmission.UpdateAdmission, (admission) => admission.withAdmission(work));
 +
-+/**
-+ * Drives the page; one admission claim covers the complete broker round trip,
-+ * so a maintenance restart waits for the host's response or the caller's
-+ * cancellation, and a closed gate refuses before any request reaches the host.
-+ */
-+const invokeMutation = Effect.fn("PreviewToolkit.invokeMutation")(function* <A>(
-+  operation: PreviewAutomationOperation,
-+  input: TargetedInput,
-+  timeoutMs?: number,
-+): Effect.fn.Return<
-+  A,
-+  PreviewAutomationError | UpdateAdmissionClosedError,
-+  | McpInvocationContext.McpInvocationContext
-+  | PreviewAutomationBroker.PreviewAutomationBroker
-+  | UpdateAdmission.UpdateAdmission
-+> {
-+  const request = yield* brokerRequest(operation, input, timeoutMs);
-+  const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
-+  const admission = yield* UpdateAdmission.UpdateAdmission;
-+  return yield* admission.withAdmission(broker.invoke<A>(request));
-+});
-
- const UploadedRecordingArtifact = Schema.Struct({
-   ...PreviewAutomationRecordingArtifact.fields,
-@@ -156,42 +184,47 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
- });
-
++const invokeMutation = <A extends object>(...args: Parameters<typeof invokeTargeted<A>>) =>
++  withMutationAdmission(invokeTargeted<A>(...args));
++
  const handlers = {
--  preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
-+  preview_status: (input) => invokeRead<PreviewAutomationStatus>("status", input ?? {}),
+   preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
    preview_open: (input) =>
 -    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
 +    invokeMutation<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
@@ -333,56 +242,45 @@ index d34c2d3ba3afc70035ae2a06bbd3bf4f79afef0a..476795ba4270e5048bf034302a66f9fd
    preview_snapshot: (input) => {
      // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
      const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
--    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
-+    return invokeRead<PreviewAutomationSnapshot>("snapshot", operationInput);
+     return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
    },
-   preview_click: (input) =>
--    invokeTargeted<void>("click", input, input.timeoutMs).pipe(Effect.as({})),
--  preview_type: (input) => invokeTargeted<void>("type", input, input.timeoutMs).pipe(Effect.as({})),
--  preview_press: (input) => invokeTargeted<void>("press", input).pipe(Effect.as({})),
--  preview_scroll: (input) => invokeTargeted<void>("scroll", input).pipe(Effect.as({})),
-+    invokeMutation<void>("click", input, input.timeoutMs).pipe(Effect.as({})),
-+  preview_type: (input) => invokeMutation<void>("type", input, input.timeoutMs).pipe(Effect.as({})),
-+  preview_press: (input) => invokeMutation<void>("press", input).pipe(Effect.as({})),
-+  preview_scroll: (input) => invokeMutation<void>("scroll", input).pipe(Effect.as({})),
-   preview_evaluate: (input) =>
--    invokeTargeted<unknown>("evaluate", input).pipe(
-+    invokeMutation<unknown>("evaluate", input).pipe(
-       Effect.map((result) => ({ value: result ?? null })),
+-  preview_click: (input) => invokeTargeted<object>("click", input, input.timeoutMs),
+-  preview_type: (input) => invokeTargeted<object>("type", input, input.timeoutMs),
+-  preview_press: (input) => invokeTargeted<object>("press", input),
+-  preview_scroll: (input) => invokeTargeted<object>("scroll", input),
++  preview_click: (input) => invokeMutation<object>("click", input, input.timeoutMs),
++  preview_type: (input) => invokeMutation<object>("type", input, input.timeoutMs),
++  preview_press: (input) => invokeMutation<object>("press", input),
++  preview_scroll: (input) => invokeMutation<object>("scroll", input),
+   preview_evaluate: ({ tabId, ...input }) =>
+     invoke<unknown>("evaluate", input, undefined, tabId).pipe(
++      withMutationAdmission,
+       Effect.map(({ result, toolIcon }) => ({
+         value: result ?? null,
+         ...(toolIcon ? { toolIcon } : {}),
+@@ -214,7 +222,7 @@ const handlers = {
      ),
-   preview_wait_for: (input) =>
--    invokeTargeted<void>("waitFor", input, input.timeoutMs).pipe(Effect.as({})),
-+    invokeRead<void>("waitFor", input, input.timeoutMs).pipe(Effect.as({})),
+   preview_wait_for: (input) => invokeTargeted<object>("waitFor", input, input.timeoutMs),
    preview_recording_start: (input) =>
 -    invokeTargeted<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
 +    invokeMutation<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
    preview_recording_stop: (input) =>
      Effect.gen(function* () {
        const scope = yield* McpInvocationContext.requireMcpCapability("preview");
--      const response = yield* invokeTargeted<unknown>(
--        "recordingStop",
--        { ...input, transferToEnvironment: true },
--        PREVIEW_RECORDING_STOP_TIMEOUT_MS,
-+      const admission = yield* UpdateAdmission.UpdateAdmission;
-+      return yield* admission.withAdmission(
-+        Effect.gen(function* () {
-+          const response = yield* invokeRead<unknown>(
-+            "recordingStop",
-+            { ...input, transferToEnvironment: true },
-+            PREVIEW_RECORDING_STOP_TIMEOUT_MS,
-+          );
-+          return yield* claimPreviewRecording(scope.threadId, response);
-+        }),
+@@ -227,7 +235,7 @@ const handlers = {
        );
--      return yield* claimPreviewRecording(scope.threadId, response);
-     }),
+       const artifact = yield* claimPreviewRecording(scope.threadId, response.result);
+       return { ...artifact, ...(response.toolIcon ? { toolIcon: response.toolIcon } : {}) };
+-    }),
++    }).pipe(withMutationAdmission),
  } satisfies Parameters<typeof PreviewToolkit.toLayer>[0];
-
+ 
+ const { preview_snapshot, ...standardHandlers } = handlers;
 diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
-index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d4d7e8750 100644
+index 3f80e84e9a595b641c180716ca1a1d6ef1ee56db..c0d0229abdcc933d296028c5c47bbe1fad78ca12 100644
 --- a/apps/server/src/mcp/toolkits/preview/tools.ts
 +++ b/apps/server/src/mcp/toolkits/preview/tools.ts
-@@ -17,6 +17,7 @@ import {
+@@ -18,6 +18,7 @@ import {
    PreviewAutomationTabTargetInput,
    PreviewAutomationTypeInput,
    PreviewAutomationWaitForInput,
@@ -390,27 +288,27 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
  } from "@t3tools/contracts";
  import * as Schema from "effect/Schema";
  import * as FileSystem from "effect/FileSystem";
-@@ -25,12 +26,19 @@ import { Tool, Toolkit } from "effect/unstable/ai";
+@@ -26,12 +27,19 @@ import { Tool, Toolkit } from "effect/unstable/ai";
  import * as McpInvocationContext from "../../McpInvocationContext.ts";
  import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
  import * as ServerConfig from "../../../config.ts";
 +import * as UpdateAdmission from "../../../updateAdmission.ts";
-
+ 
  const dependencies = [
    McpInvocationContext.McpInvocationContext,
    PreviewAutomationBroker.PreviewAutomationBroker,
  ];
-
+ 
 +// Tools that drive the browser are client mutations: they claim update
 +// admission around the broker call and can be refused during maintenance.
 +// The observing tools stay available so an agent can still read the page.
 +const mutationDependencies = [...dependencies, UpdateAdmission.UpdateAdmission];
 +const PreviewMutationFailure = Schema.Union([PreviewAutomationError, UpdateAdmissionClosedError]);
 +
- const PreviewActionResult = Schema.Record(Schema.String, Schema.Never).annotate({
-   description: "The preview action completed successfully.",
- });
-@@ -66,8 +74,8 @@ const PreviewOpenTool = browserTool(
+ const presentationFields = { toolIcon: Schema.optional(ToolActivityIcon) };
+ 
+ const PreviewActionResult = Schema.Struct(presentationFields).annotate({
+@@ -69,8 +77,8 @@ const PreviewOpenTool = browserTool(
        "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab.",
      parameters: PreviewAutomationOpenInput,
      success: PreviewAutomationStatus,
@@ -421,7 +319,7 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
    })
      .annotate(Tool.Title, "Open browser preview")
      .annotate(Tool.Destructive, false),
-@@ -79,8 +87,8 @@ const PreviewNavigateTool = safeBrowserTool(
+@@ -82,8 +90,8 @@ const PreviewNavigateTool = safeBrowserTool(
        "Navigate a collaborative browser tab. Pass tabId to target a specific tab, plus {url:'https://t3.chat'} for a website or {target:{kind:'environment-port',port:5173}} for a dev server. Exactly one of url or target is required.",
      parameters: PreviewAutomationNavigateInput,
      success: PreviewAutomationStatus,
@@ -431,11 +329,11 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Navigate browser preview"),
  );
-
-@@ -90,8 +98,8 @@ const PreviewResizeTool = safeBrowserTool(
+ 
+@@ -93,8 +101,8 @@ const PreviewResizeTool = safeBrowserTool(
        "Resize a collaborative browser tab, optionally selected by tabId. Use {mode:'fill'}, {mode:'freeform',width:1024,height:768}, or {mode:'preset',preset:'iphone-12-pro',orientation:'portrait'}. This changes CSS layout breakpoints without changing the desktop browser user agent.",
      parameters: PreviewAutomationResizeInput,
-     success: PreviewAutomationResizeResult,
+     success: Schema.Struct({ ...PreviewAutomationResizeResult.fields, ...presentationFields }),
 -    failure: PreviewAutomationError,
 -    dependencies,
 +    failure: PreviewMutationFailure,
@@ -443,10 +341,10 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
    })
      .annotate(Tool.Title, "Resize browser viewport")
      .annotate(Tool.Idempotent, true),
-@@ -103,8 +111,8 @@ const PreviewSetAppearanceTool = safeBrowserTool(
-       "Emulate prefers-color-scheme in a collaborative browser tab, optionally selected by tabId. Use {colorScheme:'dark'} or {colorScheme:'light'} to preview the page in that appearance, and {colorScheme:'system'} to clear the override and follow the OS appearance.",
-     parameters: PreviewAutomationSetColorSchemeInput,
-     success: PreviewAutomationSetColorSchemeResult,
+@@ -109,8 +117,8 @@ const PreviewSetAppearanceTool = safeBrowserTool(
+       ...PreviewAutomationSetColorSchemeResult.fields,
+       ...presentationFields,
+     }),
 -    failure: PreviewAutomationError,
 -    dependencies,
 +    failure: PreviewMutationFailure,
@@ -454,7 +352,7 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
    })
      .annotate(Tool.Title, "Set preview appearance")
      .annotate(Tool.Idempotent, true),
-@@ -141,8 +149,8 @@ const PreviewClickTool = browserTool(
+@@ -147,8 +155,8 @@ const PreviewClickTool = browserTool(
        "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together.",
      parameters: PreviewAutomationClickInput,
      success: PreviewActionResult,
@@ -464,8 +362,8 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Click preview page"),
  );
-
-@@ -152,8 +160,8 @@ const PreviewTypeTool = browserTool(
+ 
+@@ -158,8 +166,8 @@ const PreviewTypeTool = browserTool(
        "Insert literal text into one input in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; set clear=true to replace existing text.",
      parameters: PreviewAutomationTypeInput,
      success: PreviewActionResult,
@@ -475,8 +373,8 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Type into preview page"),
  );
-
-@@ -163,8 +171,8 @@ const PreviewPressTool = browserTool(
+ 
+@@ -169,8 +177,8 @@ const PreviewPressTool = browserTool(
        "Press one keyboard key in the tab selected by tabId, or this agent session's current tab when omitted. Examples: {key:'Enter'}, {key:'Escape'}, or {key:'a',modifiers:['Meta']}.",
      parameters: PreviewAutomationPressInput,
      success: PreviewActionResult,
@@ -486,8 +384,8 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Press key in preview page"),
  );
-
-@@ -174,8 +182,8 @@ const PreviewScrollTool = safeBrowserTool(
+ 
+@@ -180,8 +188,8 @@ const PreviewScrollTool = safeBrowserTool(
        "Scroll the tab selected by tabId, or this agent session's current tab when omitted. Positive deltaY scrolls down and positive deltaX scrolls right; a locator/selector targets a container.",
      parameters: PreviewAutomationScrollInput,
      success: PreviewActionResult,
@@ -497,8 +395,8 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Scroll preview page"),
  );
-
-@@ -196,8 +204,8 @@ const PreviewEvaluateTool = browserTool(
+ 
+@@ -203,8 +211,8 @@ const PreviewEvaluateTool = browserTool(
        "Evaluate JavaScript in the tab selected by tabId, or this agent session's current tab when omitted. Returns {value} with a serializable result up to 64 KB; the expression may mutate page state.",
      parameters: PreviewAutomationEvaluateInput,
      success: PreviewEvaluateResult,
@@ -508,36 +406,36 @@ index 28a2b96228b573ba06a42d61213f5a58d27c85c2..3d441f5d4536aa4adc25528bdec8472d
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Evaluate JavaScript in preview"),
  );
-
-@@ -218,8 +226,8 @@ const PreviewRecordingStartTool = safeBrowserTool(
+ 
+@@ -225,8 +233,8 @@ const PreviewRecordingStartTool = safeBrowserTool(
        "Start recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted.",
      parameters: PreviewAutomationTabTargetInput,
-     success: PreviewAutomationRecordingStatus,
+     success: Schema.Struct({ ...PreviewAutomationRecordingStatus.fields, ...presentationFields }),
 -    failure: PreviewAutomationError,
 -    dependencies,
 +    failure: PreviewMutationFailure,
 +    dependencies: mutationDependencies,
    }).annotate(Tool.Title, "Start browser recording"),
  );
-
-@@ -229,8 +237,8 @@ const PreviewRecordingStopTool = safeBrowserTool(
+ 
+@@ -236,8 +244,8 @@ const PreviewRecordingStopTool = safeBrowserTool(
        "Stop recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted, and transfer the compressed recording once (up to 50 MiB) to an evidence file readable in this agent's environment. Returns its environment-local path after transfer succeeds.",
      parameters: PreviewAutomationTabTargetInput,
-     success: PreviewAutomationRecordingArtifact,
+     success: Schema.Struct({ ...PreviewAutomationRecordingArtifact.fields, ...presentationFields }),
 -    failure: PreviewAutomationError,
 -    dependencies: [...dependencies, FileSystem.FileSystem, ServerConfig.ServerConfig],
 +    failure: PreviewMutationFailure,
 +    dependencies: [...mutationDependencies, FileSystem.FileSystem, ServerConfig.ServerConfig],
    }).annotate(Tool.Title, "Stop browser recording"),
  );
-
+ 
 diff --git a/apps/server/src/provider/AntigravityInstallation.test.ts b/apps/server/src/provider/AntigravityInstallation.test.ts
 index 0528cb4972c9b07866457d4fc9a2ebe8e6aecc6d..529f5f15ddc80c56778617007aed2ac7720c294b 100644
 --- a/apps/server/src/provider/AntigravityInstallation.test.ts
 +++ b/apps/server/src/provider/AntigravityInstallation.test.ts
 @@ -23,6 +23,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
  import * as NodeCrypto from "node:crypto";
-
+ 
  import {
 +  AntigravityInstallationError,
    makeAntigravityInstallation,
@@ -549,7 +447,7 @@ index 0528cb4972c9b07866457d4fc9a2ebe8e6aecc6d..529f5f15ddc80c56778617007aed2ac7
  import type { AntigravityReleaseAsset } from "./antigravityRelease.ts";
 +import { UpdateActivity } from "../updateActivity.ts";
 +import * as UpdateActivityModule from "../updateActivity.ts";
-
+ 
  const serverContents = "antigravity runtime\n";
  const harnessContents = "local harness\n";
 @@ -158,6 +161,7 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
@@ -575,7 +473,7 @@ index 0528cb4972c9b07866457d4fc9a2ebe8e6aecc6d..529f5f15ddc80c56778617007aed2ac7
 -  return { installation, fs, path, baseDir, requests, validations, stagingReleased };
 +  return { installation, fs, path, baseDir, requests, validations, stagingReleased, activity };
  });
-
+ 
 +/** Resolves once the activity registry counts nothing outstanding. */
 +const awaitActivityIdle = (activity: UpdateActivityModule.UpdateActivityShape) =>
 +  Effect.gen(function* () {
@@ -592,7 +490,7 @@ index 0528cb4972c9b07866457d4fc9a2ebe8e6aecc6d..529f5f15ddc80c56778617007aed2ac7
 @@ -906,6 +921,75 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
        }),
    );
-
+ 
 +  it.effect.each(["succeeded", "failed", "cancelled"] as const)(
 +    "holds one activity lease from start until the install %s",
 +    (outcome) =>
@@ -671,7 +569,7 @@ index ebcbd496ee3e3d5718a49198d961d785d4dfd676..d2eab0aaff771a30818d9bf330b689cf
 +++ b/apps/server/src/provider/AntigravityInstallation.ts
 @@ -30,6 +30,7 @@ import type * as NodeStream from "node:stream";
  import * as Yauzl from "yauzl";
-
+ 
  import { ServerConfig } from "../config.ts";
 +import { UpdateActivity } from "../updateActivity.ts";
  import { makeAntigravityAcpRuntime } from "./acp/AntigravityAcpSupport.ts";
@@ -799,10 +697,10 @@ index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a0
                  Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
                ),
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 71c740ec2e587dbe272fa49176b5ff1d7cbcc013..23fd13555416bb95fdb1420b3472e80b01e0da01 100644
+index 7bf54e51cb30791bc0d28064d72e36de4480e87d..210ae157aabb75b49bb2ced41be790657e187d25 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -536,6 +536,7 @@ const buildAppUnderTest = (options?: {
+@@ -545,6 +545,7 @@ const buildAppUnderTest = (options?: {
      providerAuth?: Partial<ProviderAuthService["Service"]>;
      providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
      antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
@@ -810,9 +708,9 @@ index 71c740ec2e587dbe272fa49176b5ff1d7cbcc013..23fd13555416bb95fdb1420b3472e80b
      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
      externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
      vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
-@@ -1055,6 +1056,17 @@ const buildAppUnderTest = (options?: {
+@@ -1069,6 +1070,17 @@ const buildAppUnderTest = (options?: {
      );
-
+ 
      const appLayer = servedRoutesLayer.pipe(
 +      // Outside `HttpRouter.serve`, as in production: the WebSocket route reads
 +      // the RPC middleware from its handler context.
@@ -828,7 +726,7 @@ index 71c740ec2e587dbe272fa49176b5ff1d7cbcc013..23fd13555416bb95fdb1420b3472e80b
        Layer.provide(resourceTelemetryLayer),
        Layer.provide(UsageService.layerTest),
        Layer.provide(
-@@ -12145,3 +12157,229 @@ it.live(
+@@ -12381,3 +12393,229 @@ it.live(
      }).pipe(Effect.provide(NodeServices.layer)),
    120_000,
  );
@@ -1059,10 +957,10 @@ index 71c740ec2e587dbe272fa49176b5ff1d7cbcc013..23fd13555416bb95fdb1420b3472e80b
 +  );
 +});
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 3c4eab4cc3ec7271e789c1d5d8a931b4ca5f0729..51e8de0555ae7a13fe23546768dfcefcc0310c3e 100644
+index c993d2bff8d9e42dd21e58e53f68c0c6d86be2f4..820543573f4292cc74bced145ff0e8dfceacd47b 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -642,15 +642,22 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -697,15 +697,22 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // `providerInstances` hydration merges `settings.providers.<kind>`
    // with explicit `providerInstances` entries on boot.
    Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -1109,7 +1007,7 @@ index f081d4d2a199ad4ed19ff9dc0d75730a59c338d7..cf5af3101d0d6e9a77491094e6a93d8d
  import * as Option from "effect/Option";
 -import * as Schema from "effect/Schema";
  import * as Semaphore from "effect/Semaphore";
-
+ 
 -/**
 - * Raised for a client command that arrives while the server is closed for
 - * maintenance (self-update). Retryable: the gate reopens once maintenance ends.
@@ -1127,12 +1025,12 @@ index f081d4d2a199ad4ed19ff9dc0d75730a59c338d7..cf5af3101d0d6e9a77491094e6a93d8d
 +// The error lives in the contracts package so the WebSocket, HTTP, and MCP
 +// transports can declare it; the gate itself stays server-only.
 +export { UpdateAdmissionClosedError };
-
+ 
  export interface UpdateAdmissionState {
    readonly phase: "open" | "maintenance";
 @@ -218,3 +211,22 @@ export const make = Effect.fn("updateAdmission.make")(function* () {
  });
-
+ 
  export const layer = Layer.effect(UpdateAdmission, make());
 +
 +/**
@@ -1181,7 +1079,7 @@ index 4cd39074f3eae5539f546c3f2c4546ba24347809..60aef436bfb87ce166c39edd3e29f08a
 +++ b/packages/contracts/src/environmentHttp.test.ts
 @@ -1,13 +1,16 @@
  import { describe, expect, it } from "vite-plus/test";
-
+ 
  import {
 +  EnvironmentAuthenticatedAuth,
    EnvironmentAuthInvalidError,
@@ -1193,9 +1091,9 @@ index 4cd39074f3eae5539f546c3f2c4546ba24347809..60aef436bfb87ce166c39edd3e29f08a
    EnvironmentScopeRequiredError,
  } from "./environmentHttp.ts";
 +import { UpdateAdmissionClosedError, UpdateAdmissionHttpMiddleware } from "./updateAdmission.ts";
-
+ 
  const traceId = "trace-1";
-
+ 
 @@ -60,3 +63,85 @@ describe("environment HTTP errors", () => {
      });
    });
@@ -1353,7 +1251,7 @@ index 9cdd21393fead7190e485a65a4300f36975efc3c..da8448342d7b492612a0ebe27890e081
 +      .middleware(UpdateAdmissionHttpMiddleware)
 +      .middleware(EnvironmentAuthenticatedAuth),
    ) {}
-
+ 
  const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
 @@ -534,7 +543,9 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
        payload: ClientOrchestrationCommand,
@@ -1364,7 +1262,7 @@ index 9cdd21393fead7190e485a65a4300f36975efc3c..da8448342d7b492612a0ebe27890e081
 +      .middleware(UpdateAdmissionHttpMiddleware)
 +      .middleware(EnvironmentAuthenticatedAuth),
    ) {}
-
+ 
  /** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
 @@ -560,7 +571,9 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
        payload: RelayLinkProofRequest,
@@ -1425,13 +1323,13 @@ index 9cdd21393fead7190e485a65a4300f36975efc3c..da8448342d7b492612a0ebe27890e081
 -    }),
 +    }).middleware(UpdateAdmissionHttpMiddleware),
    ) {}
-
+ 
  export class EnvironmentHttpApi extends HttpApi.make("environment")
 diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
-index 74a1b4939f1af18399f243eb0ed86253cccba204..0c191e5bdc5e1c0e30c5f71a8d9154db749265df 100644
+index 77d72144697a41a2fa8ce825966306415970bd78..7ae5a90e21a7a93ac8adb0f9318d6562903222d5 100644
 --- a/packages/contracts/src/index.ts
 +++ b/packages/contracts/src/index.ts
-@@ -38,4 +38,5 @@ export * from "./preview.ts";
+@@ -41,4 +41,5 @@ export * from "./preview.ts";
  export * from "./previewAutomation.ts";
  export * from "./resourceTelemetry.ts";
  export * from "./usage.ts";
@@ -1444,11 +1342,11 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 @@ -2,7 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
  import * as Exit from "effect/Exit";
  import * as Schema from "effect/Schema";
-
+ 
 -import { WsSubscribeServerConfigRpc } from "./rpc.ts";
 +import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
 +import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
-
+ 
  /**
   * The client always sends `environmentThemes`, including to servers built
 @@ -29,3 +30,166 @@ describe("subscribeServerConfig payload compatibility", () => {
@@ -1619,458 +1517,458 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 5e11aeb28fa367bad0cb5f14a7003e7ead885081..21fcac3367517841f988b8a5119e8bd5d6aeaaed 100644
+index 7ec895137eb455e3a4ca089178e81db0f286f69d..0a9074bbd920ee5c9eddd72b324ca56be96f6371 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
-@@ -250,6 +250,7 @@ import {
+@@ -253,6 +253,7 @@ import {
    SourceControlRepositoryInfo,
    SourceControlRepositoryLookupInput,
  } from "./sourceControl.ts";
 +import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
  import { VcsError } from "./vcs.ts";
-
+ 
  export const WS_METHODS = {
-@@ -415,13 +416,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
+@@ -420,13 +421,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
    payload: ServerUpsertKeybindingInput,
    success: ServerUpsertKeybindingResult,
    error: Schema.Union([KeybindingsConfigError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsServerRemoveKeybindingRpc = Rpc.make(WS_METHODS.serverRemoveKeybinding, {
    payload: ServerRemoveKeybindingInput,
    success: ServerRemoveKeybindingResult,
    error: Schema.Union([KeybindingsConfigError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
    payload: Schema.Struct({}),
-@@ -450,13 +451,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
+@@ -455,13 +456,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
    }),
    success: ServerProviderUpdatedPayload,
    error: Schema.Union([EnvironmentAuthorizationError, ProviderSetupError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
    payload: ServerProviderUpdateInput,
    success: ServerProviderUpdatedPayload,
    error: Schema.Union([ServerProviderUpdateError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const ProviderSetupRpcError = Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]);
-
-@@ -464,31 +465,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
+ 
+@@ -469,31 +470,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
    payload: ProviderConsumeResetCreditInput,
    success: ProviderConsumeResetCreditResult,
    error: Schema.Union([ProviderSetupError, UsageLimitSourceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderAuthStartRpc = Rpc.make(WS_METHODS.providerAuthStart, {
    payload: ProviderSetupInput,
    success: ProviderAuthState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderAuthCompleteRpc = Rpc.make(WS_METHODS.providerAuthComplete, {
    payload: ProviderAuthCompleteInput,
    success: ProviderAuthState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderAuthCancelRpc = Rpc.make(WS_METHODS.providerAuthCancel, {
    payload: ProviderAuthCancelInput,
    success: ProviderAuthState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderAuthLogoutRpc = Rpc.make(WS_METHODS.providerAuthLogout, {
    payload: ProviderSetupInput,
    success: ProviderAuthState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderAuthSubscribeRpc = Rpc.make(WS_METHODS.providerAuthSubscribe, {
    payload: ProviderSetupInput,
-@@ -501,13 +502,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
+@@ -506,13 +507,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
    payload: ProviderSetupInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderInstallCancelRpc = Rpc.make(WS_METHODS.providerInstallCancel, {
    payload: ProviderInstallCancelInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderInstallSubscribeRpc = Rpc.make(WS_METHODS.providerInstallSubscribe, {
    payload: ProviderSetupInput,
-@@ -520,7 +521,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
+@@ -525,7 +526,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
    payload: ProviderSetupInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsServerUpdateServerRpc = Rpc.make(WS_METHODS.serverUpdateServer, {
    payload: ServerSelfUpdateInput,
-@@ -551,7 +552,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
+@@ -556,7 +557,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
    payload: Schema.Struct({ patch: ServerSettingsPatch }),
    success: ServerSettings,
    error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
    payload: Schema.Struct({}),
-@@ -618,7 +619,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
+@@ -623,7 +624,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
    payload: ServerSignalProcessInput,
    success: ServerSignalProcessResult,
    error: EnvironmentAuthorizationError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsCloudGetRelayClientStatusRpc = Rpc.make(WS_METHODS.cloudGetRelayClientStatus, {
    payload: Schema.Struct({}),
-@@ -631,7 +632,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
+@@ -636,7 +637,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
    success: RelayClientInstallProgressEventSchema,
    error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
    stream: true,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
    payload: ClientActivityReportInput,
-@@ -718,49 +719,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
+@@ -735,49 +736,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
    payload: PullRequestActionInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsUpdateRpc = Rpc.make(WS_METHODS.pullRequestsUpdate, {
    payload: PullRequestUpdateInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsCommentRpc = Rpc.make(WS_METHODS.pullRequestsComment, {
    payload: PullRequestCommentInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsUpdateCommentRpc = Rpc.make(WS_METHODS.pullRequestsUpdateComment, {
    payload: PullRequestCommentUpdateInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsSubmitReviewRpc = Rpc.make(WS_METHODS.pullRequestsSubmitReview, {
    payload: PullRequestSubmitReviewInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsReplyToThreadRpc = Rpc.make(WS_METHODS.pullRequestsReplyToThread, {
    payload: PullRequestThreadReplyInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsSetThreadResolutionRpc = Rpc.make(WS_METHODS.pullRequestsSetThreadResolution, {
    payload: PullRequestThreadResolutionInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsSetReactionRpc = Rpc.make(WS_METHODS.pullRequestsSetReaction, {
    payload: PullRequestReactionInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPullRequestsInvalidateRpc = Rpc.make(WS_METHODS.pullRequestsInvalidate, {
    payload: PullRequestInvalidateInput,
-@@ -790,7 +791,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
+@@ -807,7 +808,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
    payload: PullRequestReviewerRequestInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  /** Read when the label menu opens, for the same reason the reviewer candidates are. */
  const WsPullRequestsLabelCandidatesRpc = Rpc.make(WS_METHODS.pullRequestsLabelCandidates, {
-@@ -803,7 +804,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
+@@ -820,7 +821,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
    payload: PullRequestLabelChangeInput,
    success: Schema.Void,
    error: PullRequestRpcError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsSourceControlLookupRepositoryRpc = Rpc.make(WS_METHODS.sourceControlLookupRepository, {
    payload: SourceControlRepositoryLookupInput,
-@@ -815,13 +816,13 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
+@@ -832,13 +833,13 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
    payload: SourceControlCloneRepositoryInput,
    success: SourceControlCloneRepositoryResult,
    error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPublishRepository, {
    payload: SourceControlPublishRepositoryInput,
    success: SourceControlPublishRepositoryResult,
    error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
    payload: ProjectSearchEntriesInput,
-@@ -851,12 +852,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
+@@ -868,12 +869,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
    payload: ProjectWriteFileInput,
    success: ProjectWriteFileResult,
    error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
    payload: LaunchEditorInput,
    error: Schema.Union([ExternalLauncherError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
    payload: FilesystemBrowseInput,
-@@ -879,7 +880,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
+@@ -896,7 +897,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
      AgentSessionScanError,
      EnvironmentAuthorizationError,
    ]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
    payload: AssetCreateUrlInput,
-@@ -891,18 +892,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
+@@ -908,18 +909,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
    payload: AttachmentCreateUploadUrlInput,
    success: AttachmentCreateUploadUrlResult,
    error: Schema.Union([AttachmentUploadSigningKeyError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsAttachmentsDeleteRpc = Rpc.make(WS_METHODS.attachmentsDelete, {
    payload: AttachmentDeleteInput,
    error: EnvironmentAuthorizationError,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, {
    payload: ProviderUploadFeedbackInput,
    success: ProviderUploadFeedbackResult,
    error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
    payload: VcsStatusInput,
-@@ -915,7 +916,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
+@@ -932,7 +933,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
    payload: VcsPullInput,
    success: VcsPullResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
    payload: VcsStatusInput,
-@@ -928,7 +929,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+@@ -945,7 +946,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
    success: GitActionProgressEvent,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
    stream: true,
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
    payload: GitPullRequestRefInput,
-@@ -940,7 +941,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
+@@ -957,7 +958,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
    payload: GitPreparePullRequestThreadInput,
    success: GitPreparePullRequestThreadResult,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
    payload: VcsListRefsInput,
-@@ -952,29 +953,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
+@@ -969,29 +970,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
    payload: VcsCreateWorktreeInput,
    success: VcsCreateWorktreeResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsVcsRemoveWorktreeRpc = Rpc.make(WS_METHODS.vcsRemoveWorktree, {
    payload: VcsRemoveWorktreeInput,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsVcsCreateRefRpc = Rpc.make(WS_METHODS.vcsCreateRef, {
    payload: VcsCreateRefInput,
    success: VcsCreateRefResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsVcsSwitchRefRpc = Rpc.make(WS_METHODS.vcsSwitchRef, {
    payload: VcsSwitchRefInput,
    success: VcsSwitchRefResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
    payload: VcsInitInput,
    error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  /**
   * Ephemeral live diff preview for compact/mobile surfaces.
-@@ -997,7 +998,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
+@@ -1014,7 +1015,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
    payload: TerminalOpenInput,
    success: TerminalSessionSnapshot,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
    payload: TerminalAttachInput,
-@@ -1009,56 +1010,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
+@@ -1026,56 +1027,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
  const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
    payload: TerminalWriteInput,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsTerminalResizeRpc = Rpc.make(WS_METHODS.terminalResize, {
    payload: TerminalResizeInput,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsTerminalClearRpc = Rpc.make(WS_METHODS.terminalClear, {
    payload: TerminalClearInput,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsTerminalRestartRpc = Rpc.make(WS_METHODS.terminalRestart, {
    payload: TerminalRestartInput,
    success: TerminalSessionSnapshot,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
    payload: TerminalCloseInput,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
    payload: PreviewOpenInput,
    success: PreviewSessionSnapshot,
    error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPreviewNavigateRpc = Rpc.make(WS_METHODS.previewNavigate, {
    payload: PreviewNavigateInput,
    success: PreviewSessionSnapshot,
    error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPreviewResizeRpc = Rpc.make(WS_METHODS.previewResize, {
    payload: PreviewResizeInput,
    success: PreviewSessionSnapshot,
    error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPreviewRefreshRpc = Rpc.make(WS_METHODS.previewRefresh, {
    payload: PreviewRefreshInput,
    error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPreviewCloseRpc = Rpc.make(WS_METHODS.previewClose, {
    payload: PreviewCloseInput,
    error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
    payload: PreviewListInput,
-@@ -1120,23 +1121,23 @@ const WsDeviceConfigureRpc = Rpc.make(WS_METHODS.deviceConfigure, {
+@@ -1137,23 +1138,23 @@ const WsDeviceConfigureRpc = Rpc.make(WS_METHODS.deviceConfigure, {
    payload: DeviceConfigureInput,
    success: DeviceServiceState,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsDeviceOpenRpc = Rpc.make(WS_METHODS.deviceOpen, {
    payload: DeviceOpenInput,
    success: DeviceSession,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsDeviceCloseRpc = Rpc.make(WS_METHODS.deviceClose, {
    payload: DeviceCloseInput,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsDeviceShutdownRpc = Rpc.make(WS_METHODS.deviceShutdown, {
    payload: DeviceShutdownInput,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsDeviceDetailRpc = Rpc.make(WS_METHODS.deviceDetail, {
    payload: DeviceDetailInput,
-@@ -1148,7 +1149,7 @@ const WsDeviceActionRpc = Rpc.make(WS_METHODS.deviceAction, {
+@@ -1165,7 +1166,7 @@ const WsDeviceActionRpc = Rpc.make(WS_METHODS.deviceAction, {
    payload: DeviceActionInput,
    success: DeviceDetail,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
    payload: Schema.Struct({}),
-@@ -1161,7 +1162,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
+@@ -1178,7 +1179,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
    payload: ClientOrchestrationCommand,
    success: OrchestrationRpcSchemas.dispatchCommand.output,
    error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
-
+ 
  const WsOrchestrationGetWorkflowScriptRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getWorkflowScript, {
    payload: OrchestrationRpcSchemas.getWorkflowScript.input,
 diff --git a/packages/contracts/src/updateAdmission.ts b/packages/contracts/src/updateAdmission.ts

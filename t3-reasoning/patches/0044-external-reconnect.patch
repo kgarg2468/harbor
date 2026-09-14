@@ -1,9 +1,9 @@
 diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
-index 72c0c420..c8920950 100644
+index 72c0c420e18c957791d87bfffa8e9c7108ecf91f..c892095043ea8c81bbe13dfa4c74ffd71f5ca9d5 100644
 --- a/packages/ssh/src/tunnel.test.ts
 +++ b/packages/ssh/src/tunnel.test.ts
 @@ -600,6 +600,168 @@ describe("ssh tunnel scripts", () => {
-
+ 
  const pairingTarget = { alias: "fixture", hostname: "fixture", username: null, port: null };
  const pairingKey = remoteStateKey(pairingTarget);
 +
@@ -172,7 +172,7 @@ index 72c0c420..c8920950 100644
  async function managedPairingFixture(
    test: (f: {
 diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
-index 1117d365..002cc6c3 100644
+index 1117d3657247c187e9af5e218166eae55d5dade4..002cc6c382ae2154515ee07e957bfc4199f6c905 100644
 --- a/packages/ssh/src/tunnel.ts
 +++ b/packages/ssh/src/tunnel.ts
 @@ -703,9 +703,8 @@ if [ -n "$DEFAULT_REMOTE_PORT" ]; then

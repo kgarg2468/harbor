@@ -1,8 +1,8 @@
 diff --git a/apps/desktop/src/settings/DesktopClientSettings.test.ts b/apps/desktop/src/settings/DesktopClientSettings.test.ts
-index 6bf0e87c9324bd89778c527df6e44929a64ac61c..d475c4ed36bfce8c27ba849b7a6ddab18d43ce19 100644
+index 5ad23ee7058204118756c2a553349844dd23a7eb..a8cd1a7439850409a7cbd12dc4f9fba703d45ee5 100644
 --- a/apps/desktop/src/settings/DesktopClientSettings.test.ts
 +++ b/apps/desktop/src/settings/DesktopClientSettings.test.ts
-@@ -32,6 +32,7 @@ const clientSettings: ClientSettings = {
+@@ -40,6 +40,7 @@ const clientSettings: ClientSettings = {
    diffIgnoreWhitespace: true,
    diffLayout: "stacked",
    environmentIdentificationMode: "artwork",
@@ -136,10 +136,10 @@ index 731910e441feab521581fea3d98a27c85e566991..8e74051f1d499c1badc35fd3ad1259dc
  
  export function resolveDefaultDesktopUpdateChannel(appVersion: string): DesktopUpdateChannel {
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index affb83eb750642c23aa6f6fc40781a537513fc10..9c7634074a4973ed8216443db75af10151805e4e 100644
+index b601d3997fd76f683541dff3bd490b58c6b43fd0..5a8cb5084939fa0e577e0aa2185b50b1366f0565 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -30,6 +30,7 @@ import {
+@@ -33,6 +33,7 @@ import {
    InvalidMacPasskeyPublishableKeyError,
    InvalidMockUpdateServerPortError,
    UnsupportedDesktopBuildArchitectureError,
@@ -147,7 +147,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..9c7634074a4973ed8216443db75af101
    isMacPasskeySigningConfigurationError,
    LinuxIconResizeError,
    LinuxDesktopBuildPrerequisitesMissingError,
-@@ -89,6 +90,10 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+@@ -93,6 +94,10 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
  import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
  import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
  
@@ -158,7 +158,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..9c7634074a4973ed8216443db75af101
  // A minimal stand-in for the staged sidecar roots packed into the WSL archive.
  const stageWslRuntimeTreeFixture = Effect.fn("stageWslRuntimeTreeFixture")(function* (
    root: string,
-@@ -257,11 +262,81 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -261,11 +266,81 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
    it("resolves the dedicated nightly updater channel from nightly versions", () => {
      assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
      assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
@@ -240,7 +240,7 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..9c7634074a4973ed8216443db75af101
    });
  
    it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
-@@ -363,6 +438,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -367,6 +442,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      ),
    );
  
@@ -333,10 +333,10 @@ index affb83eb750642c23aa6f6fc40781a537513fc10..9c7634074a4973ed8216443db75af101
      assert.deepStrictEqual(
        resolveDesktopRuntimeDependencies(
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..cfa6bfdfce1a899820e5c9189f97ef4b1522c056 100644
+index 44d5f0ab12f4570ba648cd12679c761ac8d52b39..0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -2511,8 +2511,32 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
+@@ -2595,8 +2595,32 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
    };
  });
  
@@ -370,7 +370,7 @@ index 32b090f7a83b95be28b36fc303b9a8a0561c54f2..cfa6bfdfce1a899820e5c9189f97ef4b
  }
  
  function isDesktopPreviewVersion(version: string): boolean {
-@@ -2606,7 +2630,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2693,7 +2717,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    };
    const updateChannel = resolveDesktopUpdateChannel(version);
    if (!isDesktopPreviewVersion(version)) {
