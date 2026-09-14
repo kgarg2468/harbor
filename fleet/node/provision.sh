@@ -36,6 +36,10 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/config.sh"
 # shellcheck source=../lib/auth.sh
 . "${HARBOR_ROOT}/lib/auth.sh"
+# shellcheck source=../lib/apt.sh
+. "${HARBOR_ROOT}/lib/apt.sh"
+# shellcheck source=../lib/state.sh
+. "${HARBOR_ROOT}/lib/state.sh"
 
 harbor_provision_preflight() {
   local record ownership operator linger range node rc=0
@@ -130,7 +134,7 @@ harbor_provision_attended() {
 }
 
 harbor_provision_rows() {
-  local mode=connect config agent status
+  local mode=connect config agent status claude_auth codex_auth service_state access_state=healthy stamp
   harbor_step provision-journal-config
   harbor_journal_init "${HARBOR_STATE_ROOT}" \
     || harbor_die 2 provision.journal "could not initialize the operator journal; no provision mutation was prepared, so check the filesystem and rerun"
@@ -149,6 +153,10 @@ harbor_provision_rows() {
   harbor_step provision-runtime-auth
   for agent in claude codex; do
     status="$(harbor_agents_auth_status "${agent}" "${HOME}")" || exit "$?"
+    case "${agent}" in
+      claude) claude_auth="${status}" ;;
+      codex) codex_auth="${status}" ;;
+    esac
     case "${status}" in
       logged-in) ;;
       unsupported)
@@ -169,6 +177,7 @@ harbor_provision_rows() {
 
   harbor_step provision-vendor-service
   harbor_t3_service_install "${HARBOR_STATE_ROOT}" "${HOME}"
+  service_state="$(harbor_t3_service_status "${HOME}")" || exit "$?"
 
   harbor_step provision-access-mode
   mode="$(harbor_config_access_mode "${HOME}")" || exit "$?"
@@ -179,16 +188,20 @@ harbor_provision_rows() {
       # link check because an unavailable relay can itself prevent the link.
       case "${HARBOR_T3_CONNECT_DESIRED}/${HARBOR_T3_CONNECT_AUTHENTICATED}/${HARBOR_T3_CONNECT_LINKED}/${HARBOR_T3_CONNECT_RELAY}" in
         *unknown*)
+          access_state=unknown
           harbor_provision_attended connect.unknown "T3 Connect status is unknown; run harbor service status and t3 connect status --json, resolve the vendor status, then rerun harbor provision"
           ;;
         true/true/true/available) ;;
         true/false/* | false/false/*)
+          access_state=needs_connect_login
           harbor_provision_attended needs_connect_login "run harbor auth connect, then rerun harbor provision"
           ;;
         */missing | */unsupported)
+          access_state=degraded
           harbor_provision_attended connect.degraded "vendor relayClient.status=${HARBOR_T3_CONNECT_RELAY}; run t3 connect status --json and harbor service status, resolve the vendor relay requirement, then rerun harbor provision"
           ;;
         */true/false/available)
+          access_state=needs_connect_link
           harbor_provision_attended needs_connect_link "run the PR 5 link step, harbor auth connect, once that release is available; this release provides login only"
           ;;
         # Exactly one combination reaches here: authorized, linked, relay available,
@@ -202,12 +215,23 @@ harbor_provision_rows() {
         # nothing can satisfy. The toggle belongs to the vendor, so the vendor is who
         # this names.
         *)
+          access_state=unknown
           harbor_provision_attended connect.unknown "T3 Connect is authorized and linked on this node but its own status reports desired=false, so it is not running; Harbor ships no command that sets it and harbor auth connect does not (it reports this pair as already done); turn Connect back on with t3 itself, then rerun harbor provision"
           ;;
       esac
       ;;
   esac
-  # Task 19 begins here: State record (installed.lock and provision.json).
+  # Task 19: the State record is last, including on attended runs.
+  harbor_step provision-state-record
+  # This moment, unconditionally. Preserving the previous stamp is the record
+  # writer's job and only for a record that is otherwise byte for byte unchanged;
+  # deciding it here would carry the old stamp onto changed content as well, which
+  # is what dates a rewritten record before the journal activity that caused it.
+  stamp="$(harbor_utc_now)" \
+    || harbor_die 2 state.timestamp "cannot read the UTC timestamp; state records were not written"
+  harbor_state_installed_lock_write "${HARBOR_STATE_ROOT}/installed.lock"
+  harbor_state_provision_record "${HARBOR_STATE_ROOT}/provision.json" "${stamp}" \
+    "${mode}" "${access_state}" "${service_state}" "${claude_auth}" "${codex_auth}"
 }
 
 harbor_provision_main() {

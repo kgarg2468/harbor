@@ -311,3 +311,198 @@ assert_entry() {
   run ls -A "${FIX_ROOT}/journal"
   assert_output ''
 }
+
+# Task 19 reads real observers against disposable binaries and package metadata.
+installed_fixture() {
+  . "${HARBOR_ROOT}/lib/versions.sh"
+  . "${HARBOR_ROOT}/lib/runtime.sh"
+  . "${HARBOR_ROOT}/lib/agents.sh"
+  . "${HARBOR_ROOT}/lib/t3.sh"
+  . "${HARBOR_ROOT}/lib/apt.sh"
+  . "${HARBOR_ROOT}/lib/auth.sh"
+  HOME="${FIX_HOME}"
+  export HOME
+  HARBOR_DEV=1
+  HARBOR_AUTH_FIXTURE_RECORD="${RECORD}"
+  HARBOR_STATE_OS_RELEASE="${BATS_TEST_TMPDIR}/os-release"
+  printf 'VERSION_ID="26.04"\n' >"${HARBOR_STATE_OS_RELEASE}"
+  harbor_versions_load "${HARBOR_ROOT}/versions.lock"
+  local bin="${HOME}/.local/harbor/npm/bin" shims="${BATS_TEST_TMPDIR}/bin"
+  mkdir -p "${bin}" "${shims}" "${HOME}/.local/harbor/npm/node_modules/t3"
+  printf '#!/bin/bash\nprintf "2.0.1 (Claude Code)\\n"\n' >"${bin}/claude"
+  printf '#!/bin/bash\nprintf "codex-cli 0.1.2\\n"\n' >"${bin}/codex"
+  printf '#!/bin/bash\nprintf "t3 v0.0.1\\n"\n' >"${bin}/t3"
+  printf '{\n  "engines": {\n    "node": ">=24.0.0"\n  }\n}\n' >"${HOME}/.local/harbor/npm/node_modules/t3/package.json"
+  cat >"${shims}/sh" <<'SH'
+#!/bin/bash
+[ "$*" = '-lc node --version' ] || exit 99
+printf 'v24.20.0\n'
+SH
+  cat >"${shims}/dpkg-query" <<'SH'
+#!/bin/bash
+[ "$*" = '-s tailscale' ] || exit 99
+printf 'Status: install ok installed\nVersion: 1.80.0\n'
+SH
+  chmod 0755 "${bin}/"* "${shims}/"*
+  PATH="${shims}:${PATH}"
+  export PATH
+  seed_record v0.3.0 20200101T000000Z
+}
+
+@test "installed lock records all thirteen observed and method keys, with bare versions" {
+  installed_fixture
+  run harbor_state_installed_lock_render
+  assert_success
+  assert_equal "${#lines[@]}" 13
+  local pair key
+  for pair in ubuntu_release=26.04 tailscale_version=1.80.0 nodejs_version=24.20.0 claude_code_version=2.0.1 codex_version=0.1.2 t3_version=0.0.1 't3_engines_node=>=24.0.0'; do
+    assert_line "${pair}"
+  done
+  for key in claude_code_install codex_install t3_install nodejs_install nodejs_sha256 tailscale_apt_channel; do
+    assert_line "${key}=$(harbor_version_require "${key}")"
+  done
+  refute_output --regexp '=$'
+  for key in claude_code_version codex_version t3_version nodejs_version tailscale_version; do
+    assert_regex "$(printf '%s\n' "${output}" | sed -n "s/^${key}=//p")" '^[0-9]+\.[0-9]+\.[0-9]+$'
+  done
+}
+
+@test "each unobservable installed key exits 2 and names its reading without replacing a lock" {
+  installed_fixture
+  local key target original
+  for key in claude_code_version codex_version t3_version t3_engines_node nodejs_version tailscale_version ubuntu_release; do
+    case "${key}" in
+      claude_code_version) target="${HOME}/.local/harbor/npm/bin/claude" ;;
+      codex_version) target="${HOME}/.local/harbor/npm/bin/codex" ;;
+      t3_version) target="${HOME}/.local/harbor/npm/bin/t3" ;;
+      t3_engines_node) target="${HOME}/.local/harbor/npm/node_modules/t3/package.json" ;;
+      nodejs_version) target="${BATS_TEST_TMPDIR}/bin/sh" ;;
+      tailscale_version) target="${BATS_TEST_TMPDIR}/bin/dpkg-query" ;;
+      ubuntu_release) target="${HARBOR_STATE_OS_RELEASE}" ;;
+    esac
+    original="$(cat "${target}")"
+    printf '' >"${target}"
+    printf 'previous\n' >"${FIX_ROOT}/installed.lock"
+    run harbor_state_installed_lock_write "${FIX_ROOT}/installed.lock"
+    assert_equal "${status}" 2
+    assert_output --partial "${key}"
+    case "${key}" in
+      claude_code_version | codex_version) assert_output --partial harbor_agents_installed_version ;;
+      t3_version) assert_output --partial harbor_t3_installed_version ;;
+      t3_engines_node) assert_output --partial harbor_t3_package_engines ;;
+      nodejs_version) assert_output --partial 'node --version' ;;
+      tailscale_version) assert_output --partial dpkg ;;
+      ubuntu_release) assert_output --partial VERSION_ID ;;
+    esac
+    assert_equal "$(cat "${FIX_ROOT}/installed.lock")" previous
+    printf '%s\n' "${original}" >"${target}"
+  done
+}
+
+@test "an unchanged provision record keeps its stamp; a changed one takes the new one" {
+  installed_fixture
+  seed_record v0.3.0 20200101T000000Z
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260101T000000Z connect healthy installed-current logged-in logged-in
+  assert_success
+  assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260101T000000Z
+  # Same arguments, later stamp: nothing this record describes has changed, so the
+  # record must not change either -- it renders identically against its own stamp,
+  # is journaled observed, and keeps 20260101. This is the half that makes a rerun
+  # on a healthy node rewrite nothing.
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260202T000000Z connect healthy installed-current logged-in logged-in
+  assert_success
+  assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260101T000000Z
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 ownership)" '"observed"'
+  # One argument different, so the record is going to be rewritten anyway, and the
+  # stamp must become the caller's. Preserving it here would date the new content to
+  # the previous run, and spec section 5.7's finalization compares that stamp against
+  # the newest journal .done sibling: a record rewritten after journal activity but
+  # dated before it reads as the stale one, which is what the field exists to prevent.
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260303T000000Z connect needs_connect_login installed-current logged-in logged-in
+  assert_success
+  assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260303T000000Z
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0003 ownership)" '"modified"'
+  run jq -e '.access_state == "needs_connect_login"' "${FIX_ROOT}/provision.json"
+  assert_success
+}
+
+@test "installed and provision records are private journaled files for both Tailscale ownerships" {
+  installed_fixture
+  local ownership
+  for ownership in pre-existing harbor-installed; do
+    TSOWN="${ownership}"
+    seed_record v0.3.0 20200101T000000Z
+    run harbor_state_installed_lock_write "${FIX_ROOT}/installed.lock"
+    assert_success
+    run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260914T010203Z connect healthy installed-current logged-in unsupported
+    assert_success
+    assert_equal "$(harbor_stat_mode "${FIX_ROOT}/installed.lock")" 0600
+    assert_equal "$(harbor_stat_mode "${FIX_ROOT}/provision.json")" 0600
+    assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260914T010203Z
+    run jq -e --arg ownership "${ownership}" '.tailscale_ownership == $ownership and .tailscale_version == "1.80.0" and .nodejs_version == "24.20.0" and .claude_code_version == "2.0.1" and .codex_version == "0.1.2" and .t3_version == "0.0.1" and .t3_engines_node == ">=24.0.0" and .ubuntu_release == "26.04" and .access_mode == "connect" and .access_state == "healthy" and .service_state == "installed-current" and .claude_auth == "logged-in" and .codex_auth == "unsupported"' "${FIX_ROOT}/provision.json"
+    assert_success
+  done
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  run find "${FIX_ROOT}" -name '.tmp.*'
+  assert_output ''
+}
+
+@test "provision record missing bootstrap is a precondition naming sudo harbor bootstrap" {
+  installed_fixture
+  rm "${RECORD}"
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260914T010203Z connect healthy installed-current logged-in logged-in
+  assert_equal "${status}" 3
+  assert_output --partial 'sudo harbor bootstrap'
+  assert [ ! -e "${FIX_ROOT}/provision.json" ]
+}
+
+@test "both state renames preserve the previous file and leave prepared on failure" {
+  installed_fixture
+  cat >"${BATS_TEST_TMPDIR}/bin/mv" <<'SH'
+#!/bin/bash
+exit 1
+SH
+  chmod 0755 "${BATS_TEST_TMPDIR}/bin/mv"
+  printf 'old lock\n' >"${FIX_ROOT}/installed.lock"
+  printf 'old record\n' >"${FIX_ROOT}/provision.json"
+  run harbor_state_installed_lock_write "${FIX_ROOT}/installed.lock"
+  assert_equal "${status}" 2
+  assert_output --partial 'stays prepared'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(cat "${FIX_ROOT}/installed.lock")" 'old lock'
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260914T010203Z connect healthy installed-current logged-in logged-in
+  assert_equal "${status}" 2
+  assert_output --partial 'stays prepared'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
+  assert_equal "$(cat "${FIX_ROOT}/provision.json")" 'old record'
+}
+
+@test "editing desired versions cannot change the installed snapshot or rerun ownership" {
+  installed_fixture
+  run harbor_state_installed_lock_write "${FIX_ROOT}/installed.lock"
+  assert_success
+  local before
+  before="$(cat "${FIX_ROOT}/installed.lock")"
+  sed -e 's/^claude_code_version=.*/claude_code_version=9.9.9/' \
+    -e 's/^tailscale_version=.*/tailscale_version=9.9.9/' \
+    -e 's/^nodejs_version=.*/nodejs_version=99.0.0/' \
+    -e 's/^t3_engines_node=.*/t3_engines_node=>=99.0.0/' \
+    "${HARBOR_ROOT}/versions.lock" >"${BATS_TEST_TMPDIR}/changed.lock"
+  harbor_versions_load "${BATS_TEST_TMPDIR}/changed.lock"
+  run harbor_state_installed_lock_write "${FIX_ROOT}/installed.lock"
+  assert_success
+  assert_equal "$(cat "${FIX_ROOT}/installed.lock")" "${before}"
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 ownership)" '"observed"'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+}
+
+@test "an absent runtime is unobservable rather than a literal absent version" {
+  installed_fixture
+  rm "${HOME}/.local/harbor/npm/bin/claude"
+  run harbor_state_installed_lock_render
+  assert_equal "${status}" 2
+  assert_output --partial claude_code_version
+  assert_output --partial harbor_agents_installed_version
+  refute_output --partial 'claude_code_version=absent'
+}

@@ -38,6 +38,13 @@ printf '%s\n' "${TEST_NODE}"
 exit "${TEST_NODE_RC:-0}"
 SH
   chmod 0755 "${BIN}/tailscale" "${BIN}/loginctl" "${BIN}/sh"
+  cat >"${BIN}/dpkg-query" <<'SH'
+#!/bin/bash
+[ "$*" = '-s tailscale' ] || exit 99
+printf 'Status: install ok installed\nVersion: 1.80.0\n'
+SH
+  chmod 0755 "${BIN}/dpkg-query"
+  printf 'VERSION_ID="24.04"\n' >"${BATS_TEST_TMPDIR}/os-release"
   provision_vendor_fixtures
   NODE_LOCKED="$(sed -n 's/^nodejs_version=//p' "${HARBOR_ROOT}/versions.lock")"
 }
@@ -45,6 +52,7 @@ SH
 provision() {
   env HOME="${FIX_HOME}" PATH="${BIN}:${PATH}" HARBOR_DEV=1 \
     HARBOR_AUTH_FIXTURE_RECORD="${RECORD}" HARBOR_VERBOSE=1 \
+    HARBOR_STATE_OS_RELEASE="${BATS_TEST_TMPDIR}/os-release" \
     TEST_FIXTURE="${BATS_TEST_TMPDIR}" TEST_NODE="v${NODE_LOCKED}" "$@" "${RELEASE}/bin/harbor" provision
 }
 
@@ -202,11 +210,12 @@ provision-runtime-install
 provision-runtime-auth
 provision-t3-install
 provision-vendor-service
-provision-access-mode'
+provision-access-mode
+provision-state-record'
   assert [ ! -e "${FIX_ROOT}/lock.d" ]
   assert [ -d "${FIX_ROOT}/journal" ]
-  assert [ ! -e "${FIX_ROOT}/installed.lock" ]
-  assert [ ! -e "${FIX_ROOT}/provision.json" ]
+  assert [ -f "${FIX_ROOT}/installed.lock" ]
+  assert [ -f "${FIX_ROOT}/provision.json" ]
   assert_equal "$(cat "${FIX_HOME}/.config/harbor/config")" access_mode=connect
   assert [ ! -e "${FIX_HOME}/.config/systemd" ]
 }
@@ -308,11 +317,13 @@ SH
 install codex
 install t3
 service install'
+  snapshot_before="$(cat "${FIX_ROOT}/installed.lock" "${FIX_ROOT}/provision.json")"
   before="$(grep -l -e '"ownership": "created"' -e '"ownership": "modified"' "${FIX_ROOT}/journal/"*.json)"
   : >"${BATS_TEST_TMPDIR}/mutations"
   run provision
   assert_success
   assert [ ! -s "${BATS_TEST_TMPDIR}/mutations" ]
+  assert_equal "$(cat "${FIX_ROOT}/installed.lock" "${FIX_ROOT}/provision.json")" "${snapshot_before}"
   assert_equal "$(grep -l -e '"ownership": "created"' -e '"ownership": "modified"' "${FIX_ROOT}/journal/"*.json)" "${before}"
   run grep '"phase": "prepared"' "${FIX_ROOT}/journal/"*.json
   assert_equal "${status}" 1
@@ -377,7 +388,11 @@ service install'
     assert_equal "${status}" 1
     assert_output --partial 'harbor auth claude'
     assert_output --partial 'harbor auth codex'
+    # Two assertions, not one two-line substring: the rows do not log adjacently --
+    # the attended note from the auth row sits between them -- and every step line
+    # carries the "harbor: step: " prefix, so the joined form could never match.
     assert_output --partial 'step: provision-access-mode'
+    assert_output --partial 'step: provision-state-record'
     notes="$(printf '%s\n' "${output}" | sed -n '/provision.attended:/,$p')"
     assert_equal "$(printf '%s\n' "${notes}" | grep -c 'harbor auth')" 2
   done
@@ -436,7 +451,8 @@ service install'
   run provision TEST_SERVICE_FAIL=1
   assert_equal "${status}" 2
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
-  refute_output --partial 'step: provision-access-mode'
+  refute_output --partial 'step: provision-access-mode
+provision-state-record'
 }
 
 @test "unknown service pre-state refuses without service mutation or prepared entry" {
@@ -445,7 +461,8 @@ service install'
   assert_equal "${status}" 3
   assert_output --partial t3.service_unknown
   assert [ ! -s "${BATS_TEST_TMPDIR}/mutations" ]
-  refute_output --partial 'step: provision-access-mode'
+  refute_output --partial 'step: provision-access-mode
+provision-state-record'
   run grep '"phase": "prepared"' "${FIX_ROOT}/journal/"*.json
   assert_equal "${status}" 1
 }
@@ -483,4 +500,79 @@ SH
   assert [ ! -e "${FIX_HOME}/.config/harbor/config" ]
   assert [ ! -e "${BATS_TEST_TMPDIR}/calls" ]
   refute_output --partial 'step: provision-runtime-install'
+}
+
+@test "state record boundary is last and interruption before it leaves neither artifact" {
+  run provision HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER=provision-state-record
+  assert_equal "${status}" 137
+  assert_output --partial 'step: provision-access-mode'
+  assert [ ! -e "${FIX_ROOT}/installed.lock" ]
+  assert [ ! -e "${FIX_ROOT}/provision.json" ]
+}
+
+@test "state row records installed Tailscale and attended classifications at 0600" {
+  printf '{\n  "tailscale_ownership": "pre-existing",\n  "tailscale_version": ""\n}\n' >"${RECORD}"
+  run provision TEST_CONNECT=needs-login TEST_CLAUDE_AUTH=logged-out TEST_CODEX_AUTH=unsupported
+  assert_equal "${status}" 1
+  assert_equal "$(harbor_stat_mode "${FIX_ROOT}/installed.lock")" 0600
+  assert_equal "$(harbor_stat_mode "${FIX_ROOT}/provision.json")" 0600
+  run jq -e '.tailscale_version == "1.80.0" and .tailscale_ownership == "pre-existing" and .access_state == "needs_connect_login" and .claude_auth == "logged-out" and .codex_auth == "unsupported" and .service_state == "installed-current" and (.timestamp | test("^[0-9]{8}T[0-9]{6}Z$"))' "${FIX_ROOT}/provision.json"
+  assert_success
+}
+
+@test "missing bootstrap exits 3 naming the bootstrap precondition" {
+  rm "${RECORD}"
+  run provision
+  assert_equal "${status}" 3
+  assert_output --partial 'sudo harbor bootstrap'
+}
+
+@test "each state rename fails with 2 and leaves its own entry prepared" {
+  cat >"${BIN}/mv" <<'SH'
+#!/bin/bash
+for arg in "$@"; do
+  [ "${arg}" != "${HOME}/.local/state/harbor/${TEST_FAIL_RECORD}" ] || exit 1
+done
+exec /bin/mv "$@"
+SH
+  chmod 0755 "${BIN}/mv"
+  run provision TEST_FAIL_RECORD=installed.lock
+  assert_equal "${status}" 2
+  assert_output --partial 'stays prepared'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
+  assert [ ! -e "${FIX_ROOT}/installed.lock" ]
+  assert [ ! -e "${FIX_ROOT}/provision.json" ]
+  rm -r "${FIX_ROOT}"
+  run provision TEST_FAIL_RECORD=provision.json
+  assert_equal "${status}" 2
+  assert_output --partial 'stays prepared'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" applied
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" prepared
+  assert [ -f "${FIX_ROOT}/installed.lock" ]
+  assert [ ! -e "${FIX_ROOT}/provision.json" ]
+}
+
+@test "interrupted state writes leave complete files for journal recovery" {
+  local boundary seq
+  for boundary in state-installed-lock state-provision-json; do
+    rm -rf "${FIX_ROOT}" "${FIX_HOME}/.config/harbor"
+    run provision HARBOR_TEST_HOOKS=1 HARBOR_FAIL_AFTER="${boundary}"
+    assert_equal "${status}" 137
+    case "${boundary}" in
+      state-installed-lock)
+        seq=0002
+        assert_equal "$(wc -l <"${FIX_ROOT}/installed.lock" | tr -d ' ')" 13
+        assert [ ! -e "${FIX_ROOT}/provision.json" ]
+        ;;
+      state-provision-json)
+        seq=0003
+        run jq -e '.timestamp != null and .tailscale_version == "1.80.0"' "${FIX_ROOT}/provision.json"
+        assert_success
+        ;;
+    esac
+    assert_equal "$(entry_phase "${FIX_ROOT}" "${seq}")" prepared
+    run provision
+    assert_success
+    assert_equal "$(entry_phase "${FIX_ROOT}" "${seq}")" applied
+  done
 }
