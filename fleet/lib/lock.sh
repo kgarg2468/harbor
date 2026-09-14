@@ -16,6 +16,17 @@ harbor_state_root_for_principal() {
   else
     HARBOR_STATE_ROOT="${HOME}/.local/state/harbor"
     HARBOR_LOCK_KIND="operator"
+    # The agents live in the same home this operator's state root is derived from, and
+    # they are bound here for the same reason the state root is: every operator command
+    # runs operator journal recovery under its lock, and a claude or codex
+    # runtime-install entry left prepared by a crashed provision can only be decided by
+    # a process that knows which home holds the CLIs. Binding it only in the commands
+    # that install agents is what left harbor journal resolve -- the one command whose
+    # whole purpose is an entry nothing else could decide -- dying agents.home_unset on
+    # exactly the entry it exists to resolve. Root takes no binding: no runtime-install
+    # entry for an agent is written to root's journal, and /root is not where they live.
+    # shellcheck disable=SC2034
+    HARBOR_AGENTS_HOME="${HOME}"
   fi
 }
 harbor_state_root_create() {
