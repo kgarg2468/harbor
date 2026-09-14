@@ -82,6 +82,9 @@ const ROOTS = {
   yaml: "2.9.0",
   yauzl: "3.4.0",
 };
+const ROOTS_WITHOUT_BUN = Object.fromEntries(
+  Object.entries(ROOTS).filter(([name]) => !["@effect/platform-bun", "@effect/sql-sqlite-bun"].includes(name)),
+);
 const PATCHES = {
   "reasoning-full": "diff --git a/one b/one\n--- a/one\n+++ b/one\n@@ -1 +1 @@\n-one\n+one patched\n",
   "desktop-runtime-common":
@@ -152,24 +155,24 @@ else if (args[0] === "__service-preflight") {
 `;
 }
 
-function sourceLock() {
+function sourceLock(roots = ROOTS) {
   const dependencies = Object.fromEntries(
-    Object.entries(ROOTS).map(([name, version]) => [name, { specifier: name === "effect" ? "catalog:" : version.split("(")[0], version }]),
+    Object.entries(roots).map(([name, version]) => [name, { specifier: name === "effect" ? "catalog:" : version.split("(")[0], version }]),
   );
   const packages = Object.fromEntries(
-    Object.entries(ROOTS).map(([name, version]) => [`${name}@${version.split("(")[0]}`, { resolution: { integrity: `sha512-${name}` } }]),
+    Object.entries(roots).map(([name, version]) => [`${name}@${version.split("(")[0]}`, { resolution: { integrity: `sha512-${name}` } }]),
   );
   return { lockfileVersion: "9.0", importers: { ".": { devDependencies: {} }, "apps/server": { dependencies } }, packages };
 }
 
-function serverManifest(extra = {}) {
+function serverManifest(extra = {}, roots = ROOTS) {
   return {
     name: "t3",
     version: "0.0.38",
     bin: { t3: "./dist/bin.mjs" },
     files: ["dist"],
     type: "module",
-    dependencies: Object.fromEntries(Object.entries(ROOTS).map(([name, version]) => [name, name === "effect" ? "catalog:" : `^${version.split("(")[0]}`])),
+    dependencies: Object.fromEntries(Object.entries(roots).map(([name, version]) => [name, name === "effect" ? "catalog:" : `^${version.split("(")[0]}`])),
     devDependencies: { "@t3tools/web": "workspace:*", "vite-plus": "catalog:" },
     engines: { node: ">=24.10" },
     ...extra,
@@ -179,7 +182,7 @@ function serverManifest(extra = {}) {
 // A prepared tree of one exact variant (managed-nightly by default): upstream
 // commit, that variant's ordered patches applied to the working tree,
 // provenance next to the git metadata, and a lock beside it.
-async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, target = "darwin-arm64", variant = "managed-nightly", worktree = false, serverExtra = {}, lockMutate = (l) => l } = {}) {
+async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, target = "darwin-arm64", variant = "managed-nightly", worktree = false, roots = ROOTS, serverExtra = {}, lockMutate = (l) => l } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "t3-server-builder-")));
   const lockDir = path.join(root, "lock");
   const patches = [];
@@ -193,10 +196,10 @@ async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, target
   await write(upstream, {
     "package.json": json({ name: "@t3tools/monorepo", private: true, packageManager: "pnpm@11.10.0" }),
     "pnpm-workspace.yaml": "packages:\n  - apps/*\nallowBuilds:\n  node-pty: true\n",
-    "pnpm-lock.yaml": json(sourceLock()),
+    "pnpm-lock.yaml": json(sourceLock(roots)),
     ".gitignore": "node_modules\napps/*/dist\n.env\n.env.local\nnative/**/target/\n",
     ".env.example": "T3CODE_RELAY_URL=\n",
-    "apps/server/package.json": json(serverManifest(serverExtra)),
+    "apps/server/package.json": json(serverManifest(serverExtra, roots)),
     "apps/web/package.json": json({ name: "@t3tools/web", version: "0.0.38", private: true, scripts: { build: "vp build" } }),
     "apps/desktop/package.json": json({ name: "@t3tools/desktop", version: "0.0.38", main: "dist-electron/main.cjs" }),
     "packages/contracts/package.json": json({ name: "@t3tools/contracts", version: "0.0.38", exports: {} }),
@@ -251,7 +254,7 @@ async function makeFixture({ trackedFixture = false, fixtureMode = 0o644, target
   const tmpRoot = path.join(root, "tmp");
   await mkdir(out);
   await mkdir(tmpRoot);
-  return { root, source, lockPath, lockDir, gitDir, commit, descriptor, target, out, tmpRoot, provenance, calls: [] };
+  return { root, source, lockPath, lockDir, gitDir, commit, descriptor, target, roots, out, tmpRoot, provenance, calls: [] };
 }
 
 // --- fake pnpm and cargo -----------------------------------------------------------
@@ -338,6 +341,7 @@ export function findBinary() {
     await symlink(path.relative(path.dirname(from), to), from);
   };
   for (const [name, version] of Object.entries(resolved)) {
+    if (name === opts.omitRoot) continue;
     const storeDir = path.join(nm, ".pnpm", `${name.replace("/", "+")}@${version.split("(")[0]}`, "node_modules");
     const dir = await place(storeDir, name, version.split("(")[0], stubs[name]);
     await link(path.join(nm, name), dir);
@@ -372,7 +376,7 @@ function fakeRunner(fx, opts = {}) {
       assert.ok(!args.includes("--legacy"), "no legacy deploy is ever attempted");
       if (args[0] === "--version") return { stdout: `${opts.pnpmVersion ?? "11.10.0"}\n`, stderr: "" };
       if (args[0] === "install") {
-        if (opts.installMutatesLock) await writeFile(path.join(fx.source, "pnpm-lock.yaml"), json({ ...sourceLock(), touched: true }));
+        if (opts.installMutatesLock) await writeFile(path.join(fx.source, "pnpm-lock.yaml"), json({ ...sourceLock(fx.roots), touched: true }));
         return { stdout: "", stderr: "" };
       }
       if (args[0] === "exec") {
@@ -427,7 +431,7 @@ async function assertNothingPublished(fx, { lockMutated = false } = {}) {
   assert.deepEqual(await readdir(fx.out), []);
   assert.deepEqual(await readdir(fx.tmpRoot), []);
   assert.deepEqual((await readdir(fx.source)).filter((n) => n.startsWith(".env")), [".env.example"]);
-  if (!lockMutated) assert.equal(await readFile(path.join(fx.source, "pnpm-lock.yaml"), "utf8"), json(sourceLock()));
+  if (!lockMutated) assert.equal(await readFile(path.join(fx.source, "pnpm-lock.yaml"), "utf8"), json(sourceLock(fx.roots)));
 }
 
 async function refusal(fx, opts, pattern, { beforeMutation = false } = {}) {
@@ -702,6 +706,21 @@ describe("buildManagedServerRuntime", () => {
       assert.deepEqual((await readdir(fx.source)).filter((n) => n.startsWith(".env")), [".env.example"]);
       assert.equal(await readFile(path.join(fx.source, "pnpm-lock.yaml"), "utf8"), json(sourceLock()));
       assert.deepEqual(await readdir(fx.tmpRoot), [], "the private work directory is removed");
+      await rm(fx.root, { recursive: true, force: true });
+    });
+
+    it(`builds ${target} when the upstream server no longer declares Bun runtime roots`, async () => {
+      const fx = await makeFixture({ target, roots: ROOTS_WITHOUT_BUN });
+      const result = await build(fx);
+      const probe = fx.calls.find((call) => call.command === process.execPath && call.args[0] === "--input-type=module");
+      const probeConfig = JSON.parse(probe.args.at(-1));
+      assert.deepEqual(probeConfig.roots.sort(), Object.keys(ROOTS_WITHOUT_BUN).sort());
+
+      const extracted = await mkdtemp(path.join(tmpdir(), "t3-extract-no-bun-"));
+      await run("tar", ["-xzf", path.join(fx.out, "release", result.file), "-C", extracted]);
+      const shipped = JSON.parse(await readFile(path.join(extracted, "node_modules/t3/package.json"), "utf8"));
+      assert.deepEqual(Object.keys(shipped.dependencies).sort(), Object.keys(ROOTS_WITHOUT_BUN).sort());
+      await rm(extracted, { recursive: true, force: true });
       await rm(fx.root, { recursive: true, force: true });
     });
   }
@@ -1049,6 +1068,7 @@ describe("failures after mutation publish nothing and clean up", () => {
     ["Electron is deployed", { includeElectron: true }, /electron@38\.0\.0; workspace and Electron packages/],
     ["a workspace package is deployed", { includeWorkspace: true }, /node_modules\/@t3tools; workspace and Electron/],
     ["the target native extractor is missing", { omitNative: true }, /native runtime probe failed .*msgpackr-extract-/],
+    ["a declared Bun runtime root is missing", { omitRoot: "@effect/platform-bun" }, /native runtime probe failed .*cannot locate @effect\/platform-bun/],
     ["an ordinary JS loader is missing", { omitLoader: true }, /native runtime probe failed .*node-addon-api/],
     ["the target fff library is missing", { omitFffBin: true }, /native runtime probe failed .*did not resolve/],
     ["the target ffi-rs addon is missing", { omitFfiNative: true }, /native runtime probe failed .*ffi-rs-/],

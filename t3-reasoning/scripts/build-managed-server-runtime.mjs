@@ -115,9 +115,6 @@ export const MONITOR_MANIFEST = "native/resource-monitor/Cargo.toml";
 // Cargo's build cache for the monitor. Any prior entry here, like any prior
 // node_modules, is ignored by git yet feeds the build, so it must be absent.
 export const MONITOR_TARGET_DIRECTORY = "native/resource-monitor/target";
-// Direct production roots of apps/server. All are deployed; the Bun-only
-// entries are resolved but never loaded on Node.
-export const BUN_ONLY_ROOTS = Object.freeze(["@effect/platform-bun", "@effect/sql-sqlite-bun"]);
 // Files the stage must contain, relative to node_modules/t3.
 const REQUIRED_STAGE_FILES = ["package.json", "dist/bin.mjs", "dist/service-launcher.mjs", "dist/client/index.html"];
 // Installation bookkeeping pnpm writes into the stage that Node never reads
@@ -672,7 +669,8 @@ export async function verifyStageLinks(root) {
 // every production root, loads the Node-side native modules and their JS
 // loaders from the deployed files, and opens the fff library for the target
 // without creating a finder. Prints the resolved paths as JSON; the parent
-// checks each one is inside the stage. Bun-only roots are resolved only.
+// checks each one is inside the stage. Roots that are not Node runtime
+// modules are resolved without being loaded.
 const NATIVE_PROBE = `
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -756,7 +754,7 @@ async function probeNativeRuntime({ run, node, stageT3, roots, target, env, cwd 
       fail(`native runtime probe resolved ${name} outside the deployed package`);
     }
   }
-  const missing = [...roots, ...BUN_ONLY_ROOTS, "ffi-rs", target.ffiPackage, target.fffPackage, target.msgpackrPackage].filter(
+  const missing = [...roots, "ffi-rs", target.ffiPackage, target.fffPackage, target.msgpackrPackage].filter(
     (name) => typeof report.resolved?.[name] !== "string",
   );
   if (missing.length > 0) fail(`native runtime probe did not resolve ${missing.join(", ")}`);
