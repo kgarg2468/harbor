@@ -32,6 +32,8 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/agents.sh"
 # shellcheck source=../lib/t3.sh
 . "${HARBOR_ROOT}/lib/t3.sh"
+# shellcheck source=../lib/config.sh
+. "${HARBOR_ROOT}/lib/config.sh"
 # shellcheck source=../lib/auth.sh
 . "${HARBOR_ROOT}/lib/auth.sh"
 
@@ -117,18 +119,118 @@ harbor_provision_preflight() {
   harbor_step recovery-scan
 }
 
+# Attended rows do not stop the unattended work. Keep the same notes for the
+# final summary so a later successful install cannot bury the operator's command.
+harbor_provision_attended() {
+  HARBOR_PROVISION_ATTENDED=1
+  HARBOR_PROVISION_NOTES="${HARBOR_PROVISION_NOTES}  ${1}: ${2}
+"
+  harbor_msg "${1}: ${2}"
+  harbor_log provision "attended: ${1}: ${2}"
+}
+
+harbor_provision_rows() {
+  local mode=connect config agent status
+  harbor_step provision-journal-config
+  harbor_journal_init "${HARBOR_STATE_ROOT}" \
+    || harbor_die 2 provision.journal "could not initialize the operator journal; no provision mutation was prepared, so check the filesystem and rerun"
+  config="$(harbor_config_path "${HOME}")" || exit "$?"
+  # Read an existing choice before create: create writes the mode it is given,
+  # and passing the default unconditionally would overwrite a refused choice.
+  if [ -e "${config}" ] || [ -L "${config}" ]; then
+    mode="$(harbor_config_access_mode "${HOME}")" || exit "$?"
+  fi
+  harbor_config_create "${HARBOR_STATE_ROOT}" "${HOME}" "${mode}"
+
+  harbor_step provision-runtime-install
+  harbor_agents_install "${HARBOR_STATE_ROOT}" "${HOME}" claude
+  harbor_agents_install "${HARBOR_STATE_ROOT}" "${HOME}" codex
+
+  harbor_step provision-runtime-auth
+  for agent in claude codex; do
+    status="$(harbor_agents_auth_status "${agent}" "${HOME}")" || exit "$?"
+    case "${status}" in
+      logged-in) ;;
+      unsupported)
+        harbor_msg "auth_status_unsupported: ${agent}: this pinned tool has no machine-readable auth status; Harbor cannot verify its login"
+        ;;
+      logged-out)
+        harbor_provision_attended "${agent}.needs_login" "run harbor auth ${agent}, then rerun harbor provision"
+        ;;
+      *)
+        harbor_provision_attended "${agent}.unknown" "Harbor could not verify ${agent}'s login; run harbor auth ${agent}, then rerun harbor provision"
+        ;;
+    esac
+  done
+
+  harbor_step provision-t3-install
+  harbor_t3_install "${HARBOR_STATE_ROOT}" "${HOME}"
+  harbor_t3_require_engines "${HOME}"
+
+  harbor_step provision-vendor-service
+  harbor_t3_service_install "${HARBOR_STATE_ROOT}" "${HOME}"
+
+  harbor_step provision-access-mode
+  mode="$(harbor_config_access_mode "${HOME}")" || exit "$?"
+  case "${mode}" in
+    connect)
+      harbor_t3_connect_status "${HOME}"
+      # Unknown anywhere wins over a partial answer. Relay failure precedes the
+      # link check because an unavailable relay can itself prevent the link.
+      case "${HARBOR_T3_CONNECT_DESIRED}/${HARBOR_T3_CONNECT_AUTHENTICATED}/${HARBOR_T3_CONNECT_LINKED}/${HARBOR_T3_CONNECT_RELAY}" in
+        *unknown*)
+          harbor_provision_attended connect.unknown "T3 Connect status is unknown; run harbor service status and t3 connect status --json, resolve the vendor status, then rerun harbor provision"
+          ;;
+        true/true/true/available) ;;
+        true/false/* | false/false/*)
+          harbor_provision_attended needs_connect_login "run harbor auth connect, then rerun harbor provision"
+          ;;
+        */missing | */unsupported)
+          harbor_provision_attended connect.degraded "vendor relayClient.status=${HARBOR_T3_CONNECT_RELAY}; run t3 connect status --json and harbor service status, resolve the vendor relay requirement, then rerun harbor provision"
+          ;;
+        */true/false/available)
+          harbor_provision_attended needs_connect_link "run the PR 5 link step, harbor auth connect, once that release is available; this release provides login only"
+          ;;
+        # Exactly one combination reaches here: authorized, linked, relay available,
+        # and desired false. It is attended because the row's healthy definition
+        # requires all four, and it is reported without naming harbor auth connect
+        # because that command cannot change it -- harbor_t3_connect branches on
+        # authenticated and linked alone, never reads desired, and answers a true:true
+        # pair with "nothing to do" and exit 0. Naming it would hand the operator a
+        # command that exits 0 without touching the state it was named for, which is
+        # the same defect as reporting unsupported attended: attention demanded that
+        # nothing can satisfy. The toggle belongs to the vendor, so the vendor is who
+        # this names.
+        *)
+          harbor_provision_attended connect.unknown "T3 Connect is authorized and linked on this node but its own status reports desired=false, so it is not running; Harbor ships no command that sets it and harbor auth connect does not (it reports this pair as already done); turn Connect back on with t3 itself, then rerun harbor provision"
+          ;;
+      esac
+      ;;
+  esac
+  # Task 19 begins here: State record (installed.lock and provision.json).
+}
+
 harbor_provision_main() {
   HARBOR_PID="${HARBOR_PID:-$$}"
   HARBOR_CMDLINE="${HARBOR_CMDLINE:-harbor provision ${*:-}}"
   [ "$#" -eq 0 ] || harbor_die 3 usage "usage: harbor provision"
   harbor_provision_preflight
-  # Task 18 begins here: Journal and config, then the remaining provision rows.
-  # In particular, journal initialization belongs to that first row, not to this
-  # preflight; recovery already treats an absent journal as having nothing to recover.
-  harbor_msg "provision preflight complete; provision rows begin at Task 18"
+  HARBOR_PROVISION_ATTENDED=0
+  HARBOR_PROVISION_NOTES=""
+  harbor_provision_rows
+  # What this node is, not that the command finished: bootstrap's line beside the
+  # same degraded block says "this node is bootstrapped" for the reason that applies
+  # here too. Every row applied either way, so the sentence is true either way, and
+  # an attended run must not be told "provision complete" one line above the steps
+  # that are why it is about to exit 1.
+  harbor_msg "provision complete; every row applied"
   # Read by the EXIT trap, which otherwise treats a zero exit as an incomplete run.
   # shellcheck disable=SC2034
   HARBOR_COMPLETED=1
+  [ "${HARBOR_PROVISION_ATTENDED}" = 1 ] || return 0
+  harbor_msg "provision.attended: these steps still need attention:"
+  printf '%s' "${HARBOR_PROVISION_NOTES}" >&2
+  exit 1
 }
 harbor_install_traps
 harbor_provision_main ${1+"$@"}
