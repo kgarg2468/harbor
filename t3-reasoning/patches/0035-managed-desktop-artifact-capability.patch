@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index 87b0d5e7b136137a44272b88f65fbc00b376c276..4a42abd63bc638b1014388e2125ec0c544165795 100644
+index 6a80800fd1aa5bb38bee27a28bfb57f89c1d7f0f..65434856e0d0768e77b649ebe564ed1f5d238ddd 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 @@ -229,11 +229,92 @@ describe("DesktopBackendConfiguration", () => {
@@ -96,10 +96,10 @@ index 87b0d5e7b136137a44272b88f65fbc00b376c276..4a42abd63bc638b1014388e2125ec0c5
      withHarness(
        Effect.gen(function* () {
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-index 0f1f31fe7b6525f21dc58998503bc94a5bab525e..5d9544ca7051bc47cfae48c7d597901f5c9ca5f5 100644
+index c6ddc02e15bce70a461feb0f9deccccc59f166c4..c81999da3956bd4b8225d82c3f514f8fadd82430 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-@@ -497,6 +497,18 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+@@ -520,6 +520,18 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
              managedDesktopPresentationVariant:
                environment.managedPresentationIdentity.presentationVariant,
            }),
@@ -119,18 +119,18 @@ index 0f1f31fe7b6525f21dc58998503bc94a5bab525e..5d9544ca7051bc47cfae48c7d597901f
        desktopTelemetryControlFd: 5,
        ...Option.match(input.resourceMonitorPath, {
 diff --git a/apps/server/src/cli/config.test.ts b/apps/server/src/cli/config.test.ts
-index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c6901620b 100644
+index d0b7175d0b7e58f3d228110eb8e31d9f14731026..68e49f57b50adbd584c4ac6925ca8befe2e7fe63 100644
 --- a/apps/server/src/cli/config.test.ts
 +++ b/apps/server/src/cli/config.test.ts
-@@ -24,6 +24,7 @@ const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
+@@ -25,6 +25,7 @@ const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
    deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
  
  const isDesktopBootstrap = Schema.is(DesktopBackendBootstrap);
 +const decodeDesktopBootstrap = Schema.decodeUnknownOption(DesktopBackendBootstrap);
  
  const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
- 
-@@ -80,6 +81,23 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+ const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+@@ -171,6 +172,23 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
      () =>
        Effect.gen(function* () {
          assert.notProperty(sharedServerCommandFlags, "managedDesktopPresentationVariant");
@@ -154,7 +154,7 @@ index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c
          for (const invalid of ["other", "", " managed-nightly", "reasoning ", null]) {
            assert.isFalse(
              isDesktopBootstrap({
-@@ -88,12 +106,27 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+@@ -179,12 +197,27 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
              }),
            );
          }
@@ -188,7 +188,7 @@ index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c
            const resolved = yield* resolveServerConfig(
              {
                mode: Option.none(),
-@@ -103,7 +136,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+@@ -194,7 +227,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                cwd: Option.none(),
                devUrl: Option.none(),
                noBrowser: Option.none(),
@@ -197,7 +197,7 @@ index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c
                autoBootstrapProjectFromCwd: Option.none(),
                logWebSocketEvents: Option.none(),
                tailscaleServeEnabled: Option.none(),
-@@ -117,6 +150,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+@@ -208,6 +241,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                    ConfigProvider.fromEnv({
                      env: {
                        T3CODE_MANAGED_DESKTOP_PRESENTATION_VARIANT: "reasoning",
@@ -205,7 +205,7 @@ index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c
                        T3CODE_DESKTOP_PRESENTATION_VARIANT: "reasoning",
                        T3CODE_DESKTOP_APP_USER_MODEL_ID: "com.t3tools.t3code.reasoning",
                      },
-@@ -126,8 +160,17 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+@@ -217,8 +251,17 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                ),
              ),
            );
@@ -226,10 +226,10 @@ index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c
          }
        }),
 diff --git a/apps/server/src/cli/config.ts b/apps/server/src/cli/config.ts
-index 7fb5d875e7261aa398ba0cae4137fcea9ff18c65..8db868b0e228f23ae3002be801242b670f6f1812 100644
+index c418d49da10e331bfbaac7ca2c6dbf28f2f44d6d..c9393605baa5ec686f63970034607ce5ad41729e 100644
 --- a/apps/server/src/cli/config.ts
 +++ b/apps/server/src/cli/config.ts
-@@ -380,6 +380,10 @@ export const resolveServerConfig = (
+@@ -414,6 +414,10 @@ export const resolveServerConfig = (
        ...(bootstrap?.managedDesktopPresentationVariant === undefined
          ? {}
          : { managedDesktopPresentationVariant: bootstrap.managedDesktopPresentationVariant }),
@@ -241,10 +241,10 @@ index 7fb5d875e7261aa398ba0cae4137fcea9ff18c65..8db868b0e228f23ae3002be801242b67
        desktopTelemetryControlFd,
        resourceMonitorPath,
 diff --git a/apps/server/src/config.ts b/apps/server/src/config.ts
-index 682aeb7b8a7054144c9910131db3a02d01568775..16f3d9a5845fa70f946db38c3f8073910b29e8fa 100644
+index 6b677e7982ea0afd295eef027278b07deffd9410..6ac41a98b7bf1cfa22a63eec6b206743444121e1 100644
 --- a/apps/server/src/config.ts
 +++ b/apps/server/src/config.ts
-@@ -86,6 +86,7 @@ export class ServerConfig extends Context.Service<
+@@ -91,6 +91,7 @@ export class ServerConfig extends Context.Service<
      readonly startupPresentation: StartupPresentation;
      readonly desktopBootstrapToken: string | undefined;
      readonly managedDesktopPresentationVariant?: DesktopBackendBootstrap["managedDesktopPresentationVariant"];

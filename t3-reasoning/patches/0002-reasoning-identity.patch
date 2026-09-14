@@ -143,7 +143,7 @@ index 95922bdfdca88f54dd319db571b8d1a68d9cbb9f..bcd78150a10268216d7673664d28ebdd
      passwordStore: resolveLinuxPasswordStoreSwitch({
        preference,
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index c714b259bc257b0460aef1f44fcc13794e3e1823..0a9b30fb3b6781464d97467ef6de890a1d1b0724 100644
+index a7d22dbff8b7f76e4d9777116b5ad4614089a0fc..a9b4fd5d0479d6e43d63692ae5af2a91f8ccf548 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
 @@ -40,21 +40,26 @@ const makeEnvironment = (
@@ -179,7 +179,7 @@ index c714b259bc257b0460aef1f44fcc13794e3e1823..0a9b30fb3b6781464d97467ef6de890a
        });
        assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity));
        assert.isTrue(Object.isFrozen(environment.managedPresentationIdentity?.urlSchemes));
-@@ -185,7 +190,7 @@ describe("DesktopEnvironment", () => {
+@@ -200,7 +205,7 @@ describe("DesktopEnvironment", () => {
          resourcesPath: "/tmp/.mount_t3code/resources",
        });
  
@@ -188,7 +188,7 @@ index c714b259bc257b0460aef1f44fcc13794e3e1823..0a9b30fb3b6781464d97467ef6de890a
      }),
    );
  
-@@ -198,7 +203,56 @@ describe("DesktopEnvironment", () => {
+@@ -213,7 +218,56 @@ describe("DesktopEnvironment", () => {
        const production = yield* makeEnvironment();
  
        assert.equal(development.stateDir, "/Users/alice/.t3/dev");
@@ -247,10 +247,10 @@ index c714b259bc257b0460aef1f44fcc13794e3e1823..0a9b30fb3b6781464d97467ef6de890a
    );
  
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c9d398165 100644
+index 34f72db6c599ef36a3d1894ceb71cc2ca393ead9..093768bf257299705285c010b67307bf7c975086 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
-@@ -39,13 +39,13 @@ export interface ManagedDesktopPresentationIdentity {
+@@ -40,13 +40,13 @@ export interface ManagedDesktopPresentationIdentity {
    readonly urlSchemes: ReadonlyArray<string>;
  }
  
@@ -269,7 +269,7 @@ index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c
  });
  
  // Keep this exact managed grammar in sync with updates/updateChannels.ts.
-@@ -121,6 +121,9 @@ export class DesktopEnvironment extends Context.Service<
+@@ -126,6 +126,9 @@ export class DesktopEnvironment extends Context.Service<
  >()("@t3tools/desktop/app/DesktopEnvironment") {}
  
  const APP_BASE_NAME = "T3 Code";
@@ -279,7 +279,7 @@ index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c
  
  function resolveDesktopAppStageLabel(input: {
    readonly isDevelopment: boolean;
-@@ -138,10 +141,21 @@ export function resolveDesktopAppBranding(input: {
+@@ -143,10 +146,21 @@ export function resolveDesktopAppBranding(input: {
    readonly appVersion: string;
  }): DesktopAppBranding {
    const stageLabel = resolveDesktopAppStageLabel(input);
@@ -303,7 +303,7 @@ index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c
    };
  }
  
-@@ -191,11 +205,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -196,11 +210,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
        : input.platform === "darwin"
          ? path.join(homeDirectory, "Library", "Application Support")
          : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
@@ -329,7 +329,7 @@ index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c
    const rootDir = path.resolve(input.dirname, "../../..");
    const appRoot = input.isPackaged ? input.appPath : rootDir;
    const serverRoot =
-@@ -213,8 +237,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -218,8 +242,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
      joinPath: path.join,
      t3Home: config.t3Home,
    });
@@ -343,7 +343,7 @@ index 31e4c178ec0b811eb036a694f2dc4a22b1048502..46bc87010dcb18333a2d508bd5458f0c
    const linuxApplicationsDir = path.join(
      Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
      "applications",
-@@ -262,10 +289,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -270,10 +297,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
      branding,
      displayName,
      appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
@@ -459,7 +459,7 @@ index 9ddaf40caa0a22a4acb7caa6ec4b544317ef580c..d354639328e278cd9bbe7273fd34adc3
          ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
        },
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index 4a42abd63bc638b1014388e2125ec0c544165795..5466dedf1dc8dd7094d9df2f569d0918ceb76a8d 100644
+index 65434856e0d0768e77b649ebe564ed1f5d238ddd..93501d710597b8f118ab2190e564ae173505a72d 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 @@ -225,7 +225,7 @@ describe("DesktopBackendConfiguration", () => {
@@ -481,30 +481,28 @@ index 4a42abd63bc638b1014388e2125ec0c544165795..5466dedf1dc8dd7094d9df2f569d0918
              assert.notProperty(primary.bootstrap, "managedDesktopArtifactHelperPath");
            }
 diff --git a/apps/desktop/src/electron/ElectronProtocol.test.ts b/apps/desktop/src/electron/ElectronProtocol.test.ts
-index 0d204fb3ad4238d636c73bb99e15787b6fb422c2..21eef4dc07d77168b0d354aea6db673a87db866e 100644
+index 508a5c296898b19eead692654d7492fa6ee65d74..d790dc59bf9d5bc67ec32d9ce098552bbc119231 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.test.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.test.ts
-@@ -23,6 +23,12 @@ describe("ElectronProtocol", () => {
-     unhandleMock.mockReset();
-   });
- 
+@@ -67,6 +67,11 @@ describe("ElectronProtocol", () => {
+       assert.equal(netFetchMock.mock.calls.length, 0);
+     }).pipe(Effect.provide(Layer.merge(protocolLayer, NodeServices.layer)), Effect.scoped),
+   );
 +  it("keeps the packaged Reasoning scheme apart from stock and dev schemes", () => {
 +    assert.equal(ElectronProtocol.getDesktopScheme(false), "t3code-reasoning");
 +    assert.equal(ElectronProtocol.getDesktopScheme(true), "t3code-dev");
 +    assert.equal(ElectronProtocol.getDesktopUrl(false), "t3code-reasoning://app/");
 +  });
-+
+ 
    it.effect("proxies the stable renderer origin to the current app server", () =>
      Effect.gen(function* () {
-       let handler: ((request: Request) => Promise<Response>) | undefined;
-@@ -99,12 +105,12 @@ describe("ElectronProtocol", () => {
+@@ -143,11 +148,11 @@ describe("ElectronProtocol", () => {
          Effect.gen(function* () {
            const protocol = yield* ElectronProtocol.ElectronProtocol;
            yield* protocol.registerDesktopProtocol({
 -            scheme: "t3code",
 +            scheme: "t3code-reasoning",
              targetOrigin: new URL("http://127.0.0.1:3773/"),
-             backendOrigin: new URL("http://127.0.0.1:3773/"),
              clerkFrontendApiHostname: undefined,
            });
 -          return yield* Effect.promise(() => handler!(new Request("t3code://other/")));
@@ -512,16 +510,16 @@ index 0d204fb3ad4238d636c73bb99e15787b6fb422c2..21eef4dc07d77168b0d354aea6db673a
          }),
        );
  
-@@ -176,7 +182,7 @@ describe("ElectronProtocol", () => {
+@@ -217,7 +222,7 @@ describe("ElectronProtocol", () => {
        const exit = yield* Effect.exit(
          Effect.scoped(
            protocol.registerDesktopProtocol({
 -            scheme: "t3code",
 +            scheme: "t3code-reasoning",
              targetOrigin: new URL("http://127.0.0.1:3773/"),
-             backendOrigin: new URL("http://127.0.0.1:3773/"),
              clerkFrontendApiHostname: undefined,
-@@ -188,16 +194,19 @@ describe("ElectronProtocol", () => {
+           }),
+@@ -228,16 +233,19 @@ describe("ElectronProtocol", () => {
        if (exit._tag === "Failure") {
          const error = Cause.squash(exit.cause);
          assert.instanceOf(error, ElectronProtocol.ElectronProtocolUnregistrationError);
@@ -534,7 +532,7 @@ index 0d204fb3ad4238d636c73bb99e15787b6fb422c2..21eef4dc07d77168b0d354aea6db673a
 +          'Failed to unregister Electron protocol scheme "t3code-reasoning".',
 +        );
        }
-     }).pipe(Effect.provide(ElectronProtocol.layer)),
+     }).pipe(Effect.provide(protocolLayer)),
    );
  
    it("keeps executable sources host-restricted while allowing runtime network resources", () => {
@@ -542,9 +540,9 @@ index 0d204fb3ad4238d636c73bb99e15787b6fb422c2..21eef4dc07d77168b0d354aea6db673a
 -      scheme: "t3code",
 +      scheme: "t3code-reasoning",
        targetOrigin: new URL("http://127.0.0.1:3773/"),
-       backendOrigin: new URL("http://127.0.0.1:3773/"),
        clerkFrontendApiHostname: "clerk.t3.codes",
-@@ -219,14 +228,14 @@ describe("ElectronProtocol", () => {
+     });
+@@ -258,14 +266,14 @@ describe("ElectronProtocol", () => {
      assert.deepEqual(directives["connect-src"], ["'self'", "http:", "https:", "ws:", "wss:"]);
      assert.deepEqual(directives["img-src"], [
        "'self'",
@@ -563,10 +561,10 @@ index 0d204fb3ad4238d636c73bb99e15787b6fb422c2..21eef4dc07d77168b0d354aea6db673a
    });
  });
 diff --git a/apps/desktop/src/electron/ElectronProtocol.ts b/apps/desktop/src/electron/ElectronProtocol.ts
-index af0366f93f4742cf3de5087d1ee7626260448627..f8a8acf63a558923fe4c77f4a08fa54451edb102 100644
+index ed35bbc7952fa73e1b14d4d522abb72018c53786..bf42ef08a127700cc491bf82801346edfb5e4ce8 100644
 --- a/apps/desktop/src/electron/ElectronProtocol.ts
 +++ b/apps/desktop/src/electron/ElectronProtocol.ts
-@@ -9,7 +9,9 @@ import * as Scope from "effect/Scope";
+@@ -12,7 +12,9 @@ import * as Scope from "effect/Scope";
  import * as Electron from "electron";
  
  export const DESKTOP_HOST = "app";
@@ -578,7 +576,7 @@ index af0366f93f4742cf3de5087d1ee7626260448627..f8a8acf63a558923fe4c77f4a08fa544
  
  export function getDesktopScheme(isDevelopment: boolean): string {
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b67130afcbd25 100644
+index f7c43cdffef1aee191958bc0534c608d74acd1ad..9ae4de5e85f92cd069eddd3a8442f9a985db4526 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
 @@ -59,7 +59,6 @@ import {
@@ -589,7 +587,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
    resolveMockUpdateServerPort,
    resolveMockUpdateServerUrl,
    resolvePackageManagerUserAgent,
-@@ -330,10 +329,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -320,10 +319,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      }
    });
  
@@ -604,7 +602,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
    });
  
    it("keeps nightly icons and web branding for managed nightly versions", () => {
-@@ -364,86 +363,76 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -354,62 +353,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
    });
  
@@ -672,10 +670,12 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
          false,
          false,
          undefined,
+@@ -426,25 +384,56 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          undefined,
        );
  
 -      assert.notProperty(preview, "publish");
+       assert.notProperty(previewChannel, "publish");
 -      assert.deepStrictEqual(release.publish, [
 -        {
 -          provider: "github",
@@ -737,7 +737,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
    it.effect("packages managed nightly versions with nightly presentation and no update feed", () =>
      Effect.gen(function* () {
        const build = (version: string, mockUpdates = false) =>
-@@ -463,32 +452,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -464,32 +453,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          const stable = yield* build("0.0.40").pipe(withEnv);
          const preview = yield* build("0.0.40-pr.8182.1").pipe(withEnv);
  
@@ -779,8 +779,8 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
          assert.notProperty(preview, "publish");
        }
  
-@@ -829,7 +805,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
-         "**/node_modules/.bin/**",
+@@ -824,7 +800,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+         "**/*.map",
        ]);
        assert.deepStrictEqual(mac.dmg, {
 -        title: "T3 Code (Alpha) 1.2.3 Installer",
@@ -788,7 +788,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
          background: "dmg/dmg-background-latest.png",
          window: { width: 640, height: 432 },
          contents: [
-@@ -839,11 +815,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -834,11 +810,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
          iconSize: 120,
          iconTextSize: 12,
        });
@@ -816,9 +816,9 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
 +        entry: { StartupWMClass: "t3code-reasoning" },
 +      });
        assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
-       assert.deepStrictEqual(linux.files, DESKTOP_FILE_EXCLUSIONS);
+       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
        assert.deepStrictEqual(win.files, DESKTOP_FILE_EXCLUSIONS);
-@@ -1857,7 +1848,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1928,7 +1919,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      });
  
      assert.deepStrictEqual(configuration, {
@@ -827,7 +827,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
        teamId: "ABC1234567",
        rpDomains: ["example.clerk.accounts.dev"],
        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-@@ -1877,7 +1868,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -1948,7 +1939,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        "clerk.example.com",
        "example.clerk.accounts.dev",
      ]);
@@ -836,7 +836,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
      assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
      assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
      assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
-@@ -1964,7 +1955,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -2035,7 +2026,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.notInclude(error.message, secret);
    });
  
@@ -845,7 +845,7 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
      Effect.gen(function* () {
        const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
          entitlementsPath: "/tmp/entitlements.mac.plist",
-@@ -1972,12 +1963,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -2043,12 +2034,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        });
  
        const mac = config.mac as Record<string, unknown>;
@@ -861,10 +861,10 @@ index 2253f94c920c5d6693df72f4ad7cdc6047b743de..2fcde3d96178745fb48f53c9750b6713
      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
    );
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a823233e9cb 100644
+index 73183570809104d96b3badbc8bac87669a8035e5..5d31e4a5f344b56823735b6c8f95a5a1a3e24735 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -53,7 +53,9 @@ import { Command, Flag } from "effect/unstable/cli";
+@@ -54,7 +54,9 @@ import { Command, Flag } from "effect/unstable/cli";
  import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
  
  const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
@@ -875,8 +875,8 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
  const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
  
  const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
-@@ -2609,32 +2611,6 @@ export function resolveDesktopRuntimeDependencies(
-   return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
+@@ -2574,32 +2576,6 @@ export function resolveDesktopRuntimeDependencies(
+   );
  }
  
 -export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
@@ -908,7 +908,7 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
  // Ordinary upstream nightlies keep their historical suffix-only classification.
  const ORDINARY_NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
  
-@@ -2704,10 +2680,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
+@@ -2676,10 +2652,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
    return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
  }
  
@@ -924,7 +924,7 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
  }
  
  export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
-@@ -2732,7 +2709,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2704,7 +2681,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    const buildConfig: Record<string, unknown> = {
      appId: DESKTOP_APP_ID,
      productName: resolveDesktopProductName(version),
@@ -933,7 +933,7 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
      electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
      files: [
        ...DESKTOP_FILE_EXCLUSIONS,
-@@ -2759,24 +2736,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2735,24 +2712,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      ],
    };
    const updateChannel = resolveDesktopUpdateChannel(version);
@@ -970,7 +970,7 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
    }
  
    if (platform === "mac") {
-@@ -2790,10 +2761,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2766,10 +2737,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
          NSScreenCaptureUsageDescription:
            "T3 Code captures the active window when you use the window capture shortcut.",
        },
@@ -985,7 +985,7 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
          },
        ],
        ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-@@ -2831,21 +2804,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2807,21 +2780,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    if (platform === "linux") {
      buildConfig.linux = {
        target: [target],
@@ -1013,7 +1013,7 @@ index 69b8416ca9df125d54455f18dfcc4f939e2f8da8..6e6c0545d8a9c25e6fa157169f031a82
          },
        },
      };
-@@ -3848,13 +3822,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+@@ -3725,13 +3699,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
        ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
        : undefined;
    const stagePackageJson: StagePackageJson = {

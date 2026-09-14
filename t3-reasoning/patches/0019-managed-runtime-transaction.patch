@@ -1705,10 +1705,10 @@ index 0000000000000000000000000000000000000000..1bb10d8e721f07b96bba2dbd8c05f637
 +});
 diff --git a/apps/server/src/cloud/managedRuntime.ts b/apps/server/src/cloud/managedRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b6c049d01
+index 0000000000000000000000000000000000000000..8668ea709551173b43a556ca391fa7c867542506
 --- /dev/null
 +++ b/apps/server/src/cloud/managedRuntime.ts
-@@ -0,0 +1,1203 @@
+@@ -0,0 +1,1224 @@
 +// @effect-diagnostics nodeBuiltinImport:off - owns exclusive no-follow file creation, fsync of files and directories, and the rename that publishes a version; the Effect FileSystem does not expose these.
 +import * as NodeCrypto from "node:crypto";
 +import * as NodeFS from "node:fs";
@@ -1745,7 +1745,7 @@ index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b
 +import { pinnedRuntimePaths, type PinnedRuntimePaths } from "./pinnedRuntime.ts";
 +import type { StagedArtifact } from "./queuedUpdate.ts";
 +import { decodeServicePreflightResult } from "./servicePreflight.ts";
-+import { SERVICE_LAUNCHER_FILE, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 +
 +/**
 + * Stages one exact managed release into the pinned runtime directory as an
@@ -1767,6 +1767,9 @@ index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b
 +/** Root command name; the CLI prints `<name> v<version>` for `--version` on a non-TTY stdout. */
 +const CLI_NAME = "t3";
 +const PACKAGE_DIR = "node_modules/t3";
++// Managed archives retain their authenticated package layout independently
++// of upstream's standalone CLI archive layout.
++const MANAGED_SERVICE_LAUNCHER_FILE = "service-launcher.mjs";
 +const PACKAGE_NAME = "t3";
 +const STAGING_PREFIX = ".staging-";
 +const PAYLOAD_DIR = "payload";
@@ -1924,7 +1927,7 @@ index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b
 +  return [
 +    `${PACKAGE_DIR}/package.json`,
 +    MANAGED_SERVER_ENTRY,
-+    `${PACKAGE_DIR}/dist/${SERVICE_LAUNCHER_FILE}`,
++    `${PACKAGE_DIR}/dist/${MANAGED_SERVICE_LAUNCHER_FILE}`,
 +    `${PACKAGE_DIR}/dist/client/index.html`,
 +    `${PACKAGE_DIR}/dist/resource-monitor/${target.platform}-${target.arch}/t3-resource-monitor`,
 +  ];
@@ -2838,7 +2841,16 @@ index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b
 +        const layout = yield* fsStep("preparing the managed runtime directories", () =>
 +          resolveLayout(options.baseDir, true),
 +        );
-+        const paths = pinnedRuntimePaths(path, layout.baseDir, targetVersion);
++        const runtimePaths = pinnedRuntimePaths(
++          path,
++          layout.baseDir,
++          targetVersion,
++          options.hostTarget.platform,
++        );
++        const paths = {
++          ...runtimePaths,
++          entryPath: path.join(runtimePaths.versionDir, MANAGED_SERVER_ENTRY),
++        };
 +
 +        const documents = yield* options.source
 +          .readDocuments(targetVersion)
@@ -2883,7 +2895,16 @@ index 0000000000000000000000000000000000000000..3a5b5ee2d50d254f3781912b0db6bf6b
 +    const step = "verifying the staged runtime";
 +    yield* validateVersion(step, staged.version);
 +    const layout = yield* fsStep(step, () => resolveLayout(options.baseDir, false));
-+    const paths = pinnedRuntimePaths(path, layout.baseDir, staged.version);
++    const runtimePaths = pinnedRuntimePaths(
++      path,
++      layout.baseDir,
++      staged.version,
++      options.hostTarget.platform,
++    );
++    const paths = {
++      ...runtimePaths,
++      entryPath: path.join(runtimePaths.versionDir, MANAGED_SERVER_ENTRY),
++    };
 +    const existing = yield* readPublished(paths, staged.version);
 +    if (existing.kind === "absent") {
 +      return yield* stageError(step, `${staged.version} is not staged`);

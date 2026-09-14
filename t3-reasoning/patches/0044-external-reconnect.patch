@@ -1,9 +1,9 @@
 diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
-index 72c0c420e18c957791d87bfffa8e9c7108ecf91f..c892095043ea8c81bbe13dfa4c74ffd71f5ca9d5 100644
+index 68c805b9baf26d50a35ea38519ea87d6df1a66cb..83b9051a4bc3a130c06c4e7a294ab2ab83440f8e 100644
 --- a/packages/ssh/src/tunnel.test.ts
 +++ b/packages/ssh/src/tunnel.test.ts
-@@ -600,6 +600,168 @@ describe("ssh tunnel scripts", () => {
- 
+@@ -820,6 +820,168 @@ describe("archive runner script", () => {
+ });
  const pairingTarget = { alias: "fixture", hostname: "fixture", username: null, port: null };
  const pairingKey = remoteStateKey(pairingTarget);
 +
@@ -172,10 +172,10 @@ index 72c0c420e18c957791d87bfffa8e9c7108ecf91f..c892095043ea8c81bbe13dfa4c74ffd7
  async function managedPairingFixture(
    test: (f: {
 diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
-index 1117d3657247c187e9af5e218166eae55d5dade4..002cc6c382ae2154515ee07e957bfc4199f6c905 100644
+index 00fc8dbc60e26830b5651c8f4b270ac68960978f..64026367ddb38e02650298c4e4c97ef333013a45 100644
 --- a/packages/ssh/src/tunnel.ts
 +++ b/packages/ssh/src/tunnel.ts
-@@ -703,9 +703,8 @@ if [ -n "$DEFAULT_REMOTE_PORT" ]; then
+@@ -816,9 +816,8 @@ if [ -n "$DEFAULT_REMOTE_PORT" ]; then
  fi
  if [ "$REMOTE_MANAGED" = "external" ]; then
    if [ -z "$REMOTE_PORT" ] || ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then

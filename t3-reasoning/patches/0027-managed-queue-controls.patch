@@ -23,7 +23,7 @@ index 7262239577b482f84309654431c16c15349af272..efd4acb0d802ae680e2939e6949aaac4
      for (const method of ["server.notRegistered", "toString", "constructor"]) {
        expect(() => requiredScopeForRpcMethod(method)).toThrow(
 diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
-index 2e2bdea73fc72b9b496b1a19a9997280752ddd8f..cab74114161783d0c993a094ba725c7d2f0beed6 100644
+index ca55e4e95e0139458af07c12d457715cdbb97b0e..63baa89cd834fd06c4c8e54cd92c3a74ce8394f7 100644
 --- a/apps/server/src/auth/RpcAuthorization.ts
 +++ b/apps/server/src/auth/RpcAuthorization.ts
 @@ -46,6 +46,9 @@ export const RPC_REQUIRED_SCOPES = {
@@ -36,7 +36,7 @@ index 2e2bdea73fc72b9b496b1a19a9997280752ddd8f..cab74114161783d0c993a094ba725c7d
    [WS_METHODS.serverUpsertKeybinding]: AuthOrchestrationOperateScope,
    [WS_METHODS.serverRemoveKeybinding]: AuthOrchestrationOperateScope,
    [WS_METHODS.serverGetSettings]: AuthOrchestrationReadScope,
-@@ -157,6 +160,7 @@ export const RPC_REQUIRED_SCOPES = {
+@@ -159,6 +162,7 @@ export const RPC_REQUIRED_SCOPES = {
    [WS_METHODS.subscribeDeviceState]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
@@ -239,7 +239,7 @@ index e82c3055328103a059088ca581bcb0bd498e7d2e..4937264c8c71d35fa24aa22fdc23c334
 +  });
  });
 diff --git a/apps/server/src/environment/ServerEnvironment.test.ts b/apps/server/src/environment/ServerEnvironment.test.ts
-index a12a8242b0d20961168f01dc49fd097ef5b28a6c..6391c044722ec4094bd87c8fdfc3d7b515f6c9b8 100644
+index 2577866838b18937ddb74bba6aa739df7ad0940f..783dce23072152b4bdd78bfbe0d51c85c4b2385d 100644
 --- a/apps/server/src/environment/ServerEnvironment.test.ts
 +++ b/apps/server/src/environment/ServerEnvironment.test.ts
 @@ -1,5 +1,6 @@
@@ -268,7 +268,7 @@ index a12a8242b0d20961168f01dc49fd097ef5b28a6c..6391c044722ec4094bd87c8fdfc3d7b5
  import * as ServerConfig from "../config.ts";
  import * as ServerEnvironment from "./ServerEnvironment.ts";
  
-@@ -260,6 +267,66 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+@@ -262,6 +269,66 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
      }),
    );
  
@@ -351,7 +351,7 @@ index 92e32d00549200a5fe213e569624f672bd041f4b..f703153c1084961e72d74cdba058210b
      },
    };
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 210ae157aabb75b49bb2ced41be790657e187d25..211b769cff11c861e6b23fb7a5ec2fa575f7dde0 100644
+index 48c3f95d5c3b02a299e75b662f774445c524f5d2..d0d0999e8292302b10c504d17c4347e8819e0b8b 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -25,6 +25,7 @@ import {
@@ -370,7 +370,7 @@ index 210ae157aabb75b49bb2ced41be790657e187d25..211b769cff11c861e6b23fb7a5ec2fa5
  import * as PubSub from "effect/PubSub";
  import * as Ref from "effect/Ref";
  import * as Queue from "effect/Queue";
-@@ -546,6 +548,8 @@ const buildAppUnderTest = (options?: {
+@@ -548,6 +550,8 @@ const buildAppUnderTest = (options?: {
      providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
      antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
      updateAdmission?: UpdateAdmission.UpdateAdmission["Service"];
@@ -379,7 +379,7 @@ index 210ae157aabb75b49bb2ced41be790657e187d25..211b769cff11c861e6b23fb7a5ec2fa5
      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
      externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
      vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
-@@ -771,9 +775,13 @@ const buildAppUnderTest = (options?: {
+@@ -775,9 +779,13 @@ const buildAppUnderTest = (options?: {
          ),
        ),
      );
@@ -396,7 +396,7 @@ index 210ae157aabb75b49bb2ced41be790657e187d25..211b769cff11c861e6b23fb7a5ec2fa5
  
      const servedRoutesLayer = HttpRouter.serve(
        makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
-@@ -1105,14 +1113,20 @@ const buildAppUnderTest = (options?: {
+@@ -1113,14 +1121,20 @@ const buildAppUnderTest = (options?: {
          }),
        ),
        Layer.provide(
@@ -425,7 +425,7 @@ index 210ae157aabb75b49bb2ced41be790657e187d25..211b769cff11c861e6b23fb7a5ec2fa5
        ),
        Layer.provide(
          Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-@@ -12101,6 +12115,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12226,6 +12240,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
    );
  });
  
@@ -946,10 +946,10 @@ index 210ae157aabb75b49bb2ced41be790657e187d25..211b769cff11c861e6b23fb7a5ec2fa5
    "reports thread HTTP and WebSocket transfer budgets",
    () =>
 diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
-index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515bdf1d6ddc 100644
+index 6a16640f7034e0d1c38f0fd2113613ae1512d6e0..c2c9f8d29c2db8510eee31049efb15d4ee92209f 100644
 --- a/apps/server/src/ws.ts
 +++ b/apps/server/src/ws.ts
-@@ -56,6 +56,9 @@ import {
+@@ -58,6 +58,9 @@ import {
    ProviderSetupError,
    RelayClientInstallFailedError,
    type RelayClientInstallProgressEvent,
@@ -959,7 +959,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
    ServerSelfUpdateError,
    type ServerSelfUpdateProgressEvent,
    type ServerLifecycleStreamEvent,
-@@ -108,7 +111,9 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
+@@ -110,7 +113,9 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
  import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
  import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
  import { makeProviderInstallation } from "./provider/providerInstallation.ts";
@@ -969,7 +969,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
  import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
  import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
  import * as ServerSettings from "./serverSettings.ts";
-@@ -166,6 +171,59 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http
+@@ -171,6 +176,59 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http
  import * as RelayClient from "@t3tools/shared/relayClient";
  const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
  
@@ -1029,7 +1029,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
  const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
  const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
  
-@@ -554,7 +612,30 @@ const makeWsRpcLayer = (
+@@ -561,7 +619,30 @@ const makeWsRpcLayer = (
        const providerInstances = yield* ProviderInstanceRegistry;
        const providerInstallation = yield* makeProviderInstallation();
        const serverUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -1060,7 +1060,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
        const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
        const serverSettings = yield* ServerSettings.ServerSettingsService;
        const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
-@@ -2006,6 +2087,26 @@ const makeWsRpcLayer = (
+@@ -2278,6 +2359,26 @@ const makeWsRpcLayer = (
              serverUpdate.commitDesktopUpdate(input.requestId),
              { "rpc.aggregate": "server" },
            ),
@@ -1087,7 +1087,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
          [WS_METHODS.serverUpsertKeybinding]: (rule) =>
            observeRpcEffect(
              WS_METHODS.serverUpsertKeybinding,
-@@ -3042,6 +3143,12 @@ const makeWsRpcLayer = (
+@@ -3337,6 +3438,12 @@ const makeWsRpcLayer = (
              }),
              { "rpc.aggregate": "server" },
            ),
@@ -1100,7 +1100,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
          [WS_METHODS.subscribeAuthAccess]: (_input) =>
            observeRpcStreamEffect(
              WS_METHODS.subscribeAuthAccess,
-@@ -3129,6 +3236,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
+@@ -3424,6 +3531,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
      });
      const pullRequests = yield* PullRequestService.PullRequestService;
      const sql = yield* SqlClient.SqlClient;
@@ -1111,7 +1111,7 @@ index 1f960c488d8ab2b71a7b20d11628b1ef39c510ed..1e31e1633f73992fb0f9d5698e35515b
      return HttpRouter.add(
        "GET",
        "/ws",
-@@ -3167,6 +3278,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
+@@ -3468,6 +3579,10 @@ export const websocketRpcRouteLayer = Layer.unwrap(
                Layer.provide(AgentSessionScanner.layer),
                Layer.provide(ProviderMaintenanceRunner.layer),
                Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
@@ -1222,10 +1222,10 @@ index 180f4408ec693336aae281e07d8938bd30fc1588..7609a66a13fdaf795b3d109e82bfbce8
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc01f3bda6 100644
+index 996dee39fcd255e8d681b4bececa2dcf4c27c388..73db42b1af8106188c5518fb9ea86f6373352177 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
-@@ -209,6 +209,10 @@ import {
+@@ -215,6 +215,10 @@ import {
  import {
    ServerConfigStreamEvent,
    DesktopUpdateCommitInput,
@@ -1236,7 +1236,7 @@ index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc
    ServerConfig,
    ServerProviderUpdateError,
    ServerProviderUpdateInput,
-@@ -349,6 +353,9 @@ export const WS_METHODS = {
+@@ -355,6 +359,9 @@ export const WS_METHODS = {
    serverUpdateServer: "server.updateServer",
    serverUpdateServerWithProgress: "server.updateServerWithProgress",
    serverCommitDesktopUpdate: "server.commitDesktopUpdate",
@@ -1246,7 +1246,7 @@ index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc
    serverUpsertKeybinding: "server.upsertKeybinding",
    serverRemoveKeybinding: "server.removeKeybinding",
    serverGetSettings: "server.getSettings",
-@@ -412,6 +419,7 @@ export const WS_METHODS = {
+@@ -420,6 +427,7 @@ export const WS_METHODS = {
    subscribeDeviceState: "subscribeDeviceState",
    subscribeServerConfig: "subscribeServerConfig",
    subscribeServerLifecycle: "subscribeServerLifecycle",
@@ -1254,7 +1254,7 @@ index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc
    subscribeAuthAccess: "subscribeAuthAccess",
    subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
    subscribeResourceTelemetry: "subscribeResourceTelemetry",
-@@ -547,6 +555,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
+@@ -555,6 +563,33 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
    error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
  });
  
@@ -1288,7 +1288,7 @@ index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc
  const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
    payload: Schema.Struct({}),
    success: ServerSettings,
-@@ -1273,6 +1308,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
+@@ -1294,6 +1329,14 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
    stream: true,
  });
  
@@ -1303,7 +1303,7 @@ index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc
  const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
    payload: Schema.Struct({}),
    success: AuthAccessStreamEvent,
-@@ -1312,6 +1355,9 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -1333,6 +1376,9 @@ export const WsRpcGroup = RpcGroup.make(
    WsServerUpdateServerRpc,
    WsServerUpdateServerWithProgressRpc,
    WsServerCommitDesktopUpdateRpc,
@@ -1313,7 +1313,7 @@ index 0a9074bbd920ee5c9eddd72b324ca56be96f6371..d4231ea4dea3a2b0594498e6e9bb88dc
    WsServerUpsertKeybindingRpc,
    WsServerRemoveKeybindingRpc,
    WsServerGetSettingsRpc,
-@@ -1418,6 +1464,7 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -1441,6 +1487,7 @@ export const WsRpcGroup = RpcGroup.make(
    WsSubscribeDeviceStateRpc,
    WsSubscribeServerConfigRpc,
    WsSubscribeServerLifecycleRpc,

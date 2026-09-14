@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index 747663b80ac018be2630ccaf8195cd39fe028989..c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447 100644
+index 595582a1628034ac1858738b27ee379efc711628..b1a2cc9500ed493b593325eb66ea71b696eddbd6 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 @@ -295,6 +295,53 @@ describe("DesktopBackendConfiguration", () => {
@@ -56,10 +56,10 @@ index 747663b80ac018be2630ccaf8195cd39fe028989..c468f0e0cae3cf810c3bb7c297e19bd0
    it.effect("resolveWsl reuses the primary's bootstrap token", () =>
      withHarness(
        Effect.gen(function* () {
-@@ -889,6 +936,9 @@ describe("DesktopBackendConfiguration", () => {
-           assert.equal(config.httpBaseUrl.href, "http://172.27.0.99:5050/");
+@@ -881,6 +928,9 @@ describe("DesktopBackendConfiguration", () => {
            assert.equal(config.env.OPENAI_API_KEY, "openai-key");
            assert.equal(config.env.ANTHROPIC_API_KEY, "anthropic-key");
+           assert.equal(config.env.T3CODE_OTLP_PROTOCOL, "http/protobuf");
 +          // The prepared-env signal is a packaged-primary-only contract; the
 +          // WSL backend must hydrate its own Linux-side environment.
 +          assert.isUndefined(config.env.T3CODE_SKIP_LOGIN_SHELL);
@@ -67,7 +67,7 @@ index 747663b80ac018be2630ccaf8195cd39fe028989..c468f0e0cae3cf810c3bb7c297e19bd0
            // "::" segment survives — WSL ignores it, so we don't normalize
            // it away) and ANTHROPIC_API_KEY is appended. OPENAI_API_KEY is
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-index d7c524d168154df448ca5beab2c15cc0bf5eab51..2d5d87f7b2e79dc4d40979b5861d075ee6914654 100644
+index a36902304809de9c30c19acda5fd9af1e35bc5b9..ef35ace8e9c60492ccf44db9f4100d825b7474a0 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 @@ -85,6 +85,7 @@ const DESKTOP_BACKEND_ENV_NAMES = [
@@ -77,8 +77,8 @@ index d7c524d168154df448ca5beab2c15cc0bf5eab51..2d5d87f7b2e79dc4d40979b5861d075e
 +  "T3CODE_SKIP_LOGIN_SHELL",
  ] as const;
  
- // Sensitive env vars that the WSL backend needs but Windows process.env won't
-@@ -507,6 +508,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+ // Env vars that the WSL backend needs but Windows process.env won't forward
+@@ -530,6 +531,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
        env: {
          ...backendChildEnvPatch(),
          ELECTRON_RUN_AS_NODE: "1",

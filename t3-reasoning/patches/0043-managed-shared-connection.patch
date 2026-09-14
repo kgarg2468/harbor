@@ -150,10 +150,10 @@ index 5329dc0b883935e4d6338e70b3eb4f0c902b6dea..03ffb5b818c2cde840f05e2d1a123205
 +  );
 +}
 diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
-index 9fb0ea58b9e3a6098cb282a860067958c8fc62f0..0d37fc74b5fae824f24688b16b60ba3a1411d9ed 100644
+index 8972d4f7ab96a3e31dbe47b83120987ac9c57177..255dfd98a704755c37bf729c9a205cf2f8d7d32f 100644
 --- a/apps/desktop/src/ssh/DesktopSshEnvironment.ts
 +++ b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
-@@ -213,9 +213,9 @@ const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
+@@ -212,9 +212,9 @@ const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
              if (--activeOperations === 0) Deferred.doneUnsafe(drained, Effect.void);
            }),
        );
@@ -166,7 +166,7 @@ index 9fb0ea58b9e3a6098cb282a860067958c8fc62f0..0d37fc74b5fae824f24688b16b60ba3a
      const managerScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
        lifecycle.withTeardown(
          Effect.gen(function* () {
-@@ -234,21 +234,13 @@ const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
+@@ -233,21 +233,13 @@ const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
            Effect.suspend(() =>
              marked
                ? Effect.void
@@ -196,7 +196,7 @@ index 9fb0ea58b9e3a6098cb282a860067958c8fc62f0..0d37fc74b5fae824f24688b16b60ba3a
          ),
        ),
 diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
-index e2536ba920172ed0ad45e69c4c69cad351480370..72c0c420e18c957791d87bfffa8e9c7108ecf91f 100644
+index 980107d19a8222f1084fbe587d986d6c051913df..68c805b9baf26d50a35ea38519ea87d6df1a66cb 100644
 --- a/packages/ssh/src/tunnel.test.ts
 +++ b/packages/ssh/src/tunnel.test.ts
 @@ -1,3 +1,11 @@
@@ -211,7 +211,7 @@ index e2536ba920172ed0ad45e69c4c69cad351480370..72c0c420e18c957791d87bfffa8e9c71
  import { assert, describe, it } from "@effect/vitest";
  import * as NodeServices from "@effect/platform-node/NodeServices";
  import * as NetService from "@t3tools/shared/Net";
-@@ -13,6 +21,7 @@ import { TestClock } from "effect/testing";
+@@ -15,6 +23,7 @@ import { TestClock } from "effect/testing";
  import { HttpClient, HttpClientResponse } from "effect/unstable/http";
  import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
  
@@ -219,11 +219,27 @@ index e2536ba920172ed0ad45e69c4c69cad351480370..72c0c420e18c957791d87bfffa8e9c71
  import { SshPasswordPrompt } from "./auth.ts";
  import { SshCommandError } from "./errors.ts";
  import {
-@@ -588,3 +597,367 @@ describe("ssh tunnel scripts", () => {
-       }),
+@@ -150,9 +159,13 @@ describe("ssh tunnel scripts", () => {
+       script.indexOf('"$T3_STAGING/t3" --version'),
+       script.indexOf('> "$T3_STAGING/.install-complete"'),
+     );
+-    // Node discovery is defined for the dev path but only ever invoked inside
+-    // the node-script branch, which the archive path skips entirely.
+-    assert.equal(script.split("ensure_remote_node_path || true").length - 1, 1);
++    // Managed pairing and source checkout execution need Node; ordinary archive
++    // commands skip both conditional branches.
++    assert.equal(script.split("ensure_remote_node_path || true").length - 1, 2);
++    assert.isBelow(
++      script.indexOf('if [ "${1:-}" = "auth" ]'),
++      script.indexOf("ensure_remote_node_path || true"),
++    );
+     assert.isBelow(
+       script.indexOf("ensure_remote_node_path || true"),
+       script.indexOf('exec node "$T3_NODE_SCRIPT_PATH" "$@"'),
+@@ -805,3 +818,372 @@ describe("archive runner script", () => {
+     60_000,
    );
  });
-+
 +const pairingTarget = { alias: "fixture", hostname: "fixture", username: null, port: null };
 +const pairingKey = remoteStateKey(pairingTarget);
 +const managedVersion = "0.0.15-nightly.20260910.1507.managed.1.p123456789abc";
@@ -322,7 +338,13 @@ index e2536ba920172ed0ad45e69c4c69cad351480370..72c0c420e18c957791d87bfffa8e9c71
 +      NodePath.join(root, "node_modules/t3/dist/bin.mjs"),
 +      "console.log(JSON.stringify(process.argv.slice(2)))",
 +    );
-+    const script = buildRemotePairingScript(pairingTarget, { packageSpec: `t3@${managedVersion}` });
++    const fallbackRoot = NodePath.join(home, ".t3/runtime/versions", ARCHIVE.archiveVersion);
++    await NodeFSP.mkdir(fallbackRoot, { recursive: true });
++    await NodeFSP.writeFile(NodePath.join(fallbackRoot, "t3"), "#!/bin/sh\necho fallback\n", {
++      mode: 0o755,
++    });
++    await NodeFSP.writeFile(NodePath.join(fallbackRoot, ".install-complete"), ARCHIVE.archiveVersion);
++    const script = buildRemotePairingScript(pairingTarget, ARCHIVE);
 +    await test({
 +      home,
 +      root,
@@ -588,10 +610,10 @@ index e2536ba920172ed0ad45e69c4c69cad351480370..72c0c420e18c957791d87bfffa8e9c71
 +  });
 +}
 diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
-index 9cb6b25e412180dfc3313b5b56860ab6baa2f2dc..1117d3657247c187e9af5e218166eae55d5dade4 100644
+index 135cb7decae9ab0efe85d17c4b4c5ce841d40926..00fc8dbc60e26830b5651c8f4b270ac68960978f 100644
 --- a/packages/ssh/src/tunnel.ts
 +++ b/packages/ssh/src/tunnel.ts
-@@ -402,10 +402,157 @@ ensure_remote_node_path() {
+@@ -426,13 +426,161 @@ ensure_remote_node_path() {
  }
  `;
  
@@ -730,8 +752,8 @@ index 9cb6b25e412180dfc3313b5b56860ab6baa2f2dc..1117d3657247c187e9af5e218166eae5
  const REMOTE_RUNNER_SCRIPT = `#!/bin/sh
  set -eu
  @@T3_NODE_ENV_SCRIPT@@
- ensure_remote_node_path || true
 +if [ "\${1:-}" = "auth" ] && [ "\${2:-}" = "pairing" ] && [ -e "$HOME/.t3/runtime/service-state.json" -o -L "$HOME/.t3/runtime/service-state.json" ]; then
++  ensure_remote_node_path || true
 +  if ! command -v node >/dev/null 2>&1; then
 +    printf 'Managed SSH pairing runtime validation failed: node is unavailable.\\n' >&2
 +    exit 1
@@ -748,12 +770,17 @@ index 9cb6b25e412180dfc3313b5b56860ab6baa2f2dc..1117d3657247c187e9af5e218166eae5
 +fi
  T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
  if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
+   # Dev mode: a source checkout on the remote. This is the only path that
+-  # needs Node, so Node discovery runs here and nowhere else.
++  # needs Node outside managed pairing, so Node discovery stays on those paths.
+   ensure_remote_node_path || true
    if ! command -v node >/dev/null 2>&1; then
-@@ -656,6 +803,7 @@ export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string
+     printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
+@@ -806,6 +954,7 @@ export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string
+   );
    return stripTrailingNewlines(
      applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
-       T3_PACKAGE_SPEC: packageSpec,
 +      T3_MANAGED_PAIRING_SCRIPT: REMOTE_MANAGED_PAIRING_SCRIPT,
        T3_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
-       T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
-     }),
+       T3_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
+       T3_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),

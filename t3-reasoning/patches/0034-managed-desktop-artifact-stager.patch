@@ -1411,13 +1411,13 @@ index 0000000000000000000000000000000000000000..b68952442068af79adcfa5b61552a2c8
 +  puts("native desktop artifact tests passed (13 groups)"); return 0;
 +}
 diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
-index 7ae5a90e21a7a93ac8adb0f9318d6562903222d5..fea197a764f2060030e1abb8df60d29f6216db45 100644
+index c078efb8b7a2c9a16522df9b41bb4bf1ba03dc49..d92e0083eb6c29e75372ba4defbcd9a0d30ece4e 100644
 --- a/packages/contracts/src/index.ts
 +++ b/packages/contracts/src/index.ts
-@@ -43,3 +43,4 @@ export * from "./resourceTelemetry.ts";
- export * from "./usage.ts";
+@@ -44,3 +44,4 @@ export * from "./usage.ts";
  export * from "./updateAdmission.ts";
  export * from "./rpc.ts";
+ export * from "./worktreeSetup.ts";
 +export * from "./managedDesktopUpdate.ts";
 diff --git a/packages/contracts/src/managedDesktopUpdate.test.ts b/packages/contracts/src/managedDesktopUpdate.test.ts
 new file mode 100644
@@ -1569,17 +1569,17 @@ index 0000000000000000000000000000000000000000..0acf4dd91bd99e54af630f6384c2c028
 +  ];
 +}
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index 5a8cb5084939fa0e577e0aa2185b50b1366f0565..2253f94c920c5d6693df72f4ad7cdc6047b743de 100644
+index 49b2d10ff59baf3ef3d92af9c5f0f4491e1a5edb..f7c43cdffef1aee191958bc0534c608d74acd1ad 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -27,6 +27,7 @@ import {
+@@ -26,6 +26,7 @@ import {
    DESKTOP_FILE_EXCLUSIONS,
    DESKTOP_EXTRA_RESOURCES,
    LINUX_CAPTURE_EXTRA_RESOURCES,
 +  MANAGED_DESKTOP_ARTIFACT_EXTRA_RESOURCES,
    LINUX_BROWSER_SECRET_EXTRA_RESOURCES,
+   LINUX_FILE_EXCLUSIONS,
    MAC_FILE_EXCLUSIONS,
-   InvalidMacPasskeyRpDomainError,
 @@ -73,6 +74,7 @@ import {
    copyDirectoryPreservingSymlinks,
    LinuxBrowserSecretHostError,
@@ -1588,10 +1588,10 @@ index 5a8cb5084939fa0e577e0aa2185b50b1366f0565..2253f94c920c5d6693df72f4ad7cdc60
    validateWindowsPackagedPayload,
    WindowsPrimaryNativeProbeError,
    WindowsDesktopBuildPrerequisitesMissingError,
-@@ -719,6 +721,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
- 
-     assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
+@@ -713,6 +715,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
        "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+       "!**/*.map",
+       "!**/*.d.cts",
 +      "!apps/desktop/resources/desktop-artifact",
 +      "!apps/desktop/resources/desktop-artifact/**/*",
 +      "!apps/desktop/prod-resources/desktop-artifact",
@@ -1599,7 +1599,23 @@ index 5a8cb5084939fa0e577e0aa2185b50b1366f0565..2253f94c920c5d6693df72f4ad7cdc60
        "!apps/desktop/resources/browser-secret",
        "!apps/desktop/resources/browser-secret/**/*",
        "!apps/desktop/prod-resources/browser-secret",
-@@ -2511,3 +2517,72 @@ it("ignores trailing separators", () => {
+@@ -1639,8 +1645,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+           appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+         });
+ 
++        const path = yield* Path.Path;
++        // The harness may export ELECTRON_RUN_AS_NODE for unrelated Node
++        // probes too. Identify the primary probe by its packaged executable.
+         assert.isFalse(
+-          commands.some((command) => command.options.env?.ELECTRON_RUN_AS_NODE === "1"),
++          commands.some(
++            (command) =>
++              command.command === path.join(fixture.packagedAppDir, fixture.appExecutableName),
++          ),
+         );
+         assert.isTrue(
+           commands.some(
+@@ -2451,3 +2463,72 @@ it("ignores trailing separators", () => {
      ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
    );
  });
@@ -1673,13 +1689,13 @@ index 5a8cb5084939fa0e577e0aa2185b50b1366f0565..2253f94c920c5d6693df72f4ad7cdc60
 +  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, spawner)));
 +});
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f939e2f8da8 100644
+index c31327fa6bb827822d9b1e2f9e6935993f3427d1..73183570809104d96b3badbc8bac87669a8035e5 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -959,6 +959,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
-   // so the SDK's optional platform packages (each a ~200MB bundled executable)
-   // are dead weight. The trailing dash keeps the SDK's own JS package.
-   "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+@@ -949,6 +949,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
+   // client's maps alone were 50 MB of app.asar that no request ever read.
+   "!**/*.map",
+   "!**/*.d.cts",
 +  "!apps/desktop/resources/desktop-artifact",
 +  "!apps/desktop/resources/desktop-artifact/**/*",
 +  "!apps/desktop/prod-resources/desktop-artifact",
@@ -1687,7 +1703,7 @@ index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f93
    "!apps/desktop/resources/browser-secret",
    "!apps/desktop/resources/browser-secret/**/*",
    "!apps/desktop/prod-resources/browser-secret",
-@@ -1110,6 +1114,9 @@ export const LINUX_CAPTURE_EXTRA_RESOURCES = [
+@@ -1085,6 +1089,9 @@ export const LINUX_CAPTURE_EXTRA_RESOURCES = [
      filter: gnomeCaptureBundle.files,
    },
  ] as const;
@@ -1697,7 +1713,7 @@ index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f93
  export const LINUX_BROWSER_SECRET_EXTRA_RESOURCES = [
    { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
  ] as const;
-@@ -2305,6 +2312,39 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function*
+@@ -2268,6 +2275,39 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function*
    }
  });
  
@@ -1737,7 +1753,7 @@ index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f93
  export const stageBrowserSecret = Effect.fn("stageBrowserSecret")(function* (input: {
    readonly repoRoot: string;
    readonly stageResourcesDir: string;
-@@ -2710,6 +2750,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2686,6 +2726,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      extraResources: [
        ...DESKTOP_EXTRA_RESOURCES,
        ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
@@ -1747,7 +1763,7 @@ index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f93
        ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
        ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
        ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
-@@ -3713,6 +3756,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+@@ -3600,6 +3643,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
          verbose: options.verbose,
        });
    }

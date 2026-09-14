@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/bin.ts b/apps/server/src/bin.ts
-index 52cc363ed04ff2e1113cde9aca5f724bebe52c9e..9799a0117c319b79c82bb455496344f49c9234bb 100644
+index 1ec78ff2e173e98bc90d2d6bf85aa6290f692167..c9d5dad0edf83960abc0b15eafb316340c19cadb 100644
 --- a/apps/server/src/bin.ts
 +++ b/apps/server/src/bin.ts
 @@ -14,6 +14,7 @@ import { pairCommand } from "./cli/pair.ts";
@@ -10,16 +10,16 @@ index 52cc363ed04ff2e1113cde9aca5f724bebe52c9e..9799a0117c319b79c82bb455496344f4
  import { projectCommand } from "./cli/project.ts";
  import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
  import { serviceCommand } from "./cli/service.ts";
-@@ -60,6 +61,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
-       projectCommand,
-       serviceCommand,
+@@ -70,6 +71,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
+       claudeHistoryCommand,
        servicePreflightCommand,
+       sshHelperCommand,
 +      migrationPreflightCommand,
        themeCommand,
        triageCommand,
        cloudEnabled ? connectCommand : connectUnavailableCommand,
 diff --git a/apps/server/src/cli/invocation.test.ts b/apps/server/src/cli/invocation.test.ts
-index 370a8977fc4c3861f34d236a5ce73432b3d7fb0a..7b5591cc577a48345b5a1dabc0ddf0d363378f5a 100644
+index 067d9fa09d80394f75fdc238213850cc77183b00..8ff9bd329b284727947cf971fefcdf9a147caea4 100644
 --- a/apps/server/src/cli/invocation.test.ts
 +++ b/apps/server/src/cli/invocation.test.ts
 @@ -1,5 +1,26 @@
@@ -49,7 +49,7 @@ index 370a8977fc4c3861f34d236a5ce73432b3d7fb0a..7b5591cc577a48345b5a1dabc0ddf0d3
  import { formatCliCommand } from "./invocation.ts";
  
  it("formats package runner commands from their cache entry paths", () => {
-@@ -85,3 +106,135 @@ it("formats serve suggestions to match the launching command", () => {
+@@ -87,3 +108,135 @@ it("formats serve suggestions to match the launching command", () => {
      "t3 serve",
    );
  });

@@ -837,10 +837,10 @@ index 0000000000000000000000000000000000000000..197ecab6a672d031288fddc0cf95f2ba
 +  });
 +});
 diff --git a/apps/server/src/cloud/selfUpdate.test.ts b/apps/server/src/cloud/selfUpdate.test.ts
-index e6d8010f19d734f10aa5ce2683f5d0a502aee909..5611124a25086b78af83b7243bfe38275a65b96b 100644
+index 8ca0baa64a323fc7ca031bc955223e2bed13d2a3..75a3f922994176a8d6126480ede9d08f0d1e0409 100644
 --- a/apps/server/src/cloud/selfUpdate.test.ts
 +++ b/apps/server/src/cloud/selfUpdate.test.ts
-@@ -17,9 +17,15 @@ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
+@@ -18,9 +18,15 @@ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
  import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
  import * as ServerSelfUpdate from "./selfUpdate.ts";
  
@@ -856,7 +856,7 @@ index e6d8010f19d734f10aa5ce2683f5d0a502aee909..5611124a25086b78af83b7243bfe3827
    readonly preflight?: "ready" | "blocked";
    readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
    readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
-@@ -89,7 +95,9 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
+@@ -110,7 +116,9 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
    const config = yield* ServerConfig.ServerConfig.pipe(
      Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
    );
@@ -867,7 +867,7 @@ index e6d8010f19d734f10aa5ce2683f5d0a502aee909..5611124a25086b78af83b7243bfe3827
      Effect.provideService(ProcessRunner.ProcessRunner, runner),
      Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
      Effect.provideService(
-@@ -333,6 +341,29 @@ it.layer(NodeServices.layer)("server self update", (it) => {
+@@ -356,6 +364,29 @@ it.layer(NodeServices.layer)("server self update", (it) => {
      }),
    );
  
@@ -898,12 +898,12 @@ index e6d8010f19d734f10aa5ce2683f5d0a502aee909..5611124a25086b78af83b7243bfe3827
      Effect.gen(function* () {
        const web = yield* makeHarness();
 diff --git a/apps/server/src/cloud/selfUpdate.ts b/apps/server/src/cloud/selfUpdate.ts
-index 3cea30790a4c4005e9f1fd93876a7d77f6a2d1e5..382f168fc04a489f15f254cf737be1d1cee35e01 100644
+index a388f8a0b4d73199496af8e6ef2b27600b4eb337..4ccf32cbabdead403c7377924cde23c66c8c7589 100644
 --- a/apps/server/src/cloud/selfUpdate.ts
 +++ b/apps/server/src/cloud/selfUpdate.ts
-@@ -17,9 +17,11 @@ import * as FileSystem from "effect/FileSystem";
- import * as Layer from "effect/Layer";
- import * as Path from "effect/Path";
+@@ -22,9 +22,11 @@ import { HttpClient } from "effect/unstable/http";
+ 
+ import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
  
 +import packageJson from "../../package.json" with { type: "json" };
  import * as ServerConfig from "../config.ts";
@@ -912,8 +912,8 @@ index 3cea30790a4c4005e9f1fd93876a7d77f6a2d1e5..382f168fc04a489f15f254cf737be1d1
 +import { parseManagedReleaseVersion } from "./managedRelease.ts";
  import {
    ensurePinnedRuntimeInstalled,
-   PinnedRuntimeInstallError,
-@@ -163,7 +165,10 @@ export const withRunningThreadContinuation = Effect.fn(
+   pinnedRuntimeCommand,
+@@ -169,7 +171,10 @@ export const withRunningThreadContinuation = Effect.fn(
    });
  });
  
@@ -925,7 +925,7 @@ index 3cea30790a4c4005e9f1fd93876a7d77f6a2d1e5..382f168fc04a489f15f254cf737be1d1
    const serverConfig = yield* ServerConfig.ServerConfig;
    const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
    const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
-@@ -204,6 +209,18 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
+@@ -217,6 +222,18 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
      if (!isExactServiceVersion(targetVersion)) {
        return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
      }

@@ -1,17 +1,17 @@
 {
   "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
-  "commit": "c07575f573dd3a1af4f734297d17f7c951c95f10",
+  "commit": "112a7088da63ea4fa48fee63dc8f29557c545ed7",
   "patches": [
     {
       "id": "reasoning-full",
       "path": "patches/0001-reasoning.patch",
-      "sha256": "9a418a4b6d7187647e2ec7acb0965182830362d33c37774b50f7a49dd35b2b84"
+      "sha256": "21fff98bb63ea5f6be5e5e67dd0096412a32f3a7a17e3f94096bb92dfee618d3"
     },
     {
       "id": "desktop-runtime-common",
       "path": "patches/0002-desktop-runtime-common.patch",
-      "sha256": "aae732db2fafe749dbe9d4d2f4850147dc46413b668b261460e88bc12202fa1b"
+      "sha256": "5f3416362e61ce496367be4c970f48cea6c3dddf4f6235e1956863e5b79adf6b"
     },
     {
       "id": "update-admission",
@@ -31,7 +31,7 @@
     {
       "id": "activity-wiring",
       "path": "patches/0009-activity-wiring.patch",
-      "sha256": "34a74dd6ef483ec7f5aebb27ec2b3e47a03a4ccbbfda9d640890c96299ccdf3c"
+      "sha256": "5093084b6d46edf035878b5b0dc7981eff2f4cae8741fbc439ba5d9a8bd5f951"
     },
     {
       "id": "thread-fork-backend",
@@ -46,7 +46,7 @@
     {
       "id": "migration-preflight",
       "path": "patches/0012-migration-preflight.patch",
-      "sha256": "caac5288cf290902498b2323e976332498fd43ceaa9588ee5740b36824380b74"
+      "sha256": "5b95d5fe4f1304b0e4aa1629906e0c1a7e4316a77c7c6d8dafcfcc646c67512e"
     },
     {
       "id": "idle-coordinator",
@@ -56,7 +56,7 @@
     {
       "id": "managed-runtime-stager",
       "path": "patches/0014-managed-runtime-stager.patch",
-      "sha256": "3c31328fd77e776cec683b9c260106dc73acdcf143a5b3207c1753684cc84cb4"
+      "sha256": "821d4fb65e29c046e3b75f8694ee114afd61364717b97d7cf1c0ae193bb0a86f"
     },
     {
       "id": "desktop-reservation",
@@ -76,12 +76,12 @@
     {
       "id": "managed-runtime-transaction",
       "path": "patches/0019-managed-runtime-transaction.patch",
-      "sha256": "fd064b6eeff3fec62b4c9000f212819e7aea1f710c396da50e6a8a82f9e58ca2"
+      "sha256": "d6925f1e449330fdb90887c12ff79e558bb7f67b69554309cd6dd146192af381"
     },
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "e7df1676ef6021dbfb71958dc3ce4cb89a560a83213e2b99872e99ba293ea907"
+      "sha256": "742bfa448b7f4ea23db60bb29205a79de2220a1be00af59136356086d863c2b3"
     },
     {
       "id": "managed-release-feed",
@@ -91,12 +91,12 @@
     {
       "id": "managed-queue-handoff",
       "path": "patches/0021-managed-queue-handoff.patch",
-      "sha256": "7e3f32b79166fc75084d4b272a2715141081731bfdaa725747b69cbaea156d46"
+      "sha256": "a7f461028a735116eccbf76aae5b707fb6fa53d624568cddbc99e79d392f869a"
     },
     {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
-      "sha256": "de59c2224f6f696e61429d21de9668ad0ecdf99f01c8a3fe2fd05550c67f75cb"
+      "sha256": "1e3799be6d053b6419a326654fc1748826bb861d277838acada34758582f3de6"
     },
     {
       "id": "idle-preparation",
@@ -106,27 +106,27 @@
     {
       "id": "managed-server-composition",
       "path": "patches/0023-managed-server-composition.patch",
-      "sha256": "b2edb6e316c07f480dbff8b1e9f8676322fe09479915f4463a7d1f4dba8cd254"
+      "sha256": "3c2d488b179e661d0ab6d5348c6bde200eb42627df83f0323de513b07f14c76f"
     },
     {
       "id": "live-admission",
       "path": "patches/0024-live-admission.patch",
-      "sha256": "2521b7949db8884d633e38af5af92bbd550bd0d4b6e4e537bd3c10450f5fe4d7"
+      "sha256": "4cf62fd48c239752450b34c74d2977d8c1a74b8f4fb01cc8b782ae9cf6e05cc3"
     },
     {
       "id": "managed-desktop-identity",
       "path": "patches/0025-managed-desktop-identity.patch",
-      "sha256": "dba0a82c80720bb74d71a51258e55c2d4b9a1dc9fa8b43a6ef306d0cd0022484"
+      "sha256": "0c92409c915ec98b4581edbc5372634512ec8903f4a0ab0c9271568e76eba94e"
     },
     {
       "id": "managed-nightly-trigger",
       "path": "patches/0026-managed-nightly-trigger.patch",
-      "sha256": "8357c4c3f1ca41a64c91145f8195b3b88711a4924b9db441bd62d623a2e4791b"
+      "sha256": "ef7c6eae54b15ac0d68e1fe3256e8dda156bf3adcbf15e25e7e5bbeb5b7a6cfb"
     },
     {
       "id": "managed-queue-controls",
       "path": "patches/0027-managed-queue-controls.patch",
-      "sha256": "a2cd2d4c8fa7dbae14817735deca306ff016c1924073d68fcd289fc2ecc02887"
+      "sha256": "50f7af63f564577963983b145f2d77fc32bbe05ecd7fc60d300b927c250bc00c"
     },
     {
       "id": "desktop-reservation-transport",
@@ -141,32 +141,32 @@
     {
       "id": "server-desktop-reservation-receiver",
       "path": "patches/0030-server-desktop-reservation-receiver.patch",
-      "sha256": "94d9552b9b26d6bf3dc5fa5253d5bea5eaefdedd4e850b1a0da3f88e2482abca"
+      "sha256": "67302d7a175b45efcb347ef6b075581c10548ab9e5797bcac3e3ad3f4da41ff7"
     },
     {
       "id": "managed-presentation-identity",
       "path": "patches/0031-managed-presentation-identity.patch",
-      "sha256": "086577308642dab809a7fdfe1ea49741b3272797c2a8895fa83edbaf24c55940"
+      "sha256": "9c9064b317070efd574110c9a80fe1f329afd7b118a4b9910b5f2f2bd60bd727"
     },
     {
       "id": "desktop-update-lifecycle",
       "path": "patches/0032-desktop-update-lifecycle.patch",
-      "sha256": "7411766c74249af97f9775bb2076cb524735259d2a0afefac33388b8bc8a097e"
+      "sha256": "211b9bda6eed57222e6737b93a8bf474f1bb09fb463ed142a23212911e9ffb1a"
     },
     {
       "id": "desktop-ssh-ownership",
       "path": "patches/0033-desktop-ssh-ownership.patch",
-      "sha256": "6b68734407547d2e45c38881d946454a738b0dfff363bfb17ec119806ee7f4ef"
+      "sha256": "7f88ed30d794e16f5ea9114e140df10c34b03dcfcc4e5f62529638ebf6d0d1c2"
     },
     {
       "id": "managed-desktop-artifact-stager",
       "path": "patches/0034-managed-desktop-artifact-stager.patch",
-      "sha256": "fa905e7fb1351446db9e3ed241a3f09c43c13800407e0d9dd7130c5074784151"
+      "sha256": "dc28bc58dda4a8a59776f06c1731330084566238e28ac2b3d6bafe2fe9e4bfa2"
     },
     {
       "id": "managed-desktop-artifact-capability",
       "path": "patches/0035-managed-desktop-artifact-capability.patch",
-      "sha256": "6a40e49c832ce0f01134ec6f623655800b9ccc8eb86187f597e46f1f79e0b572"
+      "sha256": "bbb6e33951dcb9d1ac711e04ced2533601dad2e23bebc1c145184c2ee61f9ee9"
     },
     {
       "id": "content-bound-desktop-telemetry",
@@ -176,7 +176,7 @@
     {
       "id": "managed-desktop-update-orchestration",
       "path": "patches/0037-managed-desktop-update-orchestration.patch",
-      "sha256": "d94c1b8ccbc9567074c6d195a6b0fd074cc12f82a2c61d77d1eee57a52f6024a"
+      "sha256": "1e7756a5c3d520ebbc12becd89a10b78ce4a3ae7f311b7181616e9a8573fe32a"
     },
     {
       "id": "managed-desktop-artifact-preparation",
@@ -191,27 +191,27 @@
     {
       "id": "managed-desktop-installer",
       "path": "patches/0040-managed-desktop-installer.patch",
-      "sha256": "3ca8164acdae26eed8de573f1ddb7ee16fe0a6ffbd153959aa18ddcb14bd24b9"
+      "sha256": "e3be06cc6024ff5cc2a1166955cee7276f7b12ae5a64c162e51b1c1cc2b99bc6"
     },
     {
       "id": "managed-desktop-routing",
       "path": "patches/0041-managed-desktop-routing.patch",
-      "sha256": "e33bd98b7cccf1cffdcb4c50dde8db73190d3a50f1fcda718d8cefd53aed120b"
+      "sha256": "af2c02b5928e21a056ee918167c2949509ce78171bafa0c6dd556095ee36e207"
     },
     {
       "id": "managed-desktop-scheduler",
       "path": "patches/0042-managed-desktop-scheduler.patch",
-      "sha256": "69c24a9a472a33432c67318d1410979a4608beaa469f09fdf957d5a6cfff9b8c"
+      "sha256": "47c1b364fee700ca0b5b306b4d4398825621e2680508be13289f03e26e68e21c"
     },
     {
       "id": "managed-shared-connection",
       "path": "patches/0043-managed-shared-connection.patch",
-      "sha256": "879d309e63635a1dc7df4e2476da0a97e380b2b632911585b8ef962cd426853a"
+      "sha256": "144391c828003303b377b55734f48915c49206d20d4c5965fa44f9f4a578b028"
     },
     {
       "id": "external-reconnect",
       "path": "patches/0044-external-reconnect.patch",
-      "sha256": "b8e6a617beff5313c00683cb9c750205265d7b25988b1bd67fd52fb6da504a8b"
+      "sha256": "42010d0f10916ba3712f8d933854656ef3e23c4b4845dc27634264932c52424d"
     },
     {
       "id": "desktop-cleanup-retry",
@@ -219,9 +219,14 @@
       "sha256": "f7fd8c23a1561326f87d657e3d45e94d8c0c83d47b52e049c918c4f95c9bab39"
     },
     {
+      "id": "managed-launcher-compat",
+      "path": "patches/0046-managed-launcher-compat.patch",
+      "sha256": "c898d2ea22b15ee62603a778058c10189cdc3a69cb2b2db8ab81a948d9b197be"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
-      "sha256": "f15b6983e53eaa66139f1055d2867072aea22610602b6bb113b87a37c4cdf255"
+      "sha256": "b07d4d34cf6179510e8aba703f1aab38fe9782093822b49ff7da1ec601c2199d"
     }
   ],
   "variants": {
@@ -267,7 +272,8 @@
       "managed-desktop-scheduler",
       "managed-shared-connection",
       "external-reconnect",
-      "desktop-cleanup-retry"
+      "desktop-cleanup-retry",
+      "managed-launcher-compat"
     ],
     "reasoning": [
       "reasoning-full",
@@ -312,6 +318,7 @@
       "managed-shared-connection",
       "external-reconnect",
       "desktop-cleanup-retry",
+      "managed-launcher-compat",
       "reasoning-identity"
     ]
   }

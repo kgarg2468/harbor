@@ -1673,10 +1673,10 @@ index 0000000000000000000000000000000000000000..68820283486295f3fd9a818f15d8e19f
 +  );
 +}
 diff --git a/apps/desktop/vite.config.ts b/apps/desktop/vite.config.ts
-index 89c11fe6e18c5237e46376c89fea5d9d43e1b02e..68fc56ad7269ec47311d2349a3274bc5469b70dc 100644
+index f3ec31ed34d9d11bbdbba1e0fe96a0ae2d17e348..37e5e379dc03da5ad75a3d871868942ed029b1a7 100644
 --- a/apps/desktop/vite.config.ts
 +++ b/apps/desktop/vite.config.ts
-@@ -102,6 +102,15 @@ export default defineConfig({
+@@ -113,6 +113,15 @@ export default defineConfig({
        outExtensions: () => ({ js: ".cjs" }),
        entry: ["src/mac-permission-preload.ts"],
      },
