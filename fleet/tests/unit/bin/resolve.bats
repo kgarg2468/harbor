@@ -227,3 +227,24 @@ root_resolve() {
   harbor_lock_release "${ROOT_FIX}"
   assert [ ! -e "${ROOT_FIX}/lock.d" ]
 }
+
+@test "resolve recognizes a prepared claude install at its locked version as decidable" {
+  # The public command must load and bind the reader itself. Supplying a reader or
+  # its home through the test environment would conceal the operator recovery bug
+  # this regression is meant to catch, so HOME is the only runtime location input.
+  . "${HARBOR_ROOT}/lib/runtime.sh"
+  . "${HARBOR_ROOT}/lib/agents.sh"
+  harbor_versions_load "$(harbor_versions_lock_path)"
+  locked="$(harbor_version_require claude_code_version)"
+  bin="$(harbor_agents_bin claude "${FIX_HOME}")"
+  mkdir -p "$(dirname "${bin}")"
+  printf '#!/bin/bash\nprintf "%%s (Claude Code)\\n" "%s"\n' "${locked}" >"${bin}"
+  chmod 0755 "${bin}"
+  fixture_entry "${FIX_ROOT}" 0001 runtime-install claude created prepared '"absent"' "\"${locked}\""
+  run resolve_cmd 0001 0001
+  assert_equal "${status}" 3
+  assert_output --partial 'journal.resolve_decidable'
+  refute_output --partial 'is undecidable'
+  refute_output --partial 'Type the entry number'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+}
