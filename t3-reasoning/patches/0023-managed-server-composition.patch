@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 902ea5e6fcfd4ca7e55b6c61b2da04c9bf4364b6..7bf54e51cb30791bc0d28064d72e36de4480e87d 100644
+index aef163b17faa2e5e7a0632ae39c76e792c425baf..866246aabed3df96ab29ee1b130b49cdd9a83abb 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -56,10 +56,12 @@ import { assert, it } from "@effect/vitest";
@@ -57,7 +57,7 @@ index 902ea5e6fcfd4ca7e55b6c61b2da04c9bf4364b6..7bf54e51cb30791bc0d28064d72e36de
  import {
    isThreadDetailEvent,
    resolveAvailableEditorsForConfig,
-@@ -11644,6 +11672,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
+@@ -11769,6 +11797,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
    );
  });
  
@@ -482,10 +482,10 @@ index 902ea5e6fcfd4ca7e55b6c61b2da04c9bf4364b6..7bf54e51cb30791bc0d28064d72e36de
    "reports thread HTTP and WebSocket transfer budgets",
    () =>
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6d86be2f4 100644
+index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284be5a2bd2 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -8,11 +8,13 @@ import * as Duration from "effect/Duration";
+@@ -13,11 +13,13 @@ import * as Duration from "effect/Duration";
  import * as Deferred from "effect/Deferred";
  import * as Effect from "effect/Effect";
  import * as Layer from "effect/Layer";
@@ -499,7 +499,7 @@ index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
  import * as ServerConfig from "./config.ts";
-@@ -121,6 +123,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
+@@ -128,6 +130,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
  import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
  import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
  import * as CloudCliState from "./cloud/CliState.ts";
@@ -523,7 +523,7 @@ index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6
  import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
  import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
  import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
-@@ -137,12 +156,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+@@ -144,12 +163,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
  import * as UsageService from "./usage/UsageService.ts";
  import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
  import { UpdateActivityLive } from "./updateActivity.ts";
@@ -542,7 +542,7 @@ index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6
  import * as NetService from "@t3tools/shared/Net";
  import * as RelayClient from "@t3tools/shared/relayClient";
  import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
-@@ -478,6 +503,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
+@@ -437,6 +462,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
    ),
  );
  
@@ -682,7 +682,7 @@ index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6
  const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
    // Subscribes to `account.rate-limits.updated` so usage bars track live
    // telemetry instead of waiting for the next status probe.
-@@ -545,7 +703,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -504,7 +662,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // driver context the registry captures for later `reconcile` calls. A
    // per-service provide, or one nested inside hydration, would split the
    // count.
@@ -691,7 +691,7 @@ index e3c4852ae402fede88c89569c847d37a3e5948e3..c993d2bff8d9e42dd21e58e53f68c0c6
  ).pipe(
    Layer.provideMerge(AntigravityInstallation.layer),
    // Shared native/canonical NDJSON writers used by both the per-instance
-@@ -805,19 +963,24 @@ const makeServerLayer = Layer.unwrap(
+@@ -766,19 +924,24 @@ const makeServerLayer = Layer.unwrap(
        }),
      );
  

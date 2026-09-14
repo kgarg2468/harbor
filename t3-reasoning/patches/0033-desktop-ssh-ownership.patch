@@ -401,7 +401,7 @@ index 1fe2b86aae7b96e41f87675748497a49501047d1..5329dc0b883935e4d6338e70b3eb4f0c
 +  );
 +}
 diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
-index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958c8fc62f0 100644
+index b0094f6867bc00c1599bb3c5ae55b0bef3e1e45b..8972d4f7ab96a3e31dbe47b83120987ac9c57177 100644
 --- a/apps/desktop/src/ssh/DesktopSshEnvironment.ts
 +++ b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
 @@ -18,13 +18,19 @@ import {
@@ -424,7 +424,7 @@ index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958
  import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
  
  export type DesktopSshEnvironmentRuntimeServices =
-@@ -128,46 +134,126 @@ const makePasswordPrompt = (
+@@ -127,50 +133,138 @@ const makePasswordPrompt = (
      prompts.request(request).pipe(Effect.mapError(toSshPasswordPromptError)),
  });
  
@@ -494,7 +494,7 @@ index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958
 +              Effect.withSpan("desktop.ssh.ensureEnvironment"),
 +            ),
 +          ),
-         ),
++        ),
 +      disconnectEnvironment: (target) =>
 +        lifecycle.withTeardown(
 +          ownership.withOperation(
@@ -506,7 +506,7 @@ index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958
 +                Effect.withSpan("desktop.ssh.disconnectEnvironment"),
 +              ),
 +          ),
-+        ),
+         ),
 +    });
    });
 -});
@@ -514,6 +514,10 @@ index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958
 -export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
 -  Layer.effect(DesktopSshEnvironment, make).pipe(
 -    Layer.provide(
+-      SshTunnel.SshEnvironmentManager.layer(
+-        options.resolveCliRunner === undefined
+-          ? {}
+-          : { resolveCliRunner: options.resolveCliRunner },
 +const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
 +  Effect.gen(function* () {
 +    const lifecycle = yield* DesktopUpdateLifecycle.DesktopUpdateLifecycle;
@@ -553,7 +557,9 @@ index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958
 +          yield* Scope.close(scope, Exit.void);
 +          yield* removeOwner;
 +        }),
-+      ),
+       ),
+-    ),
+-  );
 +    );
 +    const ownership: DesktopSshOwnership = {
 +      withOperation,
@@ -582,15 +588,11 @@ index 3b135eb2508f01bca53fc0246b14763a30993034..9fb0ea58b9e3a6098cb282a860067958
 +      ),
 +    };
 +    const managerContext = yield* Layer.buildWithScope(
-       SshTunnel.SshEnvironmentManager.layer({
-         ...(options.resolveCliPackageSpec === undefined
-           ? {}
-@@ -176,5 +262,13 @@ export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
-           ? {}
-           : { resolveCliRunner: options.resolveCliRunner }),
-       }),
--    ),
--  );
++      SshTunnel.SshEnvironmentManager.layer({
++        ...(options.resolveCliRunner === undefined
++          ? {}
++          : { resolveCliRunner: options.resolveCliRunner }),
++      }),
 +      managerScope,
 +    );
 +    return yield* makeEnvironment(ownership).pipe(Effect.provide(managerContext));

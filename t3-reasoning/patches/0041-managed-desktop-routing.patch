@@ -2586,7 +2586,7 @@ index 31e3c5af5260532b8b4eb244edeae6c65daf271b..45b14edb61d127c17fcab98f39e40cc1
 +  });
  });
 diff --git a/apps/desktop/src/updates/DesktopUpdates.ts b/apps/desktop/src/updates/DesktopUpdates.ts
-index 51584e3c796de35fe0c590496e0b156b941cd399..00e2668f50e89979d3b634f32b64de0f4cc3afa8 100644
+index c35b52e8343deae9a60da10d83eda0f9560fdc90..97776d98c9dca0a1cbbc19376878c1ca2da66cbf 100644
 --- a/apps/desktop/src/updates/DesktopUpdates.ts
 +++ b/apps/desktop/src/updates/DesktopUpdates.ts
 @@ -50,7 +50,7 @@ const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
@@ -2607,7 +2607,7 @@ index 51584e3c796de35fe0c590496e0b156b941cd399..00e2668f50e89979d3b634f32b64de0f
      readonly getState: Effect.Effect<DesktopUpdateState>;
      /** True while a check, download, install, or channel change holds the
          updater's single action reservation. */
-@@ -757,7 +759,8 @@ export const make = Effect.gen(function* () {
+@@ -758,7 +760,8 @@ export const make = Effect.gen(function* () {
      const error = new DesktopUpdaterReportedError({
        operation: Option.match(activeAction, {
          onNone: () => "background" as const,
@@ -2617,7 +2617,7 @@ index 51584e3c796de35fe0c590496e0b156b941cd399..00e2668f50e89979d3b634f32b64de0f
        }),
        cause,
      });
-@@ -846,6 +849,12 @@ export const make = Effect.gen(function* () {
+@@ -847,6 +850,12 @@ export const make = Effect.gen(function* () {
    });
  
    return DesktopUpdates.of({
@@ -2630,7 +2630,7 @@ index 51584e3c796de35fe0c590496e0b156b941cd399..00e2668f50e89979d3b634f32b64de0f
      getState: Ref.get(updateStateRef),
      isActionActive: activeUpdateAction.pipe(Effect.map(Option.isSome)),
      isInstallActive: activeUpdateAction.pipe(
-@@ -929,7 +938,10 @@ export const make = Effect.gen(function* () {
+@@ -930,7 +939,10 @@ export const make = Effect.gen(function* () {
        const activeAction = yield* tryStartChannelChange;
        if (Option.isSome(activeAction)) {
          return yield* new DesktopUpdateActionInProgressError({
@@ -3017,7 +3017,7 @@ index ee627d01a3bd7b59f69db9ea38bd223d334a7724..b5847205ef75655b180c9604f4dae2b3
      return { tryInstall };
    });
 diff --git a/apps/desktop/src/updates/updatesTestHarness.ts b/apps/desktop/src/updates/updatesTestHarness.ts
-index cd1404a50464792644b8dbd3f90b280c60d1a06e..b3c8cb471a38bdb206908cb294baeaae87677765 100644
+index fbcbb349f9e76339db929a878872f65672eff8dc..79e3c6396fc64622af78346e92ed0b1da4466e6d 100644
 --- a/apps/desktop/src/updates/updatesTestHarness.ts
 +++ b/apps/desktop/src/updates/updatesTestHarness.ts
 @@ -31,6 +31,7 @@ export interface UpdatesHarnessOptions {

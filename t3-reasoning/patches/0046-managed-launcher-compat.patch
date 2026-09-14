@@ -1,0 +1,418 @@
+diff --git a/apps/server/src/cloud/bootService.test.ts b/apps/server/src/cloud/bootService.test.ts
+index 25609853d2d347fd798a2f68e38ab6197186df9e..ff2827e692e7bf4bb3f798c26f9188d33ad29a1b 100644
+--- a/apps/server/src/cloud/bootService.test.ts
++++ b/apps/server/src/cloud/bootService.test.ts
+@@ -251,6 +251,23 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
+ });
+ 
+ it.layer(NodeServices.layer)("boot service install", (it) => {
++  it.effect("refuses managed installation before network, commands or service writes", () =>
++    Effect.gen(function* () {
++      const { makeService, fs, statePath, commands } = yield* makeHarness();
++      const service = yield* makeService(
++        undefined,
++        "0.0.41-nightly.20260914.1722.managed.1.p0123456789ab",
++      );
++      const before = yield* service.status;
++      commands.length = 0;
++      const error = yield* service.install().pipe(Effect.flip);
++      expect(error._tag).toBe("BootServiceInstallError");
++      expect(commands).toEqual([]);
++      expect(yield* fs.exists(statePath)).toBe(false);
++      expect(yield* fs.exists(before.unitPath)).toBe(false);
++      expect(yield* fs.exists(before.logPath)).toBe(false);
++    }),
++  );
+   it.effect(
+     "fails before installing files or validating a runtime when lingering needs an administrator",
+     () =>
+diff --git a/apps/server/src/cloud/bootService.ts b/apps/server/src/cloud/bootService.ts
+index 24495c4c2e8eb2684e198e126e0c517387f08ce1..35ad6cd6889ab373c6526589780bc8d3e8ef878c 100644
+--- a/apps/server/src/cloud/bootService.ts
++++ b/apps/server/src/cloud/bootService.ts
+@@ -748,6 +748,14 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
+     readonly allowDowngrade?: boolean;
+     readonly start?: boolean;
+   }) {
++    // Managed releases are installed by the managed stager and its owned
++    // supervisor. Never send their versions to upstream archive download or
++    // replace a working unit using the unrelated standalone-executable layout.
++    if (input.cliVersion.includes(".managed.")) {
++      return yield* new BootServiceInstallError({
++        cause: new Error("Managed service installation requires the managed runtime installer."),
++      });
++    }
+     const manager = yield* requireManager;
+     yield* fs
+       .makeDirectory(input.logsDir, { recursive: true })
+diff --git a/apps/server/src/cloud/managedServiceRuntime.test.ts b/apps/server/src/cloud/managedServiceRuntime.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8324a9da96fe92f2d34a028538f3a232b652d3e
+--- /dev/null
++++ b/apps/server/src/cloud/managedServiceRuntime.test.ts
+@@ -0,0 +1,166 @@
++// @effect-diagnostics nodeBuiltinImport:off
++import { describe, it, expect } from "@effect/vitest";
++import * as fs from "node:fs/promises";
++import * as path from "node:path";
++import * as os from "node:os";
++import { Launcher, readServiceState, writeServiceState } from "../serviceLauncher.ts";
++import {
++  assertPlainNodeHost,
++  isManagedServiceVersion,
++  verifyManagedServiceRuntime,
++} from "./managedServiceRuntime.ts";
++
++const first = "0.0.41-nightly.20260914.1722.managed.1.p0123456789ab";
++const next = "0.0.41-nightly.20260914.1722.managed.2.p0123456789ab";
++async function fixture(run: (base: string, root: string) => Promise<void>) {
++  const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "managed-launcher-")));
++  try {
++    for (const version of [first, next]) {
++      const root = path.join(base, "runtime/versions", version);
++      await fs.mkdir(path.join(root, "node_modules/t3/dist"), { recursive: true });
++      await fs.writeFile(path.join(root, ".install-complete"), `${version}\n`);
++      await fs.writeFile(
++        path.join(root, "node_modules/t3/package.json"),
++        JSON.stringify({ name: "t3", version }),
++      );
++      await fs.writeFile(path.join(root, "node_modules/t3/dist/bin.mjs"), "process.exit(0)");
++      const releaseArtifactId = `managed-server-${process.platform}-${process.arch}`;
++      const hash = "a".repeat(64);
++      await fs.writeFile(
++        path.join(root, ".managed-artifact.json"),
++        JSON.stringify({
++          schemaVersion: 1,
++          version,
++          releaseArtifactId,
++          artifactId: `${releaseArtifactId}@sha256:${hash}`,
++          archiveSha256: hash,
++          archiveBytes: 123,
++          manifestSha256: hash,
++          releaseInputSha256: hash,
++          platform: process.platform,
++          arch: process.arch,
++          launcherProtocol: 2,
++        }),
++      );
++    }
++    await run(base, path.join(base, "runtime/versions", first));
++  } finally {
++    await fs.rm(base, { recursive: true, force: true });
++  }
++}
++
++describe("managed launcher compatibility", () => {
++  it("requires exact managed versions and plain Node", () => {
++    expect(isManagedServiceVersion(first)).toBe(true);
++    for (const value of [
++      first.replace("managed.1", "managed.0"),
++      first + ".extra",
++      "1.2.3",
++      "../" + first,
++    ]) {
++      expect(isManagedServiceVersion(value)).toBe(false);
++    }
++    expect(() => assertPlainNodeHost({ node: "24.13.1" }, false)).not.toThrow();
++    for (const versions of [{ node: "24", electron: "40" }, { node: "24", bun: "1" }, {}]) {
++      expect(() => assertPlainNodeHost(versions, false)).toThrow();
++    }
++    expect(() => assertPlainNodeHost({ node: "24" }, true)).toThrow();
++  });
++
++  for (const corruption of [
++    "version",
++    "sentinel",
++    "record",
++    "entry-symlink",
++    "directory-symlink",
++    "record-symlink",
++  ] as const) {
++    it(`rejects ${corruption} without choosing a fake archive executable`, async () =>
++      fixture(async (base, root) => {
++        await fs.writeFile(path.join(root, "t3"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
++        if (corruption === "version")
++          await fs.writeFile(
++            path.join(root, "node_modules/t3/package.json"),
++            JSON.stringify({ name: "t3", version: next }),
++          );
++        if (corruption === "sentinel")
++          await fs.writeFile(path.join(root, ".install-complete"), next + "\n");
++        if (corruption === "record")
++          await fs.writeFile(path.join(root, ".managed-artifact.json"), "{}");
++        if (corruption.endsWith("symlink")) {
++          const relative =
++            corruption === "entry-symlink"
++              ? "node_modules/t3/dist/bin.mjs"
++              : corruption === "directory-symlink"
++                ? "node_modules/t3/dist"
++                : ".managed-artifact.json";
++          const original = path.join(root, relative);
++          const target = path.join(base, "external");
++          await fs.rename(original, target);
++          await fs.symlink(target, original);
++        }
++        await expect(verifyManagedServiceRuntime(base, first)).rejects.toThrow();
++        await expect(
++          new Launcher(base, { protocol: 2, activeVersion: first }).run(),
++        ).rejects.toThrow();
++      }));
++  }
++
++  for (const scenario of ["start", "commit", "rollback", "recover"] as const) {
++    it(`runs managed Node children through ${scenario}`, async () =>
++      fixture(async (base) => {
++        const statePath = path.join(base, "runtime/service-state.json");
++        const database = path.join(base, "userdata/state.sqlite");
++        await fs.mkdir(path.dirname(database));
++        await fs.writeFile(database, "original");
++        const marker = path.join(base, "children.jsonl");
++        const source = `
++import fs from "node:fs";
++const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
++fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify({version:context.childVersion, args:process.argv.slice(2)}) + "\\n");
++if (context.update?.status === "pending") {
++ process.send({type:"prepared",updateId:${scenario === "rollback" ? '"wrong"' : "context.update.id"}});
++ process.on("message", message => {if(message.type === "committed") process.exit(0)});
++} else if (!context.update && ${JSON.stringify(scenario !== "start")}) {
++ process.send({type:"request-update",targetVersion:${JSON.stringify(next)},dbPath:${JSON.stringify(database)}});
++ setInterval(()=>{},1000);
++} else process.exit(0);
++`;
++        for (const version of [first, next])
++          await fs.writeFile(
++            path.join(base, "runtime/versions", version, "node_modules/t3/dist/bin.mjs"),
++            source,
++          );
++        await writeServiceState(statePath, {
++          protocol: 2,
++          activeVersion: first,
++          ...(scenario === "recover"
++            ? {
++                update: {
++                  id: "recovery",
++                  status: "pending" as const,
++                  fromVersion: first,
++                  targetVersion: next,
++                  dbPath: database,
++                },
++              }
++            : {}),
++        });
++        await expect(new Launcher(base, await readServiceState(statePath)).run()).rejects.toThrow();
++        const children = (await fs.readFile(marker, "utf8"))
++          .trim()
++          .split("\n")
++          .map((line) => JSON.parse(line));
++        expect(children.length).toBeGreaterThan(0);
++        expect(
++          children.every((child) => child.args.length === 1 && child.args[0] === "serve"),
++        ).toBe(true);
++        const state = await readServiceState(statePath);
++        expect(state.activeVersion).toBe(
++          scenario === "commit" || scenario === "recover" ? next : first,
++        );
++        if (scenario !== "start")
++          expect(state.update?.status).toBe(scenario === "rollback" ? "rolled-back" : "committed");
++      }));
++  }
++});
+diff --git a/apps/server/src/cloud/managedServiceRuntime.ts b/apps/server/src/cloud/managedServiceRuntime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..011be4042cf1f1f38fab261544b08736c0fc40ab
+--- /dev/null
++++ b/apps/server/src/cloud/managedServiceRuntime.ts
+@@ -0,0 +1,106 @@
++// @effect-diagnostics nodeBuiltinImport:off
++// Shared with the standalone launcher; keep this module on Node built-ins.
++import * as NodeFSP from "node:fs/promises";
++import { constants } from "node:fs";
++import * as NodePath from "node:path";
++import * as NodeSea from "node:sea";
++
++const numeric = "(?:0|[1-9]\\d*)";
++const managedVersionPattern = new RegExp(
++  `^${numeric}\\.${numeric}\\.${numeric}-nightly\\.[1-9]\\d{7}\\.${numeric}\\.managed\\.(${numeric})\\.p[0-9a-f]{12}$`,
++);
++
++export function isManagedServiceVersion(version: string): boolean {
++  const match = managedVersionPattern.exec(version);
++  return match !== null && Number.isSafeInteger(Number(match[1])) && Number(match[1]) > 0;
++}
++
++export function assertPlainNodeHost(
++  versions: Readonly<Record<string, string | undefined>> = process.versions,
++  sea = NodeSea.isSea(),
++): void {
++  if (!versions.node || versions.electron || versions.bun || sea) {
++    throw new Error("Managed service runtimes require a plain Node launcher.");
++  }
++}
++
++export async function verifyManagedServiceRuntime(baseDir: string, version: string): Promise<void> {
++  if (!isManagedServiceVersion(version)) throw new Error("Invalid managed service version.");
++  assertPlainNodeHost();
++  const root = NodePath.join(baseDir, "runtime", "versions", version);
++  const identities: Array<{ file: string; dev: number; ino: number }> = [];
++  // Every component from the supplied base to the executable is owned; a
++  // symlink cannot redirect either metadata reads or the selected child.
++  const directories = [
++    baseDir,
++    NodePath.join(baseDir, "runtime"),
++    NodePath.dirname(root),
++    root,
++    NodePath.join(root, "node_modules"),
++    NodePath.join(root, "node_modules/t3"),
++    NodePath.join(root, "node_modules/t3/dist"),
++  ];
++  for (const directory of directories) {
++    const stat = await NodeFSP.lstat(directory);
++    if (!stat.isDirectory() || stat.isSymbolicLink())
++      throw new Error("Invalid managed runtime directory.");
++    identities.push({ file: directory, dev: stat.dev, ino: stat.ino });
++  }
++  const read = async (relative: string, maxBytes: number) => {
++    const file = NodePath.join(root, relative);
++    const handle = await NodeFSP.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
++    try {
++      const stat = await handle.stat();
++      if (!stat.isFile() || stat.size > maxBytes)
++        throw new Error("Invalid managed runtime metadata.");
++      identities.push({ file, dev: stat.dev, ino: stat.ino });
++      return await handle.readFile("utf8");
++    } finally {
++      await handle.close();
++    }
++  };
++  const [sentinel, packageText, recordText] = await Promise.all([
++    read(".install-complete", 512),
++    read("node_modules/t3/package.json", 1024 * 1024),
++    read(".managed-artifact.json", 16 * 1024),
++  ]);
++  const entry = await NodeFSP.lstat(NodePath.join(root, "node_modules/t3/dist/bin.mjs"));
++  if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("Invalid managed runtime entry.");
++  identities.push({
++    file: NodePath.join(root, "node_modules/t3/dist/bin.mjs"),
++    dev: entry.dev,
++    ino: entry.ino,
++  });
++  const pkg = JSON.parse(packageText);
++  const record = JSON.parse(recordText);
++  const hex = (value: unknown) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
++  if (
++    sentinel !== `${version}\n` ||
++    pkg.name !== "t3" ||
++    pkg.version !== version ||
++    Object.keys(record).length !== 11 ||
++    record.schemaVersion !== 1 ||
++    record.version !== version ||
++    record.launcherProtocol !== 2 ||
++    !["managed-server-darwin-arm64", "managed-server-linux-x64"].includes(
++      record.releaseArtifactId,
++    ) ||
++    record.platform !== process.platform ||
++    record.arch !== process.arch ||
++    record.releaseArtifactId !== `managed-server-${process.platform}-${process.arch}` ||
++    !hex(record.archiveSha256) ||
++    !hex(record.manifestSha256) ||
++    !hex(record.releaseInputSha256) ||
++    !Number.isSafeInteger(record.archiveBytes) ||
++    record.archiveBytes <= 0 ||
++    record.artifactId !== `${record.releaseArtifactId}@sha256:${record.archiveSha256}`
++  ) {
++    throw new Error("Managed runtime metadata does not match its selected version and host.");
++  }
++  for (const identity of identities) {
++    const stat = await NodeFSP.lstat(identity.file);
++    if (stat.isSymbolicLink() || stat.dev !== identity.dev || stat.ino !== identity.ino) {
++      throw new Error("Managed runtime changed during validation.");
++    }
++  }
++}
+diff --git a/apps/server/src/service-launcher.ts b/apps/server/src/service-launcher.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a59f445188ed35d0447e715ff8d8c2a97395da5
+--- /dev/null
++++ b/apps/server/src/service-launcher.ts
+@@ -0,0 +1,18 @@
++// @effect-diagnostics nodeBuiltinImport:off
++// Standalone entry for managed Node runtimes; executable builds use the
++// __service-launcher subcommand instead. Importing this module does not start it.
++import { resolve } from "node:path";
++import { pathToFileURL } from "node:url";
++
++import { main } from "./serviceLauncher.ts";
++
++if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
++  main().catch((cause: unknown) => {
++    const category = cause instanceof Error ? cause.name : "UnknownError";
++    const message = cause instanceof Error ? cause.message : String(cause);
++    process.stderr.write(
++      `[service-launcher] ${category.slice(0, 80)}: ${message.replace(/[\r\n]/g, " ").slice(0, 512)}\n`,
++    );
++    process.exitCode = 1;
++  });
++}
+diff --git a/apps/server/src/serviceLauncher.ts b/apps/server/src/serviceLauncher.ts
+index cfdd3d75b57ee7cb7ebca52dd3ae126460664dc9..48dfa0c6aa1c6c5af159df5624d3998142cb7252 100644
+--- a/apps/server/src/serviceLauncher.ts
++++ b/apps/server/src/serviceLauncher.ts
+@@ -9,6 +9,10 @@ import * as NodeCrypto from "node:crypto";
+ import * as NodeFS from "node:fs";
+ import * as NodeFSP from "node:fs/promises";
+ import * as NodePath from "node:path";
++import {
++  isManagedServiceVersion,
++  verifyManagedServiceRuntime,
++} from "./cloud/managedServiceRuntime.ts";
+ 
+ import type {
+   PendingServiceUpdate,
+@@ -52,14 +56,18 @@ const runtimePaths = (baseDir: string, version: string) => {
+   const executableName = process.platform === "win32" ? "t3.exe" : "t3";
+   return {
+     versionDir,
+-    entryPath: NodePath.join(versionDir, executableName),
++    managed: isManagedServiceVersion(version),
++    entryPath: NodePath.join(
++      versionDir,
++      isManagedServiceVersion(version) ? "node_modules/t3/dist/bin.mjs" : executableName,
++    ),
+     sentinelPath: NodePath.join(versionDir, ".install-complete"),
+   };
+ };
+ 
+ const runtimeSpawnArguments = (paths: ReturnType<typeof runtimePaths>) => ({
+-  command: paths.entryPath,
+-  args: ["serve"],
++  command: paths.managed ? process.execPath : paths.entryPath,
++  args: paths.managed ? [paths.entryPath, "serve"] : ["serve"],
+ });
+ 
+ /** SQLite persists across the main file plus its WAL and shared-memory sidecars. */
+@@ -216,6 +224,10 @@ export async function writeServiceState(filePath: string, state: ServiceState):
+ async function runtimeExists(baseDir: string, version: string): Promise<boolean> {
+   const paths = runtimePaths(baseDir, version);
+   try {
++    if (version.includes(".managed.")) {
++      await verifyManagedServiceRuntime(baseDir, version);
++      return true;
++    }
+     const [entry, sentinel] = await Promise.all([
+       NodeFSP.stat(paths.entryPath),
+       NodeFSP.readFile(paths.sentinelPath, "utf8"),
+diff --git a/apps/server/vite.config.ts b/apps/server/vite.config.ts
+index 32a8be7e6daa9c249e3bc62b8830df4d281759a1..9137bffe470384a6d5d1089776daf05cec7dbeca 100644
+--- a/apps/server/vite.config.ts
++++ b/apps/server/vite.config.ts
+@@ -77,7 +77,9 @@ export default mergeConfig(
+     pack: {
+       // The executable embeds one entry; the history worker becomes a hidden
+       // subcommand there instead of a sibling script.
+-      entry: packExecutable ? ["src/bin.ts"] : ["src/bin.ts", "src/claude-history-worker.ts"],
++      entry: packExecutable
++        ? ["src/bin.ts"]
++        : ["src/bin.ts", "src/claude-history-worker.ts", "src/service-launcher.ts"],
+       outDir: packExecutable ? "dist-exe" : "dist",
+       sourcemap: !packExecutable,
+       clean: true,

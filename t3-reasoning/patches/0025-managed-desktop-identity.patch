@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/settings/DesktopClientSettings.test.ts b/apps/desktop/src/settings/DesktopClientSettings.test.ts
-index 5ad23ee7058204118756c2a553349844dd23a7eb..a8cd1a7439850409a7cbd12dc4f9fba703d45ee5 100644
+index 53044dcf7e5d58d924140e76df7f2276beaf1ba2..7f81f1003c3b2c9d68f6f32277a3dd6158b78945 100644
 --- a/apps/desktop/src/settings/DesktopClientSettings.test.ts
 +++ b/apps/desktop/src/settings/DesktopClientSettings.test.ts
 @@ -40,6 +40,7 @@ const clientSettings: ClientSettings = {
@@ -11,14 +11,18 @@ index 5ad23ee7058204118756c2a553349844dd23a7eb..a8cd1a7439850409a7cbd12dc4f9fba7
    fontFamilyCode: "",
    fontFamilyComposer: "",
 diff --git a/apps/desktop/src/updates/updateChannels.test.ts b/apps/desktop/src/updates/updateChannels.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..777915df55dfb84ce0bf50997a5b63808fe0dc22
---- /dev/null
+index acf4155fab8e39798059de18dbd13a9458cd2a6b..acb976e7e8896279bad87fe982fcda14a296bfcd 100644
+--- a/apps/desktop/src/updates/updateChannels.test.ts
 +++ b/apps/desktop/src/updates/updateChannels.test.ts
-@@ -0,0 +1,83 @@
-+import { describe, expect, it } from "vite-plus/test";
-+
-+import { isNightlyDesktopVersion, resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
+@@ -11,6 +11,88 @@ describe("updateChannels", () => {
+ 
+   it("only matches the first prerelease identifier", () => {
+     expect(isNightlyDesktopVersion("1.2.3-foo-preview.20260911.1")).toBe(false);
++    expect(isNightlyDesktopVersion("1.2.3-foo-nightly.20260911.1")).toBe(false);
++    expect(resolveDefaultDesktopUpdateChannel("1.2.3-foo-nightly.20260911.1")).toBe("latest");
+     expect(isNightlyDesktopVersion("1.2.3")).toBe(false);
+   });
+ });
 +
 +const ORDINARY_NIGHTLY = "0.0.40-nightly.20260907.1359";
 +const MANAGED_NIGHTLY = "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab";
@@ -36,11 +40,11 @@ index 0000000000000000000000000000000000000000..777915df55dfb84ce0bf50997a5b6380
 +        "0.0.40-nightly.20260907.1359.managed.9007199254740991.p0123456789ab",
 +      ),
 +    ).toBe(true);
-+    // Ordinary nightly classification stays suffix-only.
++    // Ordinary nightlies keep upstream's first-prerelease-identifier classification.
 +    expect(isNightlyDesktopVersion("junk-nightly.20260907.1359")).toBe(true);
 +  });
 +
-+  it("keeps stable and preview versions outside nightly", () => {
++  it("keeps stable and pull request versions outside nightly", () => {
 +    expect(isNightlyDesktopVersion("0.0.40")).toBe(false);
 +    expect(isNightlyDesktopVersion("0.0.40-pr.8182.1")).toBe(false);
 +  });
@@ -100,16 +104,13 @@ index 0000000000000000000000000000000000000000..777915df55dfb84ce0bf50997a5b6380
 +  });
 +});
 diff --git a/apps/desktop/src/updates/updateChannels.ts b/apps/desktop/src/updates/updateChannels.ts
-index 731910e441feab521581fea3d98a27c85e566991..8e74051f1d499c1badc35fd3ad1259dc72a639f3 100644
+index e7f9a2f8547d09dd8daf0e2aeb46ea701c6b3da2..312a5ca5164e94bf58bb5613b6ae1c96ee7c51dc 100644
 --- a/apps/desktop/src/updates/updateChannels.ts
 +++ b/apps/desktop/src/updates/updateChannels.ts
-@@ -1,9 +1,29 @@
- import type { DesktopUpdateChannel } from "@t3tools/contracts";
+@@ -9,10 +9,31 @@ const NIGHTLY_VERSION_PATTERN = /^[^-+]+-nightly\.\d{8}\.\d+$/;
+ // and no updater feed ever lists a preview release.
+ const PRERELEASE_VERSION_PATTERN = /^[^-+]+-(?:nightly|preview)\.\d{8}\.\d+$/;
  
--const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
-+// Ordinary upstream nightlies keep their historical suffix-only classification.
-+const ORDINARY_NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
-+
 +// Harbor derives a managed desktop version from an ordinary nightly version by
 +// appending `.managed.<counter>.p<12 lowercase hex>`, and the whole string must
 +// match Harbor's release descriptor grammar: SemVer numerics without leading
@@ -128,15 +129,20 @@ index 731910e441feab521581fea3d98a27c85e566991..8e74051f1d499c1badc35fd3ad1259dc
 +  const releaseCounter = Number(match[1]);
 +  return Number.isSafeInteger(releaseCounter) && releaseCounter >= 1;
 +}
- 
++
  export function isNightlyDesktopVersion(version: string): boolean {
--  return NIGHTLY_VERSION_PATTERN.test(version);
-+  return ORDINARY_NIGHTLY_VERSION_PATTERN.test(version) || isManagedNightlyDesktopVersion(version);
+-  return PRERELEASE_VERSION_PATTERN.test(version);
++  return PRERELEASE_VERSION_PATTERN.test(version) || isManagedNightlyDesktopVersion(version);
  }
  
  export function resolveDefaultDesktopUpdateChannel(appVersion: string): DesktopUpdateChannel {
+-  return NIGHTLY_VERSION_PATTERN.test(appVersion) ? "nightly" : "latest";
++  return NIGHTLY_VERSION_PATTERN.test(appVersion) || isManagedNightlyDesktopVersion(appVersion)
++    ? "nightly"
++    : "latest";
+ }
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index b601d3997fd76f683541dff3bd490b58c6b43fd0..5a8cb5084939fa0e577e0aa2185b50b1366f0565 100644
+index 08d7cf10e1a61bb597cece5622a445bb0fa9d231..49b2d10ff59baf3ef3d92af9c5f0f4491e1a5edb 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
 @@ -33,6 +33,7 @@ import {
@@ -147,7 +153,7 @@ index b601d3997fd76f683541dff3bd490b58c6b43fd0..5a8cb5084939fa0e577e0aa2185b50b1
    isMacPasskeySigningConfigurationError,
    LinuxIconResizeError,
    LinuxDesktopBuildPrerequisitesMissingError,
-@@ -93,6 +94,10 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+@@ -94,6 +95,10 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
  import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
  import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
  
@@ -155,10 +161,10 @@ index b601d3997fd76f683541dff3bd490b58c6b43fd0..5a8cb5084939fa0e577e0aa2185b50b1
 +// followed by `.managed.<positive counter>.p<12 lowercase hex>`.
 +const MANAGED_NIGHTLY_VERSION = "0.0.40-nightly.20260907.1359.managed.1.p0123456789ab";
 +
- // A minimal stand-in for the staged sidecar roots packed into the WSL archive.
- const stageWslRuntimeTreeFixture = Effect.fn("stageWslRuntimeTreeFixture")(function* (
-   root: string,
-@@ -261,11 +266,81 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+ // A minimal stand-in for the Linux CLI release archive: one top-level
+ // directory named after the archive stem holding the executable, the web
+ // client, and the runtime externals with node-pty built from source.
+@@ -251,11 +256,81 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
    it("resolves the dedicated nightly updater channel from nightly versions", () => {
      assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
      assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
@@ -240,7 +246,7 @@ index b601d3997fd76f683541dff3bd490b58c6b43fd0..5a8cb5084939fa0e577e0aa2185b50b1
    });
  
    it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
-@@ -367,6 +442,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -368,6 +443,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      ),
    );
  
@@ -329,14 +335,14 @@ index b601d3997fd76f683541dff3bd490b58c6b43fd0..5a8cb5084939fa0e577e0aa2185b50b1
 +    }),
 +  );
 +
-   it("omits bundled workspace packages from staged desktop dependencies", () => {
+   it("stages only the desktop main-process externals", () => {
      assert.deepStrictEqual(
        resolveDesktopRuntimeDependencies(
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 44d5f0ab12f4570ba648cd12679c761ac8d52b39..0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18 100644
+index cb47e40b8b11055a364b1696c6c1a37121e322cb..c31327fa6bb827822d9b1e2f9e6935993f3427d1 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -2595,8 +2595,32 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
+@@ -2560,8 +2560,32 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
    };
  });
  
@@ -369,8 +375,8 @@ index 44d5f0ab12f4570ba648cd12679c761ac8d52b39..0a25c8b37a1450b3f5e777e58701b0cf
 +    : "latest";
  }
  
- function isDesktopPreviewVersion(version: string): boolean {
-@@ -2693,7 +2717,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+ // Pull request builds (`-pr.<n>.`) and the maintainers' preview train
+@@ -2669,7 +2693,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    };
    const updateChannel = resolveDesktopUpdateChannel(version);
    if (!isDesktopPreviewVersion(version)) {

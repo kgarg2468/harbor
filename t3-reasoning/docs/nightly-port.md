@@ -10,14 +10,76 @@ maintenance record for the current pin.
 | Item | Value |
 | --- | --- |
 | Upstream repository | `https://github.com/pingdotgg/t3code.git` |
-| Upstream commit | `c07575f573dd3a1af4f734297d17f7c951c95f10` |
-| Upstream tag at that commit | `v0.0.41-nightly.20260914.1687` |
+| Upstream commit | `112a7088da63ea4fa48fee63dc8f29557c545ed7` |
+| Upstream tag at that commit | `v0.0.41-nightly.20260914.1722` |
 | Patch `reasoning-full` | `patches/0001-reasoning.patch` (37 files) |
 | Patch `desktop-runtime-common` | `patches/0002-desktop-runtime-common.patch` (4 files) |
 | Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (13 files) |
 | Upstream license | `UPSTREAM-LICENSE` (MIT, T3 Tools Inc., copied unchanged) |
 
-The current port was verified on 2026-09-14 against official release
+The current port targets official release `388660723`, published at
+`2026-09-14T19:37:08Z`. The previous lock pinned
+`c07575f573dd3a1af4f734297d17f7c951c95f10` (Nightly 20260914.1687).
+The existing 43 active patches retain their order and feature ownership; a
+new common `managed-launcher-compat` patch restores managed service compatibility.
+The inactive
+thread-fork catalog entry and both variants' selections remain unchanged.
+
+### Changes for Nightly 20260914.1722
+
+- Reasoning delivery follows upstream's `responseStreamingMode`: token mode
+  streams reasoning, while paragraph and turn modes retain completion/spill
+  buffering. Assistant answers retain upstream's paragraph pacing. The
+  timeline retains upstream's worktree setup card alongside reasoning rows.
+- Shared-default controls follow upstream's new connection list: the selected
+  connection carries a badge and menu action, with persisted default status
+  above the list. Local host administration still uses the platform primary.
+- Desktop identity retains preview branding, upstream telemetry configuration,
+  static client serving, and the Linux CLI payload. Managed helper exclusions
+  coexist with upstream source-map exclusions. The Windows cross-architecture
+  test distinguishes the packaged executable probe from the helper probe.
+- SSH retains upstream's self-contained archive runner. Node discovery is
+  conditional on managed pairing or a source checkout; ordinary archive
+  commands require neither Node nor npm. Managed pairing validation remains
+  fail-closed and its fixtures cover the archive fallback.
+- Managed server archives retain their authenticated `node_modules/t3` layout
+  while adapting to upstream's platform-aware runtime paths. HTTP test layers
+  provide admission middleware, and the server fixture splits its long Effect
+  pipeline to remain within the typed overload limit.
+- The common launcher compatibility patch restores the standalone Node entry
+  for existing managed boot units. Exact managed versions select the fixed
+  `node_modules/t3/dist/bin.mjs` path through plain Node after validating
+  metadata, host, sentinel and filesystem ownership. Official archive versions
+  retain their direct executable. Managed `service install` fails before any
+  mutation or download; managed installations continue through their dedicated
+  installer instead of upstream's archive installer.
+
+Both variants prepare through the checksum-validating CLI. Their tree ids are
+`29669e8de8e163e68cec4e5c3c667bf358cd36be` (Reasoning) and
+`5db206947aded11508579810abd161f6d7f1dea5` (managed Nightly). The Reasoning
+tree matches the staged source port exactly. Only the 13 identity files differ;
+server, web and shared package sources match between variants.
+
+Validation for this port:
+
+- Node 24.13.1 component suite: 374 passing tests, including real variant
+  preparation; four live-server smoke tests skipped because no binary was
+  supplied. Markdown lint passes.
+- Reasoning and orchestration: 1,022 passing tests across 47 suites. Desktop
+  update, packaging and server integration: 642 passing tests across 18 suites.
+  The SSH runner suite passes all 62 tests, including real shell execution.
+- Contracts, client-runtime, server, web, desktop and SSH typechecks pass. The source
+  delta passes `git diff --check`. Dependencies installed with the frozen
+  upstream lock on Node 24.13.1 and pnpm 11.10.0.
+- Launcher compatibility: 59 tests pass, including managed start, update,
+  rollback, recovery, metadata and symlink refusal, plain-Node enforcement,
+  guarded installation and unchanged official lifecycle coverage. The real
+  non-SEA server bundle emits its standalone launcher; SEA configuration retains
+  one CLI entry. No desktop app was built, installed or deployed by this port.
+
+### Previous Nightly 20260914.1687 port
+
+The previous port was verified on 2026-09-14 against official release
 `388118886`, published at `2026-09-14T02:43:52Z`. The previous lock pinned
 `17f8e2a8acba76d5516e0a52c85bf802b0e17892` (Nightly 20260913.1646).
 All 43 active patches were replayed in order and exported as incremental

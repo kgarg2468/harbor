@@ -1073,10 +1073,10 @@ index 0000000000000000000000000000000000000000..01d18a96f87848a7f65ade74605398de
 +
 +export const layer = Layer.effect(DesktopUpdateLifecycle, make);
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 939b88c7d0d0b9aacada58fbf947368945d44857..4681da83123c891adc34f6b1298d9b51d2c2974d 100644
+index 0d626a51955dd9e63038fc77ff0769a989d4463f..8fcbf8b133d39761b47a5d2e49d86a9c797ad82f 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -40,6 +40,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
+@@ -39,6 +39,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
  import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
  import * as DesktopAssets from "./app/DesktopAssets.ts";
  import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
@@ -1084,7 +1084,7 @@ index 939b88c7d0d0b9aacada58fbf947368945d44857..4681da83123c891adc34f6b1298d9b51
  import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
  import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
  import * as DesktopNetworkInterfaces from "./backend/DesktopNetworkInterfaces.ts";
-@@ -180,6 +181,7 @@ const desktopAppActivationLayer = DesktopAppActivation.layer.pipe(
+@@ -171,6 +172,7 @@ const desktopAppActivationLayer = DesktopAppActivation.layer.pipe(
  // WSL second instance gets registered later in the migration. See
  // DesktopBackendPool.ts header for the full rollout plan.
  const desktopBackendLayer = DesktopBackendPool.layer.pipe(

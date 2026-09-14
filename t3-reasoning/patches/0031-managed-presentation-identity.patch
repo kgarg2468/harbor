@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index 262097ca78ea67be03613b0effb45f1a2193f606..c714b259bc257b0460aef1f44fcc13794e3e1823 100644
+index 0e5fbecd022415faedbed641937d5e1924ef837a..a7d22dbff8b7f76e4d9777116b5ad4614089a0fc 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
 @@ -40,6 +40,59 @@ const makeEnvironment = (
@@ -63,7 +63,7 @@ index 262097ca78ea67be03613b0effb45f1a2193f606..c714b259bc257b0460aef1f44fcc1379
      Effect.gen(function* () {
        const environment = yield* makeEnvironment(
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index 9d7f00c3ee69f0f04f8e3f7cd0b19ebef38af410..31e4c178ec0b811eb036a694f2dc4a22b1048502 100644
+index e7a489d5e89d9477faed1b964a4c4b7efb08309f..34f72db6c599ef36a3d1894ceb71cc2ca393ead9 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
 @@ -1,4 +1,5 @@
@@ -72,7 +72,7 @@ index 9d7f00c3ee69f0f04f8e3f7cd0b19ebef38af410..31e4c178ec0b811eb036a694f2dc4a22
    DesktopAppBranding,
    DesktopAppStageLabel,
    DesktopRuntimeArch,
-@@ -29,6 +30,38 @@ export interface MakeDesktopEnvironmentInput {
+@@ -30,6 +31,38 @@ export interface MakeDesktopEnvironmentInput {
    readonly runningUnderArm64Translation: boolean;
  }
  
@@ -111,18 +111,18 @@ index 9d7f00c3ee69f0f04f8e3f7cd0b19ebef38af410..31e4c178ec0b811eb036a694f2dc4a22
  export class DesktopEnvironment extends Context.Service<
    DesktopEnvironment,
    {
-@@ -70,6 +103,7 @@ export class DesktopEnvironment extends Context.Service<
-     readonly commitHashOverride: Option.Option<string>;
-     readonly otlpTracesUrl: Option.Option<string>;
+@@ -75,6 +108,7 @@ export class DesktopEnvironment extends Context.Service<
      readonly otlpExportIntervalMs: number;
+     readonly otlpHeaders: Option.Option<Record<string, string>>;
+     readonly otlpProtocol: OtlpProtocol;
 +    readonly managedPresentationIdentity?: ManagedDesktopPresentationIdentity;
      readonly branding: DesktopAppBranding;
      readonly displayName: string;
      readonly appUserModelId: string;
-@@ -222,6 +256,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
-     commitHashOverride: config.commitHashOverride,
-     otlpTracesUrl: config.otlpTracesUrl,
+@@ -230,6 +264,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
      otlpExportIntervalMs: config.otlpExportIntervalMs,
+     otlpHeaders: config.otlpHeaders,
+     otlpProtocol: config.otlpProtocol,
 +    ...(input.isPackaged && !isDevelopment && isExactManagedVersion(input.appVersion)
 +      ? { managedPresentationIdentity: MANAGED_PRESENTATION_IDENTITY }
 +      : {}),
@@ -130,7 +130,7 @@ index 9d7f00c3ee69f0f04f8e3f7cd0b19ebef38af410..31e4c178ec0b811eb036a694f2dc4a22
      displayName,
      appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447..87b0d5e7b136137a44272b88f65fbc00b376c276 100644
+index b1a2cc9500ed493b593325eb66ea71b696eddbd6..6a80800fd1aa5bb38bee27a28bfb57f89c1d7f0f 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 @@ -105,6 +105,7 @@ const withHarness = <A, E, R>(
@@ -180,7 +180,7 @@ index c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447..87b0d5e7b136137a44272b88f65fbc00
          assert.equal(first.bootstrap.noBrowser, true);
          assert.equal(first.bootstrap.port, 4888);
          assert.equal(first.bootstrap.host, "0.0.0.0");
-@@ -929,6 +946,7 @@ describe("DesktopBackendConfiguration", () => {
+@@ -920,6 +937,7 @@ describe("DesktopBackendConfiguration", () => {
            assert.equal(config.bootstrap.host, "0.0.0.0");
            assert.equal(config.bootstrap.tailscaleServeEnabled, false);
            assert.notProperty(config.bootstrap, "desktopTelemetryFd");
@@ -189,10 +189,10 @@ index c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447..87b0d5e7b136137a44272b88f65fbc00
            // httpBaseUrl uses the resolved distro IP from the test stub,
            // not localhost — the renderer reaches the backend directly to
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-index 2d5d87f7b2e79dc4d40979b5861d075ee6914654..0f1f31fe7b6525f21dc58998503bc94a5bab525e 100644
+index ef35ace8e9c60492ccf44db9f4100d825b7474a0..c6ddc02e15bce70a461feb0f9deccccc59f166c4 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-@@ -491,6 +491,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
+@@ -514,6 +514,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
        desktopBootstrapToken: input.bootstrapToken,
        tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
        tailscaleServePort: backendExposure.tailscaleServePort,
@@ -206,10 +206,10 @@ index 2d5d87f7b2e79dc4d40979b5861d075ee6914654..0f1f31fe7b6525f21dc58998503bc94a
        desktopTelemetryControlFd: 5,
        ...Option.match(input.resourceMonitorPath, {
 diff --git a/apps/server/src/cli/config.test.ts b/apps/server/src/cli/config.test.ts
-index 2267a5cb1cc9e7f7460fec521f93ca6aa9ac6cd2..70d09a24f18c22c56e6b6cc1f2e57091642bbd7f 100644
+index 8c4dbbcdbbf23f5efa29cb0f1244889f5f030525..d0b7175d0b7e58f3d228110eb8e31d9f14731026 100644
 --- a/apps/server/src/cli/config.test.ts
 +++ b/apps/server/src/cli/config.test.ts
-@@ -18,11 +18,13 @@ import {
+@@ -19,11 +19,13 @@ import {
  import * as NetService from "@t3tools/shared/Net";
  import * as NodeServices from "@effect/platform-node/NodeServices";
  import { deriveServerPaths } from "../config.ts";
@@ -222,11 +222,11 @@ index 2267a5cb1cc9e7f7460fec521f93ca6aa9ac6cd2..70d09a24f18c22c56e6b6cc1f2e57091
 +const isDesktopBootstrap = Schema.is(DesktopBackendBootstrap);
 +
  const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
+ const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
  
- const makeDesktopBootstrap = (
-@@ -73,6 +75,64 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
-     );
-   });
+@@ -164,6 +166,64 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
+     }),
+   );
  
 +  it.effect(
 +    "accepts only closed bootstrap variants and ignores environment or flag injection",
@@ -290,10 +290,10 @@ index 2267a5cb1cc9e7f7460fec521f93ca6aa9ac6cd2..70d09a24f18c22c56e6b6cc1f2e57091
      Effect.gen(function* () {
        const { join } = yield* Path.Path;
 diff --git a/apps/server/src/cli/config.ts b/apps/server/src/cli/config.ts
-index 847edbbc4fe085fe05bb6eb1bcd55b2a5a903f42..7fb5d875e7261aa398ba0cae4137fcea9ff18c65 100644
+index e0ba4e190f139cdedeb61cf5aab33359187877d5..c418d49da10e331bfbaac7ca2c6dbf28f2f44d6d 100644
 --- a/apps/server/src/cli/config.ts
 +++ b/apps/server/src/cli/config.ts
-@@ -377,6 +377,9 @@ export const resolveServerConfig = (
+@@ -411,6 +411,9 @@ export const resolveServerConfig = (
        noBrowser,
        startupPresentation,
        desktopBootstrapToken,
@@ -304,7 +304,7 @@ index 847edbbc4fe085fe05bb6eb1bcd55b2a5a903f42..7fb5d875e7261aa398ba0cae4137fcea
        desktopTelemetryControlFd,
        resourceMonitorPath,
 diff --git a/apps/server/src/config.ts b/apps/server/src/config.ts
-index 1486f6b40a2af95db83f91c2d6feb10fd92b12ab..682aeb7b8a7054144c9910131db3a02d01568775 100644
+index 919628c8d1edb8acdf88839f8054e9a0586c051d..6b677e7982ea0afd295eef027278b07deffd9410 100644
 --- a/apps/server/src/config.ts
 +++ b/apps/server/src/config.ts
 @@ -6,6 +6,8 @@
@@ -316,7 +316,7 @@ index 1486f6b40a2af95db83f91c2d6feb10fd92b12ab..682aeb7b8a7054144c9910131db3a02d
  import * as Context from "effect/Context";
  import * as Clock from "effect/Clock";
  import * as Effect from "effect/Effect";
-@@ -83,6 +85,7 @@ export class ServerConfig extends Context.Service<
+@@ -88,6 +90,7 @@ export class ServerConfig extends Context.Service<
      readonly noBrowser: boolean;
      readonly startupPresentation: StartupPresentation;
      readonly desktopBootstrapToken: string | undefined;

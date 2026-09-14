@@ -1,8 +1,8 @@
 diff --git a/apps/server/src/cloud/selfUpdate.test.ts b/apps/server/src/cloud/selfUpdate.test.ts
-index 5611124a25086b78af83b7243bfe38275a65b96b..3af32e73df1084c0780daf283ea6b8b560915389 100644
+index 75a3f922994176a8d6126480ede9d08f0d1e0409..cf90a7883a3bd7158da0c4fd51c91b1a20821878 100644
 --- a/apps/server/src/cloud/selfUpdate.test.ts
 +++ b/apps/server/src/cloud/selfUpdate.test.ts
-@@ -385,10 +385,10 @@ it.layer(NodeServices.layer)("server self update", (it) => {
+@@ -408,10 +408,10 @@ it.layer(NodeServices.layer)("server self update", (it) => {
          mode: "desktop",
          desktopAppUpdate: {
            available: true,
@@ -15,7 +15,7 @@ index 5611124a25086b78af83b7243bfe38275a65b96b..3af32e73df1084c0780daf283ea6b8b5
              ),
            commit: () => Effect.never,
          },
-@@ -396,7 +396,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
+@@ -419,7 +419,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
        const result = yield* selfUpdate.update({ targetVersion: "1.1.0" }, (stage) =>
          Effect.sync(() => void stages.push(stage)),
        );
@@ -25,10 +25,10 @@ index 5611124a25086b78af83b7243bfe38275a65b96b..3af32e73df1084c0780daf283ea6b8b5
        // The launcher staging path must not run on the desktop path.
        expect(order).toEqual([]);
 diff --git a/apps/server/src/cloud/selfUpdate.ts b/apps/server/src/cloud/selfUpdate.ts
-index 382f168fc04a489f15f254cf737be1d1cee35e01..3d2b7bc8777fe33612b27f71306b6545322e3e77 100644
+index 4ccf32cbabdead403c7377924cde23c66c8c7589..50e663e66092ee00f2e6310c5f5afe41bb78b4a7 100644
 --- a/apps/server/src/cloud/selfUpdate.ts
 +++ b/apps/server/src/cloud/selfUpdate.ts
-@@ -189,11 +189,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* (option
+@@ -202,11 +202,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* (option
      "cloud.server_self_update.update",
    )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
      if (capability === "desktop-managed") {
