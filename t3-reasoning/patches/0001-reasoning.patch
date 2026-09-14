@@ -1302,7 +1302,7 @@ index cdaadba1a96d894c3304ea946cf58336cda763e2..a9481d1502ebef35970e278473c4212a
    }
    const text = assistantCitationsToPlainText(message.text).trim();
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb79d263d5 100644
+index c22cf3e53bea7c7604aa267234378cb845ddd22d..a0174a4e97ade8c756369d61ad0f0a6de5d7bd5f 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -22,6 +22,7 @@ import {
@@ -1313,7 +1313,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
    ThreadId,
    TurnId,
  } from "@t3tools/contracts";
-@@ -234,7 +235,10 @@ async function waitForThread(
+@@ -237,7 +238,10 @@ async function waitForThread(
  
  describe("ProviderRuntimeIngestion", () => {
    let runtime: ManagedRuntime.ManagedRuntime<
@@ -1325,17 +1325,24 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
      unknown
    > | null = null;
    let scope: Scope.Closeable | null = null;
-@@ -297,7 +301,8 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -300,6 +304,7 @@ describe("ProviderRuntimeIngestion", () => {
          });
        }),
      ).pipe(Layer.provide(projectionSnapshotLayer));
--    const layer = ProviderRuntimeIngestionLive.pipe(
 +    const serverSettingsLayer = makeTestServerSettingsLayer(options?.serverSettings);
+     // Real clock plus an offset the test can advance, so delivery pacing in
+     // ingestion can be driven without sleeping. Sleeps stay real.
+     let clockOffsetMs = 0;
+@@ -316,7 +321,7 @@ describe("ProviderRuntimeIngestion", () => {
+       monotonicTimeNanos: realClock.monotonicTimeNanos,
+       sleep: (duration) => realClock.sleep(duration),
+     };
+-    const layer = ProviderRuntimeIngestionLive.pipe(
 +    const ingestionLayer = ProviderRuntimeIngestionLive.pipe(
+       Layer.provide(Layer.succeed(Clock.Clock, shiftedClock)),
        Layer.provideMerge(orchestrationLayer),
        Layer.provideMerge(ingestionProjectionSnapshotLayer),
-       // Single shared liveness instance across ingestion (writer), the
-@@ -306,18 +311,20 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -326,18 +331,20 @@ describe("ProviderRuntimeIngestion", () => {
        Layer.provideMerge(ThreadPlanProgress.layer),
        Layer.provideMerge(SqlitePersistenceMemory),
        Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
@@ -1357,7 +1364,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
      scope = await Effect.runPromise(Scope.make("sequential"));
      await testRuntime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
      const drain = () => testRuntime.runPromise(ingestion.drain);
-@@ -395,6 +402,8 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -418,6 +425,8 @@ describe("ProviderRuntimeIngestion", () => {
        emitAndDrain,
        sqlCount: sqlCounter.count,
        setProviderSession: provider.setSession,
@@ -1366,7 +1373,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
        drain,
      };
    }
-@@ -1322,7 +1331,7 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -1345,7 +1354,7 @@ describe("ProviderRuntimeIngestion", () => {
      const harness = await createHarness();
      const initial = await harness.readModel();
  
@@ -1375,7 +1382,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
        harness.emit({
          type: "content.delta",
          eventId: asEventId(`evt-ignored-${streamKind}`),
-@@ -4366,4 +4375,926 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -4528,6 +4537,931 @@ describe("ProviderRuntimeIngestion", () => {
      expect(thread.session?.status).toBe("error");
      expect(thread.session?.lastError).toBe("runtime still processed");
    });
@@ -1391,8 +1398,11 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
 +      createdAt: "2026-05-01T00:00:00.000Z",
 +      threadId: asThreadId("thread-1"),
 +      turnId,
-+      payload: { streamKind: "reasoning_summary_text", delta: "Inspecting files" },
++      payload: { streamKind: "reasoning_summary_text", delta: "Inspecting files\n\n" },
 +    });
++    await harness.drain();
++    const bufferedThread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
++    expect(bufferedThread?.messages.filter((message) => message.channel === "reasoning")).toEqual([]);
 +    harness.emit({
 +      type: "content.delta",
 +      eventId: asEventId("evt-answer-after-reasoning"),
@@ -1437,7 +1447,7 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
 +      return reasoning.length === 2 && reasoning.every((message) => !message.streaming);
 +    });
 +    expect(thread.messages.map((message) => [message.channel, message.text])).toEqual([
-+      ["reasoning", "Inspecting files"],
++      ["reasoning", "Inspecting files\n\n"],
 +      [undefined, "Answer"],
 +      ["reasoning", "Checking results"],
 +    ]);
@@ -2302,8 +2312,10 @@ index 1094ab48b7ac88cc9affd620f9ee98073e638a40..14588c2fd9c4e6e3f648476fd55808bb
 +    ]);
 +  });
  });
+ 
+ describe("splitBufferedAssistantText", () => {
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b6a56f287 100644
+index 8126537bd9f7fdbd9df987badfffa5d4a1bc9c2b..71a75e854cc4bc36ac8c64b350d0418d528fa9db 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 @@ -8,12 +8,14 @@ import {
@@ -2321,7 +2333,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
    type ProviderRuntimeEvent,
    RuntimeRequestId,
  } from "@t3tools/contracts";
-@@ -36,7 +38,10 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
+@@ -37,7 +39,10 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
  import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
  import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
  import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
@@ -2333,7 +2345,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
  import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
  import { ProjectionThreadProposedPlanRepository } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
  import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
-@@ -98,6 +103,17 @@ interface AssistantSegmentState {
+@@ -99,6 +104,17 @@ interface AssistantSegmentState {
    activeMessageId: MessageId | null;
  }
  
@@ -2351,7 +2363,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
  const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
  const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
  const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
-@@ -139,6 +155,25 @@ function sameId(left: string | null | undefined, right: string | null | undefine
+@@ -145,6 +161,25 @@ function sameId(left: string | null | undefined, right: string | null | undefine
    return left === right;
  }
  
@@ -2377,7 +2389,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
  function hasCheckpointForTurn(
    checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
    turnId: TurnId,
-@@ -916,6 +951,14 @@ const make = Effect.gen(function* () {
+@@ -974,6 +1009,14 @@ const make = Effect.gen(function* () {
        Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
      );
  
@@ -2392,7 +2404,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
    const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
      capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
      timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
-@@ -937,6 +980,16 @@ const make = Effect.gen(function* () {
+@@ -1001,6 +1044,16 @@ const make = Effect.gen(function* () {
        ),
    });
  
@@ -2409,7 +2421,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
    const bufferedProposedPlanById = yield* Cache.make<string, { text: string; createdAt: string }>({
      capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
      timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
-@@ -982,6 +1035,26 @@ const make = Effect.gen(function* () {
+@@ -1046,6 +1099,26 @@ const make = Effect.gen(function* () {
      );
    });
  
@@ -2436,7 +2448,31 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
    const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
      Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
        Effect.flatMap((existingIds) =>
-@@ -1174,7 +1247,7 @@ const make = Effect.gen(function* () {
+@@ -1167,7 +1240,7 @@ const make = Effect.gen(function* () {
+       });
+     });
+ 
+-  const appendBufferedAssistantText = (messageId: MessageId, delta: string, atMillis: number) =>
++  const appendBufferedAssistantText = (messageId: MessageId, delta: string, atMillis?: number) =>
+     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
+       Effect.flatMap((existingText) =>
+         Effect.gen(function* () {
+@@ -1182,9 +1255,12 @@ const make = Effect.gen(function* () {
+           const lastDeliveredAt = Option.getOrUndefined(
+             yield* Cache.getOption(lastAssistantDeliveryAtByMessageId, messageId),
+           );
++          // Reasoning bursts omit the clock to retain completion/spill-only
++          // delivery; paragraph pacing applies to visible assistant answers.
+           const paced =
+-            lastDeliveredAt === undefined ||
+-            atMillis - lastDeliveredAt >= MIN_ASSISTANT_DELIVERY_INTERVAL_MS;
++            atMillis !== undefined &&
++            (lastDeliveredAt === undefined ||
++              atMillis - lastDeliveredAt >= MIN_ASSISTANT_DELIVERY_INTERVAL_MS);
+           if (
+             paced &&
+             hasRenderableAssistantText(ready) &&
+@@ -1264,7 +1340,7 @@ const make = Effect.gen(function* () {
          messageId: input.messageId,
          delta: bufferedText,
          ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2445,7 +2481,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
        });
        return true;
      });
-@@ -1241,7 +1314,7 @@ const make = Effect.gen(function* () {
+@@ -1331,7 +1407,7 @@ const make = Effect.gen(function* () {
            messageId: input.messageId,
            delta: text,
            ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2454,7 +2490,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          });
        }
  
-@@ -1252,7 +1325,7 @@ const make = Effect.gen(function* () {
+@@ -1342,7 +1418,7 @@ const make = Effect.gen(function* () {
            threadId: input.threadId,
            messageId: input.messageId,
            ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -2463,7 +2499,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          });
        }
        yield* clearAssistantMessageState(input.messageId);
-@@ -1300,6 +1373,141 @@ const make = Effect.gen(function* () {
+@@ -1390,6 +1466,141 @@ const make = Effect.gen(function* () {
        }
      });
  
@@ -2605,7 +2641,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
    const finalizeBufferedProposedPlan = Effect.fn("finalizeBufferedProposedPlan")(function* (input: {
      event: ProviderRuntimeEvent;
      threadId: ThreadId;
-@@ -1375,6 +1583,9 @@ const make = Effect.gen(function* () {
+@@ -1465,6 +1676,9 @@ const make = Effect.gen(function* () {
              : Effect.void,
          { concurrency: 1 },
        ).pipe(Effect.asVoid);
@@ -2615,7 +2651,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
        yield* Effect.forEach(
          proposedPlanKeys,
          (key) =>
-@@ -1477,7 +1688,12 @@ const make = Effect.gen(function* () {
+@@ -1567,7 +1781,12 @@ const make = Effect.gen(function* () {
  
    const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
      Effect.gen(function* () {
@@ -2629,7 +2665,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          return;
        }
  
-@@ -1555,6 +1771,31 @@ const make = Effect.gen(function* () {
+@@ -1645,6 +1864,31 @@ const make = Effect.gen(function* () {
            ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
            : null;
  
@@ -2661,7 +2697,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
        if (
          event.type === "session.started" ||
          event.type === "session.state.changed" ||
-@@ -1589,14 +1830,9 @@ const make = Effect.gen(function* () {
+@@ -1679,14 +1923,9 @@ const make = Effect.gen(function* () {
          const nextActiveTurnId =
            event.type === "turn.started"
              ? (eventTurnId ?? null)
@@ -2678,7 +2714,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          const lastError =
            event.type === "session.state.changed" && event.payload.state === "error"
              ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-@@ -1653,11 +1889,22 @@ const make = Effect.gen(function* () {
+@@ -1743,11 +1982,22 @@ const make = Effect.gen(function* () {
          event.type === "content.delta" && event.payload.streamKind === "assistant_text"
            ? event.payload.delta
            : undefined;
@@ -2701,7 +2737,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          const assistantMessageId = yield* getOrCreateAssistantMessageId({
            threadId: thread.id,
            event,
-@@ -1684,7 +1931,7 @@ const make = Effect.gen(function* () {
+@@ -1780,7 +2030,7 @@ const make = Effect.gen(function* () {
                messageId: assistantMessageId,
                delta: spillChunk,
                ...(turnId ? { turnId } : {}),
@@ -2710,7 +2746,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
              });
            }
          } else {
-@@ -1695,17 +1942,84 @@ const make = Effect.gen(function* () {
+@@ -1791,17 +2041,84 @@ const make = Effect.gen(function* () {
              messageId: assistantMessageId,
              delta: assistantDelta,
              ...(turnId ? { turnId } : {}),
@@ -2796,7 +2832,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          const hasProjectedMessage = yield* projectionThreadMessages.hasAssistantMessageForTurn({
            threadId: thread.id,
            turnId: pauseForUserTurnId,
-@@ -1774,6 +2088,11 @@ const make = Effect.gen(function* () {
+@@ -1870,6 +2187,11 @@ const make = Effect.gen(function* () {
  
        if (assistantCompletion) {
          const turnId = toTurnId(event.turnId);
@@ -2808,7 +2844,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
          const activeAssistantMessageId = turnId
            ? yield* getActiveAssistantMessageIdForTurn(thread.id, turnId)
            : Option.none<MessageId>();
-@@ -2134,6 +2453,13 @@ const make = Effect.gen(function* () {
+@@ -2230,6 +2552,13 @@ const make = Effect.gen(function* () {
        }
  
        const activities = runtimeEventToActivities(activityEvent, taskTitle);
@@ -2822,7 +2858,7 @@ index 964f60d3a30645d817c8c299c2fe3a63f15f388f..ce25b6dfad42fe1147f2b8002d20193b
        yield* Effect.forEach(activities, (activity) =>
          providerCommandId(event, "thread-activity-append").pipe(
            Effect.flatMap((commandId) =>
-@@ -2147,6 +2473,10 @@ const make = Effect.gen(function* () {
+@@ -2243,6 +2572,10 @@ const make = Effect.gen(function* () {
            ),
          ),
        ).pipe(Effect.asVoid);
@@ -5283,7 +5319,7 @@ index 8dcb539fb024f2534277f0f234a7564552d12c27..5f3869c85a77cd5269a7731e03d42cb1
        kind: "thinking",
        id: LIVE_ACTIVITY_ROW_ID,
 diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
-index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e95c6d81ee 100644
+index 084287080bd9819cc0804a19fe9b5a323f25b6f9..1487ce65ec3c878ef4ff55726760f6cd0dd9284f 100644
 --- a/apps/web/src/components/chat/MessagesTimeline.tsx
 +++ b/apps/web/src/components/chat/MessagesTimeline.tsx
 @@ -12,6 +12,7 @@ import {
@@ -5310,7 +5346,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
    toolGroupAction,
    workEntryDisplayLabel,
    workEntryIsVisibleInGroup,
-@@ -271,6 +274,12 @@ interface TimelineRowSharedState {
+@@ -272,6 +275,12 @@ interface TimelineRowSharedState {
    onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
    onToggleSpawnRow: (entryId: string, expanded: boolean) => void;
    workGroupViewState: WorkGroupViewState;
@@ -5323,7 +5359,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
    agentPanelModel: AgentPanelModel;
    expandedSpawnEntryIds: ReadonlySet<string>;
    onOpenAgents: () => void;
-@@ -506,6 +515,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -519,6 +528,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
      () => ({ scrollPositions: new Map(), expandedEntries: new Set() }),
      [listIdentityKey],
    );
@@ -5333,7 +5369,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
    const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
    const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
    const disclosureAnchorKeyRef = useRef<string | null>(null);
-@@ -593,6 +605,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -621,6 +633,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
      },
      [expandedWorkGroupIds, suspendEndScrollMaintenanceForDisclosure],
    );
@@ -5349,7 +5385,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
  
    // An in-session interrupt leaves its turn expanded so the user keeps their
    // place; the next turn (or a reload, since this is local state) folds it.
-@@ -874,6 +895,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -902,6 +923,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
        onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
        onToggleSpawnRow,
        workGroupViewState,
@@ -5358,7 +5394,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
        agentPanelModel: agentPanelModel ?? EMPTY_AGENT_PANEL_MODEL,
        expandedSpawnEntryIds: paintedExpandedSpawnEntryIds,
        onOpenAgents,
-@@ -901,6 +924,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
+@@ -929,6 +952,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
        suspendEndScrollMaintenanceForDisclosure,
        onToggleSpawnRow,
        workGroupViewState,
@@ -5367,7 +5403,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
        agentPanelModel,
        paintedExpandedSpawnEntryIds,
        onOpenAgents,
-@@ -1030,7 +1055,9 @@ function keyExtractor(item: MessagesTimelineRow) {
+@@ -1060,7 +1085,9 @@ function keyExtractor(item: MessagesTimelineRow) {
  }
  
  function getItemType(item: MessagesTimelineRow) {
@@ -5378,7 +5414,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
  }
  
  interface TimelinePositionState {
-@@ -1385,7 +1412,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
+@@ -1415,7 +1442,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
        {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
        {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
        {row.kind === "message" && row.message.role === "assistant" ? (
@@ -5391,7 +5427,7 @@ index 568a86721e4c754b1093417ccc15b9a56bb10282..12ecf121f90a5a64c03ccfd5a7c901e9
        ) : null}
        {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
        {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
-@@ -1849,6 +1880,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
+@@ -1879,6 +1910,44 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
    );
  }
  

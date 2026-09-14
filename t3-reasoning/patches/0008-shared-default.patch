@@ -26,10 +26,10 @@ index c5871fa65d6638c5afff5d3d21eef0f98f664fa7..4c9cc99e6c173638a69a0ed27614ea6a
      () =>
        primary?.entry.target._tag === "PrimaryConnectionTarget"
 diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
-index 6769586f7fa86fe74d153d207f904b8266ad7243..fa1d7577ccef2700e230c80d937d9dd8e0807f3b 100644
+index 6497df68c8bdff677ba87bd1761bce69e42431f3..8dbb766eda2660748010b1b63bcbeebc40071875 100644
 --- a/apps/web/src/components/AppSidebarLayout.tsx
 +++ b/apps/web/src/components/AppSidebarLayout.tsx
-@@ -23,6 +23,7 @@ import {
+@@ -27,6 +27,7 @@ import {
  import LegacyThreadSidebar from "./LegacySidebar";
  import ThreadSidebar from "./Sidebar";
  import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -37,7 +37,7 @@ index 6769586f7fa86fe74d153d207f904b8266ad7243..fa1d7577ccef2700e230c80d937d9dd8
  import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
  import {
    resolveSidebarStageFocusRingOffsetClass,
-@@ -254,7 +255,15 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+@@ -259,7 +260,15 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
            )}
            <SidebarRail onDoubleClick={resetSidebarWidth} />
          </Sidebar>
@@ -570,12 +570,12 @@ index 0000000000000000000000000000000000000000..d39bc058e13ad5043f8411b423f358a6
 +  );
 +}
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619469cffca 100644
+index 9cee123e4ecf06db1ef015cdb80ef03e20090b07..d05b702a0e62ac5211d14d5e92c94568c707ecbf 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -122,12 +122,17 @@ import { useClientSettings } from "../hooks/useSettings";
- import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+@@ -126,12 +126,17 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
  import { useLocalStorage } from "../hooks/useLocalStorage";
+ import { SidebarCompletedTime } from "./sidebar/SidebarCompletedTime";
  import { useNowMinute } from "../hooks/useNowMinute";
 -import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 +import {
@@ -592,7 +592,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
  } from "../state/entities";
  import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
  import { vcsEnvironment } from "../state/vcs";
-@@ -803,6 +808,9 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+@@ -884,6 +889,9 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
    projectByKey: ReadonlyMap<string, EnvironmentProject>;
    projectDisplayNameByKey: ReadonlyMap<string, string>;
    scopedProjectKeys: ReadonlySet<string> | null;
@@ -602,7 +602,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
    routeDraftId: string | null;
    onNavigateToDraft: (draftId: DraftId) => void;
  }) {
-@@ -842,6 +850,12 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+@@ -923,6 +931,12 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
        if (session.promotedTo != null) {
          continue;
        }
@@ -615,7 +615,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
        if (
          props.scopedProjectKeys !== null &&
          !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-@@ -869,6 +883,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+@@ -950,6 +964,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
      draftThreadsByThreadKey,
      draftsByThreadKey,
      frozenActive,
@@ -623,7 +623,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
      props.routeDraftId,
      props.scopedProjectKeys,
    ]);
-@@ -2112,6 +2127,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
+@@ -2441,6 +2456,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
  
  export default function Sidebar() {
    const projects = useProjects();
@@ -633,7 +633,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
    const projectOrder = useUiStateStore((store) => store.projectOrder);
    const threads = useThreadShells();
    const router = useRouter();
-@@ -2200,6 +2218,7 @@ export default function Sidebar() {
+@@ -2533,6 +2551,7 @@ export default function Sidebar() {
    );
    const { environments } = useEnvironments();
    const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -641,7 +641,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
    const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
    const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
    const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
-@@ -2427,6 +2446,12 @@ export default function Sidebar() {
+@@ -2760,6 +2779,12 @@ export default function Sidebar() {
        if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
          continue;
        }
@@ -654,7 +654,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
        if (
          scopedProjectKeys !== null &&
          !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-@@ -4328,7 +4353,7 @@ export default function Sidebar() {
+@@ -4708,7 +4733,7 @@ export default function Sidebar() {
            <SidebarGroup className="relative z-[1] p-[var(--sidebar-content-inset)] pt-1">
              <SidebarThreadHeader
                searchFieldRef={headerSearchRef}
@@ -663,7 +663,7 @@ index e7a55e16e0cd2980fadfbd49901e6dd87ca200a7..91a008880ccd0175a5003f6ad0167619
                projectScope={
                  <Combobox
                    items={projectScopeItems}
-@@ -4704,6 +4729,7 @@ export default function Sidebar() {
+@@ -5116,6 +5141,7 @@ export default function Sidebar() {
                            projectByKey={projectByKey}
                            projectDisplayNameByKey={projectDisplayNameByKey}
                            scopedProjectKeys={scopedProjectKeys}
@@ -932,10 +932,10 @@ index d683efab3a4a6d2c0060a54786523433715abf34..43de15d0de60ff444301b052ee1b0913
   * A QR code encoding a loopback URL makes the scanning device dial itself, so
   * loopback endpoints stay copyable from the endpoint menu but are never
 diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
-index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e5c32a301 100644
+index a6e29cf7231284e5be9b16702fbd77c97d883887..a629fd8024f7be7e4f29ad77d43380d2a19ff685 100644
 --- a/apps/web/src/components/settings/ConnectionsSettings.tsx
 +++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
-@@ -55,6 +55,7 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
+@@ -56,6 +56,7 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
  import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
  import {
    applyWslEnableSelection,
@@ -943,7 +943,7 @@ index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e
    isQrShareableEndpoint,
    isWslSettingsRowVisible,
    selectQrEndpointOption,
-@@ -151,10 +152,15 @@ import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desk
+@@ -152,10 +153,15 @@ import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desk
  import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
  import {
    type EnvironmentPresentation,
@@ -959,8 +959,8 @@ index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e
 +import { Badge } from "../ui/badge";
  import { useAtomCommand } from "../../state/use-atom-command";
  import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
- import { ConnectionStatusDot } from "../ConnectionStatusDot";
-@@ -1416,13 +1422,19 @@ type SavedBackendListRowProps = {
+ import { ConnectionStatusDot, connectionPhaseDotClassName } from "../ConnectionStatusDot";
+@@ -1417,13 +1423,19 @@ type SavedBackendListRowProps = {
    removingEnvironmentId: EnvironmentId | null;
    onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
    onRemove: (environment: EnvironmentPresentation) => void;
@@ -980,19 +980,17 @@ index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e
  }: SavedBackendListRowProps) {
    const environmentId = environment.environmentId;
    const enabled = environment.entry.enabled;
-@@ -1516,6 +1528,11 @@ function SavedBackendListRow({
-             <h3 className="min-w-0 truncate text-sm font-medium text-foreground">
-               {environment.label}
-             </h3>
+@@ -1520,6 +1532,9 @@ function SavedBackendListRow({
+                 {environment.label}
+               </h3>
+             </div>
 +            {isSharedDefault ? (
-+              <Badge size="sm" variant="info">
-+                Shared default
-+              </Badge>
++              <Badge size="sm" variant="info">Shared default</Badge>
 +            ) : null}
-           </div>
-           {metadataBits.length > 0 ? (
-             <p className="truncate text-xs text-muted-foreground">{metadataBits.join(" · ")}</p>
-@@ -1596,6 +1613,16 @@ function SavedBackendListRow({
+             {isConnected ? (
+               <div className="w-full sm:w-auto">
+                 <EnvironmentIconPicker
+@@ -1600,6 +1615,16 @@ function SavedBackendListRow({
              </Tooltip>
            ) : (
              <>
@@ -1009,7 +1007,7 @@ index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e
                <Tooltip>
                  <TooltipTrigger
                    render={
-@@ -1812,7 +1839,58 @@ export function ConnectionsSettings() {
+@@ -1816,7 +1841,58 @@ export function ConnectionsSettings() {
    const desktopBridge = window.desktopBridge;
    const keybindings = useAtomValue(primaryServerKeybindingsAtom);
    const { environments } = useEnvironments();
@@ -1066,10 +1064,10 @@ index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e
 +    () => saveSharedDefault(null, "This app's built-in environment is used again."),
 +    [saveSharedDefault],
 +  );
-   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
-   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
-     reportFailure: false,
-@@ -3701,13 +3779,40 @@ export function ConnectionsSettings() {
+   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(null);
+   const searchTargetId = useLocation({ select: (location) => location.hash.replace(/^#/, "") });
+   const [handledSearchTargetId, setHandledSearchTargetId] = useState<string | null>(null);
+@@ -3725,6 +3801,30 @@ export function ConnectionsSettings() {
            </div>
          }
        >
@@ -1097,19 +1095,19 @@ index e8f1232b19bcfbb3ef4b3dcca2389e47892a720f..c97d36ce82a53de159b0096574a0fb2e
 +            ) : undefined
 +          }
 +        />
-         {savedEnvironments.map((environment) => (
-           <SavedBackendListRow
-             key={environment.environmentId}
-             environment={environment}
-             removingEnvironmentId={removingSavedEnvironmentId}
-             onSetEnabled={handleSetSavedBackendEnabled}
-+            isSharedDefault={environment.environmentId === sharedDefaultEnvironmentId}
-+            isSavingSharedDefault={isSavingSharedDefault}
-             onRemove={handleRemoveSavedBackend}
-+            onUseAsSharedDefault={handleUseAsSharedDefault}
-           />
-         ))}
-         <CloudRemoteEnvironmentRows
+         <div className="overflow-hidden rounded-xl border border-border/60 bg-card/40 shadow-xs/5 lg:grid lg:h-[min(34rem,calc(100dvh-18rem))] lg:min-h-[28rem] lg:grid-cols-[17rem_minmax(0,1fr)]">
+           <div className="border-b border-border/60 bg-muted/10 lg:flex lg:min-h-0 lg:flex-col lg:border-r lg:border-b-0">
+             <ScrollArea
+@@ -3814,6 +3914,9 @@ export function ConnectionsSettings() {
+                       environment={selectedEnvironment}
+                       removingEnvironmentId={removingSavedEnvironmentId}
+                       onSetEnabled={handleSetSavedBackendEnabled}
++                      isSharedDefault={selectedEnvironment.environmentId === sharedDefaultEnvironmentId}
++                      isSavingSharedDefault={isSavingSharedDefault}
++                      onUseAsSharedDefault={handleUseAsSharedDefault}
+                       onRemove={handleRemoveSavedBackend}
+                     />
+                   </SettingsSection>
 diff --git a/apps/web/src/hooks/useHandleNewThread.test.ts b/apps/web/src/hooks/useHandleNewThread.test.ts
 index 6cae988e87c6ccb871494f530d1850d713a6c420..1b7f6eb4569fb0635f0c767e015f184eeaa58aa2 100644
 --- a/apps/web/src/hooks/useHandleNewThread.test.ts
@@ -1601,7 +1599,7 @@ index eeb0ca524a6401dd610dc6ebac97b8b47376ef6e..9a669a93673422b4aa6fb6917dd9cbde
 +  });
 +});
 diff --git a/apps/web/src/hooks/useSettings.ts b/apps/web/src/hooks/useSettings.ts
-index 194cc36c55f4ac0674ad75acf5df2ae383bcb0f9..f4a0118abc9f2191e62b1cc3d844b3784177b259 100644
+index fa4b8bc8fd31e8f77b185825d2526d1a83ecea33..a76a059481b3258f194646525ab3158bfb02d57e 100644
 --- a/apps/web/src/hooks/useSettings.ts
 +++ b/apps/web/src/hooks/useSettings.ts
 @@ -43,6 +43,7 @@ import { toastManager } from "~/components/ui/toast";
@@ -1659,7 +1657,7 @@ index 194cc36c55f4ac0674ad75acf5df2ae383bcb0f9..f4a0118abc9f2191e62b1cc3d844b378
  async function hydrateClientSettings(): Promise<void> {
    if (clientSettingsHydrationStatus === "ready") {
      return;
-@@ -505,6 +530,38 @@ export function useUpdateClientSettings() {
+@@ -512,6 +537,38 @@ export function useUpdateClientSettings() {
    }, []);
  }
  
@@ -1698,7 +1696,7 @@ index 194cc36c55f4ac0674ad75acf5df2ae383bcb0f9..f4a0118abc9f2191e62b1cc3d844b378
  export function __resetClientSettingsPersistenceForTests(): void {
    clientSettingsHydrationGeneration += 1;
    clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
-@@ -514,6 +571,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
+@@ -521,6 +578,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
    deferredClientSettingsPatchCount = 0;
    clientSettingsListeners.clear();
    clientSettingsHydrationListeners.clear();
@@ -1706,17 +1704,17 @@ index 194cc36c55f4ac0674ad75acf5df2ae383bcb0f9..f4a0118abc9f2191e62b1cc3d844b378
  }
  
  export function __setClientSettingsForTests(settings: ClientSettings): void {
-@@ -521,4 +579,5 @@ export function __setClientSettingsForTests(settings: ClientSettings): void {
+@@ -528,4 +586,5 @@ export function __setClientSettingsForTests(settings: ClientSettings): void {
    clientSettingsSnapshot = settings;
    clientSettingsHydrationStatus = "ready";
    clientSettingsHydrationPromise = null;
 +  publishPreferredEnvironment();
  }
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e7e446928 100644
+index 982d81420445be9c899857a5cd5904dc19974985..d9421ff1484958fdaa5a25ed9f1342f31e8023b2 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
-@@ -55,7 +55,11 @@ import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
+@@ -57,7 +57,11 @@ import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
  import { shellEnvironment } from "../state/shell";
  import { useAtomValue } from "@effect/atom-react";
  import { useAtomCommand } from "../state/use-atom-command";
@@ -1729,7 +1727,7 @@ index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e
  import {
    primaryServerConfigAtom,
    primaryServerConfigEventAtom,
-@@ -311,8 +315,16 @@ function DocumentTitleSync() {
+@@ -329,8 +333,16 @@ function DocumentTitleSync() {
  function HostedStaticEnvironmentBootstrap() {
    const { environments } = useEnvironments();
    const activeEnvironmentId = useActiveEnvironmentId();
@@ -1746,7 +1744,7 @@ index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e
      if (
        environments.some(
          (environment) => environment.entry.target._tag === "PrimaryConnectionTarget",
-@@ -331,7 +343,7 @@ function HostedStaticEnvironmentBootstrap() {
+@@ -349,7 +361,7 @@ function HostedStaticEnvironmentBootstrap() {
      }
  
      setActiveEnvironmentId(firstSavedEnvironment.environmentId);
@@ -1755,7 +1753,7 @@ index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e
  
    return null;
  }
-@@ -459,6 +471,11 @@ function EventRouter({
+@@ -478,6 +490,11 @@ function EventRouter({
    const pathname = useLocation({ select: (loc) => loc.pathname });
    const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
    const primaryEnvironment = usePrimaryEnvironment();
@@ -1767,7 +1765,7 @@ index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e
    const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
      reportFailure: false,
    });
-@@ -476,7 +493,9 @@ function EventRouter({
+@@ -495,7 +512,9 @@ function EventRouter({
    const handleWelcome = useEffectEvent((payload: ServerLifecycleWelcomePayload | null) => {
      if (!payload) return;
  
@@ -1778,7 +1776,7 @@ index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e
      void (async () => {
        if (!payload.bootstrapProjectId || !payload.bootstrapThreadId) {
          return;
-@@ -496,7 +515,7 @@ function EventRouter({
+@@ -515,7 +534,7 @@ function EventRouter({
          );
        useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
  
@@ -1787,7 +1785,7 @@ index 0831a922325e5274226d86366fd9f12bd24e3c8d..ba960afd3fa5a43ec5adf2af1766947e
          return;
        }
        if (skipInitialBootstrapNavigationRef.current) {
-@@ -579,12 +598,12 @@ function EventRouter({
+@@ -598,12 +617,12 @@ function EventRouter({
    });
  
    useEffect(() => {
@@ -3065,7 +3063,7 @@ index 37ce280e9f41b5b7a1483f40e58d152b32fff320..b7564bf62c49f30a496e328f409a2c94
    );
  }
 diff --git a/packages/contracts/src/settings.test.ts b/packages/contracts/src/settings.test.ts
-index 7bb2e1da5c0b495fa9404528945ee2d7891040a7..296aae1ce8617e41efc023c303a387a6a51be4e7 100644
+index c8c6922ec0200fc25e4b0dcf972a09f7c9117413..00f76b368a9b216a4f59bac2a00c604fc3f692ae 100644
 --- a/packages/contracts/src/settings.test.ts
 +++ b/packages/contracts/src/settings.test.ts
 @@ -49,6 +49,37 @@ describe("ServerSettings default permissions", () => {
@@ -3107,7 +3105,7 @@ index 7bb2e1da5c0b495fa9404528945ee2d7891040a7..296aae1ce8617e41efc023c303a387a6
    const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
  
 diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
-index 004a53b320e86254d32cb41cc787540d42048b93..9313c85b62dc1dfe70d66d3b576960f81325f3e3 100644
+index 9d3eaf877af8597830e90a6c507c45b58f95b55d..172f0f97a1da1575788db2a7c1e15eb7ddeb78fa 100644
 --- a/packages/contracts/src/settings.ts
 +++ b/packages/contracts/src/settings.ts
 @@ -4,6 +4,7 @@ import * as Duration from "effect/Duration";
@@ -3118,7 +3116,7 @@ index 004a53b320e86254d32cb41cc787540d42048b93..9313c85b62dc1dfe70d66d3b576960f8
    ForwardCompatibleNullable,
    ProjectId,
    TrimmedNonEmptyString,
-@@ -361,6 +362,15 @@ export const ClientSettingsSchema = Schema.Struct({
+@@ -362,6 +363,15 @@ export const ClientSettingsSchema = Schema.Struct({
    environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
      Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE)),
    ),
@@ -3134,7 +3132,7 @@ index 004a53b320e86254d32cb41cc787540d42048b93..9313c85b62dc1dfe70d66d3b576960f8
    glassOpacity: GlassOpacity.pipe(
      Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
    ),
-@@ -1449,6 +1459,7 @@ export const ClientSettingsPatch = Schema.Struct({
+@@ -1453,6 +1463,7 @@ export const ClientSettingsPatch = Schema.Struct({
    diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
    diffLayout: Schema.optionalKey(DiffLayout),
    environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),

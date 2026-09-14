@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 3ce082ee47d1b2c5d6efcebcf67843abc3fc44d8..a054b979a84b55d4de35687ec5f412611778ec17 100644
+index 902ea5e6fcfd4ca7e55b6c61b2da04c9bf4364b6..7bf54e51cb30791bc0d28064d72e36de4480e87d 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -56,10 +56,12 @@ import { assert, it } from "@effect/vitest";
@@ -23,7 +23,7 @@ index 3ce082ee47d1b2c5d6efcebcf67843abc3fc44d8..a054b979a84b55d4de35687ec5f41261
  import * as Stream from "effect/Stream";
  import * as TestClock from "effect/testing/TestClock";
  import * as Tracer from "effect/Tracer";
-@@ -99,7 +102,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
+@@ -106,7 +109,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as ServerConfig from "./config.ts";
  import * as DeviceService from "./device/DeviceService.ts";
@@ -57,7 +57,7 @@ index 3ce082ee47d1b2c5d6efcebcf67843abc3fc44d8..a054b979a84b55d4de35687ec5f41261
  import {
    isThreadDetailEvent,
    resolveAvailableEditorsForConfig,
-@@ -11452,6 +11480,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
+@@ -11644,6 +11672,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
    );
  });
  

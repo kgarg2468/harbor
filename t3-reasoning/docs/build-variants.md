@@ -173,3 +173,12 @@ excluded. The prepared Reasoning tree is
 is exactly the 13 files of `reasoning-identity`. The earlier eight-file
 proofs above are historical records. No server, web or shared package file
 differs between the current variants.
+
+## Nightly 20260914.1687 port proof
+
+Verified on 2026-09-14 with the same active patch selections. Reasoning tree:
+`800a4347f0d7208dd2c76d4783f3c1ddcd2e2f62`; managed Nightly tree:
+`eece6f827f99db1f6141e14bdc09acc8a4783085`. The opt-in materialization test
+confirms that exactly the 13 identity files differ. The Reasoning tree matches
+the source port commit recorded in `nightly-port.md`. No inactive fork patch
+is included in either tree.

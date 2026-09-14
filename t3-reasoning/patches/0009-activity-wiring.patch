@@ -1753,7 +1753,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
    });
  
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09d2cc1637 100644
+index a0174a4e97ade8c756369d61ad0f0a6de5d7bd5f..eaa54da1062c84045897fe53802ddf424c735492 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -33,7 +33,6 @@ import * as Exit from "effect/Exit";
@@ -1764,7 +1764,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
  import * as Scope from "effect/Scope";
  import * as Stream from "effect/Stream";
  import * as Tracer from "effect/Tracer";
-@@ -63,6 +62,13 @@ import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeInge
+@@ -66,6 +65,13 @@ import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeInge
  import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
  import { ServerConfig } from "../../config.ts";
  import { ServerSettingsService } from "../../serverSettings.ts";
@@ -1778,7 +1778,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
  import * as NodeServices from "@effect/platform-node/NodeServices";
  import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
  
-@@ -107,12 +113,14 @@ function isLegacyTurnCompletedEvent(
+@@ -110,12 +116,14 @@ function isLegacyTurnCompletedEvent(
    );
  }
  
@@ -1799,7 +1799,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
    );
    const runtimeSessions: ProviderSession[] = [];
  
-@@ -143,18 +151,8 @@ function createProviderServiceHarness() {
+@@ -146,18 +154,8 @@ function createProviderServiceHarness() {
      },
      rollbackConversation: () => unsupported(),
      uploadFeedback: () => unsupported(),
@@ -1820,7 +1820,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
    };
  
    const setSession = (session: ProviderSession): void => {
-@@ -182,28 +180,48 @@ function createProviderServiceHarness() {
+@@ -185,28 +183,48 @@ function createProviderServiceHarness() {
    };
  
    const emit = (event: LegacyProviderRuntimeEvent): void => {
@@ -1880,7 +1880,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
  type ProviderRuntimeTestReadModel = OrchestrationReadModel;
  type ProviderRuntimeTestThread = ProviderRuntimeTestReadModel["threads"][number];
  type ProviderRuntimeTestMessage = ProviderRuntimeTestThread["messages"][number];
-@@ -268,6 +286,8 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -271,6 +289,8 @@ describe("ProviderRuntimeIngestion", () => {
      serverSettings?: Partial<ServerSettings>;
      threadTitle?: string;
      workspaceSubdirectory?: string;
@@ -1889,7 +1889,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
    }) {
      const repositoryRoot = makeTempDir("t3-provider-project-");
      NodeChildProcess.execFileSync("git", ["init", "--initial-branch=main"], {
-@@ -276,7 +296,17 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -279,7 +299,17 @@ describe("ProviderRuntimeIngestion", () => {
      });
      const workspaceRoot = NodePath.join(repositoryRoot, options?.workspaceSubdirectory ?? "");
      NodeFS.mkdirSync(workspaceRoot, { recursive: true });
@@ -1908,7 +1908,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
      const sqlCounter = makeSqlStatementCounter();
      const orchestrationLayer = OrchestrationEngineLive.pipe(
        Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-@@ -311,6 +341,7 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -331,6 +361,7 @@ describe("ProviderRuntimeIngestion", () => {
        Layer.provideMerge(ThreadPlanProgress.layer),
        Layer.provideMerge(SqlitePersistenceMemory),
        Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
@@ -1916,7 +1916,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
        Layer.provideMerge(serverSettingsLayer),
        Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
        Layer.provideMerge(VcsProcess.layer),
-@@ -325,15 +356,45 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -345,15 +376,45 @@ describe("ProviderRuntimeIngestion", () => {
      const snapshotQuery = await testRuntime.runPromise(Effect.service(ProjectionSnapshotQuery));
      const ingestion = await testRuntime.runPromise(Effect.service(ProviderRuntimeIngestionService));
      const serverSettings = await testRuntime.runPromise(Effect.service(ServerSettingsService));
@@ -1968,7 +1968,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
  
      const createdAt = "2026-01-01T00:00:00.000Z";
      await dispatch({
-@@ -390,6 +451,7 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -410,6 +471,7 @@ describe("ProviderRuntimeIngestion", () => {
  
      return {
        engine,
@@ -1976,7 +1976,7 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
        dispatch,
        readModel: () => testRuntime.runPromise(snapshotQuery.getSnapshot()),
        readThreadShell: () =>
-@@ -408,6 +470,62 @@ describe("ProviderRuntimeIngestion", () => {
+@@ -431,6 +493,62 @@ describe("ProviderRuntimeIngestion", () => {
      };
    }
  
@@ -2040,10 +2040,10 @@ index 14588c2fd9c4e6e3f648476fd55808bb79d263d5..211401b16c0a33b88cf32f6b107bbe09
      const harness = await createHarness();
      const now = "2026-01-01T00:00:00.000Z";
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index ce25b6dfad42fe1147f2b8002d20193b6a56f287..46bc20baf1f07f02c07104c307c69f6475e45004 100644
+index 71a75e854cc4bc36ac8c64b350d0418d528fa9db..da3080221693f2060ddc929d65173b538e4bf650 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-@@ -28,8 +28,6 @@ import * as Effect from "effect/Effect";
+@@ -29,8 +29,6 @@ import * as Effect from "effect/Effect";
  import * as Layer from "effect/Layer";
  import * as Option from "effect/Option";
  import * as Predicate from "effect/Predicate";
@@ -2052,7 +2052,7 @@ index ce25b6dfad42fe1147f2b8002d20193b6a56f287..46bc20baf1f07f02c07104c307c69f64
  import { formatTokens } from "@t3tools/shared/usageFormat";
  
  import { ProviderService } from "../../provider/Services/ProviderService.ts";
-@@ -57,6 +55,7 @@ import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
+@@ -58,6 +56,7 @@ import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
  import { forkParked } from "../../serverActivation.ts";
  import { ServerSettingsService } from "../../serverSettings.ts";
  import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -2060,7 +2060,7 @@ index ce25b6dfad42fe1147f2b8002d20193b6a56f287..46bc20baf1f07f02c07104c307c69f64
  import { canReplaceThreadTitle } from "../threadTitles.ts";
  
  const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
-@@ -946,6 +945,7 @@ const make = Effect.gen(function* () {
+@@ -1004,6 +1003,7 @@ const make = Effect.gen(function* () {
    const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
    const serverSettingsService = yield* ServerSettingsService;
    const checkpointStore = yield* CheckpointStore.CheckpointStore;
@@ -2068,7 +2068,7 @@ index ce25b6dfad42fe1147f2b8002d20193b6a56f287..46bc20baf1f07f02c07104c307c69f64
    const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
      crypto.randomUUIDv4.pipe(
        Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
-@@ -2499,17 +2499,26 @@ const make = Effect.gen(function* () {
+@@ -2598,17 +2598,26 @@ const make = Effect.gen(function* () {
        }),
      );
  
@@ -5422,10 +5422,10 @@ index 1e7cdc3f00e636e7e5347e427ad685154652673e..23a3267612507b1eeab1027f2912e889
            } satisfies OrchestrationEngineShape),
            Layer.succeed(ProjectionSnapshotQuery, {
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 81399ce61d6fc8f21ea324dca980978ad2550e19..3ce082ee47d1b2c5d6efcebcf67843abc3fc44d8 100644
+index af934c59d480e1fd8d714ba3785a326ccf36f10c..902ea5e6fcfd4ca7e55b6c61b2da04c9bf4364b6 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -958,6 +958,7 @@ const buildAppUnderTest = (options?: {
+@@ -965,6 +965,7 @@ const buildAppUnderTest = (options?: {
                }),
              dispatch: () => Effect.succeed({ sequence: 0 }),
              streamDomainEvents: Stream.empty,

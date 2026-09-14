@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "repository": "pingdotgg/t3code",
-  "releaseId": 387826845,
-  "tag": "v0.0.41-nightly.20260913.1646",
-  "version": "0.0.41-nightly.20260913.1646",
-  "commit": "17f8e2a8acba76d5516e0a52c85bf802b0e17892",
-  "publishedAt": "2026-09-13T07:31:58Z"
+  "releaseId": 388118886,
+  "tag": "v0.0.41-nightly.20260914.1687",
+  "version": "0.0.41-nightly.20260914.1687",
+  "commit": "c07575f573dd3a1af4f734297d17f7c951c95f10",
+  "publishedAt": "2026-09-14T02:43:52Z"
 }

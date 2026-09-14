@@ -659,7 +659,7 @@ index 3370154db8d67b52395b360b198b7731d0f0ad1e..6e7c291aa3df2c661a204a75bda68214
  
  export const layer = Layer.effect(DesktopAppUpdate, make());
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 328aa476d5eb2716f18fcc18c66d7f97a2baaf92..8b83a1e440770de02af029e066f5a06e66230555 100644
+index 2989cab246d055e2254a544c5d61c3d09cb6af0a..94776fdbd349e44004db54dc11b9a2a55d70acc3 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -57,7 +57,7 @@ import {
@@ -671,7 +671,7 @@ index 328aa476d5eb2716f18fcc18c66d7f97a2baaf92..8b83a1e440770de02af029e066f5a06e
  import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
  import * as Clock from "effect/Clock";
  import * as Config from "effect/Config";
-@@ -113,6 +113,7 @@ import {
+@@ -120,6 +120,7 @@ import {
    DesktopUpdateReservationLayerLive,
    HTTP_ROUTER_CONFIG,
    makeManagedUpdateRuntimeLayer,
@@ -679,7 +679,7 @@ index 328aa476d5eb2716f18fcc18c66d7f97a2baaf92..8b83a1e440770de02af029e066f5a06e
    makeRoutesLayer,
    makeSelectionBoundManagedRuntimeResolver,
    resolveManagedServerTarget,
-@@ -13248,3 +13249,40 @@ it.layer(NodeServices.layer)("update admission over the transports", (it) => {
+@@ -13440,3 +13441,40 @@ it.layer(NodeServices.layer)("update admission over the transports", (it) => {
        }).pipe(Effect.provide(NodeHttpServer.layerTest)),
    );
  });

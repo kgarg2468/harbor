@@ -10,26 +10,66 @@ maintenance record for the current pin.
 | Item | Value |
 | --- | --- |
 | Upstream repository | `https://github.com/pingdotgg/t3code.git` |
-| Upstream commit | `17f8e2a8acba76d5516e0a52c85bf802b0e17892` |
-| Upstream tag at that commit | `v0.0.41-nightly.20260913.1646` |
+| Upstream commit | `c07575f573dd3a1af4f734297d17f7c951c95f10` |
+| Upstream tag at that commit | `v0.0.41-nightly.20260914.1687` |
 | Patch `reasoning-full` | `patches/0001-reasoning.patch` (37 files) |
 | Patch `desktop-runtime-common` | `patches/0002-desktop-runtime-common.patch` (4 files) |
 | Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (13 files) |
 | Upstream license | `UPSTREAM-LICENSE` (MIT, T3 Tools Inc., copied unchanged) |
 
 The current port was verified on 2026-09-14 against official release
-`387826845`, published at `2026-09-13T07:31:58Z`. The previous lock pinned
-`c52b8d96e4b34201f19b5e5bb12c6b2a77bfaa9a` (Nightly 20260911.1520).
-All 43 active patches were replayed in order, resolving three-way conflicts
-and re-exporting each incremental delta with full blob ids. The inactive
-thread-fork catalog entry and both variants' patch selections are unchanged.
+`388118886`, published at `2026-09-14T02:43:52Z`. The previous lock pinned
+`17f8e2a8acba76d5516e0a52c85bf802b0e17892` (Nightly 20260913.1646).
+All 43 active patches were replayed in order and exported as incremental
+full-index diffs. The inactive thread-fork catalog entry and both variants'
+patch selections are unchanged.
 
 The complete Reasoning tree is represented by single-parent source port commit
-`1ae2dc87ac10b48f981f79f3415e0c146ba87c7b` over the new upstream commit.
-The source port commit is a provenance record in the throwaway working clone;
+`b30702c889b2f7d2406540759a969c7b1050127d` over the new upstream commit.
+This source commit is a provenance record in the throwaway working clone;
 the checksummed patches are Harbor's reproducible artifact.
 
-### Conflict resolutions in this port
+### Changes for Nightly 20260914.1687
+
+- The ingestion harness combines upstream's shifted test clock with the
+  Reasoning settings layer, so paragraph delivery and reasoning remain testable.
+- Upstream assistant paragraph/code-block pacing retains its server clock.
+  Reasoning bursts retain completion/spill-only buffering by omitting the
+  optional pacing clock. A regression assertion checks that even a complete
+  reasoning paragraph stays buffered before the answer begins.
+- The new two-pane connection settings and icon picker retain shared-default
+  status and controls. The selected connection receives the shared-default
+  callbacks; host administration continues to use the platform primary.
+- The remaining refreshed patches carry new context and blob ids without
+  changing their variant membership or enabling inactive features.
+
+Both variants prepare through the checksum-validating CLI. Their tree ids are
+`800a4347f0d7208dd2c76d4783f3c1ddcd2e2f62` (Reasoning) and
+`eece6f827f99db1f6141e14bdc09acc8a4783085` (managed Nightly). The prepared
+Reasoning tree matches the source port commit. Exactly the 13 identity files
+differ; server, web and shared package sources match between variants.
+
+Validation for this port:
+
+- Node 24.13.1 component suite: 374 passing tests, including the opt-in real
+  variant proof; four live-server smoke tests skipped because no server binary
+  was supplied. Markdown lint passes.
+- Focused upstream suites: 1,010 passing tests across 17 suites. The 91-test
+  ingestion suite passed again after the buffering regression assertion.
+- Contracts, client-runtime, server and web typechecks pass. The exported
+  source delta passes `git diff --check`.
+- Dependencies installed frozen with Node 24.13.1 and pnpm 11.10.0. No dependency
+  lock changes are included. No app was built, installed or deployed.
+
+### Previous Nightly 20260913.1646 port
+
+The previous port moved from `c52b8d96e4b34201f19b5e5bb12c6b2a77bfaa9a`
+(Nightly 20260911.1520) to `17f8e2a8acba76d5516e0a52c85bf802b0e17892`.
+Its single-parent source port commit was
+`1ae2dc87ac10b48f981f79f3415e0c146ba87c7b`. The resolutions and evidence below
+are retained as history and remain part of the current feature baseline.
+
+### Conflict resolutions for Nightly 20260913.1646
 
 - The optimized single-pass thread reducer keeps message context and adds
   reasoning channel propagation. Contracts retain the upstream context fields.

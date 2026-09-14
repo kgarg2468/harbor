@@ -1,12 +1,12 @@
 {
   "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
-  "commit": "17f8e2a8acba76d5516e0a52c85bf802b0e17892",
+  "commit": "c07575f573dd3a1af4f734297d17f7c951c95f10",
   "patches": [
     {
       "id": "reasoning-full",
       "path": "patches/0001-reasoning.patch",
-      "sha256": "7034ad56de13640e50cd599597301c76736ed78989d071f1b53d61f3b259b6ec"
+      "sha256": "9a418a4b6d7187647e2ec7acb0965182830362d33c37774b50f7a49dd35b2b84"
     },
     {
       "id": "desktop-runtime-common",
@@ -31,7 +31,7 @@
     {
       "id": "activity-wiring",
       "path": "patches/0009-activity-wiring.patch",
-      "sha256": "3ac8087c5640be432f9af1728f671e7302124a93fd616d2f3f26de34f92b95ea"
+      "sha256": "34a74dd6ef483ec7f5aebb27ec2b3e47a03a4ccbbfda9d640890c96299ccdf3c"
     },
     {
       "id": "thread-fork-backend",
@@ -56,7 +56,7 @@
     {
       "id": "managed-runtime-stager",
       "path": "patches/0014-managed-runtime-stager.patch",
-      "sha256": "6e3ee966d089bb8967a5481d2c12c8e65ec87f3083dd5dcc35b8195e4ad16c77"
+      "sha256": "3c31328fd77e776cec683b9c260106dc73acdcf143a5b3207c1753684cc84cb4"
     },
     {
       "id": "desktop-reservation",
@@ -81,7 +81,7 @@
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "530125dd9714fcba6e483afd4e5681ef2839013ee85f97150f226def1066273a"
+      "sha256": "e7df1676ef6021dbfb71958dc3ce4cb89a560a83213e2b99872e99ba293ea907"
     },
     {
       "id": "managed-release-feed",
@@ -106,17 +106,17 @@
     {
       "id": "managed-server-composition",
       "path": "patches/0023-managed-server-composition.patch",
-      "sha256": "3ef498f91a085bcb152871b8b3bb6d48143e65155ab29c07e3447e499a1a76e2"
+      "sha256": "b2edb6e316c07f480dbff8b1e9f8676322fe09479915f4463a7d1f4dba8cd254"
     },
     {
       "id": "live-admission",
       "path": "patches/0024-live-admission.patch",
-      "sha256": "c131d4cb50aebd2b44f9e4197383a87b76384550582c9f4581ce5a5d73f027db"
+      "sha256": "2521b7949db8884d633e38af5af92bbd550bd0d4b6e4e537bd3c10450f5fe4d7"
     },
     {
       "id": "managed-desktop-identity",
       "path": "patches/0025-managed-desktop-identity.patch",
-      "sha256": "89247defecde56d069328a44b85169e3f103e2eba4a9a0f7aa2b53bcd05cbdca"
+      "sha256": "dba0a82c80720bb74d71a51258e55c2d4b9a1dc9fa8b43a6ef306d0cd0022484"
     },
     {
       "id": "managed-nightly-trigger",
@@ -126,7 +126,7 @@
     {
       "id": "managed-queue-controls",
       "path": "patches/0027-managed-queue-controls.patch",
-      "sha256": "fa50435c5b2791874e256e24168d581e23ff7e28eea02ce902491bdcb4c94644"
+      "sha256": "a2cd2d4c8fa7dbae14817735deca306ff016c1924073d68fcd289fc2ecc02887"
     },
     {
       "id": "desktop-reservation-transport",
@@ -141,7 +141,7 @@
     {
       "id": "server-desktop-reservation-receiver",
       "path": "patches/0030-server-desktop-reservation-receiver.patch",
-      "sha256": "bac4e616af49e8143d910cc06e199ab2c3c833b90a176787404775f8a4a275c8"
+      "sha256": "94d9552b9b26d6bf3dc5fa5253d5bea5eaefdedd4e850b1a0da3f88e2482abca"
     },
     {
       "id": "managed-presentation-identity",
@@ -201,7 +201,7 @@
     {
       "id": "managed-desktop-scheduler",
       "path": "patches/0042-managed-desktop-scheduler.patch",
-      "sha256": "98ea0760a8892812ac5183d865f0216c652d54fcc54d20dccf7ec945af140142"
+      "sha256": "69c24a9a472a33432c67318d1410979a4608beaa469f09fdf957d5a6cfff9b8c"
     },
     {
       "id": "managed-shared-connection",

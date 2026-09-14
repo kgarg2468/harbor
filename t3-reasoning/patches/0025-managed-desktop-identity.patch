@@ -1,8 +1,8 @@
 diff --git a/apps/desktop/src/settings/DesktopClientSettings.test.ts b/apps/desktop/src/settings/DesktopClientSettings.test.ts
-index 5c1e01cb147123899bc7994ec28fe6e9139445c3..56b6c270888d86651b9bcb6ce95aac3f413f3ee1 100644
+index 5ad23ee7058204118756c2a553349844dd23a7eb..a8cd1a7439850409a7cbd12dc4f9fba703d45ee5 100644
 --- a/apps/desktop/src/settings/DesktopClientSettings.test.ts
 +++ b/apps/desktop/src/settings/DesktopClientSettings.test.ts
-@@ -39,6 +39,7 @@ const clientSettings: ClientSettings = {
+@@ -40,6 +40,7 @@ const clientSettings: ClientSettings = {
    diffIgnoreWhitespace: true,
    diffLayout: "stacked",
    environmentIdentificationMode: "artwork",

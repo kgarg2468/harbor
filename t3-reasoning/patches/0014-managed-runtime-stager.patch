@@ -3014,10 +3014,10 @@ index 0000000000000000000000000000000000000000..e058dc34db1b7a11c4865b1429f013cf
 +  );
 +});
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
-index a8dbaf39692448ac6ffda2c252ee57fb52e3dadd..b1a2a8b308b9dc2bbe134c6385ef0d502a7f2e1f 100644
+index 26f13005de4bfafe955527c44282e25fbed31493..3fef48aa6214fd21297a31252e45b66638723a9b 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -531,6 +531,9 @@ importers:
+@@ -532,6 +532,9 @@ importers:
        stream-json:
          specifier: 3.6.0
          version: 3.6.0

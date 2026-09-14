@@ -697,10 +697,10 @@ index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a0
                  Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
                ),
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index a054b979a84b55d4de35687ec5f412611778ec17..f0b1e52934a78b465a0d05301d23d389c1c54cd4 100644
+index 7bf54e51cb30791bc0d28064d72e36de4480e87d..210ae157aabb75b49bb2ced41be790657e187d25 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -538,6 +538,7 @@ const buildAppUnderTest = (options?: {
+@@ -545,6 +545,7 @@ const buildAppUnderTest = (options?: {
      providerAuth?: Partial<ProviderAuthService["Service"]>;
      providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
      antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
@@ -708,7 +708,7 @@ index a054b979a84b55d4de35687ec5f412611778ec17..f0b1e52934a78b465a0d05301d23d389
      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
      externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
      vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
-@@ -1062,6 +1063,17 @@ const buildAppUnderTest = (options?: {
+@@ -1069,6 +1070,17 @@ const buildAppUnderTest = (options?: {
      );
  
      const appLayer = servedRoutesLayer.pipe(
@@ -726,7 +726,7 @@ index a054b979a84b55d4de35687ec5f412611778ec17..f0b1e52934a78b465a0d05301d23d389
        Layer.provide(resourceTelemetryLayer),
        Layer.provide(UsageService.layerTest),
        Layer.provide(
-@@ -12189,3 +12201,229 @@ it.live(
+@@ -12381,3 +12393,229 @@ it.live(
      }).pipe(Effect.provide(NodeServices.layer)),
    120_000,
  );
