@@ -1411,10 +1411,10 @@ index 0000000000000000000000000000000000000000..b68952442068af79adcfa5b61552a2c8
 +  puts("native desktop artifact tests passed (13 groups)"); return 0;
 +}
 diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
-index 0c191e5bdc5e1c0e30c5f71a8d9154db749265df..79f8017a723f263897193b742450b141b3ace049 100644
+index 7ae5a90e21a7a93ac8adb0f9318d6562903222d5..fea197a764f2060030e1abb8df60d29f6216db45 100644
 --- a/packages/contracts/src/index.ts
 +++ b/packages/contracts/src/index.ts
-@@ -40,3 +40,4 @@ export * from "./resourceTelemetry.ts";
+@@ -43,3 +43,4 @@ export * from "./resourceTelemetry.ts";
  export * from "./usage.ts";
  export * from "./updateAdmission.ts";
  export * from "./rpc.ts";
@@ -1589,7 +1589,7 @@ index 5a8cb5084939fa0e577e0aa2185b50b1366f0565..2253f94c920c5d6693df72f4ad7cdc60
    WindowsPrimaryNativeProbeError,
    WindowsDesktopBuildPrerequisitesMissingError,
 @@ -719,6 +721,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
-
+ 
      assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
        "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
 +      "!apps/desktop/resources/desktop-artifact",
@@ -1700,7 +1700,7 @@ index 0a25c8b37a1450b3f5e777e58701b0cfa0ef4f18..69b8416ca9df125d54455f18dfcc4f93
 @@ -2305,6 +2312,39 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function*
    }
  });
-
+ 
 +export const stageDesktopArtifactHelper = Effect.fn("stageDesktopArtifactHelper")(
 +  function* (input: {
 +    readonly repoRoot: string;

@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/cloud/idleUpdateCoordinator.test.ts b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
-index 6437fbebd..1531b22f6 100644
+index 6437fbebd3fbf8d3708411ff80204021a551244d..1531b22f6d787dccf4dadfac6dc78a63202615f8 100644
 --- a/apps/server/src/cloud/idleUpdateCoordinator.test.ts
 +++ b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
 @@ -468,4 +468,150 @@ describe("idleUpdateCoordinator", () => {
@@ -154,7 +154,7 @@ index 6437fbebd..1531b22f6 100644
 +  });
  });
 diff --git a/apps/server/src/cloud/idleUpdateCoordinator.ts b/apps/server/src/cloud/idleUpdateCoordinator.ts
-index d795ebafa..f3aa56117 100644
+index d795ebafa437fc5635d6e7b42aaca4c044a5209b..f3aa561176a50c0647711ee56e8a9a0ad0187d6c 100644
 --- a/apps/server/src/cloud/idleUpdateCoordinator.ts
 +++ b/apps/server/src/cloud/idleUpdateCoordinator.ts
 @@ -33,9 +33,11 @@ import type { ActivationDeclined } from "./queuedUpdate.ts";
@@ -240,7 +240,7 @@ index d795ebafa..f3aa56117 100644
  export const layer = Layer.effect(
 diff --git a/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
 new file mode 100644
-index 000000000..5c8ff7c74
+index 0000000000000000000000000000000000000000..5c8ff7c74a735b8f4053c3f44a201f89213e37e9
 --- /dev/null
 +++ b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
 @@ -0,0 +1,610 @@
@@ -856,7 +856,7 @@ index 000000000..5c8ff7c74
 +});
 diff --git a/apps/server/src/desktopUpdate/DesktopUpdateReservation.ts b/apps/server/src/desktopUpdate/DesktopUpdateReservation.ts
 new file mode 100644
-index 000000000..8412b9e27
+index 0000000000000000000000000000000000000000..8412b9e27eef142b6f7be8fe8cc7466cfac012a2
 --- /dev/null
 +++ b/apps/server/src/desktopUpdate/DesktopUpdateReservation.ts
 @@ -0,0 +1,310 @@

@@ -1,6 +1,6 @@
 diff --git a/apps/server/src/cloud/managedNightlyUpdate.test.ts b/apps/server/src/cloud/managedNightlyUpdate.test.ts
 new file mode 100644
-index 00000000..8b7a6430
+index 0000000000000000000000000000000000000000..8b7a6430164f7da769ab6d4a950c7f0f802b551d
 --- /dev/null
 +++ b/apps/server/src/cloud/managedNightlyUpdate.test.ts
 @@ -0,0 +1,866 @@
@@ -872,7 +872,7 @@ index 00000000..8b7a6430
 +});
 diff --git a/apps/server/src/cloud/managedNightlyUpdate.ts b/apps/server/src/cloud/managedNightlyUpdate.ts
 new file mode 100644
-index 00000000..cce6b676
+index 0000000000000000000000000000000000000000..cce6b676de51a98abce37557fc7b9138f5bb9c37
 --- /dev/null
 +++ b/apps/server/src/cloud/managedNightlyUpdate.ts
 @@ -0,0 +1,233 @@
@@ -1110,10 +1110,10 @@ index 00000000..cce6b676
 +    }),
 +  );
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index b158ee00..2f9ceb27 100644
+index 820543573f4292cc74bced145ff0e8dfceacd47b..899878d10dfa9d4d5b9288cc95636dfc8c7f01cb 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -117,6 +117,7 @@ import * as CloudCliState from "./cloud/CliState.ts";
+@@ -126,6 +126,7 @@ import * as CloudCliState from "./cloud/CliState.ts";
  import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
  import * as IdleUpdatePreparation from "./cloud/idleUpdatePreparation.ts";
  import { makeManagedCandidateProcess } from "./cloud/managedCandidateProcess.ts";
@@ -1121,7 +1121,7 @@ index b158ee00..2f9ceb27 100644
  import type { ManagedServerTarget } from "./cloud/managedRelease.ts";
  import {
    type ManagedReleaseFeed,
-@@ -521,10 +522,11 @@ export const makeManagedUpdateRuntimeLayer = (input: {
+@@ -580,10 +581,11 @@ export const makeManagedUpdateRuntimeLayer = (input: {
  // the runtime dependencies so every consumer sees the same pair.
  const UpdateGatesLive = Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer);
  
@@ -1137,7 +1137,7 @@ index b158ee00..2f9ceb27 100644
  const ManagedUpdateRuntimeLive = Layer.unwrap(
    Effect.gen(function* () {
      const config = yield* ServerConfig.ServerConfig;
-@@ -536,6 +538,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -595,6 +597,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
      const hostTarget = resolveManagedServerTarget(platform, architecture, linuxLibc);
  
      let resolve: ManagedQueuedUpdate.ResolveManagedRuntime;
@@ -1145,7 +1145,7 @@ index b158ee00..2f9ceb27 100644
      if (hostTarget === undefined) {
        const unsupported = new ManagedArtifactSourceError({
          reason: `managed server updates are unsupported on ${platform}-${architecture}${
-@@ -554,6 +557,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -613,6 +616,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
          candidate,
        });
        const feed = yield* makeGitHubManagedReleaseFeed({ hostTarget });
@@ -1153,7 +1153,7 @@ index b158ee00..2f9ceb27 100644
        resolve = makeSelectionBoundManagedRuntimeResolver({
          feed,
          makeStager: (selection) =>
-@@ -567,13 +571,21 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -626,13 +630,21 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
        });
      }
  

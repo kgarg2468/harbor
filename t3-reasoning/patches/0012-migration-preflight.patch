@@ -36,7 +36,7 @@ index 370a8977fc4c3861f34d236a5ce73432b3d7fb0a..7b5591cc577a48345b5a1dabc0ddf0d3
 +import { Command } from "effect/unstable/cli";
 +import * as CliError from "effect/unstable/cli/CliError";
 +import * as SqlClient from "effect/unstable/sql/SqlClient";
-
+ 
 +import packageJson from "../../package.json" with { type: "json" };
 +import { makeCli } from "../bin.ts";
 +import {
@@ -47,7 +47,7 @@ index 370a8977fc4c3861f34d236a5ce73432b3d7fb0a..7b5591cc577a48345b5a1dabc0ddf0d3
 +import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 +import { migrationManifest } from "../persistence/Migrations.ts";
  import { formatCliCommand } from "./invocation.ts";
-
+ 
  it("formats package runner commands from their cache entry paths", () => {
 @@ -85,3 +106,135 @@ it("formats serve suggestions to match the launching command", () => {
      "t3 serve",

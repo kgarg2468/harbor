@@ -1,6 +1,6 @@
 diff --git a/apps/server/src/cloud/managedQueuedUpdate.test.ts b/apps/server/src/cloud/managedQueuedUpdate.test.ts
 new file mode 100644
-index 00000000..e06178cb
+index 0000000000000000000000000000000000000000..e06178cb8bdeb8011f632cf7970cb82ebb24f20b
 --- /dev/null
 +++ b/apps/server/src/cloud/managedQueuedUpdate.test.ts
 @@ -0,0 +1,647 @@
@@ -653,7 +653,7 @@ index 00000000..e06178cb
 +});
 diff --git a/apps/server/src/cloud/managedQueuedUpdate.ts b/apps/server/src/cloud/managedQueuedUpdate.ts
 new file mode 100644
-index 00000000..197ecab6
+index 0000000000000000000000000000000000000000..197ecab6a672d031288fddc0cf95f2baa37ce701
 --- /dev/null
 +++ b/apps/server/src/cloud/managedQueuedUpdate.ts
 @@ -0,0 +1,179 @@
@@ -837,7 +837,7 @@ index 00000000..197ecab6
 +  });
 +});
 diff --git a/apps/server/src/cloud/selfUpdate.test.ts b/apps/server/src/cloud/selfUpdate.test.ts
-index e6d8010f..5611124a 100644
+index e6d8010f19d734f10aa5ce2683f5d0a502aee909..5611124a25086b78af83b7243bfe38275a65b96b 100644
 --- a/apps/server/src/cloud/selfUpdate.test.ts
 +++ b/apps/server/src/cloud/selfUpdate.test.ts
 @@ -17,9 +17,15 @@ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
@@ -898,7 +898,7 @@ index e6d8010f..5611124a 100644
      Effect.gen(function* () {
        const web = yield* makeHarness();
 diff --git a/apps/server/src/cloud/selfUpdate.ts b/apps/server/src/cloud/selfUpdate.ts
-index 3cea3079..382f168f 100644
+index 3cea30790a4c4005e9f1fd93876a7d77f6a2d1e5..382f168fc04a489f15f254cf737be1d1cee35e01 100644
 --- a/apps/server/src/cloud/selfUpdate.ts
 +++ b/apps/server/src/cloud/selfUpdate.ts
 @@ -17,9 +17,11 @@ import * as FileSystem from "effect/FileSystem";
@@ -945,7 +945,7 @@ index 3cea3079..382f168f 100644
        return yield* failWith("A server update is already in progress.");
      }
 diff --git a/apps/server/src/cloud/serviceLauncherClient.test.ts b/apps/server/src/cloud/serviceLauncherClient.test.ts
-index eab09354..03c00d90 100644
+index eab0935419a07b5af63d8ea68990cfe5f0eaaea5..03c00d90e0f34a2ba8ae735aae4abfc80dda74a1 100644
 --- a/apps/server/src/cloud/serviceLauncherClient.test.ts
 +++ b/apps/server/src/cloud/serviceLauncherClient.test.ts
 @@ -1,7 +1,10 @@
@@ -1237,7 +1237,7 @@ index eab09354..03c00d90 100644
 +  }),
 +);
 diff --git a/apps/server/src/cloud/serviceLauncherClient.ts b/apps/server/src/cloud/serviceLauncherClient.ts
-index 970c72ce..a9e0b275 100644
+index 2d644157211fdbe07995bfdfc7bfb0a0e1dd0ec7..644f6ab29e714966b3600ec309bfb78d1e9c8543 100644
 --- a/apps/server/src/cloud/serviceLauncherClient.ts
 +++ b/apps/server/src/cloud/serviceLauncherClient.ts
 @@ -96,14 +96,32 @@ export const ServiceLauncherHostProcess = Context.Reference<ServiceLauncherProce

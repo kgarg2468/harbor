@@ -252,7 +252,7 @@ index 686dea73cb4ce82bc7a1c22be7a29d2b21e0da8b..2e5a56e539c45111a7ccace66de6e333
 +  );
 +});
 diff --git a/apps/server/src/cloud/managedRelease.ts b/apps/server/src/cloud/managedRelease.ts
-index 8f040bb51e315f8edec1692e0d8f3c0441de5736..7ed3e90b1256565189af9f6325aef15301c65bdc 100644
+index abe550f143f8156fb86bbf605c33131f50bb9378..76d3678e185914056a9a35f2b9f40555709b2916 100644
 --- a/apps/server/src/cloud/managedRelease.ts
 +++ b/apps/server/src/cloud/managedRelease.ts
 @@ -13,8 +13,9 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";

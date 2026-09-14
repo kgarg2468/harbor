@@ -163,3 +163,13 @@ for a deployable configuration.
 3. Update the lock's `sha256`, run the component tests, and prepare both
    variants into fresh destinations to confirm every patch applies.
 4. Record the new tree ids and the file-level difference in this document.
+
+## Nightly 20260913.1646 port proof
+
+Verified on 2026-09-14 with all active patches and the inactive fork entry
+excluded. The prepared Reasoning tree is
+`214c26f3de8122cec2770b267d585feb99c49c7f`; the managed Nightly tree is
+`51af81a723ce9d80c5b40505c619ecf159ded8ba`. The current variant difference
+is exactly the 13 files of `reasoning-identity`. The earlier eight-file
+proofs above are historical records. No server, web or shared package file
+differs between the current variants.

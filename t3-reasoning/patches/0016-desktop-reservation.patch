@@ -1,6 +1,6 @@
 diff --git a/apps/desktop/src/updates/desktopUpdateReservation.test.ts b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
 new file mode 100644
-index 000000000..f1e9799f5
+index 0000000000000000000000000000000000000000..f1e9799f5409b7c0f71bb668abd15ea955a34d03
 --- /dev/null
 +++ b/apps/desktop/src/updates/desktopUpdateReservation.test.ts
 @@ -0,0 +1,892 @@
@@ -898,7 +898,7 @@ index 000000000..f1e9799f5
 +});
 diff --git a/apps/desktop/src/updates/desktopUpdateReservation.ts b/apps/desktop/src/updates/desktopUpdateReservation.ts
 new file mode 100644
-index 000000000..ee627d01a
+index 0000000000000000000000000000000000000000..ee627d01a3bd7b59f69db9ea38bd223d334a7724
 --- /dev/null
 +++ b/apps/desktop/src/updates/desktopUpdateReservation.ts
 @@ -0,0 +1,468 @@
@@ -1372,7 +1372,7 @@ index 000000000..ee627d01a
 +  });
 diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
 new file mode 100644
-index 000000000..26f2112fe
+index 0000000000000000000000000000000000000000..26f2112fe6c4085a9103f687a70b6f0f0660cb59
 --- /dev/null
 +++ b/packages/contracts/src/resourceTelemetry.test.ts
 @@ -0,0 +1,216 @@
@@ -1593,10 +1593,10 @@ index 000000000..26f2112fe
 +  });
 +});
 diff --git a/packages/contracts/src/resourceTelemetry.ts b/packages/contracts/src/resourceTelemetry.ts
-index 3ec1e4de3..9012303dc 100644
+index ee9d2b3ac2588f33965e7c15512e893bf1ac8dc9..6930641415a8c740f2303f114a553da922855687 100644
 --- a/packages/contracts/src/resourceTelemetry.ts
 +++ b/packages/contracts/src/resourceTelemetry.ts
-@@ -253,6 +253,17 @@ export const DesktopUpdateRemoteOutcome = Schema.Literals([
+@@ -287,6 +287,17 @@ export const DesktopUpdateRemoteOutcome = Schema.Literals([
  ]);
  export type DesktopUpdateRemoteOutcome = typeof DesktopUpdateRemoteOutcome.Type;
  
@@ -1614,7 +1614,7 @@ index 3ec1e4de3..9012303dc 100644
  /**
   * Desktop main -> server: the desktop app's update state. Sent once when the
   * backend attaches and again on every state change, so the server always
-@@ -268,10 +279,64 @@ export const DesktopUpdateStatusReport = Schema.Struct({
+@@ -302,10 +313,64 @@ export const DesktopUpdateStatusReport = Schema.Struct({
    // Terminal marker for a server-triggered run; absent while it is working.
    outcome: Schema.optionalKey(DesktopUpdateRemoteOutcome),
    reason: Schema.optionalKey(TrimmedNonEmptyString),

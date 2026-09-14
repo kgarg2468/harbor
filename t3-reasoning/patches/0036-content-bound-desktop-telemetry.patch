@@ -60,10 +60,10 @@ index e746c33073d8bd26fa13bb5850797b3ecc6284c1..0ed5c41c8093963cc55e370407078f3d
        }).pipe(Effect.provide(layer));
      }),
 diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
-index 7c4c19f64a2497df2f591d57f987dcb1445fe906..c92f2d65ab5f1341151dfbcde10a9303e196d577 100644
+index d768da2196d151a9b4dab4ca39b1f471b6fd6378..fe8d05e48616225e78c9c1d7067ed28df36c67da 100644
 --- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
 +++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
-@@ -483,7 +483,13 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -484,7 +484,13 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
          electronPid: process.pid,
        } as const),
        body,
@@ -151,7 +151,7 @@ index 4307c88cae5a277086ecd63037cff3492cfd9791..f15acec8f92e1afcd85436f5d0ecdbcc
      Effect.gen(function* () {
        const harness = yield* makeReceiverHarness();
 diff --git a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
-index c613172f066aec28bc3ef23eb6a35809c85178c2..53172818d5b214d731c1280b08a04ca5ecffef22 100644
+index 1f59ab9e781ea5874d4fa41262312f4018e1f0ec..238d5fa92dc61ae3644af537e85215ce5c3a9fe6 100644
 --- a/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
 +++ b/apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts
 @@ -7,6 +7,7 @@ import {
@@ -171,7 +171,7 @@ index c613172f066aec28bc3ef23eb6a35809c85178c2..53172818d5b214d731c1280b08a04ca5
      ) => Effect.Effect<void, DesktopTelemetryControlError>;
      readonly commitDesktopUpdate: (
        requestId: string,
-@@ -402,7 +405,10 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+@@ -403,7 +406,10 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
        Effect.gen(function* () {
          const fd = config.desktopTelemetryControlFd;
          if (fd === undefined) return;
@@ -183,7 +183,7 @@ index c613172f066aec28bc3ef23eb6a35809c85178c2..53172818d5b214d731c1280b08a04ca5
            Effect.mapError(
              (cause) =>
                new DesktopTelemetryControlFailed({
-@@ -702,11 +708,13 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
+@@ -703,11 +709,13 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
      health: Ref.get(health),
      subscribeHealth: subscribeBeforeSnapshotWithoutMutex(healthChanges, Ref.get(health)),
      setDiagnosticsDemand,

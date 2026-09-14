@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/backend/DesktopBackendManager.test.ts b/apps/desktop/src/backend/DesktopBackendManager.test.ts
-index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff91692243e494 100644
+index 5a1ef70ad1c2ab473ab1471d56a3c828e5cbc960..2d139f57dabf513c9ef76fcf235be9801ef87353 100644
 --- a/apps/desktop/src/backend/DesktopBackendManager.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendManager.test.ts
 @@ -2,11 +2,15 @@ import {
@@ -18,8 +18,8 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
  import * as FileSystem from "effect/FileSystem";
  import * as Fiber from "effect/Fiber";
  import * as Layer from "effect/Layer";
-@@ -25,6 +29,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
- import * as DesktopBackendManager from "./DesktopBackendManager.ts";
+@@ -27,6 +31,10 @@ import * as DesktopApp from "../app/DesktopApp.ts";
+ import * as DesktopBackendPool from "./DesktopBackendPool.ts";
  import * as DesktopObservability from "../app/DesktopObservability.ts";
  import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 +import type {
@@ -27,12 +27,12 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
 +  OwnedBackendRun,
 +} from "../updates/desktopUpdateReservation.ts";
  import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
-
+ 
  const decodeDesktopBackendBootstrap = Schema.decodeEffect(
-@@ -115,6 +123,105 @@ function decodeBootstrap(raw: string) {
+@@ -117,6 +125,105 @@ function decodeBootstrap(raw: string) {
    return decodeDesktopBackendBootstrap(raw);
  }
-
+ 
 +interface FakeRunChannel {
 +  readonly run: OwnedBackendRun;
 +  /** Every control message this generation's callback received. */
@@ -135,7 +135,7 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
  interface MakeInstanceInput {
    readonly spawnerLayer: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner>;
    readonly httpClientLayer?: Layer.Layer<HttpClient.HttpClient>;
-@@ -133,6 +240,10 @@ interface MakeInstanceInput {
+@@ -135,6 +242,10 @@ interface MakeInstanceInput {
    readonly desktopTelemetryPublisher?: Partial<
      DesktopTelemetryPublisher.DesktopTelemetryPublisher["Service"]
    >;
@@ -145,8 +145,8 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
 +  readonly reservationTransport?: DesktopTelemetryPublisher.DesktopUpdateReservationTransport;
    readonly pruneRuntimes?: (distro: string | null, runtimeId: string) => Effect.Effect<void>;
  }
-
-@@ -162,15 +273,24 @@ function makeTestInstance(input: MakeInstanceInput) {
+ 
+@@ -164,15 +275,24 @@ function makeTestInstance(input: MakeInstanceInput) {
      Layer.succeed(DesktopTelemetryPublisher.DesktopTelemetryPublisher, {
        latest: Effect.succeed(Option.none()),
        changes: Stream.empty,
@@ -174,10 +174,10 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
        ...input.desktopTelemetryPublisher,
      }),
      DesktopWslEnvironment.layerTest(
-@@ -607,6 +727,378 @@ describe("DesktopBackendManager", () => {
+@@ -609,6 +729,378 @@ describe("DesktopBackendManager", () => {
      ),
    );
-
+ 
 +  it.effect("binds fd4 and fd5 to the channel opened for the exact generation", () =>
 +    Effect.scoped(
 +      Effect.gen(function* () {
@@ -553,16 +553,16 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
    it.effect("drains trailing child output before persisting an unexpected exit", () =>
      Effect.scoped(
        Effect.gen(function* () {
-@@ -821,7 +1313,7 @@ describe("DesktopBackendManager", () => {
+@@ -823,7 +1315,7 @@ describe("DesktopBackendManager", () => {
          let shutdownCount = 0;
          let persistedFailureCount = 0;
          let discardedSessionCount = 0;
 -        let removedTelemetrySources = 0;
 +        const reservations = makeFakeReservationTransport();
-
+ 
          const spawnerLayer = Layer.succeed(
            ChildProcessSpawner.ChildProcessSpawner,
-@@ -873,12 +1365,7 @@ describe("DesktopBackendManager", () => {
+@@ -875,12 +1367,7 @@ describe("DesktopBackendManager", () => {
                discardedSessionCount += 1;
              }),
            },
@@ -575,8 +575,8 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
 +          reservationTransport: reservations.transport,
          });
          assert.isTrue(Option.isNone(yield* instance.currentConfig));
-
-@@ -902,7 +1389,14 @@ describe("DesktopBackendManager", () => {
+ 
+@@ -904,7 +1391,14 @@ describe("DesktopBackendManager", () => {
          assert.equal(closedCount, 1);
          assert.equal(persistedFailureCount, 0);
          assert.equal(discardedSessionCount, 1);
@@ -589,11 +589,11 @@ index 53ccf5a756eb71ef65b9ab01ded37d5eae68e4e6..cafe1f61275a8af4d4acb5033dff9169
 +          yield* Deferred.await(reservations.opened[0]!.closed),
 +          "backend process exited",
 +        );
-
+ 
          const stoppedSnapshot = yield* instance.snapshot;
          assert.isFalse(yield* Ref.get(backendReadyFlag));
 diff --git a/apps/desktop/src/backend/DesktopBackendManager.ts b/apps/desktop/src/backend/DesktopBackendManager.ts
-index 436c0c08e4ed019380aedee137ff69d419fe8c93..67e176a237be6b74fae4c1c88af5b1be3613e111 100644
+index 6f1ea139bdca4c4bbc3223b48af35f35a8bff2a9..049cf81562a9aaaff0a80f60b7d18089983bef1d 100644
 --- a/apps/desktop/src/backend/DesktopBackendManager.ts
 +++ b/apps/desktop/src/backend/DesktopBackendManager.ts
 @@ -825,6 +825,24 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
@@ -618,19 +618,19 @@ index 436c0c08e4ed019380aedee137ff69d419fe8c93..67e176a237be6b74fae4c1c88af5b1be
 +            return channel;
 +          }),
 +        );
-
+ 
          const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
            reason: string,
 @@ -882,7 +900,6 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                  );
-
+ 
                if (isCurrentRun) {
 -                yield* desktopTelemetryPublisher.removeControlSource(spec.id);
                  if (Option.isSome(pid)) {
                    if (exitObserved && !stopRequested) {
                      yield* backendOutputLog.persistFailure({
 @@ -906,9 +923,8 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
-
+ 
          const program = runBackendProcess({
            ...config.value,
 -          desktopTelemetryStream: desktopTelemetryPublisher.encoded,
@@ -685,7 +685,7 @@ index 436c0c08e4ed019380aedee137ff69d419fe8c93..67e176a237be6b74fae4c1c88af5b1be
            }
            if (cleanup.shouldStart) {
 diff --git a/apps/desktop/src/backend/DesktopBackendPool.test.ts b/apps/desktop/src/backend/DesktopBackendPool.test.ts
-index 5fe02c8d17289410dfcf3d366027b5b815ea8999..956006610d62408ab2ab44f919728a651b6dfb25 100644
+index b9a96d72a77aea438504f34265ee19218d865262..409e5944643d5e9715755386701d9938355f36ee 100644
 --- a/apps/desktop/src/backend/DesktopBackendPool.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendPool.test.ts
 @@ -77,6 +77,20 @@ function makePoolLayer(
@@ -739,7 +739,7 @@ index d705252ef588e20376d97b85981d545ebc68bc96..e746c33073d8bd26fa13bb5850797b3e
 @@ -50,6 +58,118 @@ function makeElectronAppLayer(
    } satisfies ElectronApp.ElectronApp["Service"]);
  }
-
+ 
 +// A publisher whose power monitor never changes, for tests that only care
 +// about routing. The initial sample still lands, so every attached stream
 +// replays exactly one snapshot after its hello. `onMetricsRead` fires on each
@@ -858,7 +858,7 @@ index d705252ef588e20376d97b85981d545ebc68bc96..e746c33073d8bd26fa13bb5850797b3e
 @@ -421,30 +541,7 @@ describe("DesktopTelemetryPublisher", () => {
          const received = yield* Fiber.join(requestFiber);
          assert.equal(Option.getOrThrow(received).requestId, "req-9");
-
+ 
 -        const report = {
 -          version: 1,
 -          type: "desktopUpdateStatus",
@@ -884,7 +884,7 @@ index d705252ef588e20376d97b85981d545ebc68bc96..e746c33073d8bd26fa13bb5850797b3e
 -        } as const;
 -        yield* publisher.publishUpdateReport(report);
 +        yield* publisher.publishUpdateReport(upToDateReport);
-
+ 
          // A subscriber that attaches after the publish (the backend spawned
          // by a relaunch) still sees the latest report replayed.
 @@ -466,4 +563,390 @@ describe("DesktopTelemetryPublisher", () => {
@@ -1279,7 +1279,7 @@ index d705252ef588e20376d97b85981d545ebc68bc96..e746c33073d8bd26fa13bb5850797b3e
 +  });
  });
 diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
-index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1445fe906 100644
+index 8fd478c821e7bfaf993aab612ffed32896e26b13..d768da2196d151a9b4dab4ca39b1f471b6fd6378 100644
 --- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
 +++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.ts
 @@ -1,16 +1,20 @@
@@ -1304,14 +1304,14 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
  import * as Effect from "effect/Effect";
  import * as Layer from "effect/Layer";
 @@ -23,6 +27,10 @@ import * as Stream from "effect/Stream";
-
+ 
  import * as ElectronApp from "../electron/ElectronApp.ts";
  import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
 +import type {
 +  DesktopUpdateReservationExchange,
 +  OwnedBackendRun,
 +} from "../updates/desktopUpdateReservation.ts";
-
+ 
  const LIVE_SAMPLE_INTERVAL = Duration.seconds(1);
  const BATTERY_SAMPLE_INTERVAL = Duration.seconds(5);
 @@ -30,6 +38,9 @@ const CONSTRAINED_SAMPLE_INTERVAL = Duration.seconds(15);
@@ -1323,11 +1323,11 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
 +const RESERVATION_REPLY_TIMEOUT = Duration.seconds(30);
  const encodeMessage = Schema.encodeSync(Schema.fromJsonString(DesktopHostTelemetryMessage));
  const textEncoder = new TextEncoder();
-
+ 
 @@ -57,6 +68,34 @@ interface HostPowerIntervals {
    readonly idle: Duration.Duration;
  }
-
+ 
 +/**
 + * The telemetry endpoints of one backend process generation. `encoded` is
 + * that run's fd input: the hello, the global snapshot/report replay and live
@@ -1366,7 +1366,7 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
 +    readonly reservationTransport: DesktopUpdateReservationTransport;
    }
  >()("@t3tools/desktop/telemetry/DesktopTelemetryPublisher") {}
-
+ 
 +interface ReservationRunEntry {
 +  readonly run: OwnedBackendRun;
 +  /** Diagnostics-demand source key for this exact generation. */
@@ -1391,10 +1391,10 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
  function booleanState(value: boolean): HostPowerSnapshot["onBattery"] {
    return value ? "true" : "false";
  }
-@@ -314,28 +375,39 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -315,28 +376,39 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
      }
    }).pipe(Effect.forkScoped);
-
+ 
 +  // `retired` is consulted inside the same synchronous step that mutates the
 +  // set, so a source that was retired between constructing this effect and
 +  // running it can neither re-add itself nor race the retirement's removal.
@@ -1447,7 +1447,7 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
        case "setHostPowerIntervals":
          return Ref.set(hostPowerIntervals, {
            active: Duration.millis(message.activeIntervalMs),
-@@ -347,6 +419,10 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -348,6 +420,10 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
          return Queue.offer(updateCommitQueue, message).pipe(Effect.asVoid);
        case "cancelDesktopUpdate":
          return Queue.offer(updateCancellationQueue, message).pipe(Effect.asVoid);
@@ -1458,7 +1458,7 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
      }
    };
    const removeControlSource: DesktopTelemetryPublisher["Service"]["removeControlSource"] = (
-@@ -393,14 +469,22 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -394,14 +470,22 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
        );
      }),
    );
@@ -1486,13 +1486,13 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
 +      body,
 +    ).pipe(Stream.map((message) => textEncoder.encode(`${encodeMessage(message)}\n`)));
 +  const encoded = encodeWithHello(globalBody);
-
+ 
    const publishUpdateReport: DesktopTelemetryPublisher["Service"]["publishUpdateReport"] = (
      report,
-@@ -410,6 +494,174 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -411,6 +495,174 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
        Effect.asVoid,
      );
-
+ 
 +  // Exact generations keyed by instance id, then run id. Every registry and
 +  // pending-map mutation happens inside one synchronous step, so a close and
 +  // an exchange can never interleave halfway.
@@ -1664,14 +1664,14 @@ index 3f56ace15fb1cc98a2add1fe35c1e8c6bf574b40..7c4c19f64a2497df2f591d57f987dcb1
    return DesktopTelemetryPublisher.of({
      latest: Ref.get(latest),
      changes: Stream.fromPubSub(changes),
-@@ -421,6 +673,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
+@@ -422,6 +674,7 @@ export const make = Effect.fn("desktop.telemetryPublisher.make")(function* () {
      updateRequests: Stream.fromQueue(updateRequestQueue),
      updateCommits: Stream.fromQueue(updateCommitQueue),
      updateCancellations: Stream.fromQueue(updateCancellationQueue),
 +    reservationTransport: { openRun, exchange },
    });
  });
-
+ 
 diff --git a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts b/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
 index 0f4cb970da2c1a0fe0f29df786ea7f75431e65d5..62b27d43971fa195e9ec16aa7099a4f4208d469b 100644
 --- a/apps/desktop/src/updates/DesktopRemoteUpdates.test.ts
@@ -1695,14 +1695,14 @@ index 0f4cb970da2c1a0fe0f29df786ea7f75431e65d5..62b27d43971fa195e9ec16aa7099a4f4
 +            }),
 +        },
        });
-
+ 
        const updates = yield* DesktopUpdates.DesktopUpdates;
 diff --git a/packages/contracts/src/resourceTelemetry.test.ts b/packages/contracts/src/resourceTelemetry.test.ts
 index 26f2112fe6c4085a9103f687a70b6f0f0660cb59..3cc7302c23a35100a66229bbcd4c2f4728b40e81 100644
 --- a/packages/contracts/src/resourceTelemetry.test.ts
 +++ b/packages/contracts/src/resourceTelemetry.test.ts
 @@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
-
+ 
  import {
    DesktopHostTelemetryMessage,
 +  DesktopTelemetryControlMessage,
@@ -1711,11 +1711,11 @@ index 26f2112fe6c4085a9103f687a70b6f0f0660cb59..3cc7302c23a35100a66229bbcd4c2f47
    DesktopUpdateStatusReport,
 @@ -28,6 +29,8 @@ const updateState = {
  };
-
+ 
  const decodeHostMessage = Schema.decodeUnknownSync(DesktopHostTelemetryMessage);
 +const decodeControlMessage = Schema.decodeUnknownSync(DesktopTelemetryControlMessage);
 +const encodeControlMessage = Schema.encodeSync(DesktopTelemetryControlMessage);
-
+ 
  describe("DesktopUpdateStatusReport", () => {
    const decode = Schema.decodeUnknownSync(DesktopUpdateStatusReport);
 @@ -172,6 +175,31 @@ describe("DesktopUpdateReservationCommand", () => {
@@ -1748,7 +1748,7 @@ index 26f2112fe6c4085a9103f687a70b6f0f0660cb59..3cc7302c23a35100a66229bbcd4c2f47
 +    ).toThrow();
 +  });
  });
-
+ 
  describe("DesktopUpdateReservationReply", () => {
 @@ -213,4 +241,40 @@ describe("DesktopUpdateReservationReply", () => {
      expect(reply).not.toHaveProperty("instanceId");
@@ -1798,7 +1798,7 @@ index 6930641415a8c740f2303f114a553da922855687..f6a3c5567ae764dfe4aaeb43931cce59
 @@ -371,10 +371,16 @@ export const DesktopUpdateReservationReply = Schema.Struct({
  });
  export type DesktopUpdateReservationReply = typeof DesktopUpdateReservationReply.Type;
-
+ 
 +/**
 + * Desktop main -> server, on the telemetry input. Hello, snapshots and update
 + * reports reach every attached backend; a reservation command is written to
@@ -1811,7 +1811,7 @@ index 6930641415a8c740f2303f114a553da922855687..f6a3c5567ae764dfe4aaeb43931cce59
 +  DesktopUpdateReservationCommand,
  ]);
  export type DesktopHostTelemetryMessage = typeof DesktopHostTelemetryMessage.Type;
-
+ 
 @@ -426,6 +432,7 @@ export const DesktopTelemetryControlMessage = Schema.Union([
    DesktopTelemetryRequestDesktopUpdate,
    DesktopTelemetryCommitDesktopUpdate,
@@ -1819,4 +1819,4 @@ index 6930641415a8c740f2303f114a553da922855687..f6a3c5567ae764dfe4aaeb43931cce59
 +  DesktopUpdateReservationReply,
  ]);
  export type DesktopTelemetryControlMessage = typeof DesktopTelemetryControlMessage.Type;
-
+ 

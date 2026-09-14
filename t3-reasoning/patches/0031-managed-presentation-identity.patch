@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index 89cc592831a7bc67626cc964267239210cec504f..18d8d73d15d17e5ccde397dc6da952c90e16f7b7 100644
+index 262097ca78ea67be03613b0effb45f1a2193f606..c714b259bc257b0460aef1f44fcc13794e3e1823 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
 @@ -40,6 +40,59 @@ const makeEnvironment = (
@@ -63,7 +63,7 @@ index 89cc592831a7bc67626cc964267239210cec504f..18d8d73d15d17e5ccde397dc6da952c9
      Effect.gen(function* () {
        const environment = yield* makeEnvironment(
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index 4583e51240918d0440040f30dadde203de80573d..ebb3d14aa958635f0cd07f50ad9d1566c05f5810 100644
+index 9d7f00c3ee69f0f04f8e3f7cd0b19ebef38af410..31e4c178ec0b811eb036a694f2dc4a22b1048502 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
 @@ -1,4 +1,5 @@
@@ -72,7 +72,7 @@ index 4583e51240918d0440040f30dadde203de80573d..ebb3d14aa958635f0cd07f50ad9d1566
    DesktopAppBranding,
    DesktopAppStageLabel,
    DesktopRuntimeArch,
-@@ -28,6 +29,38 @@ export interface MakeDesktopEnvironmentInput {
+@@ -29,6 +30,38 @@ export interface MakeDesktopEnvironmentInput {
    readonly runningUnderArm64Translation: boolean;
  }
  
@@ -111,7 +111,7 @@ index 4583e51240918d0440040f30dadde203de80573d..ebb3d14aa958635f0cd07f50ad9d1566
  export class DesktopEnvironment extends Context.Service<
    DesktopEnvironment,
    {
-@@ -69,6 +102,7 @@ export class DesktopEnvironment extends Context.Service<
+@@ -70,6 +103,7 @@ export class DesktopEnvironment extends Context.Service<
      readonly commitHashOverride: Option.Option<string>;
      readonly otlpTracesUrl: Option.Option<string>;
      readonly otlpExportIntervalMs: number;
@@ -119,7 +119,7 @@ index 4583e51240918d0440040f30dadde203de80573d..ebb3d14aa958635f0cd07f50ad9d1566
      readonly branding: DesktopAppBranding;
      readonly displayName: string;
      readonly appUserModelId: string;
-@@ -221,6 +255,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -222,6 +256,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
      commitHashOverride: config.commitHashOverride,
      otlpTracesUrl: config.otlpTracesUrl,
      otlpExportIntervalMs: config.otlpExportIntervalMs,
@@ -189,7 +189,7 @@ index c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447..87b0d5e7b136137a44272b88f65fbc00
            // httpBaseUrl uses the resolved distro IP from the test stub,
            // not localhost — the renderer reaches the backend directly to
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-index 54f595785338ac9d1ebf73c3bb47904fa14ba6cd..5da131052cac70680d3082c862d8617c51086f9a 100644
+index 2d5d87f7b2e79dc4d40979b5861d075ee6914654..0f1f31fe7b6525f21dc58998503bc94a5bab525e 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 @@ -491,6 +491,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
@@ -290,7 +290,7 @@ index 2267a5cb1cc9e7f7460fec521f93ca6aa9ac6cd2..70d09a24f18c22c56e6b6cc1f2e57091
      Effect.gen(function* () {
        const { join } = yield* Path.Path;
 diff --git a/apps/server/src/cli/config.ts b/apps/server/src/cli/config.ts
-index f739a4e2f22c694a238a177a223c44e81e2efae0..75b31805f4e66c98d73678191d0b90f6db9bd033 100644
+index 847edbbc4fe085fe05bb6eb1bcd55b2a5a903f42..7fb5d875e7261aa398ba0cae4137fcea9ff18c65 100644
 --- a/apps/server/src/cli/config.ts
 +++ b/apps/server/src/cli/config.ts
 @@ -377,6 +377,9 @@ export const resolveServerConfig = (
@@ -304,7 +304,7 @@ index f739a4e2f22c694a238a177a223c44e81e2efae0..75b31805f4e66c98d73678191d0b90f6
        desktopTelemetryControlFd,
        resourceMonitorPath,
 diff --git a/apps/server/src/config.ts b/apps/server/src/config.ts
-index 42df3814b070a302f92ae72d30cc16d979481b4c..dfccbf1be4cece09d2ec471695adec3679234d5b 100644
+index 1486f6b40a2af95db83f91c2d6feb10fd92b12ab..682aeb7b8a7054144c9910131db3a02d01568775 100644
 --- a/apps/server/src/config.ts
 +++ b/apps/server/src/config.ts
 @@ -6,6 +6,8 @@
@@ -316,7 +316,7 @@ index 42df3814b070a302f92ae72d30cc16d979481b4c..dfccbf1be4cece09d2ec471695adec36
  import * as Context from "effect/Context";
  import * as Clock from "effect/Clock";
  import * as Effect from "effect/Effect";
-@@ -81,6 +83,7 @@ export class ServerConfig extends Context.Service<
+@@ -83,6 +85,7 @@ export class ServerConfig extends Context.Service<
      readonly noBrowser: boolean;
      readonly startupPresentation: StartupPresentation;
      readonly desktopBootstrapToken: string | undefined;

@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index 87b0d5e7..4a42abd6 100644
+index 87b0d5e7b136137a44272b88f65fbc00b376c276..4a42abd63bc638b1014388e2125ec0c544165795 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 @@ -229,11 +229,92 @@ describe("DesktopBackendConfiguration", () => {
@@ -96,7 +96,7 @@ index 87b0d5e7..4a42abd6 100644
      withHarness(
        Effect.gen(function* () {
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-index 5da13105..716357fa 100644
+index 0f1f31fe7b6525f21dc58998503bc94a5bab525e..5d9544ca7051bc47cfae48c7d597901f5c9ca5f5 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 @@ -497,6 +497,18 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
@@ -119,7 +119,7 @@ index 5da13105..716357fa 100644
        desktopTelemetryControlFd: 5,
        ...Option.match(input.resourceMonitorPath, {
 diff --git a/apps/server/src/cli/config.test.ts b/apps/server/src/cli/config.test.ts
-index 70d09a24..fd36ad65 100644
+index 70d09a24f18c22c56e6b6cc1f2e57091642bbd7f..fd36ad65b71d0b925f58429617cc4c1c6901620b 100644
 --- a/apps/server/src/cli/config.test.ts
 +++ b/apps/server/src/cli/config.test.ts
 @@ -24,6 +24,7 @@ const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
@@ -226,7 +226,7 @@ index 70d09a24..fd36ad65 100644
          }
        }),
 diff --git a/apps/server/src/cli/config.ts b/apps/server/src/cli/config.ts
-index 75b31805..9617cd2f 100644
+index 7fb5d875e7261aa398ba0cae4137fcea9ff18c65..8db868b0e228f23ae3002be801242b670f6f1812 100644
 --- a/apps/server/src/cli/config.ts
 +++ b/apps/server/src/cli/config.ts
 @@ -380,6 +380,10 @@ export const resolveServerConfig = (
@@ -241,10 +241,10 @@ index 75b31805..9617cd2f 100644
        desktopTelemetryControlFd,
        resourceMonitorPath,
 diff --git a/apps/server/src/config.ts b/apps/server/src/config.ts
-index dfccbf1b..c08fcd27 100644
+index 682aeb7b8a7054144c9910131db3a02d01568775..16f3d9a5845fa70f946db38c3f8073910b29e8fa 100644
 --- a/apps/server/src/config.ts
 +++ b/apps/server/src/config.ts
-@@ -84,6 +84,7 @@ export class ServerConfig extends Context.Service<
+@@ -86,6 +86,7 @@ export class ServerConfig extends Context.Service<
      readonly startupPresentation: StartupPresentation;
      readonly desktopBootstrapToken: string | undefined;
      readonly managedDesktopPresentationVariant?: DesktopBackendBootstrap["managedDesktopPresentationVariant"];
@@ -253,7 +253,7 @@ index dfccbf1b..c08fcd27 100644
      readonly desktopTelemetryControlFd?: number | undefined;
      readonly resourceMonitorPath?: string | undefined;
 diff --git a/packages/contracts/src/desktopBootstrap.ts b/packages/contracts/src/desktopBootstrap.ts
-index 9ccf5573..a3f6cea1 100644
+index 9ccf557365cb24c7d1af6ec5e4f28175f96e6fd9..a3f6cea18d12b68c99befdd877e8ba9e2cb4c63c 100644
 --- a/packages/contracts/src/desktopBootstrap.ts
 +++ b/packages/contracts/src/desktopBootstrap.ts
 @@ -20,9 +20,17 @@ export const DesktopBackendBootstrap = Schema.Struct({

@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/backend/DesktopBackendManager.test.ts b/apps/desktop/src/backend/DesktopBackendManager.test.ts
-index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc8701ce1d507 100644
+index 2d139f57dabf513c9ef76fcf235be9801ef87353..b0fabb97c6d6c94d86216e2b1308aa4a44f1c65b 100644
 --- a/apps/desktop/src/backend/DesktopBackendManager.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendManager.test.ts
 @@ -1,3 +1,4 @@
@@ -7,7 +7,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
  import {
    DesktopBackendBootstrap,
    type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
-@@ -223,6 +224,7 @@ const reserveCommand: DesktopUpdateReservationCommand = {
+@@ -225,6 +226,7 @@ const reserveCommand: DesktopUpdateReservationCommand = {
  };
  
  interface MakeInstanceInput {
@@ -15,7 +15,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
    readonly spawnerLayer: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner>;
    readonly httpClientLayer?: Layer.Layer<HttpClient.HttpClient>;
    readonly backendOutputLog?: Partial<DesktopObservability.DesktopBackendOutputLogShape>;
-@@ -262,6 +264,9 @@ function makeTestInstance(input: MakeInstanceInput) {
+@@ -264,6 +266,9 @@ function makeTestInstance(input: MakeInstanceInput) {
      ...input.backendOutputLog,
    };
    const servicesLayer = Layer.mergeAll(
@@ -25,7 +25,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
      FileSystem.layerNoop({
        exists: () => Effect.succeed(true),
      }),
-@@ -1375,6 +1380,10 @@ describe("DesktopBackendManager", () => {
+@@ -1377,6 +1382,10 @@ describe("DesktopBackendManager", () => {
          assert.isTrue(yield* Ref.get(backendReadyFlag));
          assert.deepEqual(yield* instance.currentConfig, Option.some(baseConfig));
  
@@ -36,7 +36,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
          const runningSnapshot = yield* instance.snapshot;
          assert.equal(runningSnapshot.ready, true);
          assert.deepEqual(runningSnapshot.activePid, Option.some(123));
-@@ -1383,6 +1392,10 @@ describe("DesktopBackendManager", () => {
+@@ -1385,6 +1394,10 @@ describe("DesktopBackendManager", () => {
          yield* Deferred.await(teardownStarted).pipe(Effect.timeout("1 second"));
          assert.isFalse(yield* Ref.get(backendReadyFlag));
          assert.equal(shutdownCount, 1);
@@ -47,7 +47,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
          yield* Deferred.succeed(finishTeardown, undefined);
          yield* Fiber.join(stopFiber).pipe(Effect.timeout("1 second"));
          assert.equal(startCount, 1);
-@@ -1398,6 +1411,7 @@ describe("DesktopBackendManager", () => {
+@@ -1400,6 +1413,7 @@ describe("DesktopBackendManager", () => {
            "backend process exited",
          );
  
@@ -55,7 +55,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
          const stoppedSnapshot = yield* instance.snapshot;
          assert.isFalse(yield* Ref.get(backendReadyFlag));
          assert.equal(shutdownCount, 1);
-@@ -1411,6 +1425,7 @@ describe("DesktopBackendManager", () => {
+@@ -1413,6 +1427,7 @@ describe("DesktopBackendManager", () => {
    it.effect("restarts when start is requested during stop teardown", () =>
      Effect.scoped(
        Effect.gen(function* () {
@@ -63,7 +63,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
          const starts = yield* Queue.unbounded<number>();
          const teardownStarted = yield* Deferred.make<void>();
          const finishTeardown = yield* Deferred.make<void>();
-@@ -1447,6 +1462,7 @@ describe("DesktopBackendManager", () => {
+@@ -1449,6 +1464,7 @@ describe("DesktopBackendManager", () => {
          );
  
          const instance = yield* makeTestInstance({
@@ -71,7 +71,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
            spawnerLayer,
            httpClientLayer: httpClientLayer(() => Effect.never),
          });
-@@ -1458,6 +1474,7 @@ describe("DesktopBackendManager", () => {
+@@ -1460,6 +1476,7 @@ describe("DesktopBackendManager", () => {
          yield* Deferred.await(teardownStarted).pipe(Effect.timeout("1 second"));
          yield* instance.start;
          assert.equal((yield* instance.snapshot).desiredRunning, true);
@@ -79,7 +79,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
  
          yield* Deferred.succeed(finishTeardown, undefined);
          yield* Fiber.join(stopFiber).pipe(Effect.timeout("1 second"));
-@@ -1998,3 +2015,186 @@ describe("DesktopBackendManager", () => {
+@@ -2072,3 +2089,186 @@ describe("DesktopBackendManager", () => {
      ),
    );
  });
@@ -267,7 +267,7 @@ index cafe1f61275a8af4d4acb5033dff91692243e494..ed3c156d6aa05df6ab6aabd6765cc870
 +  ).pipe(Effect.provide(TestClock.layer())),
 +);
 diff --git a/apps/desktop/src/backend/DesktopBackendManager.ts b/apps/desktop/src/backend/DesktopBackendManager.ts
-index 67e176a237be6b74fae4c1c88af5b1be3613e111..5f4d12f9e7c5273377dd6f956f88697572ba5b80 100644
+index 049cf81562a9aaaff0a80f60b7d18089983bef1d..d4170ec7cb1db0e102d0bce135fed8892d223872 100644
 --- a/apps/desktop/src/backend/DesktopBackendManager.ts
 +++ b/apps/desktop/src/backend/DesktopBackendManager.ts
 @@ -50,6 +50,7 @@ import {
@@ -415,7 +415,7 @@ index 67e176a237be6b74fae4c1c88af5b1be3613e111..5f4d12f9e7c5273377dd6f956f886975
      waitForReady,
    } satisfies DesktopBackendInstance;
 diff --git a/apps/desktop/src/backend/DesktopBackendPool.test.ts b/apps/desktop/src/backend/DesktopBackendPool.test.ts
-index 956006610d62408ab2ab44f919728a651b6dfb25..65d0ce30ce0be44d0290f68dc76acabeb882337d 100644
+index 409e5944643d5e9715755386701d9938355f36ee..2eec0812a165e55b536b494f40a74ee0c3342d21 100644
 --- a/apps/desktop/src/backend/DesktopBackendPool.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendPool.test.ts
 @@ -1,4 +1,11 @@
@@ -472,7 +472,7 @@ index 956006610d62408ab2ab44f919728a651b6dfb25..65d0ce30ce0be44d0290f68dc76acabe
          } satisfies DesktopObservability.DesktopBackendOutputLogFactory["Service"]),
          Layer.succeed(DesktopTelemetryPublisher.DesktopTelemetryPublisher, {
            latest: Effect.succeed(Option.none()),
-@@ -170,3 +185,246 @@ describe("DesktopBackendPool", () => {
+@@ -172,3 +187,246 @@ describe("DesktopBackendPool", () => {
      ),
    );
  });
@@ -720,7 +720,7 @@ index 956006610d62408ab2ab44f919728a651b6dfb25..65d0ce30ce0be44d0290f68dc76acabe
 +    ),
 +);
 diff --git a/apps/desktop/src/backend/DesktopBackendPool.ts b/apps/desktop/src/backend/DesktopBackendPool.ts
-index 27e24d55c6bdbfb7fd6dc00623e97ae5d84d0ab7..3640bd6289ffb6ac8a725e053bfa54efedc8487a 100644
+index 2930780d4102ec5237aad2ccd27c4a88879675e2..a17eaaafd18927ba422e6c0ac5fe9ac61522c079 100644
 --- a/apps/desktop/src/backend/DesktopBackendPool.ts
 +++ b/apps/desktop/src/backend/DesktopBackendPool.ts
 @@ -93,6 +93,7 @@ import * as FileSystem from "effect/FileSystem";
@@ -1073,10 +1073,10 @@ index 0000000000000000000000000000000000000000..01d18a96f87848a7f65ade74605398de
 +
 +export const layer = Layer.effect(DesktopUpdateLifecycle, make);
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 3337228aa9622b36dd9e8cf942641f57efb85c6c..2d380b806b4b3336e22bb4424a45b6641e6136f7 100644
+index 939b88c7d0d0b9aacada58fbf947368945d44857..4681da83123c891adc34f6b1298d9b51d2c2974d 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -39,6 +39,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
+@@ -40,6 +40,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
  import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
  import * as DesktopAssets from "./app/DesktopAssets.ts";
  import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
@@ -1084,7 +1084,7 @@ index 3337228aa9622b36dd9e8cf942641f57efb85c6c..2d380b806b4b3336e22bb4424a45b664
  import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
  import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
  import * as DesktopNetworkInterfaces from "./backend/DesktopNetworkInterfaces.ts";
-@@ -173,6 +174,7 @@ const desktopAppActivationLayer = DesktopAppActivation.layer.pipe(
+@@ -180,6 +181,7 @@ const desktopAppActivationLayer = DesktopAppActivation.layer.pipe(
  // WSL second instance gets registered later in the migration. See
  // DesktopBackendPool.ts header for the full rollout plan.
  const desktopBackendLayer = DesktopBackendPool.layer.pipe(

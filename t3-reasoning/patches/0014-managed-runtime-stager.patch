@@ -1,8 +1,8 @@
 diff --git a/apps/server/package.json b/apps/server/package.json
-index 7d27d39d2eb3228be05db6c9039f033f19242272..98fdb905afeb3883b3d273376602d56d3d9acbd0 100644
+index 9b5f2fb2d7d78b8c6eab0fc3756a0862cff4b476..ca7805ffd845b4f48cf36db5502624c63d01c32f 100644
 --- a/apps/server/package.json
 +++ b/apps/server/package.json
-@@ -33,6 +33,7 @@
+@@ -34,6 +34,7 @@
      "node-pty": "^1.1.0",
      "stream-chain": "^4.2.5",
      "stream-json": "3.6.0",
@@ -3014,10 +3014,10 @@ index 0000000000000000000000000000000000000000..e058dc34db1b7a11c4865b1429f013cf
 +  );
 +});
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
-index 6c58c455b4655a508e1ad685cc92e3f61b531b35..f7d65a884258d8a60136f948b8de7aeaf1fd8b0c 100644
+index a8dbaf39692448ac6ffda2c252ee57fb52e3dadd..b1a2a8b308b9dc2bbe134c6385ef0d502a7f2e1f 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -524,6 +524,9 @@ importers:
+@@ -531,6 +531,9 @@ importers:
        stream-json:
          specifier: 3.6.0
          version: 3.6.0

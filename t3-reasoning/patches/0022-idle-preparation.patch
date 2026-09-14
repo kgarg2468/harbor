@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/cloud/idleUpdateCoordinator.test.ts b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
-index 1531b22f6..4321aefdb 100644
+index 1531b22f6d787dccf4dadfac6dc78a63202615f8..4321aefdba147baf97264182b5b1d8dce3a2a6b4 100644
 --- a/apps/server/src/cloud/idleUpdateCoordinator.test.ts
 +++ b/apps/server/src/cloud/idleUpdateCoordinator.test.ts
 @@ -6,9 +6,19 @@ import * as Exit from "effect/Exit";
@@ -292,7 +292,7 @@ index 1531b22f6..4321aefdb 100644
      it.effect.each([
        {
 diff --git a/apps/server/src/cloud/idleUpdateCoordinator.ts b/apps/server/src/cloud/idleUpdateCoordinator.ts
-index f3aa56117..0d6bfcf04 100644
+index f3aa561176a50c0647711ee56e8a9a0ad0187d6c..0d6bfcf047f7b47147d5f411be0e2460a0db3427 100644
 --- a/apps/server/src/cloud/idleUpdateCoordinator.ts
 +++ b/apps/server/src/cloud/idleUpdateCoordinator.ts
 @@ -29,6 +29,7 @@ import {
@@ -488,7 +488,7 @@ index f3aa56117..0d6bfcf04 100644
  );
 diff --git a/apps/server/src/cloud/idleUpdatePreparation.test.ts b/apps/server/src/cloud/idleUpdatePreparation.test.ts
 new file mode 100644
-index 000000000..1d64bf3d8
+index 0000000000000000000000000000000000000000..1d64bf3d83ed945dee0b073bca03ed3b46725ae5
 --- /dev/null
 +++ b/apps/server/src/cloud/idleUpdatePreparation.test.ts
 @@ -0,0 +1,405 @@
@@ -899,7 +899,7 @@ index 000000000..1d64bf3d8
 +});
 diff --git a/apps/server/src/cloud/idleUpdatePreparation.ts b/apps/server/src/cloud/idleUpdatePreparation.ts
 new file mode 100644
-index 000000000..26d8593a1
+index 0000000000000000000000000000000000000000..26d8593a1ee73b237d07437f10d70daa04fdf29d
 --- /dev/null
 +++ b/apps/server/src/cloud/idleUpdatePreparation.ts
 @@ -0,0 +1,280 @@
@@ -1183,8 +1183,25 @@ index 000000000..26d8593a1
 +    return make({ provider, admission, activity, serverScope });
 +  }),
 +);
+diff --git a/apps/server/src/cloud/managedQueuedUpdate.test.ts b/apps/server/src/cloud/managedQueuedUpdate.test.ts
+index e06178cb8bdeb8011f632cf7970cb82ebb24f20b..a67622b1d7d1beff543fa92859144c34593a1bc7 100644
+--- a/apps/server/src/cloud/managedQueuedUpdate.test.ts
++++ b/apps/server/src/cloud/managedQueuedUpdate.test.ts
+@@ -166,7 +166,11 @@ const observeCoordinator = (
+   admission: UpdateAdmission.UpdateAdmissionShape,
+   activity: UpdateActivity.UpdateActivityShape,
+ ) => {
+-  const real = IdleUpdateCoordinator.make({ admission, activity });
++  const real = IdleUpdateCoordinator.make({
++    admission,
++    activity,
++    preparation: { checkReadyForSeal: Effect.succeed({ status: "ready" as const }) },
++  });
+   let acceptedRuns = 0;
+   const tryActivate: IdleUpdateCoordinator.IdleUpdateCoordinatorShape["tryActivate"] = (
+     handoff,
 diff --git a/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
-index 5c8ff7c74..3a5bef328 100644
+index 5c8ff7c74a735b8f4053c3f44a201f89213e37e9..3a5bef3280482cb96510acda7141cf27e2745419 100644
 --- a/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
 +++ b/apps/server/src/desktopUpdate/DesktopUpdateReservation.test.ts
 @@ -51,7 +51,8 @@ const answer = (
@@ -1211,7 +1228,7 @@ index 5c8ff7c74..3a5bef328 100644
          const reservation = yield* Scope.provide(make({ coordinator }), scope);
  
 diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.test.ts b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
-index 4bd0bb3e1..778d02552 100644
+index 4bd0bb3e1010343541327ff38c096845c58732d3..778d02552b60aba6ff606bc6565769eb80e73afc 100644
 --- a/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
 @@ -18,6 +18,7 @@ import * as Path from "effect/Path";
@@ -1368,7 +1385,7 @@ index 4bd0bb3e1..778d02552 100644
 +  );
  });
 diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.ts b/apps/server/src/provider/Layers/AntigravityAdapter.ts
-index 97925cd49..9ddf1006f 100644
+index 61a9b3c3a6450e89fa8443e73c1641cf5088d8a1..196b2bdf3e45225b2b7cf06677c8b0d9511c9438 100644
 --- a/apps/server/src/provider/Layers/AntigravityAdapter.ts
 +++ b/apps/server/src/provider/Layers/AntigravityAdapter.ts
 @@ -83,7 +83,10 @@ import {
@@ -1400,7 +1417,7 @@ index 97925cd49..9ddf1006f 100644
    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
    const randomId = crypto.randomUUIDv4.pipe(
      Effect.mapError(
-@@ -942,7 +955,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+@@ -945,7 +958,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
              ),
            );
        }).pipe(Effect.scoped),
@@ -1409,7 +1426,7 @@ index 97925cd49..9ddf1006f 100644
  
    const promoteBackgroundCommands = (context: SessionContext) =>
      context.commandLock.withPermit(
-@@ -1231,6 +1244,22 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+@@ -1234,6 +1247,22 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
      withThreadLock(threadId, Effect.flatMap(requireSession(threadId), stopContext));
    const stopAll: Adapter["stopAll"] = () =>
      Effect.forEach([...sessions.values()], stopContext, { discard: true });
@@ -1432,7 +1449,7 @@ index 97925cd49..9ddf1006f 100644
    yield* Effect.addFinalizer(() =>
      stopAll().pipe(
        Effect.catchCause((cause) =>
-@@ -1253,6 +1282,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
+@@ -1256,6 +1285,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
      respondToUserInput,
      stopSession,
      stopAll,
@@ -1441,10 +1458,10 @@ index 97925cd49..9ddf1006f 100644
        Effect.sync(() =>
          [...sessions.values()]
 diff --git a/apps/server/src/provider/Layers/CursorAdapter.test.ts b/apps/server/src/provider/Layers/CursorAdapter.test.ts
-index 988171013..f7d935b96 100644
+index bdc818994a9a33b469ee9a982112ccc4fefebd3b..c3edf716f93eb8f37a8cedb6472ea758276a72a0 100644
 --- a/apps/server/src/provider/Layers/CursorAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/CursorAdapter.test.ts
-@@ -1557,4 +1557,142 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
+@@ -1615,4 +1615,142 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
        // hang until the suite timeout instead of failing here.
      }).pipe(TestClock.withLive),
    );
@@ -1588,10 +1605,10 @@ index 988171013..f7d935b96 100644
 +  );
  });
 diff --git a/apps/server/src/provider/Layers/CursorAdapter.ts b/apps/server/src/provider/Layers/CursorAdapter.ts
-index 1ed9648a5..f1a01a14e 100644
+index 925d585e5838726b40984975d9f145f2dbbcb7c7..14b2e71dcefae6bb4b645fb299c749874406c290 100644
 --- a/apps/server/src/provider/Layers/CursorAdapter.ts
 +++ b/apps/server/src/provider/Layers/CursorAdapter.ts
-@@ -76,6 +76,7 @@ import {
+@@ -77,6 +77,7 @@ import {
    extractTodosAsPlan,
  } from "../acp/CursorAcpExtension.ts";
  import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
@@ -1599,7 +1616,7 @@ index 1ed9648a5..f1a01a14e 100644
  import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
  import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
  import {
-@@ -342,6 +343,16 @@ export function makeCursorAdapter(
+@@ -344,6 +345,16 @@ export function makeCursorAdapter(
      const sessions = new Map<ThreadId, CursorSessionContext>();
      const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
      const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -1616,7 +1633,7 @@ index 1ed9648a5..f1a01a14e 100644
  
      const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
      const randomUUIDv4 = crypto.randomUUIDv4.pipe(
-@@ -920,7 +931,7 @@ export function makeCursorAdapter(
+@@ -932,7 +943,7 @@ export function makeCursorAdapter(
  
            return session;
          }).pipe(Effect.scoped),
@@ -1625,7 +1642,7 @@ index 1ed9648a5..f1a01a14e 100644
  
      const sendTurn: CursorAdapterShape["sendTurn"] = (input) =>
        Effect.gen(function* () {
-@@ -1197,6 +1208,23 @@ export function makeCursorAdapter(
+@@ -1223,6 +1234,23 @@ export function makeCursorAdapter(
      const stopAll: CursorAdapterShape["stopAll"] = () =>
        Effect.forEach(sessions.values(), stopSessionInternal, { discard: true });
  
@@ -1649,7 +1666,7 @@ index 1ed9648a5..f1a01a14e 100644
      yield* Effect.addFinalizer(() =>
        Effect.forEach(sessions.values(), stopSessionInternal, { discard: true }).pipe(
          Effect.catch((cause) =>
-@@ -1224,6 +1252,7 @@ export function makeCursorAdapter(
+@@ -1250,6 +1278,7 @@ export function makeCursorAdapter(
        listSessions,
        hasSession,
        stopAll,
@@ -1658,10 +1675,10 @@ index 1ed9648a5..f1a01a14e 100644
      } satisfies CursorAdapterShape;
    });
 diff --git a/apps/server/src/provider/Layers/GrokAdapter.test.ts b/apps/server/src/provider/Layers/GrokAdapter.test.ts
-index 41fa6ed0f..d0044881b 100644
+index 545a6a094e4e5a116d4987b574089cceccea3a5a..3d20a865b5206939a7821efe99ce88d10f606a94 100644
 --- a/apps/server/src/provider/Layers/GrokAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/GrokAdapter.test.ts
-@@ -2457,4 +2457,136 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+@@ -2537,4 +2537,136 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
        // hang until the suite timeout instead of failing here.
      }).pipe(TestClock.withLive),
    );
@@ -1799,10 +1816,10 @@ index 41fa6ed0f..d0044881b 100644
 +  );
  });
 diff --git a/apps/server/src/provider/Layers/GrokAdapter.ts b/apps/server/src/provider/Layers/GrokAdapter.ts
-index 25188adcf..164a17e61 100644
+index 01ec3d118a3eb828e59a04552be0745fad8c1f29..0dc0c873d2b239ba555f53508e573989e9888ed0 100644
 --- a/apps/server/src/provider/Layers/GrokAdapter.ts
 +++ b/apps/server/src/provider/Layers/GrokAdapter.ts
-@@ -80,6 +80,7 @@ import {
+@@ -84,6 +84,7 @@ import {
    XAiExitPlanModeRequest,
  } from "../acp/XAiAcpExtension.ts";
  import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
@@ -1810,7 +1827,7 @@ index 25188adcf..164a17e61 100644
  import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
  
  const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
-@@ -363,6 +364,16 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+@@ -369,6 +370,16 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
      const sessions = new Map<ThreadId, GrokSessionContext>();
      const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
      const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -1827,7 +1844,7 @@ index 25188adcf..164a17e61 100644
      const requestedTurnInactivityTimeoutMs = options?.turnInactivityTimeoutMs;
      const turnInactivityTimeoutMs =
        typeof requestedTurnInactivityTimeoutMs === "number" &&
-@@ -1469,7 +1480,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+@@ -1501,7 +1512,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
  
            return session;
          }).pipe(Effect.scoped),
@@ -1836,7 +1853,7 @@ index 25188adcf..164a17e61 100644
  
      const sendTurn: GrokAdapterShape["sendTurn"] = (input) =>
        Effect.gen(function* () {
-@@ -2116,6 +2127,23 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+@@ -2148,6 +2159,23 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
      const stopAll: GrokAdapterShape["stopAll"] = () =>
        Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
  
@@ -1860,7 +1877,7 @@ index 25188adcf..164a17e61 100644
      yield* Effect.addFinalizer(() =>
        Effect.ignore(stopAll()).pipe(
          Effect.tap(() => PubSub.shutdown(runtimeEventPubSub)),
-@@ -2140,6 +2168,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
+@@ -2172,6 +2200,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
        listSessions,
        hasSession,
        stopAll,
@@ -1869,10 +1886,10 @@ index 25188adcf..164a17e61 100644
      } satisfies GrokAdapterShape;
    });
 diff --git a/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts b/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts
-index ee5767f9d..ef5a420f6 100644
+index a6636fcd69d0ffa444396ae503dc6b5da8b851d7..d86dfc39233483ecc7db946c9a9f0997b96dbd67 100644
 --- a/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/OpenCodeAdapter.test.ts
-@@ -7583,4 +7583,137 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+@@ -7690,4 +7690,137 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
        NodeAssert.deepEqual(closeCallsDuringRun, []);
      }),
    );
@@ -2011,7 +2028,7 @@ index ee5767f9d..ef5a420f6 100644
 +  );
  });
 diff --git a/apps/server/src/provider/Layers/OpenCodeAdapter.ts b/apps/server/src/provider/Layers/OpenCodeAdapter.ts
-index 742ee9b86..55ea5b33f 100644
+index 3d216bb1167b43d830ee33f8821c419a4e27cc08..3186502e36045766250165b1abc6a5d9ea5bcbab 100644
 --- a/apps/server/src/provider/Layers/OpenCodeAdapter.ts
 +++ b/apps/server/src/provider/Layers/OpenCodeAdapter.ts
 @@ -45,6 +45,7 @@ import {
@@ -2043,7 +2060,7 @@ index 742ee9b86..55ea5b33f 100644
          const binaryPath = openCodeSettings.binaryPath;
          const serverUrl = openCodeSettings.serverUrl;
          const serverPassword = openCodeSettings.serverPassword;
-@@ -3838,6 +3846,23 @@ export function makeOpenCodeAdapter(
+@@ -3916,6 +3924,23 @@ export function makeOpenCodeAdapter(
          );
        });
  
@@ -2067,7 +2084,7 @@ index 742ee9b86..55ea5b33f 100644
      return {
        provider: PROVIDER,
        capabilities: {
-@@ -3855,6 +3880,7 @@ export function makeOpenCodeAdapter(
+@@ -3933,6 +3958,7 @@ export function makeOpenCodeAdapter(
        readThread,
        rollbackThread,
        stopAll,
@@ -2076,7 +2093,7 @@ index 742ee9b86..55ea5b33f 100644
          return Stream.fromQueue(runtimeEvents);
        },
 diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
-index a84334a86..5c2e73b45 100644
+index 169019696f06af079ee58d2d57b493d800f2f065..cfe9e75d1bd57be4a296b3a9594fc20fac348436 100644
 --- a/apps/server/src/provider/Layers/ProviderService.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.test.ts
 @@ -60,7 +60,10 @@ import {
@@ -2091,7 +2108,7 @@ index a84334a86..5c2e73b45 100644
  import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
  import * as ProviderService from "../Services/ProviderService.ts";
  import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-@@ -5524,4 +5527,355 @@ describe("ProviderServiceLive update activity", () => {
+@@ -6080,4 +6083,355 @@ describe("ProviderServiceLive update activity", () => {
        );
      }),
    );
@@ -2448,10 +2465,10 @@ index a84334a86..5c2e73b45 100644
 +  });
  });
 diff --git a/apps/server/src/provider/Layers/ProviderService.ts b/apps/server/src/provider/Layers/ProviderService.ts
-index ecee6b3ca..736ab3fa2 100644
+index 7b4a6fd7c2bd595f37123f12aba04028d427ab4c..aee52d9142df8b0fe606ef2d58ed959338b170b8 100644
 --- a/apps/server/src/provider/Layers/ProviderService.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.ts
-@@ -1192,6 +1192,157 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -1416,6 +1416,157 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
      () => reconcileInstanceSubscriptions,
    ).pipe(Effect.forkScoped);
  
@@ -2609,7 +2626,7 @@ index ecee6b3ca..736ab3fa2 100644
    const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
      readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
      readonly operation: string;
-@@ -2266,29 +2417,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
+@@ -2593,29 +2744,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
    // Internal callers (fallback compaction, recovery) use the inner functions
    // under the caller's lease. Reads stay untracked, and the `runStopAll`
    // shutdown finalizer above never waits on the registry.
@@ -2661,7 +2678,7 @@ index ecee6b3ca..736ab3fa2 100644
      // consumers (usage ingestion, relays, etc.) each independently receive all
      // runtime events without holding update activity.
 diff --git a/apps/server/src/provider/Services/ProviderService.ts b/apps/server/src/provider/Services/ProviderService.ts
-index acdacee35..2b6c9d973 100644
+index acdacee35f4e27c7bf627967284684999329314f..2b6c9d9730ea9253287aec1f727665d534cb68a1 100644
 --- a/apps/server/src/provider/Services/ProviderService.ts
 +++ b/apps/server/src/provider/Services/ProviderService.ts
 @@ -33,7 +33,10 @@ import type * as Scope from "effect/Scope";
@@ -2740,20 +2757,3 @@ index acdacee35..2b6c9d973 100644
  }
  
  /**
-diff --git a/apps/server/src/cloud/managedQueuedUpdate.test.ts b/apps/server/src/cloud/managedQueuedUpdate.test.ts
-index e06178cb..a67622b1 100644
---- a/apps/server/src/cloud/managedQueuedUpdate.test.ts
-+++ b/apps/server/src/cloud/managedQueuedUpdate.test.ts
-@@ -166,7 +166,11 @@ const observeCoordinator = (
-   admission: UpdateAdmission.UpdateAdmissionShape,
-   activity: UpdateActivity.UpdateActivityShape,
- ) => {
--  const real = IdleUpdateCoordinator.make({ admission, activity });
-+  const real = IdleUpdateCoordinator.make({
-+    admission,
-+    activity,
-+    preparation: { checkReadyForSeal: Effect.succeed({ status: "ready" as const }) },
-+  });
-   let acceptedRuns = 0;
-   const tryActivate: IdleUpdateCoordinator.IdleUpdateCoordinatorShape["tryActivate"] = (
-     handoff,

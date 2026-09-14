@@ -1,8 +1,8 @@
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-index accfdf70b3a3fa11cf0b07cb0799c8c4c46da9fb..c2e5dad5d1671d2251f42a686ce20956046d8541 100644
+index 747663b80ac018be2630ccaf8195cd39fe028989..c468f0e0cae3cf810c3bb7c297e19bd0ad6a2447 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
-@@ -303,6 +303,53 @@ describe("DesktopBackendConfiguration", () => {
+@@ -295,6 +295,53 @@ describe("DesktopBackendConfiguration", () => {
      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
    );
  
@@ -56,7 +56,7 @@ index accfdf70b3a3fa11cf0b07cb0799c8c4c46da9fb..c2e5dad5d1671d2251f42a686ce20956
    it.effect("resolveWsl reuses the primary's bootstrap token", () =>
      withHarness(
        Effect.gen(function* () {
-@@ -897,6 +944,9 @@ describe("DesktopBackendConfiguration", () => {
+@@ -889,6 +936,9 @@ describe("DesktopBackendConfiguration", () => {
            assert.equal(config.httpBaseUrl.href, "http://172.27.0.99:5050/");
            assert.equal(config.env.OPENAI_API_KEY, "openai-key");
            assert.equal(config.env.ANTHROPIC_API_KEY, "anthropic-key");
@@ -67,7 +67,7 @@ index accfdf70b3a3fa11cf0b07cb0799c8c4c46da9fb..c2e5dad5d1671d2251f42a686ce20956
            // "::" segment survives — WSL ignores it, so we don't normalize
            // it away) and ANTHROPIC_API_KEY is appended. OPENAI_API_KEY is
 diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
-index 4c43070b5f97be8b59f797847cc19061b22afb4a..6d81999d1aa05afb4fe3d323cc88fe2538c9c022 100644
+index d7c524d168154df448ca5beab2c15cc0bf5eab51..2d5d87f7b2e79dc4d40979b5861d075ee6914654 100644
 --- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 @@ -85,6 +85,7 @@ const DESKTOP_BACKEND_ENV_NAMES = [

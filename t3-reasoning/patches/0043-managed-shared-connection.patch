@@ -1,7 +1,8 @@
 diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
+index 5329dc0b883935e4d6338e70b3eb4f0c902b6dea..03ffb5b818c2cde840f05e2d1a123205f2ad139e 100644
 --- a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
 +++ b/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts
-@@ -271,8 +271,11 @@
+@@ -271,8 +271,11 @@ describe("SSH update ownership", () => {
            yield* Deferred.succeed(f.ensureRelease, undefined);
            assert.deepEqual(yield* Fiber.join(ensuring), bootstrap);
            const result = yield* f.lifecycle.tryFreeze;
@@ -15,7 +16,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
          }),
        ),
    );
-@@ -307,7 +310,9 @@
+@@ -307,7 +310,9 @@ describe("SSH update ownership", () => {
          assert.equal((yield* f.lifecycle.tryFreeze)._tag, "busy");
          yield* Deferred.succeed(f.disconnectRelease, undefined);
          yield* Fiber.join(disconnect);
@@ -26,7 +27,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
          const closing = yield* Scope.close(f.scope, Exit.void).pipe(Effect.forkChild);
          yield* Deferred.await(f.cleanupEntered);
          assert.isTrue(f.ownerPresent());
-@@ -325,6 +330,8 @@
+@@ -325,6 +330,8 @@ describe("SSH update ownership", () => {
    it.effect("retention lets waiting SSH teardown settle while new ensure stays excluded", () =>
      withSshFixture((f) =>
        Effect.gen(function* () {
@@ -35,7 +36,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
          const frozen = yield* f.lifecycle.tryFreeze;
          if (frozen._tag !== "frozen") return assert.fail("expected freeze");
          const ensuring = yield* f.environment.ensureEnvironment(target).pipe(Effect.forkChild);
-@@ -411,7 +418,9 @@
+@@ -411,7 +418,9 @@ it.effect("deleting a real saved SSH record does not hide live ownership", () =>
          yield* f.environment.ensureEnvironment(target);
          yield* saved.removeEnvironment(savedRecord.environmentId);
          assert.deepEqual(yield* saved.getRegistry, []);
@@ -46,7 +47,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
          assert.isTrue(f.ownerPresent());
        }),
      ),
-@@ -470,23 +479,23 @@
+@@ -470,23 +479,23 @@ it.effect(
      ),
  );
  
@@ -87,7 +88,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
  );
  
  for (const maxOps of [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
-@@ -498,7 +507,9 @@
+@@ -498,7 +507,9 @@ for (const maxOps of [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
            Array.from({ length: 10 }, () => f.environment.ensureEnvironment(target)),
            { concurrency: "unbounded" },
          );
@@ -98,7 +99,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
          yield* Deferred.succeed(f.cleanupRelease, undefined);
          yield* Scope.close(f.scope, Exit.void);
          const frozen = yield* f.lifecycle.tryFreeze;
-@@ -508,3 +519,49 @@
+@@ -508,3 +519,49 @@ for (const maxOps of [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
      ).pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, maxOps)),
    );
  }
@@ -149,9 +150,10 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.test.ts b/apps/desktop/s
 +  );
 +}
 diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
+index 9fb0ea58b9e3a6098cb282a860067958c8fc62f0..0d37fc74b5fae824f24688b16b60ba3a1411d9ed 100644
 --- a/apps/desktop/src/ssh/DesktopSshEnvironment.ts
 +++ b/apps/desktop/src/ssh/DesktopSshEnvironment.ts
-@@ -213,9 +213,9 @@
+@@ -213,9 +213,9 @@ const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
              if (--activeOperations === 0) Deferred.doneUnsafe(drained, Effect.void);
            }),
        );
@@ -164,7 +166,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ss
      const managerScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
        lifecycle.withTeardown(
          Effect.gen(function* () {
-@@ -234,21 +234,13 @@
+@@ -234,21 +234,13 @@ const makeWithOptions = (options: DesktopSshEnvironmentLayerOptions = {}) =>
            Effect.suspend(() =>
              marked
                ? Effect.void
@@ -194,6 +196,7 @@ diff --git a/apps/desktop/src/ssh/DesktopSshEnvironment.ts b/apps/desktop/src/ss
          ),
        ),
 diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
+index e2536ba920172ed0ad45e69c4c69cad351480370..72c0c420e18c957791d87bfffa8e9c7108ecf91f 100644
 --- a/packages/ssh/src/tunnel.test.ts
 +++ b/packages/ssh/src/tunnel.test.ts
 @@ -1,3 +1,11 @@
@@ -208,7 +211,7 @@ diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
  import { assert, describe, it } from "@effect/vitest";
  import * as NodeServices from "@effect/platform-node/NodeServices";
  import * as NetService from "@t3tools/shared/Net";
-@@ -13,6 +21,7 @@
+@@ -13,6 +21,7 @@ import { TestClock } from "effect/testing";
  import { HttpClient, HttpClientResponse } from "effect/unstable/http";
  import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
  
@@ -216,7 +219,7 @@ diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
  import { SshPasswordPrompt } from "./auth.ts";
  import { SshCommandError } from "./errors.ts";
  import {
-@@ -588,3 +597,367 @@
+@@ -588,3 +597,367 @@ describe("ssh tunnel scripts", () => {
        }),
    );
  });
@@ -585,9 +588,10 @@ diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
 +  });
 +}
 diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
+index 9cb6b25e412180dfc3313b5b56860ab6baa2f2dc..1117d3657247c187e9af5e218166eae55d5dade4 100644
 --- a/packages/ssh/src/tunnel.ts
 +++ b/packages/ssh/src/tunnel.ts
-@@ -402,10 +402,157 @@
+@@ -402,10 +402,157 @@ ensure_remote_node_path() {
  }
  `;
  
@@ -745,7 +749,7 @@ diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
  T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
  if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
    if ! command -v node >/dev/null 2>&1; then
-@@ -656,6 +803,7 @@
+@@ -656,6 +803,7 @@ export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string
    return stripTrailingNewlines(
      applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
        T3_PACKAGE_SPEC: packageSpec,
