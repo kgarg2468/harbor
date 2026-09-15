@@ -21,7 +21,7 @@ harbor_config_validate_mode() {
 }
 harbor_config_create() {
   # harbor_config_create STATE_ROOT HOME MODE: one journaled 0600 file.
-  local root="${1}" home="${2}" mode="${3:-connect}" file dir tmp pre post ownership entry
+  local root="${1}" home="${2}" mode="${3:-connect}" file dir tmp pre post ownership entry staged_mode
   file="$(harbor_config_path "${home}")"
   harbor_config_validate_mode "${file}" "${mode}"
   dir="$(dirname "${file}")"
@@ -56,9 +56,10 @@ harbor_config_create() {
   }
   # Asserted, not set: umask cannot widen an existing file, so a mode other than 0600
   # here means something else owns that path, and staging onto it is refused.
-  [ "$(harbor_stat_mode "${tmp}")" = 0600 ] || {
+  staged_mode="$(harbor_stat_mode "${tmp}")"
+  [ "${staged_mode}" = 0600 ] || {
     rm -f "${tmp}"
-    harbor_die 2 config.stage "${tmp} is not mode 0600; ${file} was not changed"
+    harbor_die 2 config.stage "${tmp} was staged at mode ${staged_mode}, not 0600, even though it was created under umask 077; something on this node is widening a newly created file, such as a default ACL on ${dir} (check: getfacl ${dir}); ${file} was not changed"
   }
   post="$(harbor_observe_file "${tmp}")"
   if [ "${post}" = "${pre}" ]; then
