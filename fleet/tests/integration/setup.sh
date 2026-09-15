@@ -78,10 +78,25 @@ for prog in getfacl setfacl; do
     exit 1
   }
 done
-printf 'before: %s\n' "$(getfacl -p /home | tr '\n' ' ')"
+# Each reading is taken into a variable first. A getfacl inside an if condition or a
+# command substitution cannot fail this step -- set -e does not apply to either, and
+# the pipeline's status would be grep's -- so an unreadable /home would take the same
+# path as a /home with no default entries, which is the inference this step exists to
+# refuse. Present-but-unreadable is a broken runner and is said as much.
+home_acl="$(getfacl -p /home)" || {
+  printf 'setup.sh: getfacl could not read /home, so its ACL is unknown\n' >&2
+  exit 1
+}
+printf 'before: %s\n' "$(printf '%s' "${home_acl}" | tr '\n' ' ')"
 sudo setfacl -k /home
-printf 'after:  %s\n' "$(getfacl -p /home | tr '\n' ' ')"
-if getfacl -p /home | grep -q '^default:'; then
+home_acl="$(getfacl -p /home)" || {
+  printf 'setup.sh: getfacl could not read /home after setfacl -k\n' >&2
+  exit 1
+}
+printf 'after:  %s\n' "$(printf '%s' "${home_acl}" | tr '\n' ' ')"
+# grep against the reading already taken, not against a fresh command: here a
+# non-zero status can only mean "no default entry", which is what is being asked.
+if printf '%s\n' "${home_acl}" | grep -q '^default:'; then
   printf 'setup.sh: /home still carries a default ACL, so the operator home would inherit it\n' >&2
   exit 1
 fi

@@ -179,7 +179,7 @@ if [ -n "${fail_after}" ]; then
     # that at all -- an entry wrongly marked applied is the regression this matrix
     # case exists for, and it would pass. So the entry is captured and the phase it
     # must come back with is named.
-    agents-claude-prepared)
+    agents-claude-prepared | t3-service-prepared)
       for entry in "${op_journal}"/*.json; do
         [ -f "${entry}" ] || continue
         if [ "$(it_journal_field "${entry}" phase)" = prepared ]; then unmutated+=("${entry}"); fi
@@ -239,9 +239,16 @@ before_mut="$(provision_sha "${IT_MUT_LOG}")"
 # The entry names present before the rerun, pipe-delimited on both sides so a
 # substring test cannot match a prefix of a longer name.
 before_names='|'
+# The bytes as well as the names. A rerun that rewrote an existing entry -- turning a
+# reverted one into applied, say, or restamping one it should not have touched --
+# leaves the set of names identical, so a membership test alone would call that
+# "changes nothing". Every entry here is already resolved, so none of them has any
+# business changing.
+declare -A before_sha
 for entry in "${op_journal}"/*.json; do
   [ -f "${entry}" ] || continue
   before_names="${before_names}$(basename "${entry}")|"
+  before_sha["$(basename "${entry}")"]="$(provision_sha "${entry}")"
 done
 before_lock="$(provision_sha "${op_root}/installed.lock")"
 before_record="$(provision_sha "${op_root}/provision.json")"
@@ -260,21 +267,36 @@ it_eq 'second run makes zero mutating stub calls' "${before_mut}" "$(provision_s
 # not appear are the ones claiming something was created or modified.
 new_written=0
 new_observed=0
+rewritten=0
 for entry in "${op_journal}"/*.json; do
   [ -f "${entry}" ] || continue
+  name="$(basename "${entry}")"
   case "${before_names}" in
-    *"|$(basename "${entry}")|"*) continue ;;
+    *"|${name}|"*)
+      if [ "$(provision_sha "${entry}")" != "${before_sha[${name}]}" ]; then
+        rewritten=$((rewritten + 1))
+        it_fail "the rerun rewrote the existing entry ${name}"
+      fi
+      continue
+      ;;
   esac
   ownership="$(it_journal_field "${entry}" ownership)"
   case "${ownership}" in
     observed) new_observed=$((new_observed + 1)) ;;
     *)
       new_written=$((new_written + 1))
-      it_fail "the rerun journalled $(basename "${entry}") as ${ownership}"
+      it_fail "the rerun journalled ${name} as ${ownership}"
       ;;
   esac
+  # An observed entry is written applied in one call and has no mutation to fall
+  # short of, so one left prepared is an entry recovery would later have to decide
+  # about -- on a node where nothing happened. Checked here because the resolved
+  # sweep above ran before this rerun and cannot see anything it wrote.
+  phase="$(it_journal_field "${entry}" phase)"
+  [ "${phase}" = applied ] || it_fail "the rerun left ${name} in phase ${phase}"
 done
 it_eq 'second run journals no created or modified entry' 0 "${new_written}"
+it_eq 'second run rewrote no existing entry' 0 "${rewritten}"
 printf 'the rerun journalled %s new observed entries, which is what an\n' "${new_observed}"
 printf 'inspection-first rerun records: already-correct state, mutating nothing.\n'
 it_eq 'installed.lock unchanged' "${before_lock}" "$(provision_sha "${op_root}/installed.lock")"

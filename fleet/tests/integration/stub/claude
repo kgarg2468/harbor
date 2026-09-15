@@ -4,22 +4,34 @@
 # reads are logged; unknown arguments are refused without echoing private bytes.
 set -euo pipefail
 
-case "${*}" in
-  --version | auth\ status\ --json) ;;
-  *)
-    printf 'integration claude stub: unsupported invocation\n' >&2
-    exit 64
+# Dispatch on the argument vector, one element at a time, rather than on "${*}".
+# Joining the vector with spaces makes ("auth" "status" "--json") and the single
+# argument ("auth status --json") the same string, so a stub matching on the join
+# accepts an invocation the real CLI would reject -- and a regression that passed a
+# subcommand as one argument would be answered here instead of refused. Counting
+# the arguments is the other half: without it a trailing argument is simply ignored.
+it_cmd=""
+case "${1:-}" in
+  --version)
+    if [ "$#" = 1 ]; then it_cmd=version; fi
+    ;;
+  auth)
+    if [ "$#" = 3 ] && [ "${2}" = status ] && [ "${3}" = --json ]; then it_cmd=auth-status; fi
     ;;
 esac
+[ -n "${it_cmd}" ] || {
+  printf 'integration claude stub: unsupported invocation\n' >&2
+  exit 64
+}
 it_line="$(date -u +%s)"$'\t'inspect$'\t'claude
 for it_arg in "$@"; do
   it_line="${it_line}"$'\t'"${it_arg}"
 done
 printf '%s\n' "${it_line}" >>/opt/harbor-it/state/shim.log
-case "${*}" in
-  --version)
+case "${it_cmd}" in
+  version)
     it_version="$(sed -n 's/^claude_code_version=//p' /opt/harbor-it/fixtures/provision.versions.lock)"
     printf '%s (Claude Code)\n' "${it_version}"
     ;;
-  auth\ status\ --json) printf '{\n  "loggedIn": true\n}\n' ;;
+  auth-status) printf '{\n  "loggedIn": true\n}\n' ;;
 esac

@@ -4,22 +4,31 @@
 # reads are logged; unknown arguments are refused without echoing private bytes.
 set -euo pipefail
 
-case "${*}" in
-  --version | login\ status) ;;
-  *)
-    printf 'integration codex stub: unsupported invocation\n' >&2
-    exit 64
+# Dispatch on the argument vector rather than on "${*}", and count the arguments.
+# See stub/claude for why: a join makes ("login" "status") and ("login status")
+# indistinguishable, so the stub would accept a vector the real CLI rejects.
+it_cmd=""
+case "${1:-}" in
+  --version)
+    if [ "$#" = 1 ]; then it_cmd=version; fi
+    ;;
+  login)
+    if [ "$#" = 2 ] && [ "${2}" = status ]; then it_cmd=login-status; fi
     ;;
 esac
+[ -n "${it_cmd}" ] || {
+  printf 'integration codex stub: unsupported invocation\n' >&2
+  exit 64
+}
 it_line="$(date -u +%s)"$'\t'inspect$'\t'codex
 for it_arg in "$@"; do
   it_line="${it_line}"$'\t'"${it_arg}"
 done
 printf '%s\n' "${it_line}" >>/opt/harbor-it/state/shim.log
-case "${*}" in
-  --version)
+case "${it_cmd}" in
+  version)
     it_version="$(sed -n 's/^codex_version=//p' /opt/harbor-it/fixtures/provision.versions.lock)"
     printf 'codex-cli %s\n' "${it_version}"
     ;;
-  login\ status) printf 'Logged in using ChatGPT\n' ;;
+  login-status) printf 'Logged in using ChatGPT\n' ;;
 esac

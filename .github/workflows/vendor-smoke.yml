@@ -42,6 +42,13 @@ on:
       - fleet/versions.lock
       - fleet/vendor-smoke/**
       - .github/workflows/vendor-smoke.yml
+      # The adapter the t3 half measures. Its package reader, its version reader
+      # and its service classifier are all claims about a vendor artifact, and the
+      # unit fixtures for them are written from this file -- so a change here that
+      # breaks against real npm output keeps every synthetic test green. This is
+      # the only lane that would notice, and waiting for the weekly run means
+      # noticing after the merge.
+      - fleet/lib/t3.sh
 
 # Read-only. The lane checks out the repository, measures, and uploads its record
 # as an artifact; it writes nothing back.
