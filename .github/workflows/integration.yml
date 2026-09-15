@@ -226,3 +226,83 @@ jobs:
           # local repository is built, or the local repository would inherit it.
           sudo rm -f /etc/apt/sources.list.d/tailscale.list
           fleet/tests/integration/tailscale_status_probe.sh stub
+
+  # Task 20: bootstrap first on each fresh VM, then provision as the operator.
+  # One boundary per runner keeps every crash at its original pre-state. The
+  # lock-gate positional proof runs in every case, including the ordinary one.
+  provision:
+    needs: bootstrap
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        step:
+          - none
+          - provision-principal
+          - provision-entrypoint
+          - provision-backend
+          - provision-linger
+          - provision-state-root
+          - provision-lock
+          - provision-node
+          - recovery-scan
+          - provision-journal-config
+          - config-file
+          - provision-runtime-install
+          # One -prepared boundary, not six. A crash there is the entry whose
+          # mutation never happened, which recovery must revert -- the decision
+          # worth a runner. The other five are that same code path under another
+          # op name, and each one costs a full bootstrap on a fresh VM.
+          - agents-claude-prepared
+          - agents-claude-installed
+          - agents-codex-installed
+          - provision-runtime-auth
+          - provision-t3-install
+          - t3-installed
+          - provision-vendor-service
+          - t3-service-installed
+          - provision-access-mode
+          - provision-state-record
+          - state-installed-lock
+          - state-provision-json
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Prepare the runner
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/setup.sh ufw-inactive
+
+      - name: Bootstrap at the real paths
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/run_root.sh --from checkout
+
+      - name: Assert provision and convergence as the real operator
+        env:
+          STEP: ${{ matrix.step }}
+        run: |
+          set -euo pipefail
+          if [ "${STEP}" = none ]; then
+            sudo bash fleet/tests/integration/assert_provision.sh
+          else
+            sudo bash fleet/tests/integration/assert_provision.sh --fail-after "${STEP}"
+          fi
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          for log in /opt/harbor-it/state/shim.log /opt/harbor-it/state/mutations.log /home/harbor/.local/state/harbor/harbor.log; do
+            if sudo test -f "${log}"; then sudo cat "${log}"; fi
+          done
+          if sudo test -d /home/harbor/.local/state/harbor/journal; then
+            sudo grep -r . /home/harbor/.local/state/harbor/journal
+          fi

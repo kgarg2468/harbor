@@ -1,0 +1,25 @@
+#!/bin/bash
+# Integration stand-in: version and credential-free authenticated status only.
+# Installed into the operator prefix by the npm half of stub/t3. Only recognized
+# reads are logged; unknown arguments are refused without echoing private bytes.
+set -euo pipefail
+
+case "${*}" in
+  --version | login\ status) ;;
+  *)
+    printf 'integration codex stub: unsupported invocation\n' >&2
+    exit 64
+    ;;
+esac
+it_line="$(date -u +%s)"$'\t'inspect$'\t'codex
+for it_arg in "$@"; do
+  it_line="${it_line}"$'\t'"${it_arg}"
+done
+printf '%s\n' "${it_line}" >>/opt/harbor-it/state/shim.log
+case "${*}" in
+  --version)
+    it_version="$(sed -n 's/^codex_version=//p' /opt/harbor-it/fixtures/provision.versions.lock)"
+    printf 'codex-cli %s\n' "${it_version}"
+    ;;
+  login\ status) printf 'Logged in using ChatGPT\n' ;;
+esac

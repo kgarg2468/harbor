@@ -86,6 +86,9 @@ sudo chmod 0666 "${IT_TS_BACKEND}"
 # ---------------------------------------------------------------------------
 step 'wrappers'
 # ---------------------------------------------------------------------------
+sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/stub/t3" "${IT_BIN}/t3"
+sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/stub/claude" "${IT_BIN}/claude"
+sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/stub/codex" "${IT_BIN}/codex"
 sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/bin/ufw" "${IT_BIN}/ufw"
 sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/bin/curl" "${IT_BIN}/curl"
 sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/bin/passthrough" "${IT_BIN}/passthrough"
