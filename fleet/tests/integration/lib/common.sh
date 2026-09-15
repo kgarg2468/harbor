@@ -286,3 +286,54 @@ it_release_tag() {
 it_operator_home() {
   getent passwd "${IT_OPERATOR}" | cut -d: -f6
 }
+
+# it_wait_user_manager UID -- block until the operator's systemd user manager can
+# answer, up to 30s for its runtime directory and 30s more for the manager itself.
+# Returns non-zero if it never came up, and sets three globals rather than printing:
+#   IT_USER_MANAGER_STATE     the last state word read, or no-runtime-dir
+#   IT_WAIT_RUNTIME_SECONDS   seconds spent waiting for /run/user/UID
+#   IT_WAIT_MANAGER_SECONDS   seconds spent waiting for the manager after that
+# Globals rather than stdout because a caller that wants both the word and the two
+# timings would have to run this in a command substitution to read the word, and a
+# subshell is exactly where the timings would be lost.
+#
+# Linger being enabled is not the same as the user manager being up: systemd starts
+# the operator's per-user manager asynchronously afterwards, so a script that reads
+# Linger=yes and runs systemctl --user at once can lose a race it has no stake in.
+# (The unit's name is not written here: it is shaped like an address, and the lint's
+# placeholder scan refuses addresses outside example.com wherever they appear.)
+# Callers that assert on readiness as a product property read the state word and say
+# what they found; callers that merely need it up before doing something else check
+# the return.
+# assert_bootstrap.sh is the first kind and this is factored out of it.
+it_wait_user_manager() {
+  local uid="${1}" runtime_dir waited=0
+  runtime_dir="/run/user/${uid}"
+  IT_USER_MANAGER_STATE=""
+  IT_WAIT_RUNTIME_SECONDS=0
+  IT_WAIT_MANAGER_SECONDS=0
+  while [ ! -d "${runtime_dir}" ] && [ "${waited}" -lt 30 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  IT_WAIT_RUNTIME_SECONDS="${waited}"
+  if [ ! -d "${runtime_dir}" ]; then
+    IT_USER_MANAGER_STATE=no-runtime-dir
+    return 1
+  fi
+  waited=0
+  while [ "${waited}" -lt 30 ]; do
+    IT_USER_MANAGER_STATE="$(runuser -u "${IT_OPERATOR}" -- \
+      env "XDG_RUNTIME_DIR=${runtime_dir}" systemctl --user is-system-running 2>&1)" || :
+    case "${IT_USER_MANAGER_STATE}" in
+      running | degraded) break ;;
+    esac
+    sleep 1
+    waited=$((waited + 1))
+  done
+  IT_WAIT_MANAGER_SECONDS="${waited}"
+  case "${IT_USER_MANAGER_STATE}" in
+    running | degraded) return 0 ;;
+  esac
+  return 1
+}

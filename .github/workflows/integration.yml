@@ -226,3 +226,106 @@ jobs:
           # local repository is built, or the local repository would inherit it.
           sudo rm -f /etc/apt/sources.list.d/tailscale.list
           fleet/tests/integration/tailscale_status_probe.sh stub
+
+  # Task 20: bootstrap first on each fresh VM, then provision as the operator.
+  # One boundary per runner keeps every crash at its original pre-state. The
+  # lock-gate positional proof runs in every case, including the ordinary one.
+  provision:
+    needs: bootstrap
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        step:
+          - none
+          - provision-principal
+          - provision-entrypoint
+          - provision-backend
+          - provision-linger
+          - provision-state-root
+          - provision-lock
+          - provision-node
+          - recovery-scan
+          - provision-journal-config
+          - config-file
+          - provision-runtime-install
+          # Two -prepared boundaries, not six. A crash there is the entry whose
+          # mutation never happened, which recovery must revert -- the decision
+          # worth a runner, and each one costs a full bootstrap on a fresh VM.
+          # These two are kept because they are the two distinct recovery paths:
+          # the four runtime installs all journal op runtime-install and are
+          # decided by harbor_observe_op_runtime_install, so claude stands for
+          # codex and for t3, while the service row journals op t3-service and is
+          # decided by harbor_observe_op_t3_service, which reads the vendor's own
+          # status and the real user manager rather than an installed version.
+          - agents-claude-prepared
+          - t3-service-prepared
+          - agents-claude-installed
+          - agents-codex-installed
+          - provision-runtime-auth
+          - provision-t3-install
+          - t3-installed
+          - provision-vendor-service
+          - t3-service-installed
+          - provision-access-mode
+          - provision-state-record
+          - state-installed-lock
+          - state-provision-json
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Prepare the runner
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/setup.sh ufw-inactive
+
+      - name: Bootstrap at the real paths
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/run_root.sh --from checkout
+
+      - name: Assert provision and convergence as the real operator
+        env:
+          STEP: ${{ matrix.step }}
+        run: |
+          set -euo pipefail
+          if [ "${STEP}" = none ]; then
+            sudo bash fleet/tests/integration/assert_provision.sh
+          else
+            sudo bash fleet/tests/integration/assert_provision.sh --fail-after "${STEP}"
+          fi
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          for log in /opt/harbor-it/state/shim.log /opt/harbor-it/state/mutations.log /home/harbor/.local/state/harbor/harbor.log; do
+            printf '\n===== %s\n' "${log}"
+            if sudo test -f "${log}"; then sudo cat "${log}"; else printf '(absent)\n'; fi
+          done
+          printf '\n===== journal\n'
+          if sudo test -d /home/harbor/.local/state/harbor/journal; then
+            # grep exits 1 on no match, and an empty journal is a legitimate thing to
+            # be diagnosing -- this step must not fail and hide the logs above it.
+            sudo grep -r . /home/harbor/.local/state/harbor/journal || printf '(no entries)\n'
+          else
+            printf '(absent)\n'
+          fi
+          # The operator's own directories, modes included. A newly created file
+          # landing at a mode umask 077 could not produce points at a default ACL
+          # or a mount option rather than at anything Harbor did.
+          printf '\n===== operator home permissions\n'
+          sudo ls -lad /home/harbor /home/harbor/.config /home/harbor/.config/harbor \
+            /home/harbor/.local/state/harbor 2>&1 || true
+          # /home included: the runner image puts a default ACL there, setup.sh
+          # drops it, and an operator home that inherited one anyway is the
+          # difference between a Harbor bug and a harness that did not hold.
+          sudo getfacl -p /home /home/harbor /home/harbor/.config 2>&1 || printf '(getfacl unavailable)\n'
+          printf 'mount: %s\n' "$(findmnt -no SOURCE,FSTYPE,OPTIONS --target /home/harbor || true)"

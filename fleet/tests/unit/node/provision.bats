@@ -227,11 +227,11 @@ provision_vendor_fixtures() {
   prefix="${FIX_HOME}/.local/harbor/npm"
   mkdir -p "${BATS_TEST_TMPDIR}/payload" "${prefix}/bin"
   # The library uses node_modules directly beneath the npm prefix.
-  mkdir -p "${prefix}/node_modules/t3"
+  mkdir -p "${prefix}/lib/node_modules/t3"
   cp -R "${HARBOR_ROOT}/tests/fixtures/t3" "${BATS_TEST_TMPDIR}/t3-fixtures"
   cp "${HARBOR_ROOT}/versions.lock" "${BATS_TEST_TMPDIR}/versions.lock"
   range="$(sed -n 's/^t3_engines_node=//p' "${HARBOR_ROOT}/versions.lock")"
-  printf '{\n  "engines": {\n    "node": "%s"\n  }\n}\n' "${range}" >"${prefix}/node_modules/t3/package.json"
+  printf '{\n  "engines": {\n    "node": "%s"\n  }\n}\n' "${range}" >"${prefix}/lib/node_modules/t3/package.json"
   printf 'installed-current\n' >"${BATS_TEST_TMPDIR}/service"
   : >"${BATS_TEST_TMPDIR}/mutations"
   cat >"${BATS_TEST_TMPDIR}/payload/vendor" <<'SH'
@@ -444,7 +444,7 @@ service install'
 }
 
 @test "missing engines and incompatible engines stop before service with 2 and 3" {
-  package="${FIX_HOME}/.local/harbor/npm/node_modules/t3/package.json"
+  package="${FIX_HOME}/.local/harbor/npm/lib/node_modules/t3/package.json"
   rm "${package}"
   run provision
   assert_equal "${status}" 2

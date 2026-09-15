@@ -39,6 +39,8 @@ jobs:
           fleet/tests/integration/*.sh fleet/tests/integration/lib/*.sh
           fleet/tests/integration/bin/curl fleet/tests/integration/bin/passthrough
           fleet/tests/integration/bin/ufw fleet/tests/integration/stub/tailscale
+          fleet/tests/integration/stub/t3 fleet/tests/integration/stub/claude
+          fleet/tests/integration/stub/codex
           fleet/vendor-smoke/*.sh
       - name: shfmt
         run: >
@@ -48,6 +50,8 @@ jobs:
           fleet/tests/integration/*.sh fleet/tests/integration/lib/*.sh
           fleet/tests/integration/bin/curl fleet/tests/integration/bin/passthrough
           fleet/tests/integration/bin/ufw fleet/tests/integration/stub/tailscale
+          fleet/tests/integration/stub/t3 fleet/tests/integration/stub/claude
+          fleet/tests/integration/stub/codex
           fleet/vendor-smoke/*.sh
       - name: Placeholder scan
         run: fleet/tests/lint/placeholder_scan.sh

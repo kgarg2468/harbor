@@ -328,11 +328,11 @@ installed_fixture() {
   printf 'VERSION_ID="26.04"\n' >"${HARBOR_STATE_OS_RELEASE}"
   harbor_versions_load "${HARBOR_ROOT}/versions.lock"
   local bin="${HOME}/.local/harbor/npm/bin" shims="${BATS_TEST_TMPDIR}/bin"
-  mkdir -p "${bin}" "${shims}" "${HOME}/.local/harbor/npm/node_modules/t3"
+  mkdir -p "${bin}" "${shims}" "${HOME}/.local/harbor/npm/lib/node_modules/t3"
   printf '#!/bin/bash\nprintf "2.0.1 (Claude Code)\\n"\n' >"${bin}/claude"
   printf '#!/bin/bash\nprintf "codex-cli 0.1.2\\n"\n' >"${bin}/codex"
   printf '#!/bin/bash\nprintf "t3 v0.0.1\\n"\n' >"${bin}/t3"
-  printf '{\n  "engines": {\n    "node": ">=24.0.0"\n  }\n}\n' >"${HOME}/.local/harbor/npm/node_modules/t3/package.json"
+  printf '{\n  "engines": {\n    "node": ">=24.0.0"\n  }\n}\n' >"${HOME}/.local/harbor/npm/lib/node_modules/t3/package.json"
   cat >"${shims}/sh" <<'SH'
 #!/bin/bash
 [ "$*" = '-lc node --version' ] || exit 99
@@ -375,7 +375,7 @@ SH
       claude_code_version) target="${HOME}/.local/harbor/npm/bin/claude" ;;
       codex_version) target="${HOME}/.local/harbor/npm/bin/codex" ;;
       t3_version) target="${HOME}/.local/harbor/npm/bin/t3" ;;
-      t3_engines_node) target="${HOME}/.local/harbor/npm/node_modules/t3/package.json" ;;
+      t3_engines_node) target="${HOME}/.local/harbor/npm/lib/node_modules/t3/package.json" ;;
       nodejs_version) target="${BATS_TEST_TMPDIR}/bin/sh" ;;
       tailscale_version) target="${BATS_TEST_TMPDIR}/bin/dpkg-query" ;;
       ubuntu_release) target="${HARBOR_STATE_OS_RELEASE}" ;;

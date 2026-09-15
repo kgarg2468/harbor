@@ -301,7 +301,7 @@ journal_names() {
   local before
   before="$(tree_snapshot)"
   assert_equal "$(harbor_t3_bin "${FIX_HOME}")" "$(harbor_agents_prefix "${FIX_HOME}")/bin/t3"
-  assert_equal "$(harbor_t3_package_dir "${FIX_HOME}")" "$(harbor_agents_prefix "${FIX_HOME}")/node_modules/t3"
+  assert_equal "$(harbor_t3_package_dir "${FIX_HOME}")" "$(harbor_agents_prefix "${FIX_HOME}")/lib/node_modules/t3"
   assert_equal "$(harbor_t3_installed_version "${FIX_HOME}")" absent
   assert_equal "$(tree_snapshot)" "${before}"
   fake_agent "${DECOY_HOME}" t3 't3 v9.9.9'

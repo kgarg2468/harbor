@@ -57,6 +57,50 @@ os_version="$(sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-rel
   exit 1
 }
 
+# The GitHub runner image carries a default ACL on /home granting the workflow
+# user rwx, so that anything created under it is reachable from the job. Ubuntu
+# Server 24.04 ships /home with no ACL at all, and this one is inherited by the
+# operator home the bootstrap is about to create: every file made there, however
+# tight the umask, comes out carrying a second user's entry and an rwx mask, which
+# stat reports in the group position. harbor_config_create refuses exactly that,
+# and it is right to -- a 0600 configuration another account can read is not 0600.
+# Removing the default entries here is what makes this runner's /home the /home a
+# real node has. -k, not -b: only the inheritance is dropped, so the access ACL on
+# /home itself, and every existing home under it, are left as the image left them.
+# Required, not probed for. Missing tools are not evidence of a missing ACL -- the
+# kernel and the filesystem carry them, getfacl and setfacl only read and write
+# them -- so a run that cannot look would be a run that silently hands the bootstrap
+# a /home it never inspected, and the mode failures would come back looking like
+# Harbor's. This is a precondition on the runner, alongside the release and PID 1.
+for prog in getfacl setfacl; do
+  command -v "${prog}" >/dev/null 2>&1 || {
+    printf 'setup.sh: %s is missing, so /home cannot be checked for an inheritable ACL\n' "${prog}" >&2
+    exit 1
+  }
+done
+# Each reading is taken into a variable first. A getfacl inside an if condition or a
+# command substitution cannot fail this step -- set -e does not apply to either, and
+# the pipeline's status would be grep's -- so an unreadable /home would take the same
+# path as a /home with no default entries, which is the inference this step exists to
+# refuse. Present-but-unreadable is a broken runner and is said as much.
+home_acl="$(getfacl -p /home)" || {
+  printf 'setup.sh: getfacl could not read /home, so its ACL is unknown\n' >&2
+  exit 1
+}
+printf 'before: %s\n' "$(printf '%s' "${home_acl}" | tr '\n' ' ')"
+sudo setfacl -k /home
+home_acl="$(getfacl -p /home)" || {
+  printf 'setup.sh: getfacl could not read /home after setfacl -k\n' >&2
+  exit 1
+}
+printf 'after:  %s\n' "$(printf '%s' "${home_acl}" | tr '\n' ' ')"
+# grep against the reading already taken, not against a fresh command: here a
+# non-zero status can only mean "no default entry", which is what is being asked.
+if printf '%s\n' "${home_acl}" | grep -q '^default:'; then
+  printf 'setup.sh: /home still carries a default ACL, so the operator home would inherit it\n' >&2
+  exit 1
+fi
+
 tailscale_version="$(it_lock tailscale_version)"
 nodejs_version="$(it_lock nodejs_version)"
 printf 'admin user      %s\n' "${IT_ADMIN}"
@@ -86,6 +130,9 @@ sudo chmod 0666 "${IT_TS_BACKEND}"
 # ---------------------------------------------------------------------------
 step 'wrappers'
 # ---------------------------------------------------------------------------
+sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/stub/t3" "${IT_BIN}/t3"
+sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/stub/claude" "${IT_BIN}/claude"
+sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/stub/codex" "${IT_BIN}/codex"
 sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/bin/ufw" "${IT_BIN}/ufw"
 sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/bin/curl" "${IT_BIN}/curl"
 sudo install -m 0755 -o root -g root "${IT_INTEGRATION}/bin/passthrough" "${IT_BIN}/passthrough"

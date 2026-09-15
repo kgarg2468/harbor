@@ -1,0 +1,141 @@
+#!/bin/bash
+# Integration stand-in for T3 and, through a lane-local npm symlink, its installer.
+# The installer copies the three stubs into the real operator prefix. No registry
+# is contacted. Pins come from the lane's copy of the installed versions.lock,
+# outside the checkout so the deleted-checkout assertion still exercises Harbor.
+#
+# service install owns the unit and saves its exact bytes before systemd sees it.
+# The service is a real loopback HTTP listener; status reads its real unit file,
+# and Harbor separately asks the real user manager whether it is active.
+set -euo pipefail
+
+it_bin=/opt/harbor-it/bin
+it_state=/opt/harbor-it/state
+it_lock=/opt/harbor-it/fixtures/provision.versions.lock
+it_prog="$(basename "${0}")"
+
+it_log() {
+  local kind line arg
+  kind="${1}"
+  shift
+  line="$(date -u +%s)"$'\t'"${kind}"$'\t'"${it_prog}"
+  for arg in "$@"; do
+    line="${line}"$'\t'"${arg}"
+  done
+  printf '%s\n' "${line}" >>"${it_state}/shim.log"
+  if [ "${kind}" = mutate ]; then
+    printf '%s\n' "${line}" >>"${it_state}/mutations.log"
+  fi
+}
+
+if [ "${it_prog}" = npm ]; then
+  # Validate before logging: the accepted argv contains only the public package
+  # pin and the fixed operator prefix, never credentials or arbitrary npm flags.
+  [ "$#" = 5 ] && [ "${1}" = install ] && [ "${2}" = --global ] \
+    && [ "${3}" = --prefix ] && [ "${4}" = "${HOME}/.local/harbor/npm" ] || {
+    printf 'integration npm stub: unsupported invocation\n' >&2
+    exit 64
+  }
+  it_agent=""
+  for it_pair in claude:claude_code_install codex:codex_install t3:t3_install; do
+    it_spec="$(sed -n "s/^${it_pair#*:}=npm://p" "${it_lock}")"
+    if [ "${5}" = "${it_spec}" ]; then it_agent="${it_pair%%:*}"; fi
+  done
+  [ -n "${it_agent}" ] || {
+    printf 'integration npm stub: package does not match a pin\n' >&2
+    exit 64
+  }
+  it_log mutate "$@"
+  mkdir -p "${4}/bin"
+  install -m 0755 "${it_bin}/${it_agent}" "${4}/bin/${it_agent}"
+  if [ "${it_agent}" = t3 ]; then
+    mkdir -p "${4}/lib/node_modules/t3"
+    it_engines="$(sed -n 's/^t3_engines_node=//p' "${it_lock}")"
+    printf '{\n  "engines": {\n    "node": "%s"\n  }\n}\n' "${it_engines}" \
+      >"${4}/lib/node_modules/t3/package.json"
+  fi
+  exit 0
+fi
+
+# Dispatch on the argument vector, one element at a time, rather than on "${*}".
+# Joining the vector with spaces makes ("service" "status") and the single argument
+# ("service status") the same string, so a stub matching on the join accepts an
+# invocation the real CLI would reject, and a regression that passed a subcommand as
+# one argument would be answered here instead of refused. Counting the arguments is
+# the other half: without it a trailing argument is simply ignored.
+it_cmd=""
+case "${1:-}" in
+  --version)
+    if [ "$#" = 1 ]; then it_cmd=version; fi
+    ;;
+  service)
+    if [ "$#" = 2 ] && [ "${2}" = status ]; then it_cmd=service-status; fi
+    if [ "$#" = 2 ] && [ "${2}" = install ]; then it_cmd=service-install; fi
+    ;;
+  connect)
+    if [ "$#" = 3 ] && [ "${2}" = status ] && [ "${3}" = --json ]; then it_cmd=connect-status; fi
+    ;;
+esac
+[ -n "${it_cmd}" ] || {
+  printf 'integration t3 stub: unsupported invocation\n' >&2
+  exit 64
+}
+case "${it_cmd}" in
+  service-install) it_log mutate "$@" ;;
+  *) it_log inspect "$@" ;;
+esac
+it_version="$(sed -n 's/^t3_version=//p' "${it_lock}")"
+it_unit="${HOME}/.config/systemd/user/t3code.service"
+case "${it_cmd}" in
+  version) printf 't3 v%s\n' "${it_version}" ;;
+  service-status)
+    if [ -f "${it_unit}" ]; then
+      printf '  Status: installed · t3@%s\n' "${it_version}"
+    else
+      printf '  Status: not installed\n'
+    fi
+    ;;
+  connect-status)
+    printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": true,\n  "relayClient": {\n    "status": "available"\n  }\n}\n'
+    ;;
+  service-install)
+    mkdir -p "${HOME}/.config/systemd/user" "${HOME}/.local/share/harbor-it"
+    cat >"${it_unit}.new" <<'UNIT'
+[Unit]
+Description=Harbor integration T3 vendor stand-in
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 18743 --bind 127.0.0.1 --directory /opt/harbor-it/fixtures
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+    # The unit is the vendor's to write, and the snapshot beside it is what
+    # assert_provision.sh compares the final file against. If anything else put a
+    # unit there first, writing over it and then snapshotting the result would make
+    # that comparison a comparison of this stub with itself, and "Harbor did not
+    # touch the vendor's file" would pass precisely when it was false. Identical
+    # bytes are the rerun, and are not a finding.
+    if [ -f "${it_unit}" ] && ! cmp -s "${it_unit}" "${it_unit}.new"; then
+      rm -f "${it_unit}.new"
+      printf 'integration t3 stub: %s already holds other bytes; the vendor unit is not Harbor to write\n' \
+        "${it_unit}" >&2
+      exit 1
+    fi
+    mv -f "${it_unit}.new" "${it_unit}"
+    cp "${it_unit}" "${HOME}/.local/share/harbor-it/t3code.service.expected"
+    systemctl --user daemon-reload
+    systemctl --user enable --now t3code.service
+    # Wait for the listener too: Type=simple can be active before Python binds.
+    for ((it_attempt = 0; it_attempt < 50; it_attempt++)); do
+      if /usr/bin/python3 -c 'import socket; socket.create_connection(("127.0.0.1", 18743), timeout=1).close()' 2>/dev/null; then
+        exit 0
+      fi
+      sleep 0.1
+    done
+    printf 'integration t3 stub: loopback listener did not become ready\n' >&2
+    exit 1
+    ;;
+esac
