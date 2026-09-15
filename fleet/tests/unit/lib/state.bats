@@ -467,9 +467,15 @@ SH
   # otherwise would fail the writer's post-rename verify for a reason the test does
   # not mean. The flag word is passed through so one shim serves -c on Linux and -f
   # on Darwin.
-  local stale
-  stale="$(/usr/bin/stat -f '%i' "${FIX_ROOT}/provision.json" 2>/dev/null \
-    || /usr/bin/stat -c '%i' "${FIX_ROOT}/provision.json")"
+  # Branching on the platform rather than trying -f and falling back to -c: GNU stat's
+  # -f is --file-system, so it does not fail on Linux, it succeeds and answers the file
+  # system id. The fallback would never run, the seeded value would never match an
+  # inode, and the shim would quietly stop lying -- a test that passes for the wrong
+  # reason on the one runner that matters most. The shim body needs no branch because
+  # harbor_stat_owner already passes the right flag as its first argument.
+  local stale flag='-c'
+  [ "$(harbor_os)" != Darwin ] || flag='-f'
+  stale="$(/usr/bin/stat "${flag}" '%i' "${FIX_ROOT}/provision.json")"
   cat >"${BATS_TEST_TMPDIR}/bin/stat" <<SH
 #!/bin/bash
 if [ "\${2}" = '%U' ] || [ "\${2}" = '%Su' ]; then
@@ -482,6 +488,11 @@ fi
 exec /usr/bin/stat "\$@"
 SH
   chmod 0755 "${BATS_TEST_TMPDIR}/bin/stat"
+  # The fixture asserted before it is relied on. A shim that silently fails to lie
+  # turns the rest of this test into a check that an unchanged record keeps its stamp,
+  # which is a different test that already exists and would pass here.
+  assert_equal "$(harbor_stat_owner "${FIX_ROOT}/provision.json")" someone-else
+  assert_equal "$(harbor_stat_mode "${FIX_ROOT}/provision.json")" 0600
   run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260202T000000Z connect healthy installed-current logged-in logged-in
   assert_success
   assert_equal "$(entry_raw "${FIX_ROOT}" 0002 ownership)" '"modified"'
