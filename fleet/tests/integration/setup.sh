@@ -67,18 +67,23 @@ os_version="$(sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-rel
 # Removing the default entries here is what makes this runner's /home the /home a
 # real node has. -k, not -b: only the inheritance is dropped, so the access ACL on
 # /home itself, and every existing home under it, are left as the image left them.
-if command -v setfacl >/dev/null 2>&1; then
-  printf 'before: %s\n' "$(getfacl -p /home 2>/dev/null | tr '\n' ' ')"
-  sudo setfacl -k /home
-  printf 'after:  %s\n' "$(getfacl -p /home 2>/dev/null | tr '\n' ' ')"
-  if getfacl -p /home 2>/dev/null | grep -q '^default:'; then
-    printf 'setup.sh: /home still carries a default ACL, so the operator home would inherit it\n' >&2
+# Required, not probed for. Missing tools are not evidence of a missing ACL -- the
+# kernel and the filesystem carry them, getfacl and setfacl only read and write
+# them -- so a run that cannot look would be a run that silently hands the bootstrap
+# a /home it never inspected, and the mode failures would come back looking like
+# Harbor's. This is a precondition on the runner, alongside the release and PID 1.
+for prog in getfacl setfacl; do
+  command -v "${prog}" >/dev/null 2>&1 || {
+    printf 'setup.sh: %s is missing, so /home cannot be checked for an inheritable ACL\n' "${prog}" >&2
     exit 1
-  fi
-else
-  # No setfacl means no ACL support to inherit from, which is the state this step
-  # is trying to reach. Say so rather than passing over it in silence.
-  printf 'setfacl is absent; /home carries no ACL to inherit\n'
+  }
+done
+printf 'before: %s\n' "$(getfacl -p /home | tr '\n' ' ')"
+sudo setfacl -k /home
+printf 'after:  %s\n' "$(getfacl -p /home | tr '\n' ' ')"
+if getfacl -p /home | grep -q '^default:'; then
+  printf 'setup.sh: /home still carries a default ACL, so the operator home would inherit it\n' >&2
+  exit 1
 fi
 
 tailscale_version="$(it_lock tailscale_version)"

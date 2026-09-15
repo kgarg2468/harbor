@@ -245,29 +245,19 @@ it_eq 'linger is enabled for the operator' yes \
   "$(/usr/bin/loginctl show-user "${IT_OPERATOR}" --property=Linger --value)"
 
 runtime_dir="/run/user/${operator_uid}"
-waited=0
-while [ ! -d "${runtime_dir}" ] && [ "${waited}" -lt 30 ]; do
-  sleep 1
-  waited=$((waited + 1))
-done
+# Both waits, in one helper, because assert_provision.sh needs the same race closed
+# before it runs a command that talks to this manager. What is asserted here is
+# unchanged: readiness is a property of the bootstrap, so this script still reads
+# the state word and says what it found rather than only checking the return.
+it_wait_user_manager "${operator_uid}" || :
+user_state="${IT_USER_MANAGER_STATE}"
+waited="${IT_WAIT_MANAGER_SECONDS}"
 if [ -d "${runtime_dir}" ]; then
-  it_pass "${runtime_dir} exists after ${waited}s of linger"
+  it_pass "${runtime_dir} exists after ${IT_WAIT_RUNTIME_SECONDS}s of linger"
 else
   it_fail "${runtime_dir} does not exist 30s after linger was enabled"
 fi
 
-user_state=""
-waited=0
-while [ "${waited}" -lt 30 ]; do
-  rc=0
-  user_state="$(runuser -u "${IT_OPERATOR}" -- \
-    env "XDG_RUNTIME_DIR=${runtime_dir}" systemctl --user is-system-running 2>&1)" || rc="$?"
-  case "${user_state}" in
-    running | degraded) break ;;
-  esac
-  sleep 1
-  waited=$((waited + 1))
-done
 case "${user_state}" in
   running | degraded)
     it_pass "the operator's user manager is ${user_state} after ${waited}s"

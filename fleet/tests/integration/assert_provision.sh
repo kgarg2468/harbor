@@ -92,6 +92,22 @@ it_symlink 'installed entrypoint' "${release}/bin/harbor" "${IT_LINK}"
 it_file 'bootstrap record' 0644 root root "${IT_HARBOR_RECORD}"
 it_file_absent 'operator state root before provision' "${op_root}"
 it_eq 'real linger is enabled' yes "$(loginctl show-user "${IT_OPERATOR}" -p Linger --value)"
+# Linger=yes says systemd was told to start the operator's per-user manager, not
+# that it has. Every provision_run below reaches that manager -- the vendor-service
+# row runs systemctl --user enable --now -- so a fresh runner that has not finished
+# starting it would fail rows that are correct. Waited for rather than asserted:
+# readiness is this script's precondition, and assert_bootstrap.sh is where it is
+# the claim.
+if ! it_wait_user_manager "${operator_uid}"; then
+  # Stop here rather than running rows that cannot succeed: every later failure
+  # would be this one, reported once per row and pointing at Harbor. it_done prints
+  # the count and exits 1 because this failure is already recorded.
+  it_fail "the operator's user manager never came up: ${IT_USER_MANAGER_STATE}"
+  it_done 'assert_provision'
+  exit 1
+fi
+printf 'user manager %s after %ss + %ss\n' "${IT_USER_MANAGER_STATE}" \
+  "${IT_WAIT_RUNTIME_SECONDS}" "${IT_WAIT_MANAGER_SECONDS}"
 # Bootstrap leaves Tailscale at NeedsLogin. Drive the stub directly so no earlier
 # Harbor command creates the state root whose ordering this script must prove.
 runuser -u "${IT_OPERATOR}" -- env -i "PATH=${IT_PATH}" "HOME=${operator_home}" \
@@ -146,6 +162,7 @@ if [ -n "${fail_after}" ]; then
   # These boundaries sit after the real mutation and before the applied write.
   # Save the prepared entries so recovery must resolve those very entries.
   prepared=()
+  unmutated=()
   case "${fail_after}" in
     config-file | agents-claude-installed | agents-codex-installed | t3-installed | \
       t3-service-installed | state-installed-lock | state-provision-json)
@@ -154,6 +171,20 @@ if [ -n "${fail_after}" ]; then
         if [ "$(it_journal_field "${entry}" phase)" = prepared ]; then prepared+=("${entry}"); fi
       done
       it_ne 'mutation left a prepared entry before its applied write' 0 "${#prepared[@]}"
+      ;;
+    # The other side of the same table: this boundary sits after the entry is
+    # written and before the mutation it describes, so the target still equals
+    # pre_state and harbor_journal_recover must mark the entry reverted. The
+    # generic resolved check below accepts applied or reverted, which is no test of
+    # that at all -- an entry wrongly marked applied is the regression this matrix
+    # case exists for, and it would pass. So the entry is captured and the phase it
+    # must come back with is named.
+    agents-claude-prepared)
+      for entry in "${op_journal}"/*.json; do
+        [ -f "${entry}" ] || continue
+        if [ "$(it_journal_field "${entry}" phase)" = prepared ]; then unmutated+=("${entry}"); fi
+      done
+      it_ne 'the boundary left an entry prepared before its mutation' 0 "${#unmutated[@]}"
       ;;
   esac
 fi
@@ -164,6 +195,10 @@ it_file_absent 'rerun released the operator lock' "${op_root}/lock.d"
 if [ -n "${fail_after}" ]; then
   for entry in "${prepared[@]}"; do
     it_eq 'recovery applied the interrupted mutation' applied "$(it_journal_field "${entry}" phase)"
+  done
+  for entry in "${unmutated[@]}"; do
+    it_eq 'recovery reverted the entry whose mutation never happened' reverted \
+      "$(it_journal_field "${entry}" phase)"
   done
 fi
 for entry in "${op_journal}"/*.json; do
