@@ -278,39 +278,37 @@ harbor_state_installed_lock_render() {
 
 # Shared by the two new operator artifacts only; bootstrap's writer is unchanged.
 # PATH's parent is the operator state root, already created and locked by preflight.
-# harbor_state_provision_unchanged FILE CONTENT: true when writing CONTENT over FILE
-# would change nothing the journal records, which is the question the timestamp
-# decision is really asking -- preserve the stamp exactly when
-# harbor_state_provision_write is going to journal observed rather than modified.
-# It is asked the way that writer answers it, by staging a candidate as it stages one
-# and comparing the two observations, rather than by testing the fields that seem to
-# matter. Naming fields by hand is how this went wrong twice: content alone preserved
-# the stamp across a repair from 0644 to 0600, and content with mode still preserves it
-# across a repair of a record owned by another user, because harbor_observe_file
-# compares owner too. A comparison built from harbor_observe_file cannot fall behind
-# harbor_observe_file. A failure staging the candidate answers false, so the caller
-# renders a fresh stamp and the writer fails on its own staging with its own message;
-# the conservative direction, since a fresh stamp on an unchanged record costs a
-# rewrite while a stale one on a changed record is the undecidability of section 5.7.
-harbor_state_provision_unchanged() {
-  local file="${1}" content="${2}" root tmp pre post
-  root="$(dirname "${file}")" || return 1
-  pre="$(harbor_observe_file "${file}")" || return 1
-  tmp="$(mktemp "${root}/.tmp.state.XXXXXX")" || return 1
-  if ! chmod 0600 "${tmp}" || ! printf '%s\n' "${content}" >"${tmp}"; then
-    rm -f "${tmp}"
-    return 1
-  fi
-  post="$(harbor_observe_file "${tmp}")" || {
-    rm -f "${tmp}"
-    return 1
-  }
-  rm -f "${tmp}" || return 1
-  [ "${post}" = "${pre}" ]
+# harbor_state_stage TMP CONTENT: TMP holding CONTENT at 0600, the one way this file
+# stages a state write. Mode before content so the bytes are never briefly readable by
+# anyone mktemp's umask would have allowed.
+harbor_state_stage() {
+  chmod 0600 "${1}" && printf '%s\n' "${2}" >"${1}"
 }
 
+# harbor_state_provision_write FILE CONTENT BOUNDARY [OTHERWISE]: OTHERWISE is how a
+# caller whose content depends on whether the write changes anything gets that decision
+# made here. provision.json is the only such caller: it must keep the timestamp it
+# already carries when nothing else about the record moved, and take a fresh one the
+# moment something did, because spec section 5.7's finalization compares that timestamp
+# against the newest <state-root>.journal.<timestamp>.done sibling and a record dated
+# before the journal activity that produced it is the stale-looking one.
+#
+# Deciding that in the caller cannot be made correct, only narrowed. The caller would
+# have to predict this function's answer, which means reproducing its comparison, and
+# it would have to inspect FILE to do it -- a second reading, so between the reading the
+# decision used and the reading the write uses the record can move, and the write then
+# applies content stamped for a file that is no longer there. Passing both candidates
+# removes the second reading rather than shrinking its window: the fallback is chosen
+# against the same pre this write goes on to journal.
+#
+# The narrower form of the same trap is worth naming because it took three attempts.
+# The comparison is not a list of fields. It is harbor_observe_file against
+# harbor_observe_file, which is content, mode, and owner -- a record correct in content
+# at 0644, or correct in content and mode but owned by another user, is one this
+# function rewrites, and the stamp has to move with it. Any test written from the
+# fields that seem to matter falls behind the next field the observation grows.
 harbor_state_provision_write() {
-  local file="${1}" content="${2}" boundary="${3}" root tmp pre post ownership entry
+  local file="${1}" content="${2}" boundary="${3}" otherwise="${4:-}" root tmp pre post ownership entry
   root="$(dirname "${file}")" || harbor_die 2 state.path "cannot derive the parent of ${file}; nothing was written"
   [ ! -L "${file}" ] || harbor_die 3 state.foreign "${file} is a symlink; nothing was written"
   pre="$(harbor_observe_file "${file}")" || harbor_die 2 state.inspect "cannot inspect ${file}; nothing was written"
@@ -319,11 +317,19 @@ harbor_state_provision_write() {
   esac
   tmp="$(mktemp "${root}/.tmp.state.XXXXXX")" \
     || harbor_die 2 state.stage "cannot create a temporary file in ${root}; ${file} is unchanged"
-  if ! chmod 0600 "${tmp}" || ! printf '%s\n' "${content}" >"${tmp}"; then
+  if ! harbor_state_stage "${tmp}" "${content}"; then
     rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
     harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
   fi
   post="$(harbor_observe_file "${tmp}")" || harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+  if [ -n "${otherwise}" ] && [ "${post}" != "${pre}" ]; then
+    # CONTENT was only ever the candidate for the unchanged case, and this is not it.
+    if ! harbor_state_stage "${tmp}" "${otherwise}"; then
+      rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
+      harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
+    fi
+    post="$(harbor_observe_file "${tmp}")" || harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+  fi
   if [ "${post}" = "${pre}" ]; then
     rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
     harbor_journal_create "${root}" file "${file}" observed applied "${pre}" "${post}" \
@@ -403,7 +409,7 @@ LOCK
 # result necessarily carries: an unchanged record keeps its own.
 harbor_state_provision_record() {
   local file="${1}" stamp="${2}" mode="${3}" access="${4}" service="${5}" claude="${6}" codex="${7}"
-  local record ownership snapshot="${8:-}" content prior known word
+  local record ownership snapshot="${8:-}" content fresh prior known word
   record="${HARBOR_AUTH_RECORD}"
   if [ "${HARBOR_DEV:-0}" = 1 ]; then
     record="${HARBOR_AUTH_FIXTURE_RECORD:-${record}}"
@@ -445,10 +451,13 @@ harbor_state_provision_record() {
   if [ -n "${prior}" ]; then
     content="$(harbor_state_provision_render "${prior}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
       || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
-    if harbor_state_provision_unchanged "${file}" "${content}"; then
-      harbor_state_provision_write "${file}" "${content}" state-provision-json
-      return 0
-    fi
+    fresh="$(harbor_state_provision_render "${stamp}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
+      || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
+    # Both candidates, so the writer picks between them against the one reading of
+    # ${file} it goes on to journal. Choosing here would mean reading ${file} a second
+    # time and stamping content for the version that reading saw.
+    harbor_state_provision_write "${file}" "${content}" state-provision-json "${fresh}"
+    return 0
   fi
   content="$(harbor_state_provision_render "${stamp}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
     || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
