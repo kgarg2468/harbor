@@ -240,6 +240,13 @@ harbor_state_installed_lock_render() {
         # into a file PR 7 compares against the lock -- where it reads as drift on
         # a node that has none. The fence below admits digits and dots only, which
         # rejects a suffix, an embedded newline, and a second line together.
+        # The v is required, not merely tolerated. node --version prefixes it, so a
+        # reading without one did not come from the reading this key names, and the
+        # glob this replaced asserted that much correctly even while it let the rest
+        # through. Dropping the requirement would widen the check in the same motion
+        # that narrowed it.
+        [ "${value}" != "${value#v}" ] \
+          || harbor_die 2 state.observe "${key}: ${reading} returned '${value}', and node --version prefixes a v; no state snapshot was written"
         value="${value#v}"
         harbor_state_bare_version "${value}" \
           || harbor_die 2 state.observe "${key}: ${reading} returned '${value}', which is not a bare N.N.N version; no state snapshot was written"
@@ -321,14 +328,24 @@ harbor_state_provision_write() {
     rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
     harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
   fi
-  post="$(harbor_observe_file "${tmp}")" || harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+  post="$(harbor_observe_file "${tmp}")" || {
+    # Best effort, and the inspection failure is still the diagnostic: a cleanup that
+    # also fails must not replace the reason the write stopped.
+    rm -f "${tmp}"
+    harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+  }
   if [ -n "${otherwise}" ] && [ "${post}" != "${pre}" ]; then
     # CONTENT was only ever the candidate for the unchanged case, and this is not it.
     if ! harbor_state_stage "${tmp}" "${otherwise}"; then
       rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
       harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
     fi
-    post="$(harbor_observe_file "${tmp}")" || harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+    post="$(harbor_observe_file "${tmp}")" || {
+      # Best effort, and the inspection failure is still the diagnostic: a cleanup that
+      # also fails must not replace the reason the write stopped.
+      rm -f "${tmp}"
+      harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+    }
   fi
   if [ "${post}" = "${pre}" ]; then
     rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"

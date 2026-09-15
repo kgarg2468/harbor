@@ -422,6 +422,16 @@ SH
   assert_equal "${status}" 2
   assert_output --partial nodejs_version
   assert_output --partial 'bare'
+  # The v is required and not merely tolerated. node --version prefixes one, so an
+  # answer without it did not come from the reading this key names, whatever its
+  # shape -- and stripping it optionally would have widened the check in the same
+  # motion that narrowed it against the suffix above.
+  printf '#!/bin/bash\n[ "$*" = "-lc node --version" ] || exit 99\nprintf "24.20.0\\n"\n' >"${BATS_TEST_TMPDIR}/bin/sh"
+  chmod 0755 "${BATS_TEST_TMPDIR}/bin/sh"
+  run harbor_state_installed_lock_render
+  assert_equal "${status}" 2
+  assert_output --partial nodejs_version
+  assert_output --partial 'prefixes a v'
 }
 
 @test "an ownership outside the design section 5.2 vocabulary is refused, not copied through" {
