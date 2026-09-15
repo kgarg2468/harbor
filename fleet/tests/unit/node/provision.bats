@@ -123,7 +123,7 @@ SH
   assert_equal "${status}" 2
   assert_output --partial 'provision.state_root'
   assert_equal "$(cat "${FIX_HOME}/.local")" foreign
-  refute_output --partial 'step provision-lock'
+  refute_output --partial 'step: provision-lock'
 }
 
 @test "the state root is 0700 at lock-gate before any journal exists" {
@@ -146,7 +146,7 @@ SH
   run provision
   assert_equal "${status}" 3
   assert_output --partial 'versions.unknown_key'
-  refute_output --partial 'step provision-node'
+  refute_output --partial 'step: provision-node'
   assert [ ! -e "${FIX_ROOT}/journal" ]
 }
 
@@ -156,7 +156,7 @@ SH
   run provision
   assert_equal "${status}" 3
   assert_output --partial 'lock.'
-  refute_output --partial 'step provision-node'
+  refute_output --partial 'step: provision-node'
   assert_equal "$(cat "${FIX_ROOT}/lock.d/holder")" broken
   assert [ ! -e "${FIX_ROOT}/journal" ]
 }
@@ -184,7 +184,7 @@ SH
   assert_output --partial 'journal.undecidable'
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
   assert_equal "$(cat "${FIX_ARTIFACT_0001}")" two
-  refute_output --partial 'preflight complete'
+  refute_output --partial 'step: provision-journal-config'
 }
 
 @test "healthy provision runs preflight and rows in table order" {
@@ -460,8 +460,8 @@ service install'
   run provision TEST_SERVICE_FAIL=1
   assert_equal "${status}" 2
   assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" prepared
-  refute_output --partial 'step: provision-access-mode
-provision-state-record'
+  refute_output --partial 'step: provision-access-mode'
+  refute_output --partial 'step: provision-state-record'
 }
 
 @test "unknown service pre-state refuses without service mutation or prepared entry" {
@@ -470,8 +470,8 @@ provision-state-record'
   assert_equal "${status}" 3
   assert_output --partial t3.service_unknown
   assert [ ! -s "${BATS_TEST_TMPDIR}/mutations" ]
-  refute_output --partial 'step: provision-access-mode
-provision-state-record'
+  refute_output --partial 'step: provision-access-mode'
+  refute_output --partial 'step: provision-state-record'
   run grep '"phase": "prepared"' "${FIX_ROOT}/journal/"*.json
   assert_equal "${status}" 1
 }

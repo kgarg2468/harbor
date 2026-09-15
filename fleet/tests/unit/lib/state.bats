@@ -399,6 +399,59 @@ SH
   done
 }
 
+@test "every observed version key is a bare version, with no vendor decoration" {
+  installed_fixture
+  run harbor_state_installed_lock_write "${FIX_ROOT}/installed.lock"
+  assert_success
+  local key value
+  # The shape tests/unit/lib/versions.bats anchors the locked versions to. Asserted
+  # on the observed keys because each one is read back out of a vendor's own output:
+  # claude prints "2.0.1 (Claude Code)", codex "codex-cli 0.1.2", t3 "t3 v0.0.1" and
+  # node "v24.20.0", and a decoration that survived any of those readers would read
+  # to PR 7 as drift against a lock that has none.
+  for key in claude_code_version codex_version t3_version nodejs_version tailscale_version; do
+    value="$(sed -n "s/^${key}=//p" "${FIX_ROOT}/installed.lock")"
+    run printf '%s' "${value}"
+    assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+$'
+  done
+  # The login shell's v is stripped, and a decorated answer is refused rather than
+  # recorded with its suffix intact.
+  printf '#!/bin/bash\n[ "$*" = "-lc node --version" ] || exit 99\nprintf "v24.20.0-nightly\\n"\n' >"${BATS_TEST_TMPDIR}/bin/sh"
+  chmod 0755 "${BATS_TEST_TMPDIR}/bin/sh"
+  run harbor_state_installed_lock_render
+  assert_equal "${status}" 2
+  assert_output --partial nodejs_version
+  assert_output --partial 'bare'
+}
+
+@test "an ownership outside the design section 5.2 vocabulary is refused, not copied through" {
+  installed_fixture
+  TSOWN=bogus
+  seed_record v0.3.0 20200101T000000Z
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260101T000000Z connect healthy installed-current logged-in logged-in
+  # 3 rather than 2: the bootstrap record is a precondition of this command, and it
+  # is the same refusal harbor_state_record makes on the same word.
+  assert_equal "${status}" 3
+  assert_output --partial state.tailscale_ownership
+  assert_output --partial bogus
+  assert [ ! -e "${FIX_ROOT}/provision.json" ]
+}
+
+@test "a record with the right content at the wrong mode is repaired and restamped" {
+  installed_fixture
+  seed_record v0.3.0 20200101T000000Z
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260101T000000Z connect healthy installed-current logged-in logged-in
+  assert_success
+  chmod 0644 "${FIX_ROOT}/provision.json"
+  # The writer compares the whole observation, so this record is going to be rewritten
+  # whatever its content says; the stamp has to move with it rather than be preserved
+  # off a content-only comparison.
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260202T000000Z connect healthy installed-current logged-in logged-in
+  assert_success
+  assert_equal "$(harbor_stat_mode "${FIX_ROOT}/provision.json")" 0600
+  assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260202T000000Z
+}
+
 @test "an unchanged provision record keeps its stamp; a changed one takes the new one" {
   installed_fixture
   seed_record v0.3.0 20200101T000000Z

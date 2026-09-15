@@ -167,6 +167,30 @@ harbor_state_record() {
   harbor_journal_set_phase "${entry}" applied
 }
 
+# harbor_state_bare_version VALUE: true when VALUE is exactly three dot-separated
+# runs of digits, the shape tests/unit/lib/versions.bats anchors the locked versions
+# to with ^[0-9]+\.[0-9]+\.[0-9]+$. Spelled as case fences because lib/ is bash 3.2
+# and has no =~, and with the digits enumerated because a bracket range resolves by
+# the locale's collating order. The dot count is taken by peeling one separator at a
+# time: the first fence has already excluded every character that is not a digit or a
+# dot, so an empty part can only show up as a leading dot, a trailing dot, or a pair.
+harbor_state_bare_version() {
+  local rest
+  case "${1}" in
+    '' | *[!0123456789.]* | .* | *. | *..*) return 1 ;;
+  esac
+  rest="${1#*.}"
+  [ "${rest}" != "${1}" ] || return 1
+  case "${rest}" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  rest="${rest#*.}"
+  case "${rest}" in
+    *.*) return 1 ;;
+  esac
+  return 0
+}
 # The operator snapshot observes versions, even when they disagree with the desired
 # lock. Only installation methods come from that lock. Buffer the whole snapshot so
 # a failed reader cannot emit a partial lock. Dependencies: versions, agents, t3,
@@ -209,10 +233,16 @@ harbor_state_installed_lock_render() {
         reading="sh -lc 'node --version'"
         value="$(sh -lc 'node --version' 2>/dev/null)" \
           || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
-        case "${value}" in
-          v[0-9]*.[0-9]*.[0-9]*) value="${value#v}" ;;
-          *) harbor_die 2 state.observe "${key}: ${reading} returned '${value}', not a version; no state snapshot was written" ;;
-        esac
+        # The v is stripped and then the rest must be bare. v[0-9]*.[0-9]*.[0-9]*
+        # alone is not that test: the globs are unanchored on the right, so
+        # v24.20.0-nightly and a two-line answer whose first line happens to look
+        # like a version both satisfy it, and either would put a decorated string
+        # into a file PR 7 compares against the lock -- where it reads as drift on
+        # a node that has none. The fence below admits digits and dots only, which
+        # rejects a suffix, an embedded newline, and a second line together.
+        value="${value#v}"
+        harbor_state_bare_version "${value}" \
+          || harbor_die 2 state.observe "${key}: ${reading} returned '${value}', which is not a bare N.N.N version; no state snapshot was written"
         ;;
       tailscale_version)
         reading='harbor_apt_installed tailscale (dpkg-query -s tailscale, HARBOR_APT_VERSION)'
@@ -342,7 +372,7 @@ LOCK
 # result necessarily carries: an unchanged record keeps its own.
 harbor_state_provision_record() {
   local file="${1}" stamp="${2}" mode="${3}" access="${4}" service="${5}" claude="${6}" codex="${7}"
-  local record ownership snapshot="${8:-}" content prior
+  local record ownership snapshot="${8:-}" content prior known word
   record="${HARBOR_AUTH_RECORD}"
   if [ "${HARBOR_DEV:-0}" = 1 ]; then
     record="${HARBOR_AUTH_FIXTURE_RECORD:-${record}}"
@@ -353,6 +383,19 @@ harbor_state_provision_record() {
     || harbor_die 2 state.observe "tailscale_ownership: reading ${record} failed; provision.json was not written"
   [ -n "${ownership}" ] \
     || harbor_die 2 state.observe "tailscale_ownership: ${record} has no ownership reading; provision.json was not written"
+  # Against the vocabulary, not merely non-empty, and for the reason harbor_state_record
+  # checks the same word above: provision.json is the file PR 7's drift row and PR 8's
+  # upgrade read to learn whether the Tailscale version beside it is Harbor's to change.
+  # A word outside the three is one those commands would have to refuse to act on, and
+  # copying it through unchecked moves that refusal from here -- where nothing has been
+  # written and the bootstrap record is named -- to them, where it lands on an operator
+  # who did nothing wrong. Fail closed at the boundary that can still say why.
+  known=0
+  for word in ${HARBOR_STATE_TAILSCALE_OWNERSHIPS}; do
+    [ "${word}" != "${ownership}" ] || known=1
+  done
+  [ "${known}" = 1 ] \
+    || harbor_die 3 state.tailscale_ownership "${record} records tailscale_ownership '${ownership}', which is not one of the ownerships design section 5.2 names (${HARBOR_STATE_TAILSCALE_OWNERSHIPS}); provision.json was not written"
   # The row's reading when it passed one, so this record and installed.lock describe
   # the same instant; rendered here only for a caller writing this record alone.
   if [ -z "${snapshot}" ]; then
@@ -371,7 +414,13 @@ harbor_state_provision_record() {
   if [ -n "${prior}" ]; then
     content="$(harbor_state_provision_render "${prior}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
       || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
-    if [ "${content}" = "$(cat "${file}" 2>/dev/null)" ]; then
+    # Mode as well as content, because the writer compares the whole observation and
+    # would rewrite a correct record sitting at the wrong mode. Testing content alone
+    # here would hand it the old stamp on exactly that path: a record repaired from
+    # 0644 to 0600 would be journaled modified and still be dated to the run before.
+    # harbor_state_record draws the line in the same place for bootstrap.json.
+    if [ "${content}" = "$(cat "${file}" 2>/dev/null)" ] \
+      && [ "$(harbor_stat_mode "${file}")" = 0600 ]; then
       harbor_state_provision_write "${file}" "${content}" state-provision-json
       return 0
     fi
