@@ -1,0 +1,68 @@
+name: insomnia
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "insomnia/**"
+      - ".github/workflows/insomnia.yml"
+  pull_request:
+    paths:
+      - "insomnia/**"
+      - ".github/workflows/insomnia.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: insomnia-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
+    defaults:
+      run:
+        working-directory: insomnia
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Show supported toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+      - name: Swift tests
+        run: swift test
+      - name: Release build
+        run: swift build -c release
+      - name: Validate source-built app bundle
+        run: |
+          app="${RUNNER_TEMP}/Insomnia.app"
+          mkdir -p "${app}/Contents/MacOS"
+          cp "$(swift build -c release --show-bin-path)/Insomnia" "${app}/Contents/MacOS/Insomnia"
+          cp Resources/Info.plist "${app}/Contents/Info.plist"
+          plutil -lint "${app}/Contents/Info.plist"
+          codesign --force --sign - "${app}"
+          codesign --verify --deep --strict --verbose=2 "${app}"
+      - name: System bash syntax
+        run: |
+          for script in scripts/*.sh; do
+            /bin/bash -n "${script}"
+          done
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Insomnia scripts
+        run: shellcheck -S warning insomnia/scripts/*.sh
