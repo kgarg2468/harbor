@@ -4,11 +4,12 @@ name: vendor-smoke
 # software, run against the real vendors rather than against a stand-in, so that
 # what Harbor assumes about them is measured rather than believed.
 #
-# This release ships the Tailscale half of it, which is what PR 3's merge gate
-# needs: the section 5.2 operator flow and the section 3.6 --ssh probe, verified
-# on the pinned Tailscale. The Node.js, Claude Code, Codex and t3 measurements
-# section 7 also names belong to the PRs that install those components, and this
-# file is where they are added.
+# Two halves so far. The Tailscale half is what PR 3's merge gate needed: the
+# section 5.2 operator flow and the section 3.6 --ssh probe, verified on the pinned
+# Tailscale. The t3 half arrives with PR 4, which is the release that installs the
+# package, and measures what Harbor's own readers believe about it. The Claude Code
+# and Codex measurements section 7 also names belong to the PRs that pin those
+# components, and this file is where they are added.
 #
 # The lane holds no Tailscale account, no auth key, and no tailnet. It installs
 # the pinned package, starts tailscaled from the vendor's own systemd unit, and
@@ -91,3 +92,31 @@ jobs:
           dpkg-query -W -f '${Package} ${Version} ${Status}\n' tailscale || printf '(not installed)\n'
           printf '\n===== tailscaled.service\n'
           systemctl --no-pager status tailscaled || true
+
+  t3:
+    name: the pinned T3 engines and absent service
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Runtime setup lives inside the probe so download and registry failures
+      # publish an inconclusive record through the same EXIT trap as measurements.
+      - name: Measure the pinned T3
+        run: |
+          set -euo pipefail
+          fleet/vendor-smoke/t3_engines_probe.sh "${RUNNER_TEMP}/t3-probe.record"
+
+      # Captures stay private and are removed by the probe. Only its fixed-word
+      # record is uploaded, including when setup or either assertion fails.
+      - name: Upload the record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3-engines-probe
+          path: ${{ runner.temp }}/t3-probe.record
+          if-no-files-found: warn

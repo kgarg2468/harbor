@@ -49,10 +49,10 @@ if [ "${it_prog}" = npm ]; then
   mkdir -p "${4}/bin"
   install -m 0755 "${it_bin}/${it_agent}" "${4}/bin/${it_agent}"
   if [ "${it_agent}" = t3 ]; then
-    mkdir -p "${4}/node_modules/t3"
+    mkdir -p "${4}/lib/node_modules/t3"
     it_engines="$(sed -n 's/^t3_engines_node=//p' "${it_lock}")"
     printf '{\n  "engines": {\n    "node": "%s"\n  }\n}\n' "${it_engines}" \
-      >"${4}/node_modules/t3/package.json"
+      >"${4}/lib/node_modules/t3/package.json"
   fi
   exit 0
 fi

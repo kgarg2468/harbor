@@ -43,8 +43,14 @@ harbor_t3_installed_version() {
 }
 # harbor_t3_package_dir HOME: the installed npm package, not a T3 service home.
 # Like the bin path, asking for it creates nothing.
+# The lib/ is npm's, not a path element Harbor chose: npm install --global --prefix P
+# puts the package tree at P/lib/node_modules and only the executables at P/bin, which
+# is why harbor_agents_bin needs no equivalent. Measured rather than assumed --
+# fleet/vendor-smoke/t3_engines_probe.sh installs the real pin and reads the real
+# tree, because a layout taken from Harbor's own fixtures is a layout that agrees with
+# Harbor by construction and with npm only by luck.
 harbor_t3_package_dir() {
-  printf '%s/node_modules/t3' "$(harbor_agents_prefix "${1}")"
+  printf '%s/lib/node_modules/t3' "$(harbor_agents_prefix "${1}")"
 }
 # harbor_t3_package_engines HOME: the installed package's own engines.node range.
 # This is a text reader standing in for a JSON reader, so its contract is the narrow
