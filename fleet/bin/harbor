@@ -62,6 +62,7 @@ subcommands:
                                       authenticated transition its status reported
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
+  provision                           run the operator provision preflight
   service <start|stop|restart|status|logs>
                                       print and run the vendor service command
   help                                print this text
@@ -87,6 +88,13 @@ case "${harbor_cmd}" in
     # uses that are not sourced above.
     # shellcheck source=../node/bootstrap.sh
     . "${HARBOR_ROOT}/node/bootstrap.sh" ${1+"$@"}
+    ;;
+  provision)
+    shift
+    # Like bootstrap, provision is sourced because the installed node/ files are
+    # 0644; only bin/harbor is executable in a release.
+    # shellcheck source=../node/provision.sh
+    . "${HARBOR_ROOT}/node/provision.sh" ${1+"$@"}
     ;;
   auth)
     shift

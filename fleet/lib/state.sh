@@ -166,3 +166,323 @@ harbor_state_record() {
     || harbor_die 2 state.verify "${record} is not what was just written to it; $(basename "${entry}") stays prepared"
   harbor_journal_set_phase "${entry}" applied
 }
+
+# harbor_state_bare_version VALUE: true when VALUE is exactly three dot-separated
+# runs of digits, the shape tests/unit/lib/versions.bats anchors the locked versions
+# to with ^[0-9]+\.[0-9]+\.[0-9]+$. Spelled as case fences because lib/ is bash 3.2
+# and has no =~, and with the digits enumerated because a bracket range resolves by
+# the locale's collating order. The dot count is taken by peeling one separator at a
+# time: the first fence has already excluded every character that is not a digit or a
+# dot, so an empty part can only show up as a leading dot, a trailing dot, or a pair.
+harbor_state_bare_version() {
+  local rest
+  case "${1}" in
+    '' | *[!0123456789.]* | .* | *. | *..*) return 1 ;;
+  esac
+  rest="${1#*.}"
+  [ "${rest}" != "${1}" ] || return 1
+  case "${rest}" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  rest="${rest#*.}"
+  case "${rest}" in
+    *.*) return 1 ;;
+  esac
+  return 0
+}
+# The operator snapshot observes versions, even when they disagree with the desired
+# lock. Only installation methods come from that lock. Buffer the whole snapshot so
+# a failed reader cannot emit a partial lock. Dependencies: versions, agents, t3,
+# apt; the caller has loaded versions.lock and selected the operator HOME.
+#
+# HARBOR_STATE_OS_RELEASE is the one host path this library takes from the
+# environment rather than from a parameter, which is not how lib/ssh.sh and
+# lib/apt.sh make their host paths testable -- those take an etc prefix from their
+# caller. The difference is that those write and this only reads, and the render
+# takes no arguments by contract. It is ungated rather than behind HARBOR_DEV
+# because gating it would buy nothing: this runs as the operator, and the file it
+# feeds is installed.lock in the operator's own 0700 state root at 0600, which that
+# same operator can edit directly. The override changes who has to type more, not
+# who can claim a different ubuntu_release. A root command must not grow a habit of
+# reading it on trust; nothing root runs reads this path today.
+harbor_state_installed_lock_render() {
+  local key value reading snapshot="" os_release
+  os_release="${HARBOR_STATE_OS_RELEASE:-/etc/os-release}"
+  for key in ubuntu_release tailscale_apt_channel tailscale_version nodejs_version nodejs_install nodejs_sha256 claude_code_version claude_code_install codex_version codex_install t3_version t3_install t3_engines_node; do
+    value=""
+    case "${key}" in
+      claude_code_version | codex_version)
+        reading="harbor_agents_installed_version (${key}) --version"
+        case "${key}" in
+          claude_code_version) value="$(harbor_agents_installed_version claude "${HOME}")" ;;
+          codex_version) value="$(harbor_agents_installed_version codex "${HOME}")" ;;
+        esac || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        ;;
+      t3_version)
+        reading='harbor_t3_installed_version --version'
+        value="$(harbor_t3_installed_version "${HOME}")" \
+          || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        ;;
+      t3_engines_node)
+        reading='harbor_t3_package_engines installed package engines.node'
+        value="$(harbor_t3_package_engines "${HOME}")" \
+          || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        ;;
+      nodejs_version)
+        reading="sh -lc 'node --version'"
+        value="$(sh -lc 'node --version' 2>/dev/null)" \
+          || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        # The v is stripped and then the rest must be bare. v[0-9]*.[0-9]*.[0-9]*
+        # alone is not that test: the globs are unanchored on the right, so
+        # v24.20.0-nightly and a two-line answer whose first line happens to look
+        # like a version both satisfy it, and either would put a decorated string
+        # into a file PR 7 compares against the lock -- where it reads as drift on
+        # a node that has none. The fence below admits digits and dots only, which
+        # rejects a suffix, an embedded newline, and a second line together.
+        # The v is required, not merely tolerated. node --version prefixes it, so a
+        # reading without one did not come from the reading this key names, and the
+        # glob this replaced asserted that much correctly even while it let the rest
+        # through. Dropping the requirement would widen the check in the same motion
+        # that narrowed it.
+        [ "${value}" != "${value#v}" ] \
+          || harbor_die 2 state.observe "${key}: ${reading} returned '${value}', and node --version prefixes a v; no state snapshot was written"
+        value="${value#v}"
+        harbor_state_bare_version "${value}" \
+          || harbor_die 2 state.observe "${key}: ${reading} returned '${value}', which is not a bare N.N.N version; no state snapshot was written"
+        ;;
+      tailscale_version)
+        reading='harbor_apt_installed tailscale (dpkg-query -s tailscale, HARBOR_APT_VERSION)'
+        # Keep the query and its output in the same subshell: the apt reader sets
+        # HARBOR_APT_VERSION and may exit on an unreadable dpkg database. Catch that
+        # exit here so the diagnostic also names the installed.lock key.
+        value="$(harbor_apt_installed tailscale && printf '%s' "${HARBOR_APT_VERSION}")" \
+          || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        ;;
+      ubuntu_release)
+        reading="${os_release} VERSION_ID"
+        value="$(sed -n 's/^VERSION_ID=//p' "${os_release}")" \
+          || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+        ;;
+      *)
+        reading="versions.lock ${key} installation method"
+        value="$(harbor_version_require "${key}")" \
+          || harbor_die 2 state.observe "${key}: ${reading} failed; no state snapshot was written"
+        ;;
+    esac
+    case "${value}" in
+      '' | absent) harbor_die 2 state.observe "${key}: ${reading} returned '${value}', so the key cannot be observed; no state snapshot was written" ;;
+    esac
+    snapshot="${snapshot}${key}=${value}
+"
+  done
+  printf '%s' "${snapshot}"
+}
+
+# Shared by the two new operator artifacts only; bootstrap's writer is unchanged.
+# PATH's parent is the operator state root, already created and locked by preflight.
+# harbor_state_stage TMP CONTENT: TMP holding CONTENT at 0600, the one way this file
+# stages a state write. Mode before content so the bytes are never briefly readable by
+# anyone mktemp's umask would have allowed.
+harbor_state_stage() {
+  chmod 0600 "${1}" && printf '%s\n' "${2}" >"${1}"
+}
+
+# harbor_state_provision_write FILE CONTENT BOUNDARY [OTHERWISE]: OTHERWISE is how a
+# caller whose content depends on whether the write changes anything gets that decision
+# made here. provision.json is the only such caller: it must keep the timestamp it
+# already carries when nothing else about the record moved, and take a fresh one the
+# moment something did, because spec section 5.7's finalization compares that timestamp
+# against the newest <state-root>.journal.<timestamp>.done sibling and a record dated
+# before the journal activity that produced it is the stale-looking one.
+#
+# Deciding that in the caller cannot be made correct, only narrowed. The caller would
+# have to predict this function's answer, which means reproducing its comparison, and
+# it would have to inspect FILE to do it -- a second reading, so between the reading the
+# decision used and the reading the write uses the record can move, and the write then
+# applies content stamped for a file that is no longer there. Passing both candidates
+# removes the second reading rather than shrinking its window: the fallback is chosen
+# against the same pre this write goes on to journal.
+#
+# The narrower form of the same trap is worth naming because it took three attempts.
+# The comparison is not a list of fields. It is harbor_observe_file against
+# harbor_observe_file, which is content, mode, and owner -- a record correct in content
+# at 0644, or correct in content and mode but owned by another user, is one this
+# function rewrites, and the stamp has to move with it. Any test written from the
+# fields that seem to matter falls behind the next field the observation grows.
+harbor_state_provision_write() {
+  local file="${1}" content="${2}" boundary="${3}" otherwise="${4:-}" root tmp pre post ownership entry
+  root="$(dirname "${file}")" || harbor_die 2 state.path "cannot derive the parent of ${file}; nothing was written"
+  [ ! -L "${file}" ] || harbor_die 3 state.foreign "${file} is a symlink; nothing was written"
+  pre="$(harbor_observe_file "${file}")" || harbor_die 2 state.inspect "cannot inspect ${file}; nothing was written"
+  case "${pre}" in
+    '"unobservable:'*) harbor_die 3 state.foreign "${file} is not a regular file; nothing was written" ;;
+  esac
+  tmp="$(mktemp "${root}/.tmp.state.XXXXXX")" \
+    || harbor_die 2 state.stage "cannot create a temporary file in ${root}; ${file} is unchanged"
+  if ! harbor_state_stage "${tmp}" "${content}"; then
+    rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
+    harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
+  fi
+  post="$(harbor_observe_file "${tmp}")" || {
+    # Both causes, in the order they happened. Every other failure path here dies
+    # when it cannot remove the staged file, and this one does too rather than
+    # leaving an unjournaled .tmp.state.* recovery will never see -- but the
+    # inspection is why the write stopped, so the message names that as well.
+    rm -f "${tmp}" \
+      || harbor_die 2 state.cleanup "cannot inspect ${tmp}, and cannot remove it either; ${file} is unchanged and ${tmp} is left behind for you to remove"
+    harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+  }
+  if [ -n "${otherwise}" ] && [ "${post}" != "${pre}" ]; then
+    # CONTENT was only ever the candidate for the unchanged case, and this is not it.
+    if ! harbor_state_stage "${tmp}" "${otherwise}"; then
+      rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
+      harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
+    fi
+    post="$(harbor_observe_file "${tmp}")" || {
+      # Both causes, in the order they happened. Every other failure path here dies
+      # when it cannot remove the staged file, and this one does too rather than
+      # leaving an unjournaled .tmp.state.* recovery will never see -- but the
+      # inspection is why the write stopped, so the message names that as well.
+      rm -f "${tmp}" \
+        || harbor_die 2 state.cleanup "cannot inspect ${tmp}, and cannot remove it either; ${file} is unchanged and ${tmp} is left behind for you to remove"
+      harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
+    }
+  fi
+  if [ "${post}" = "${pre}" ]; then
+    rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${file} is unchanged"
+    harbor_journal_create "${root}" file "${file}" observed applied "${pre}" "${post}" \
+      || harbor_die 2 state.journal "cannot journal observed ${file}; ${file} is unchanged"
+    return 0
+  fi
+  ownership=modified
+  [ "${pre}" != '"absent"' ] || ownership=created
+  harbor_journal_create "${root}" file "${file}" "${ownership}" prepared "${pre}" "${post}" \
+    || harbor_die 2 state.journal "cannot prepare ${file}; ${file} is unchanged"
+  entry="${HARBOR_JOURNAL_ENTRY}"
+  harbor_journal_sync_path "${tmp}" || harbor_die 2 state.sync "cannot sync ${tmp}; ${entry} stays prepared"
+  if ! mv -f "${tmp}" "${file}"; then
+    rm -f "${tmp}" || harbor_die 2 state.cleanup "cannot remove ${tmp}; ${entry} stays prepared"
+    harbor_die 2 state.rename "cannot rename ${tmp} onto ${file}; ${file} is unchanged and ${entry} stays prepared"
+  fi
+  harbor_journal_sync_path "${root}" || harbor_die 2 state.sync "cannot sync ${root}; ${entry} stays prepared"
+  harbor_step "${boundary}"
+  [ "$(harbor_observe_file "${file}")" = "${post}" ] \
+    || harbor_die 2 state.verify "${file} differs from the staged snapshot; ${entry} stays prepared"
+  harbor_journal_set_phase "${entry}" applied \
+    || harbor_die 2 state.journal "cannot mark ${entry} applied; ${file} was written but its entry stays prepared"
+}
+
+# harbor_state_installed_lock_write PATH [SNAPSHOT]: SNAPSHOT is how the row gives
+# both records one reading. installed.lock and provision.json are two views of a
+# single provision, and the command lock excludes other Harbor commands but not the
+# node's own package machinery -- unattended-upgrades can move the Tailscale package,
+# and a vendor updater a CLI, between two renders. Two readings would then leave two
+# durable records permanently disagreeing about the same run, with both writes having
+# succeeded and nothing to say which is right. Rendering here is the fallback for a
+# caller with one record to write; the row passes its own.
+harbor_state_installed_lock_write() {
+  local snapshot="${2:-}"
+  if [ -z "${snapshot}" ]; then
+    snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  fi
+  harbor_state_provision_write "${1}" "${snapshot}" state-installed-lock
+}
+
+# A named function rather than the body of the caller's command substitution, and
+# not only for readability: bash 3.2 -- the shell the macOS unit lane pins, and the
+# floor lib/ is written to -- cannot parse a case statement lexically inside $( ).
+# Its parser takes the ) that closes a case pattern as the ) that closes the
+# substitution, for a single pattern as readily as for an alternation, and reports a
+# syntax error pointing at the pattern line. Ubuntu's bash 5 parses it, so the form
+# works everywhere Harbor is deployed and fails only on the lane that exists to catch
+# exactly this. Writing the pattern as "(key | key)" balances the parens and is the
+# other fix; a function is the one that also gives the render a name and one caller
+# per timestamp below. The version keys are selected here rather than re-observed so
+# both records are guaranteed to carry the same readings from the same moment.
+harbor_state_provision_render() {
+  local stamp="${1}" ownership="${2}" mode="${3}" access="${4}" service="${5}" claude="${6}" codex="${7}" snapshot="${8}"
+  local key value
+  printf '{\n'
+  while IFS='=' read -r key value; do
+    case "${key}" in
+      ubuntu_release | tailscale_version | nodejs_version | claude_code_version | codex_version | t3_version | t3_engines_node)
+        printf '  "%s": "%s",\n' "${key}" "$(harbor_json_escape "${value}")"
+        ;;
+    esac
+  done <<LOCK
+${snapshot}
+LOCK
+  printf '  "tailscale_ownership": "%s",\n' "$(harbor_json_escape "${ownership}")"
+  printf '  "service_state": "%s",\n' "$(harbor_json_escape "${service}")"
+  printf '  "access_mode": "%s",\n' "$(harbor_json_escape "${mode}")"
+  printf '  "access_state": "%s",\n' "$(harbor_json_escape "${access}")"
+  printf '  "claude_auth": "%s",\n' "$(harbor_json_escape "${claude}")"
+  printf '  "codex_auth": "%s",\n' "$(harbor_json_escape "${codex}")"
+  printf '  "timestamp": "%s"\n}\n' "$(harbor_json_escape "${stamp}")"
+}
+
+# The same observers supply both records. bootstrap.json supplies ownership alone:
+# its intentionally blank pre-existing tailscale_version is not a version observer.
+# TIMESTAMP is the stamp for a record that is going to be written, not the stamp the
+# result necessarily carries: an unchanged record keeps its own.
+harbor_state_provision_record() {
+  local file="${1}" stamp="${2}" mode="${3}" access="${4}" service="${5}" claude="${6}" codex="${7}"
+  local record ownership snapshot="${8:-}" content fresh prior known word
+  record="${HARBOR_AUTH_RECORD}"
+  if [ "${HARBOR_DEV:-0}" = 1 ]; then
+    record="${HARBOR_AUTH_FIXTURE_RECORD:-${record}}"
+  fi
+  [ -f "${record}" ] && [ -r "${record}" ] \
+    || harbor_die 3 state.bootstrap "cannot read ${record}; run sudo harbor bootstrap before harbor provision"
+  ownership="$(harbor_auth_record_value "${record}" tailscale_ownership)" \
+    || harbor_die 2 state.observe "tailscale_ownership: reading ${record} failed; provision.json was not written"
+  [ -n "${ownership}" ] \
+    || harbor_die 2 state.observe "tailscale_ownership: ${record} has no ownership reading; provision.json was not written"
+  # Against the vocabulary, not merely non-empty, and for the reason harbor_state_record
+  # checks the same word above: provision.json is the file PR 7's drift row and PR 8's
+  # upgrade read to learn whether the Tailscale version beside it is Harbor's to change.
+  # A word outside the three is one those commands would have to refuse to act on, and
+  # copying it through unchecked moves that refusal from here -- where nothing has been
+  # written and the bootstrap record is named -- to them, where it lands on an operator
+  # who did nothing wrong. Fail closed at the boundary that can still say why.
+  known=0
+  for word in ${HARBOR_STATE_TAILSCALE_OWNERSHIPS}; do
+    [ "${word}" != "${ownership}" ] || known=1
+  done
+  [ "${known}" = 1 ] \
+    || harbor_die 3 state.tailscale_ownership "${record} records tailscale_ownership '${ownership}', which is not one of the ownerships design section 5.2 names (${HARBOR_STATE_TAILSCALE_OWNERSHIPS}); provision.json was not written"
+  # The row's reading when it passed one, so this record and installed.lock describe
+  # the same instant; rendered here only for a caller writing this record alone.
+  if [ -z "${snapshot}" ]; then
+    snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  fi
+  # harbor_state_record's rule for bootstrap.json, and for its reason: the comparison
+  # is made against the stamp the record already carries, so a record that is
+  # otherwise unchanged renders identically, is journaled observed, and is left
+  # alone. Only once it is going to be rewritten anyway does the stamp become the
+  # caller's. Carrying the old stamp forward onto changed content would be the real
+  # defect: spec section 5.7's finalization decides between the record and the newest
+  # <state-root>.journal.<timestamp>.done sibling by comparing them, so a record
+  # rewritten after that journal activity but dated before it reads as the stale one,
+  # which is the undecidability the field exists to prevent.
+  prior="$(harbor_state_record_timestamp "${file}")"
+  if [ -n "${prior}" ]; then
+    content="$(harbor_state_provision_render "${prior}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
+      || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
+    fresh="$(harbor_state_provision_render "${stamp}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
+      || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
+    # Both candidates, so the writer picks between them against the one reading of
+    # ${file} it goes on to journal. Choosing here would mean reading ${file} a second
+    # time and stamping content for the version that reading saw.
+    harbor_state_provision_write "${file}" "${content}" state-provision-json "${fresh}"
+    return 0
+  fi
+  content="$(harbor_state_provision_render "${stamp}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
+    || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
+  harbor_state_provision_write "${file}" "${content}" state-provision-json
+}

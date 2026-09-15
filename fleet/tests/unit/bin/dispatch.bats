@@ -19,10 +19,13 @@ setup() {
 }
 
 @test "unknown subcommand with --json anywhere: the same reply" {
-  run --separate-stderr "${HARBOR}" status --json
+  # bogus for the same reason as below: harbor status is spec section 8's PR 7 row,
+  # so naming it here schedules this assertion to fail on the day it ships, for a
+  # reason that has nothing to do with what the assertion is about.
+  run --separate-stderr "${HARBOR}" bogus --json
   assert_equal "${status}" 3
-  assert_equal "${output}" '{"error":"unknown_subcommand","subcommand":"status"}'
-  assert_equal "${stderr}" 'harbor: unknown subcommand: status'
+  assert_equal "${output}" '{"error":"unknown_subcommand","subcommand":"bogus"}'
+  assert_equal "${stderr}" 'harbor: unknown subcommand: bogus'
 }
 
 @test "unknown subcommand name is JSON-escaped" {
@@ -34,9 +37,14 @@ setup() {
 @test "unknown subcommand answers before any lock or journal access" {
   mkdir "${FIX_ROOT}/reclaim.d"
   fixture_undecidable_file_entry "${FIX_ROOT}" 0001
-  run --separate-stderr env HOME="${FIX_HOME}" "${HARBOR}" provision
+  # bogus, not provision: this assertion is about what an unknown subcommand does
+  # before it touches the lock or the journal, so its subject has to be a name that
+  # stays unknown. provision shipped in PR 4 and took this test with it. The spec's
+  # remaining rows will do the same to status, doctor, access, pair, teardown and
+  # upgrade, so none of them belongs here either.
+  run --separate-stderr env HOME="${FIX_HOME}" "${HARBOR}" bogus
   assert_equal "${status}" 3
-  assert_equal "${output}" '{"error":"unknown_subcommand","subcommand":"provision"}'
+  assert_equal "${output}" '{"error":"unknown_subcommand","subcommand":"bogus"}'
   assert [ -d "${FIX_ROOT}/reclaim.d" ]
   assert [ ! -e "${FIX_ROOT}/lock.d" ]
   assert [ ! -e "${FIX_ROOT}/harbor.log" ]
