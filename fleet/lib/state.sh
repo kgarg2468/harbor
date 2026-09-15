@@ -287,9 +287,19 @@ harbor_state_provision_write() {
     || harbor_die 2 state.journal "cannot mark ${entry} applied; ${file} was written but its entry stays prepared"
 }
 
+# harbor_state_installed_lock_write PATH [SNAPSHOT]: SNAPSHOT is how the row gives
+# both records one reading. installed.lock and provision.json are two views of a
+# single provision, and the command lock excludes other Harbor commands but not the
+# node's own package machinery -- unattended-upgrades can move the Tailscale package,
+# and a vendor updater a CLI, between two renders. Two readings would then leave two
+# durable records permanently disagreeing about the same run, with both writes having
+# succeeded and nothing to say which is right. Rendering here is the fallback for a
+# caller with one record to write; the row passes its own.
 harbor_state_installed_lock_write() {
-  local snapshot
-  snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  local snapshot="${2:-}"
+  if [ -z "${snapshot}" ]; then
+    snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  fi
   harbor_state_provision_write "${1}" "${snapshot}" state-installed-lock
 }
 
@@ -332,7 +342,7 @@ LOCK
 # result necessarily carries: an unchanged record keeps its own.
 harbor_state_provision_record() {
   local file="${1}" stamp="${2}" mode="${3}" access="${4}" service="${5}" claude="${6}" codex="${7}"
-  local record ownership snapshot content prior
+  local record ownership snapshot="${8:-}" content prior
   record="${HARBOR_AUTH_RECORD}"
   if [ "${HARBOR_DEV:-0}" = 1 ]; then
     record="${HARBOR_AUTH_FIXTURE_RECORD:-${record}}"
@@ -343,7 +353,11 @@ harbor_state_provision_record() {
     || harbor_die 2 state.observe "tailscale_ownership: reading ${record} failed; provision.json was not written"
   [ -n "${ownership}" ] \
     || harbor_die 2 state.observe "tailscale_ownership: ${record} has no ownership reading; provision.json was not written"
-  snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  # The row's reading when it passed one, so this record and installed.lock describe
+  # the same instant; rendered here only for a caller writing this record alone.
+  if [ -z "${snapshot}" ]; then
+    snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  fi
   # harbor_state_record's rule for bootstrap.json, and for its reason: the comparison
   # is made against the stamp the record already carries, so a record that is
   # otherwise unchanged renders identically, is journaled observed, and is left

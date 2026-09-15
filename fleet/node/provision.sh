@@ -115,10 +115,12 @@ harbor_provision_preflight() {
   harbor_semver_satisfies "${node}" "${range}" \
     || harbor_die 3 provision.node "the login shell's Node ${node} does not satisfy t3_engines_node '${range}'; fix its Node resolution and rerun; no provision row ran"
   harbor_step provision-node
-  # 8. The readers need the home belonging to this operator, not a value inherited
-  # from an earlier command's environment. Recovery may finish an interrupted
-  # transaction, but an undecidable entry still stops the run before any new row.
-  HARBOR_AGENTS_HOME="${HOME}"
+  # 8. Recovery may finish an interrupted transaction, but an undecidable entry still
+  # stops the run before any new row. The readers it calls need the home belonging to
+  # this operator rather than a value inherited from an earlier command's environment,
+  # and harbor_state_root_for_principal bound HARBOR_AGENTS_HOME at step 5 beside the
+  # state root it is derived from -- every operator command runs this scan, so binding
+  # it here as well would be a second place to keep in step with the first.
   harbor_journal_recover "${HARBOR_STATE_ROOT}"
   harbor_step recovery-scan
 }
@@ -134,7 +136,7 @@ harbor_provision_attended() {
 }
 
 harbor_provision_rows() {
-  local mode=connect config agent status claude_auth codex_auth service_state access_state=healthy stamp
+  local mode=connect config agent status claude_auth codex_auth service_state access_state=healthy stamp snapshot
   harbor_step provision-journal-config
   harbor_journal_init "${HARBOR_STATE_ROOT}" \
     || harbor_die 2 provision.journal "could not initialize the operator journal; no provision mutation was prepared, so check the filesystem and rerun"
@@ -229,9 +231,15 @@ harbor_provision_rows() {
   # is what dates a rewritten record before the journal activity that caused it.
   stamp="$(harbor_utc_now)" \
     || harbor_die 2 state.timestamp "cannot read the UTC timestamp; state records were not written"
-  harbor_state_installed_lock_write "${HARBOR_STATE_ROOT}/installed.lock"
+  # Observed once and written twice. The two records are two views of this one run,
+  # and the command lock holds off other Harbor commands but not the node's own
+  # package machinery: unattended-upgrades can move the Tailscale package between two
+  # renders, a vendor updater a CLI. Two readings would leave two durable records
+  # disagreeing about the same provision with both writes successful.
+  snapshot="$(harbor_state_installed_lock_render)" || exit "$?"
+  harbor_state_installed_lock_write "${HARBOR_STATE_ROOT}/installed.lock" "${snapshot}"
   harbor_state_provision_record "${HARBOR_STATE_ROOT}/provision.json" "${stamp}" \
-    "${mode}" "${access_state}" "${service_state}" "${claude_auth}" "${codex_auth}"
+    "${mode}" "${access_state}" "${service_state}" "${claude_auth}" "${codex_auth}" "${snapshot}"
 }
 
 harbor_provision_main() {

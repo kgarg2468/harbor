@@ -241,7 +241,16 @@ tool="$(basename "${0}")"
 printf '%s %s\n' "${tool}" "$*" >>"${TEST_FIXTURE}/calls"
 if [ "$*" = --version ]; then
   case "${tool}" in
-    claude) sed -n 's/^claude_code_version=\(.*\)$/\1 (Claude Code)/p' "${TEST_FIXTURE}/versions.lock" ;;
+    claude)
+      # TEST_DRIFT models the node's own package machinery moving underneath a run:
+      # the reported version changes the moment installed.lock lands, which is the
+      # window between the two records if they are rendered separately.
+      if [ -n "${TEST_DRIFT:-}" ] && [ -f "${HOME}/.local/state/harbor/installed.lock" ]; then
+        printf '%s (Claude Code)\n' "${TEST_DRIFT}"
+      else
+        sed -n 's/^claude_code_version=\(.*\)$/\1 (Claude Code)/p' "${TEST_FIXTURE}/versions.lock"
+      fi
+      ;;
     codex) sed -n 's/^codex_version=\(.*\)$/codex-cli \1/p' "${TEST_FIXTURE}/versions.lock" ;;
     t3) sed -n 's/^t3_version=\(.*\)$/t3 v\1/p' "${TEST_FIXTURE}/versions.lock" ;;
   esac
@@ -550,6 +559,23 @@ SH
   assert_equal "$(entry_phase "${FIX_ROOT}" 0003)" prepared
   assert [ -f "${FIX_ROOT}/installed.lock" ]
   assert [ ! -e "${FIX_ROOT}/provision.json" ]
+}
+
+@test "both records describe one reading even when a version moves between the writes" {
+  # The command lock excludes other Harbor commands, not the node's package
+  # machinery: unattended-upgrades can move the Tailscale package, and a vendor
+  # updater a CLI, while provision runs. Rendering the snapshot once per record
+  # would let the two durable records of a single run disagree, with both writes
+  # having succeeded and nothing to say which one is right.
+  run provision TEST_DRIFT=9.9.9
+  assert_success
+  local locked recorded
+  locked="$(sed -n 's/^claude_code_version=//p' "${FIX_ROOT}/installed.lock")"
+  recorded="$(jq -r '.claude_code_version' "${FIX_ROOT}/provision.json")"
+  assert_equal "${recorded}" "${locked}"
+  # And the reading is the one taken before the move, not a mix of both.
+  refute_output --partial 9.9.9
+  assert_equal "${locked}" "$(sed -n 's/^claude_code_version=//p' "${HARBOR_ROOT}/versions.lock")"
 }
 
 @test "interrupted state writes leave complete files for journal recovery" {
