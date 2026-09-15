@@ -278,6 +278,37 @@ harbor_state_installed_lock_render() {
 
 # Shared by the two new operator artifacts only; bootstrap's writer is unchanged.
 # PATH's parent is the operator state root, already created and locked by preflight.
+# harbor_state_provision_unchanged FILE CONTENT: true when writing CONTENT over FILE
+# would change nothing the journal records, which is the question the timestamp
+# decision is really asking -- preserve the stamp exactly when
+# harbor_state_provision_write is going to journal observed rather than modified.
+# It is asked the way that writer answers it, by staging a candidate as it stages one
+# and comparing the two observations, rather than by testing the fields that seem to
+# matter. Naming fields by hand is how this went wrong twice: content alone preserved
+# the stamp across a repair from 0644 to 0600, and content with mode still preserves it
+# across a repair of a record owned by another user, because harbor_observe_file
+# compares owner too. A comparison built from harbor_observe_file cannot fall behind
+# harbor_observe_file. A failure staging the candidate answers false, so the caller
+# renders a fresh stamp and the writer fails on its own staging with its own message;
+# the conservative direction, since a fresh stamp on an unchanged record costs a
+# rewrite while a stale one on a changed record is the undecidability of section 5.7.
+harbor_state_provision_unchanged() {
+  local file="${1}" content="${2}" root tmp pre post
+  root="$(dirname "${file}")" || return 1
+  pre="$(harbor_observe_file "${file}")" || return 1
+  tmp="$(mktemp "${root}/.tmp.state.XXXXXX")" || return 1
+  if ! chmod 0600 "${tmp}" || ! printf '%s\n' "${content}" >"${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  post="$(harbor_observe_file "${tmp}")" || {
+    rm -f "${tmp}"
+    return 1
+  }
+  rm -f "${tmp}" || return 1
+  [ "${post}" = "${pre}" ]
+}
+
 harbor_state_provision_write() {
   local file="${1}" content="${2}" boundary="${3}" root tmp pre post ownership entry
   root="$(dirname "${file}")" || harbor_die 2 state.path "cannot derive the parent of ${file}; nothing was written"
@@ -414,13 +445,7 @@ harbor_state_provision_record() {
   if [ -n "${prior}" ]; then
     content="$(harbor_state_provision_render "${prior}" "${ownership}" "${mode}" "${access}" "${service}" "${claude}" "${codex}" "${snapshot}")" \
       || harbor_die 2 state.render "cannot render provision.json; ${file} is unchanged"
-    # Mode as well as content, because the writer compares the whole observation and
-    # would rewrite a correct record sitting at the wrong mode. Testing content alone
-    # here would hand it the old stamp on exactly that path: a record repaired from
-    # 0644 to 0600 would be journaled modified and still be dated to the run before.
-    # harbor_state_record draws the line in the same place for bootstrap.json.
-    if [ "${content}" = "$(cat "${file}" 2>/dev/null)" ] \
-      && [ "$(harbor_stat_mode "${file}")" = 0600 ]; then
+    if harbor_state_provision_unchanged "${file}" "${content}"; then
       harbor_state_provision_write "${file}" "${content}" state-provision-json
       return 0
     fi

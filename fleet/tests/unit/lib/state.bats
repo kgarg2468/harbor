@@ -452,6 +452,43 @@ SH
   assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260202T000000Z
 }
 
+@test "a record with the right content owned by another user is restamped" {
+  installed_fixture
+  seed_record v0.3.0 20200101T000000Z
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260101T000000Z connect healthy installed-current logged-in logged-in
+  assert_success
+  # The one field of the observation a unit test cannot arrange for real, since
+  # changing a file's owner needs privilege this lane will never take. The shim
+  # answers only the owner query harbor_stat_owner makes, only for this path, and
+  # only while that path is still the inode seeded above -- every other stat call,
+  # the mode reads among them, goes to the real one. Scoping it to the inode is what
+  # keeps the shim honest across the rename: once the writer moves its own staged
+  # file into place the record really is the operator's, and a shim still claiming
+  # otherwise would fail the writer's post-rename verify for a reason the test does
+  # not mean. The flag word is passed through so one shim serves -c on Linux and -f
+  # on Darwin.
+  local stale
+  stale="$(/usr/bin/stat -f '%i' "${FIX_ROOT}/provision.json" 2>/dev/null \
+    || /usr/bin/stat -c '%i' "${FIX_ROOT}/provision.json")"
+  cat >"${BATS_TEST_TMPDIR}/bin/stat" <<SH
+#!/bin/bash
+if [ "\${2}" = '%U' ] || [ "\${2}" = '%Su' ]; then
+  if [ "\${3}" = '${FIX_ROOT}/provision.json' ] \\
+    && [ "\$(/usr/bin/stat "\${1}" %i "\${3}" 2>/dev/null)" = '${stale}' ]; then
+    printf 'someone-else\n'
+    exit 0
+  fi
+fi
+exec /usr/bin/stat "\$@"
+SH
+  chmod 0755 "${BATS_TEST_TMPDIR}/bin/stat"
+  run harbor_state_provision_record "${FIX_ROOT}/provision.json" 20260202T000000Z connect healthy installed-current logged-in logged-in
+  assert_success
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0002 ownership)" '"modified"'
+  rm -f "${BATS_TEST_TMPDIR}/bin/stat"
+  assert_equal "$(harbor_state_record_timestamp "${FIX_ROOT}/provision.json")" 20260202T000000Z
+}
+
 @test "an unchanged provision record keeps its stamp; a changed one takes the new one" {
   installed_fixture
   seed_record v0.3.0 20200101T000000Z
