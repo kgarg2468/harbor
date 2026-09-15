@@ -329,9 +329,12 @@ harbor_state_provision_write() {
     harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
   fi
   post="$(harbor_observe_file "${tmp}")" || {
-    # Best effort, and the inspection failure is still the diagnostic: a cleanup that
-    # also fails must not replace the reason the write stopped.
-    rm -f "${tmp}"
+    # Both causes, in the order they happened. Every other failure path here dies
+    # when it cannot remove the staged file, and this one does too rather than
+    # leaving an unjournaled .tmp.state.* recovery will never see -- but the
+    # inspection is why the write stopped, so the message names that as well.
+    rm -f "${tmp}" \
+      || harbor_die 2 state.cleanup "cannot inspect ${tmp}, and cannot remove it either; ${file} is unchanged and ${tmp} is left behind for you to remove"
     harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
   }
   if [ -n "${otherwise}" ] && [ "${post}" != "${pre}" ]; then
@@ -341,9 +344,12 @@ harbor_state_provision_write() {
       harbor_die 2 state.stage "cannot stage ${file} at 0600; ${file} is unchanged"
     fi
     post="$(harbor_observe_file "${tmp}")" || {
-      # Best effort, and the inspection failure is still the diagnostic: a cleanup that
-      # also fails must not replace the reason the write stopped.
-      rm -f "${tmp}"
+      # Both causes, in the order they happened. Every other failure path here dies
+      # when it cannot remove the staged file, and this one does too rather than
+      # leaving an unjournaled .tmp.state.* recovery will never see -- but the
+      # inspection is why the write stopped, so the message names that as well.
+      rm -f "${tmp}" \
+        || harbor_die 2 state.cleanup "cannot inspect ${tmp}, and cannot remove it either; ${file} is unchanged and ${tmp} is left behind for you to remove"
       harbor_die 2 state.inspect "cannot inspect ${tmp}; ${file} is unchanged"
     }
   fi
