@@ -57,6 +57,30 @@ os_version="$(sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-rel
   exit 1
 }
 
+# The GitHub runner image carries a default ACL on /home granting the workflow
+# user rwx, so that anything created under it is reachable from the job. Ubuntu
+# Server 24.04 ships /home with no ACL at all, and this one is inherited by the
+# operator home the bootstrap is about to create: every file made there, however
+# tight the umask, comes out carrying a second user's entry and an rwx mask, which
+# stat reports in the group position. harbor_config_create refuses exactly that,
+# and it is right to -- a 0600 configuration another account can read is not 0600.
+# Removing the default entries here is what makes this runner's /home the /home a
+# real node has. -k, not -b: only the inheritance is dropped, so the access ACL on
+# /home itself, and every existing home under it, are left as the image left them.
+if command -v setfacl >/dev/null 2>&1; then
+  printf 'before: %s\n' "$(getfacl -p /home 2>/dev/null | tr '\n' ' ')"
+  sudo setfacl -k /home
+  printf 'after:  %s\n' "$(getfacl -p /home 2>/dev/null | tr '\n' ' ')"
+  if getfacl -p /home 2>/dev/null | grep -q '^default:'; then
+    printf 'setup.sh: /home still carries a default ACL, so the operator home would inherit it\n' >&2
+    exit 1
+  fi
+else
+  # No setfacl means no ACL support to inherit from, which is the state this step
+  # is trying to reach. Say so rather than passing over it in silence.
+  printf 'setfacl is absent; /home carries no ACL to inherit\n'
+fi
+
 tailscale_version="$(it_lock tailscale_version)"
 nodejs_version="$(it_lock nodejs_version)"
 printf 'admin user      %s\n' "${IT_ADMIN}"

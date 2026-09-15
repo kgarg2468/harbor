@@ -318,5 +318,8 @@ jobs:
           printf '\n===== operator home permissions\n'
           sudo ls -lad /home/harbor /home/harbor/.config /home/harbor/.config/harbor \
             /home/harbor/.local/state/harbor 2>&1 || true
-          sudo getfacl -p /home/harbor /home/harbor/.config 2>&1 || printf '(getfacl unavailable)\n'
+          # /home included: the runner image puts a default ACL there, setup.sh
+          # drops it, and an operator home that inherited one anyway is the
+          # difference between a Harbor bug and a harness that did not hold.
+          sudo getfacl -p /home /home/harbor /home/harbor/.config 2>&1 || printf '(getfacl unavailable)\n'
           printf 'mount: %s\n' "$(findmnt -no SOURCE,FSTYPE,OPTIONS --target /home/harbor || true)"

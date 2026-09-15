@@ -146,13 +146,21 @@ prefix="${probe_home}/.local/harbor/npm"
 vendor_env=(env -i "HOME=${probe_home}" "PATH=${work}/node/bin:/usr/bin:/bin"
   "TMPDIR=${work}/tmp" "XDG_CONFIG_HOME=${probe_home}/.config" LC_ALL=C NO_COLOR=1)
 cd "${probe_home}"
+# Two absent paths, not /dev/null twice: npm resolves each config file and refuses
+# to load the same one under two names, exiting before it reads any of its own
+# arguments with "double-loading config /dev/null as global, previously loaded as
+# user". A path that does not exist is the isolation these flags were reaching for
+# anyway -- there is no file, so there is no credential in one.
 if ! timeout --kill-after=5s 300s "${vendor_env[@]}" npm install --global \
   --prefix "${prefix}" --registry=https://registry.npmjs.org \
-  --userconfig=/dev/null --globalconfig=/dev/null --cache "${work}/npm-cache" \
+  --userconfig="${work}/npmrc.user" --globalconfig="${work}/npmrc.global" \
+  --cache "${work}/npm-cache" \
   --no-audit --no-fund "t3@${t3_version}" >"${work}/npm.out" 2>&1; then
-  # Registry, transport, and installation failures prevent a measurement. Do not
-  # guess which failed by publishing npm's untrusted diagnostic or calling it drift.
-  abort npm-install-unavailable
+  # The registry, the transport, the package, and this probe's own invocation all
+  # land here, and the capture that would tell them apart is npm's untrusted
+  # diagnostic. So the note says what is actually known -- the install did not
+  # finish -- rather than naming a cause, and certainly rather than calling it drift.
+  abort npm-install-did-not-complete
 fi
 emit npm_install completed
 
