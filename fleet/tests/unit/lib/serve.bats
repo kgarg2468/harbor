@@ -237,6 +237,21 @@ STUB
   assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
 }
 
+@test "both readers answer under set -u before harbor_serve_status has ever run" {
+  # bin/harbor runs under `set -euo pipefail`. Reading an unset HARBOR_SERVE_RAW
+  # there is not a wrong answer, it is a bash error that kills the whole CLI
+  # before Harbor can print a diagnostic -- so the caller gets "unbound variable"
+  # instead of a Harbor message, and the exit code is bash's, not one of the five
+  # this project defines. Every test in this file sets the variable first, which
+  # is exactly why the ordering was never exercised.
+  run bash -euo pipefail -c '
+    . "${1}/lib/serve.sh"
+    printf "%s %s" "$(harbor_serve_mapping)" "$(harbor_serve_funnel)"
+  ' bash "${HARBOR_ROOT}"
+  assert_success
+  assert_output 'unnormalizable unknown'
+}
+
 @test "no library invokes tailscale funnel, in any code path" {
   # Section 3.3: Harbor never invokes tailscale funnel. The only permitted
   # appearances of the word are in prose -- a comment or a message telling the

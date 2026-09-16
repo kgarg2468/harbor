@@ -97,11 +97,11 @@ harbor_serve_mapping() {
   # An empty body is not an empty config: `tailscale serve status` says so in
   # words when there is nothing configured. Zero bytes means the command did not
   # answer, which is a reading Harbor cannot use.
-  [ -n "${HARBOR_SERVE_RAW}" ] || {
+  [ -n "${HARBOR_SERVE_RAW:-}" ] || {
     printf 'unnormalizable'
     return 0
   }
-  case "${HARBOR_SERVE_RAW}" in
+  case "${HARBOR_SERVE_RAW:-}" in
     'No serve config'*)
       printf 'absent'
       return 0
@@ -157,7 +157,7 @@ harbor_serve_mapping() {
         ;;
     esac
   done <<EOF
-${HARBOR_SERVE_RAW}
+${HARBOR_SERVE_RAW:-}
 EOF
   if [ "${seen443}" = 0 ]; then
     printf 'absent'
@@ -183,11 +183,11 @@ EOF
 # exit 2 wherever it is asked, whoever created the exposure, which is why the
 # unknown arm exists: a body this adapter cannot read is not evidence of no Funnel.
 harbor_serve_funnel() {
-  [ -n "${HARBOR_SERVE_RAW}" ] || {
+  [ -n "${HARBOR_SERVE_RAW:-}" ] || {
     printf 'unknown'
     return 0
   }
-  case "${HARBOR_SERVE_RAW}" in
+  case "${HARBOR_SERVE_RAW:-}" in
     'No serve config'*)
       printf 'none'
       return 0
