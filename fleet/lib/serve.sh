@@ -93,7 +93,7 @@ harbor_serve_header_port() {
 # at 443, so the answer is not `absent`, and Harbor cannot describe it, so the
 # answer is not a mapping.
 harbor_serve_mapping() {
-  local line target='' host port seen443=0 in443=0 ambiguous=0
+  local line target='' host port seen443=0 in443=0 ambiguous=0 in_listener=0
   # An empty body is not an empty config: `tailscale serve status` says so in
   # words when there is nothing configured. Zero bytes means the command did not
   # answer, which is a reading Harbor cannot use.
@@ -113,6 +113,7 @@ harbor_serve_mapping() {
         continue
         ;;
       'https://'*' ('*')')
+        in_listener=1
         if [ "$(harbor_serve_header_port "${line}")" = 443 ]; then
           in443=1
           seen443=1
@@ -120,19 +121,33 @@ harbor_serve_mapping() {
           in443=0
         fi
         ;;
-      '|-- / proxy http://'*)
-        if [ "${in443}" = 1 ]; then
-          if [ -n "${target}" ]; then
-            ambiguous=1
-          fi
-          target="${line#'|-- / proxy '}"
-        fi
-        ;;
       '|--'*)
-        # A handler on some other path, or a handler whose target is not an http
-        # proxy. It belongs to a listener but it is not the root mapping, so it
-        # neither supplies a target nor makes the body unreadable.
-        continue
+        # A handler with no listener above it is a body Harbor cannot account for,
+        # and the fail-closed word for that is unnormalizable -- not absent.
+        # Skipping it and falling through to "no 443 header was seen" would report
+        # a malformed body as an empty one, and harbor_pair_precheck reads absent
+        # as permission to create a mapping. Every arm of this parser that cannot
+        # explain what it read has to end somewhere other than absent, or the
+        # parser becomes a way to authorize a mutation by confusing it.
+        if [ "${in_listener}" = 0 ]; then
+          printf 'unnormalizable'
+          return 0
+        fi
+        case "${line}" in
+          '|-- / proxy http://'*)
+            if [ "${in443}" = 1 ]; then
+              if [ -n "${target}" ]; then
+                ambiguous=1
+              fi
+              target="${line#'|-- / proxy '}"
+            fi
+            ;;
+          *)
+            # A handler on some other path, or one whose target is not an http
+            # proxy. It belongs to a listener but is not the root mapping, so it
+            # neither supplies a target nor makes the body unreadable.
+            ;;
+        esac
         ;;
       *)
         # A line this adapter has no reading for. Refusing here is what keeps a

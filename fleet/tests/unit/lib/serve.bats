@@ -85,6 +85,40 @@ serve_fixture_body() {
   assert_equal "$(harbor_serve_mapping)" unnormalizable
 }
 
+@test "a handler with no listener above it is unnormalizable, never absent" {
+  # Ignoring the orphan and falling through to "no 443 header was seen" would
+  # report a malformed body as an empty one, and absent is what licenses a create.
+  serve_fixture_body "|-- / proxy http://127.0.0.1:3773"
+  assert_equal "$(harbor_serve_mapping)" unnormalizable
+}
+
+@test "an orphan handler above a real 443 listener still refuses the body" {
+  # The 443 listener is right there and readable. It does not rescue a body whose
+  # earlier lines Harbor could not account for.
+  serve_fixture_body "|-- / proxy http://127.0.0.1:9000
+https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:3773"
+  assert_equal "$(harbor_serve_mapping)" unnormalizable
+}
+
+@test "every unreadable-body arm ends somewhere other than absent" {
+  # The invariant behind the last three tests, asserted as one: absent is the word
+  # that authorizes harbor pair to mutate Serve, so no arm that failed to
+  # understand its input may reach it. The positive control is last.
+  local body got
+  for body in "|-- / proxy http://127.0.0.1:3773" \
+    "some new line a later tailscale prints" \
+    "https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:3773
+|-- / proxy http://127.0.0.1:9000"; do
+    serve_fixture_body "${body}"
+    got="$(harbor_serve_mapping)"
+    assert [ "${got}" != absent ]
+  done
+  serve_fixture absent
+  assert_equal "$(harbor_serve_mapping)" absent
+}
+
 @test "a line this adapter has no reading for makes the whole body unnormalizable" {
   # A future vendor format must not be silently parsed as the current one.
   serve_fixture_body "https://harbor-node.TAILNET.ts.net (tailnet only)
