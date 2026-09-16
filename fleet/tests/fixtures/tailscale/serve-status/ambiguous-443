@@ -1,0 +1,3 @@
+https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:3773
+|-- / proxy http://127.0.0.1:9000
