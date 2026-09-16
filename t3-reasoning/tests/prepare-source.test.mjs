@@ -6,9 +6,10 @@ import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
+import { SERVER_LAUNCHER_PROTOCOL } from "../scripts/write-managed-release-manifest.mjs";
 
 const run = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1131,6 +1132,21 @@ describe("source.lock.json", () => {
           assert.equal(result.code, 0, result.stderr);
         }
         for (const destination of [nightly, reasoning]) {
+          // Exercise the actual upstream preflight after every patch is applied,
+          // so a protocol bump cannot hide behind the builder's fake CLI fixture.
+          const { stdout } = await run(process.execPath, ["--input-type=module", "-e", `
+            import { runServicePreflight } from ${JSON.stringify(pathToFileURL(path.join(destination, "apps/server/src/cloud/servicePreflight.ts")).href)};
+            console.log(JSON.stringify(runServicePreflight({
+              databasePath: "/missing/managed-preflight.sqlite",
+              launcherProtocol: ${SERVER_LAUNCHER_PROTOCOL},
+              version: "managed-protocol-proof"
+            })));
+          `]);
+          assert.deepEqual(JSON.parse(stdout), {
+            status: "ready",
+            version: "managed-protocol-proof",
+            launcherProtocol: SERVER_LAUNCHER_PROTOCOL,
+          });
           const tunnel = await readFile(path.join(destination, "packages/ssh/src/tunnel.ts"), "utf8");
           const ssh = await readFile(path.join(destination, "apps/desktop/src/ssh/DesktopSshEnvironment.ts"), "utf8");
           assert.match(tunnel, /Managed SSH pairing runtime validation failed/);

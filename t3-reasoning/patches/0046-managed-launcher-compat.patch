@@ -47,16 +47,17 @@ index 24495c4c2e8eb2684e198e126e0c517387f08ce1..35ad6cd6889ab373c6526589780bc8d3
        .makeDirectory(input.logsDir, { recursive: true })
 diff --git a/apps/server/src/cloud/managedServiceRuntime.test.ts b/apps/server/src/cloud/managedServiceRuntime.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..050e2671c984879059ffb8149eea1aaba5179b98
+index 0000000000000000000000000000000000000000..6596557493606dabd2a4af33546e50a093039184
 --- /dev/null
 +++ b/apps/server/src/cloud/managedServiceRuntime.test.ts
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,167 @@
 +// @effect-diagnostics nodeBuiltinImport:off
 +import { describe, it, expect } from "@effect/vitest";
 +import * as fs from "node:fs/promises";
 +import * as path from "node:path";
 +import * as os from "node:os";
 +import { Launcher, readServiceState, writeServiceState } from "../serviceLauncher.ts";
++import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 +import {
 +  assertPlainNodeHost,
 +  isManagedServiceVersion,
@@ -154,7 +155,7 @@ index 0000000000000000000000000000000000000000..050e2671c984879059ffb8149eea1aab
 +        }
 +        await expect(verifyManagedServiceRuntime(base, first)).rejects.toThrow();
 +        await expect(
-+          new Launcher(base, { protocol: 3, activeVersion: first }).run(),
++          new Launcher(base, { protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: first }).run(),
 +        ).rejects.toThrow();
 +      }));
 +  }
@@ -185,7 +186,7 @@ index 0000000000000000000000000000000000000000..050e2671c984879059ffb8149eea1aab
 +            source,
 +          );
 +        await writeServiceState(statePath, {
-+          protocol: 3,
++          protocol: SERVICE_LAUNCHER_PROTOCOL,
 +          activeVersion: first,
 +          ...(scenario === "recover"
 +            ? {
@@ -329,6 +330,58 @@ index 0000000000000000000000000000000000000000..011be4042cf1f1f38fab261544b08736
 +    }
 +  }
 +}
+diff --git a/apps/server/src/cloud/servicePreflight.test.ts b/apps/server/src/cloud/servicePreflight.test.ts
+index 1b9cf8e46c41e6eff24f917be5a72c843c14e950..b0c2662044aaf59b957a14760e43c6b42988015a 100644
+--- a/apps/server/src/cloud/servicePreflight.test.ts
++++ b/apps/server/src/cloud/servicePreflight.test.ts
+@@ -3,7 +3,7 @@ import { expect, it } from "@effect/vitest";
+ import { runServicePreflight } from "./servicePreflight.ts";
+ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
+ 
+-it.each([1, 2])("blocks legacy launcher protocol %i", (launcherProtocol) => {
++it.each([1, 3])("blocks incompatible launcher protocol %i", (launcherProtocol) => {
+   expect(
+     runServicePreflight({
+       databasePath: "/missing/state.sqlite",
+@@ -18,16 +18,17 @@ it.each([1, 2])("blocks legacy launcher protocol %i", (launcherProtocol) => {
+   });
+ });
+ 
+-it("accepts the current launcher protocol", () => {
++it("accepts the deployed managed Node launcher protocol", () => {
++  expect(SERVICE_LAUNCHER_PROTOCOL).toBe(2);
+   expect(
+     runServicePreflight({
+       databasePath: "/missing/state.sqlite",
+-      launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++      launcherProtocol: 2,
+       version: "1.2.3",
+     }),
+   ).toEqual({
+     status: "ready",
+     version: "1.2.3",
+-    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
++    launcherProtocol: 2,
+   });
+ });
+diff --git a/apps/server/src/cloud/serviceProtocol.ts b/apps/server/src/cloud/serviceProtocol.ts
+index 2d32a996ee2c2787ef76d60181117523e0a6bb58..bb566444893ddf6138fca2504e069f88adc4ca37 100644
+--- a/apps/server/src/cloud/serviceProtocol.ts
++++ b/apps/server/src/cloud/serviceProtocol.ts
+@@ -1,8 +1,10 @@
+ import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
+ 
+-// Protocol 3 requires the standalone executable layout. Bump when runtimePaths
+-// or the installed runtime tree changes incompatibly; launchers survive self-updates.
+-export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
++// Managed builds retain the protocol-2 Node package layout and its SQLite
++// rollback contract. Upstream protocol 3 denotes the standalone executable
++// layout; managed-launcher-compat deliberately preserves the existing Node
++// entry so installed protocol-2 boot units can continue to update safely.
++export const SERVICE_LAUNCHER_PROTOCOL = 2 as const;
+ export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
+ export const SERVICE_STATE_FILE = "service-state.json";
+ /** Written by the launcher just before an explicit stop kills its child, so
 diff --git a/apps/server/src/service-launcher.ts b/apps/server/src/service-launcher.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..0a59f445188ed35d0447e715ff8d8c2a97395da5
