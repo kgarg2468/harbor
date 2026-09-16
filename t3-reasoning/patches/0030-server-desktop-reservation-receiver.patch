@@ -1086,7 +1086,7 @@ index 67842addd7df0e003b9924f34a9e7eaabfab3a39..1f59ab9e781ea5874d4fa41262312f40
      }),
    );
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2f6451a7e 100644
+index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636dc8a5035 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -12,6 +12,10 @@ import {
@@ -1100,7 +1100,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
    type DpopFailureReason,
    EnvironmentId,
    EventId,
-@@ -113,6 +117,7 @@ import * as ServerConfig from "./config.ts";
+@@ -115,6 +119,7 @@ import * as ServerConfig from "./config.ts";
  import * as DeviceService from "./device/DeviceService.ts";
  import packageJson from "../package.json" with { type: "json" };
  import {
@@ -1108,7 +1108,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
    HTTP_ROUTER_CONFIG,
    makeManagedUpdateRuntimeLayer,
    makeRoutesLayer,
-@@ -128,6 +133,7 @@ import {
+@@ -130,6 +135,7 @@ import {
  } from "./cloud/managedReleaseSource.ts";
  import { ManagedArtifactSourceError, type ManagedRuntimeStager } from "./cloud/managedRuntime.ts";
  import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
@@ -1116,7 +1116,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
  import type { ProviderIdleRetirementResult } from "./provider/Services/ProviderAdapter.ts";
  import {
    type ProviderIdlePreparationResult,
-@@ -11833,6 +11839,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12168,6 +12174,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
    const MANAGED_UNKNOWN = "0.0.38-nightly.20260906.1.managed.3.p6d1933416d7a";
    const NOT_PREPARED = "busy: idle providers are not prepared";
    const ADMISSION_BUSY = "client commands or another maintenance own update admission";
@@ -1145,7 +1145,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
  
    /** A distinguishable selection whose source and archive are never meant to be touched. */
    const makeSelection = (version: string, cut: number): ManagedReleaseSelection => ({
-@@ -11864,7 +11892,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12199,7 +12227,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
     * Builds `makeManagedUpdateRuntimeLayer` the way production does, over a
     * temp base directory, a fake exact resolver, fake launcher, fake provider
     * hooks, and the real gates, in a manually owned server scope. `hold`
@@ -1156,7 +1156,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
     */
    const makeManagedFixture = Effect.fn("makeManagedFixture")(function* (input: {
      readonly hold: (targetVersion: string) => Effect.Effect<void>;
-@@ -11939,16 +11969,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12274,16 +12304,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
          }),
      });
  
@@ -1192,7 +1192,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
          Layer.provideMerge(Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer)),
          Layer.provide(Layer.mergeAll(providerLayer, launcherLayer)),
        ),
-@@ -11964,10 +12006,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12299,10 +12341,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
        coordinator: Context.get(context, IdleUpdateCoordinator.IdleUpdateCoordinator),
        activity: Context.get(context, UpdateActivity),
        admission: Context.get(context, UpdateAdmission.UpdateAdmission),
@@ -1247,7 +1247,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
    const untouched: ManagedCalls = {
      resolve: [],
      stage: 0,
-@@ -12074,6 +12160,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12409,6 +12495,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
            yield* Effect.yieldNow;
  
            assert.deepStrictEqual(fixture.calls, untouched);
@@ -1256,7 +1256,7 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
            assert.include(yield* fixture.queue.getState, {
              stage: "current",
              installedVersion: packageJson.version,
-@@ -12238,6 +12326,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12573,6 +12661,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
        }),
      ),
    );
@@ -1470,10 +1470,10 @@ index d0d0999e8292302b10c504d17c4347e8819e0b8b..b3b846266bb979a372ee8a64dfd0afb2
  
  // The WebSocket surface of the managed update queue: one durable subscription
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 90ea5e2655fe8ae18640a0c1ceb0f6292b47b0b7..94d361d25dab3e4ef58d2eb7c6e20099b69952e4 100644
+index cf0d6c4fa32f85c5f1c399fc993bdd263c2e311e..16fc8124dd5a5f860d89167278e3c5093ad9fcae 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -150,6 +150,7 @@ import {
+@@ -151,6 +151,7 @@ import {
  import * as QueuedUpdate from "./cloud/queuedUpdate.ts";
  import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
  import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
@@ -1481,7 +1481,7 @@ index 90ea5e2655fe8ae18640a0c1ceb0f6292b47b0b7..94d361d25dab3e4ef58d2eb7c6e20099
  import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
  import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
  import * as HostResources from "./resourceTelemetry/HostResources.ts";
-@@ -535,6 +536,36 @@ export const makeManagedUpdateRuntimeLayer = (input: {
+@@ -543,6 +544,36 @@ export const makeManagedUpdateRuntimeLayer = (input: {
      ),
    );
  
@@ -1518,7 +1518,7 @@ index 90ea5e2655fe8ae18640a0c1ceb0f6292b47b0b7..94d361d25dab3e4ef58d2eb7c6e20099
  // One activity registry and one admission gate for the provider runtime, the
  // idle preparation owner, the coordinator, and the queue. Provided once inside
  // the runtime dependencies so every consumer sees the same pair.
-@@ -596,14 +627,19 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -604,14 +635,19 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
        dbPath: config.dbPath,
        resolve,
      });

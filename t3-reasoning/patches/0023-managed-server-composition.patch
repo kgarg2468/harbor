@@ -1,8 +1,8 @@
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index aef163b17faa2e5e7a0632ae39c76e792c425baf..866246aabed3df96ab29ee1b130b49cdd9a83abb 100644
+index 7fa9189ee865a1d50fc41eaf79281c20df28282b..199efdb3638522fb7506450351536caca8f45e78 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -56,10 +56,12 @@ import { assert, it } from "@effect/vitest";
+@@ -58,10 +58,12 @@ import { assert, it } from "@effect/vitest";
  import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
  import * as Clock from "effect/Clock";
  import * as Config from "effect/Config";
@@ -15,7 +15,7 @@ index aef163b17faa2e5e7a0632ae39c76e792c425baf..866246aabed3df96ab29ee1b130b49cd
  import * as FileSystem from "effect/FileSystem";
  import * as Fiber from "effect/Fiber";
  import * as Layer from "effect/Layer";
-@@ -69,6 +71,7 @@ import * as PubSub from "effect/PubSub";
+@@ -71,6 +73,7 @@ import * as PubSub from "effect/PubSub";
  import * as Ref from "effect/Ref";
  import * as Queue from "effect/Queue";
  import * as Schema from "effect/Schema";
@@ -23,7 +23,7 @@ index aef163b17faa2e5e7a0632ae39c76e792c425baf..866246aabed3df96ab29ee1b130b49cd
  import * as Stream from "effect/Stream";
  import * as TestClock from "effect/testing/TestClock";
  import * as Tracer from "effect/Tracer";
-@@ -106,7 +109,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
+@@ -108,7 +111,32 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as ServerConfig from "./config.ts";
  import * as DeviceService from "./device/DeviceService.ts";
@@ -57,7 +57,7 @@ index aef163b17faa2e5e7a0632ae39c76e792c425baf..866246aabed3df96ab29ee1b130b49cd
  import {
    isThreadDetailEvent,
    resolveAvailableEditorsForConfig,
-@@ -11769,6 +11797,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
+@@ -12104,6 +12132,423 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
    );
  });
  
@@ -482,7 +482,7 @@ index aef163b17faa2e5e7a0632ae39c76e792c425baf..866246aabed3df96ab29ee1b130b49cd
    "reports thread HTTP and WebSocket transfer budgets",
    () =>
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284be5a2bd2 100644
+index 4a109c8fbf6c00ad43c6b46a55d63d11ec4c6a95..fbaad63fad1867f1e9e1b725cf95741bec3d38f0 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
 @@ -13,11 +13,13 @@ import * as Duration from "effect/Duration";
@@ -499,7 +499,7 @@ index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284
  import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
  import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
  import * as ServerConfig from "./config.ts";
-@@ -128,6 +130,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
+@@ -129,6 +131,23 @@ import { shouldRetryCloudLink } from "./cloud/relayResponse.ts";
  import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
  import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
  import * as CloudCliState from "./cloud/CliState.ts";
@@ -523,7 +523,7 @@ index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284
  import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
  import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
  import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
-@@ -144,12 +163,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+@@ -145,12 +164,18 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
  import * as UsageService from "./usage/UsageService.ts";
  import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
  import { UpdateActivityLive } from "./updateActivity.ts";
@@ -542,7 +542,7 @@ index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284
  import * as NetService from "@t3tools/shared/Net";
  import * as RelayClient from "@t3tools/shared/relayClient";
  import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
-@@ -437,6 +462,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
+@@ -445,6 +470,139 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
    ),
  );
  
@@ -682,7 +682,7 @@ index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284
  const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
    // Subscribes to `account.rate-limits.updated` so usage bars track live
    // telemetry instead of waiting for the next status probe.
-@@ -504,7 +662,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -512,7 +670,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // driver context the registry captures for later `reconcile` calls. A
    // per-service provide, or one nested inside hydration, would split the
    // count.
@@ -691,7 +691,7 @@ index a884b0c10b53b0732ceb08e6fd845093b77a70c9..818770933b0ff698193ee67fa24f4284
  ).pipe(
    Layer.provideMerge(AntigravityInstallation.layer),
    // Shared native/canonical NDJSON writers used by both the per-instance
-@@ -766,19 +924,24 @@ const makeServerLayer = Layer.unwrap(
+@@ -774,19 +932,24 @@ const makeServerLayer = Layer.unwrap(
        }),
      );
  

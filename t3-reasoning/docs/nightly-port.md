@@ -10,14 +10,52 @@ maintenance record for the current pin.
 | Item | Value |
 | --- | --- |
 | Upstream repository | `https://github.com/pingdotgg/t3code.git` |
-| Upstream commit | `112a7088da63ea4fa48fee63dc8f29557c545ed7` |
-| Upstream tag at that commit | `v0.0.41-nightly.20260914.1722` |
-| Patch `reasoning-full` | `patches/0001-reasoning.patch` (37 files) |
+| Upstream commit | `3060cc461458e66842dfb656d979c4acca4dfb20` |
+| Upstream tag at that commit | `v0.0.41-nightly.20260916.1795` |
+| Patch `reasoning-full` | `patches/0001-reasoning.patch` (39 files) |
 | Patch `desktop-runtime-common` | `patches/0002-desktop-runtime-common.patch` (4 files) |
 | Patch `reasoning-identity` | `patches/0002-reasoning-identity.patch` (13 files) |
 | Upstream license | `UPSTREAM-LICENSE` (MIT, T3 Tools Inc., copied unchanged) |
 
-The current port targets official release `388660723`, published at
+The current port targets official release `389644208`, published at
+`2026-09-16T04:46:24Z`, selected by the official discovery helper on September 16.
+All 44 Reasoning patches (43 for managed Nightly) retain their order and
+feature ownership. The inactive thread-fork entry remains inactive.
+
+### Changes for Nightly 20260916.1795
+
+- Reasoning exclusion follows upstream's extracted thread-title context helper,
+  preserving its user-intent budget and automatic title refinement. The new
+  helper test checks that reasoning cannot enter generated title context.
+- Managed activity ownership wraps upstream's title startup recovery and branch
+  generation. Its test harness preserves deferred startup for persisted title
+  refinement and only waits for registered consumers after startup.
+- The timeline retains upstream's embedded worktree setup card alongside
+  reasoning rows. Shared-default guards preserve upstream project clone banners,
+  worktree preparation and clone send restrictions, and project lookup helpers.
+- An unsupported pinned connection reports the shared default as unreachable;
+  it cannot disappear from the exhaustive connection-state handling.
+- Managed launcher fixtures use upstream's protocol 3, and the new worktree
+  startup fixture supplies the managed engine subscription contract.
+
+Validation for this port:
+
+- Node 24.13.1 component suite: 377 passing tests, including real preparation
+  of both variants; four live-server smoke tests skipped without a server binary.
+  The variants differ only in the 13 expected desktop identity files.
+- Focused reasoning, orchestration, provider and shared-default suites:
+  1,135 passing tests across 54 files. Launcher and worktree startup: 22 passing
+  tests across three files.
+- Contracts, client-runtime, server and web typechecks pass. The source delta
+  passes `git diff --check`; Markdown lint passes.
+- Reasoning tree: `a5bf1bdc29f88d5aacd4ea77996a474d5f51923a`.
+  Managed Nightly tree: `9d27962c80fe1370d20a3a25ca4751071cf561a2`.
+  Dependencies installed frozen with Node 24.13.1 and pnpm 11.10.0.
+  No desktop app was built, installed or deployed.
+
+### Previous Nightly 20260914.1722 port
+
+The previous port targeted official release `388660723`, published at
 `2026-09-14T19:37:08Z`. The previous lock pinned
 `c07575f573dd3a1af4f734297d17f7c951c95f10` (Nightly 20260914.1687).
 The existing 43 active patches retain their order and feature ownership; a

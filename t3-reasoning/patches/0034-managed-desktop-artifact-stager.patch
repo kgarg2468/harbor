@@ -1411,10 +1411,10 @@ index 0000000000000000000000000000000000000000..b68952442068af79adcfa5b61552a2c8
 +  puts("native desktop artifact tests passed (13 groups)"); return 0;
 +}
 diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
-index c078efb8b7a2c9a16522df9b41bb4bf1ba03dc49..d92e0083eb6c29e75372ba4defbcd9a0d30ece4e 100644
+index 34f6683bbf023f22ad0ba712c8afa1aaaa8fccde..f99c0c627cd75e2d74c8058aefbb51046bd71586 100644
 --- a/packages/contracts/src/index.ts
 +++ b/packages/contracts/src/index.ts
-@@ -44,3 +44,4 @@ export * from "./usage.ts";
+@@ -45,3 +45,4 @@ export * from "./usage.ts";
  export * from "./updateAdmission.ts";
  export * from "./rpc.ts";
  export * from "./worktreeSetup.ts";

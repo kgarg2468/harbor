@@ -2093,7 +2093,7 @@ index 3d216bb1167b43d830ee33f8821c419a4e27cc08..3186502e36045766250165b1abc6a5d9
          return Stream.fromQueue(runtimeEvents);
        },
 diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
-index 169019696f06af079ee58d2d57b493d800f2f065..cfe9e75d1bd57be4a296b3a9594fc20fac348436 100644
+index a2ad2558d4d068eb6a96541b69d48211cb202eb3..9c6aa23e2e959a2e2acae291459530923f83497b 100644
 --- a/apps/server/src/provider/Layers/ProviderService.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.test.ts
 @@ -60,7 +60,10 @@ import {
@@ -2108,7 +2108,7 @@ index 169019696f06af079ee58d2d57b493d800f2f065..cfe9e75d1bd57be4a296b3a9594fc20f
  import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
  import * as ProviderService from "../Services/ProviderService.ts";
  import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-@@ -6080,4 +6083,355 @@ describe("ProviderServiceLive update activity", () => {
+@@ -6081,4 +6084,355 @@ describe("ProviderServiceLive update activity", () => {
        );
      }),
    );

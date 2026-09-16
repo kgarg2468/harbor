@@ -9,8 +9,8 @@ pin is in `docs/nightly-port.md`.
 
 Reproducible port of the existing Reasoning feature set onto the pinned
 Nightly, materialized as one of two build variants. `source.lock.json` pins
-upstream commit `112a7088da63ea4fa48fee63dc8f29557c545ed7`, which is tag
-`v0.0.41-nightly.20260914.1722`, a catalog of checksummed patches, and
+upstream commit `3060cc461458e66842dfb656d979c4acca4dfb20`, which is tag
+`v0.0.41-nightly.20260916.1795`, a catalog of checksummed patches, and
 two ordered variants over that catalog: `managed-nightly` (stock Nightly
 desktop identity) and `reasoning` (the separate Reasoning desktop identity).
 Both variants carry the same server, contracts, and client-runtime changes;

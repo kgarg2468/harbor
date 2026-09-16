@@ -1,12 +1,12 @@
 {
   "version": 2,
   "repository": "https://github.com/pingdotgg/t3code.git",
-  "commit": "112a7088da63ea4fa48fee63dc8f29557c545ed7",
+  "commit": "3060cc461458e66842dfb656d979c4acca4dfb20",
   "patches": [
     {
       "id": "reasoning-full",
       "path": "patches/0001-reasoning.patch",
-      "sha256": "21fff98bb63ea5f6be5e5e67dd0096412a32f3a7a17e3f94096bb92dfee618d3"
+      "sha256": "aa45847df99ad5cc56a1257f1bc0aca39bad51cc1aa1f18994656722ab95e88b"
     },
     {
       "id": "desktop-runtime-common",
@@ -31,7 +31,7 @@
     {
       "id": "activity-wiring",
       "path": "patches/0009-activity-wiring.patch",
-      "sha256": "5093084b6d46edf035878b5b0dc7981eff2f4cae8741fbc439ba5d9a8bd5f951"
+      "sha256": "eb03baeb2cf8a5c23b8212ac246eba2924d22ade634e8c50c511fb8e7ae3ec91"
     },
     {
       "id": "thread-fork-backend",
@@ -56,7 +56,7 @@
     {
       "id": "managed-runtime-stager",
       "path": "patches/0014-managed-runtime-stager.patch",
-      "sha256": "821d4fb65e29c046e3b75f8694ee114afd61364717b97d7cf1c0ae193bb0a86f"
+      "sha256": "d1ad1ba27b83c8d88209b5c5f0b9b0cb8a272caf91d09c4def2b3a3761d14a18"
     },
     {
       "id": "desktop-reservation",
@@ -81,7 +81,7 @@
     {
       "id": "shared-default",
       "path": "patches/0008-shared-default.patch",
-      "sha256": "742bfa448b7f4ea23db60bb29205a79de2220a1be00af59136356086d863c2b3"
+      "sha256": "a1f76d87cb018cff9261c2115d6c8030f68df0e18433e5c8fcdf3ab4b5407edd"
     },
     {
       "id": "managed-release-feed",
@@ -96,22 +96,22 @@
     {
       "id": "native-activity",
       "path": "patches/0015-native-activity.patch",
-      "sha256": "1e3799be6d053b6419a326654fc1748826bb861d277838acada34758582f3de6"
+      "sha256": "35f21d18c50383a2b32dcde2ff9392e986c6b60285c64823365f6a3546a0c807"
     },
     {
       "id": "idle-preparation",
       "path": "patches/0022-idle-preparation.patch",
-      "sha256": "52975faec2f15c9c1f58e3d69513e7c2a4b82601912494f632594f0b4b1c8967"
+      "sha256": "c32d640e88d23c1e4d2dcdc142ef71789283ffa97c75f149478ca66a357e5d7a"
     },
     {
       "id": "managed-server-composition",
       "path": "patches/0023-managed-server-composition.patch",
-      "sha256": "3c2d488b179e661d0ab6d5348c6bde200eb42627df83f0323de513b07f14c76f"
+      "sha256": "02f28ec570935cd9c03e3b4bbcc1d374406cd1bf231514259750ec0fa36458e1"
     },
     {
       "id": "live-admission",
       "path": "patches/0024-live-admission.patch",
-      "sha256": "4cf62fd48c239752450b34c74d2977d8c1a74b8f4fb01cc8b782ae9cf6e05cc3"
+      "sha256": "b785d6349aa9f0b945c434e03a2efbeb0cda35147d74d8798d4c3cedd1d02f69"
     },
     {
       "id": "managed-desktop-identity",
@@ -121,12 +121,12 @@
     {
       "id": "managed-nightly-trigger",
       "path": "patches/0026-managed-nightly-trigger.patch",
-      "sha256": "ef7c6eae54b15ac0d68e1fe3256e8dda156bf3adcbf15e25e7e5bbeb5b7a6cfb"
+      "sha256": "38b1d84bdda65ca2a6ab4c9183344cd01016f2dd7ffa7ec4fef704afb46d62fa"
     },
     {
       "id": "managed-queue-controls",
       "path": "patches/0027-managed-queue-controls.patch",
-      "sha256": "50f7af63f564577963983b145f2d77fc32bbe05ecd7fc60d300b927c250bc00c"
+      "sha256": "9ea0bbdac75a96e08a7831ee93b8cfa6a5b2b4d838520babe04051cd5b3f1ccf"
     },
     {
       "id": "desktop-reservation-transport",
@@ -141,7 +141,7 @@
     {
       "id": "server-desktop-reservation-receiver",
       "path": "patches/0030-server-desktop-reservation-receiver.patch",
-      "sha256": "67302d7a175b45efcb347ef6b075581c10548ab9e5797bcac3e3ad3f4da41ff7"
+      "sha256": "014a3a7614e5e60414ca5cefa482fd65fdbfdac5713e026c0a942985d8500cd8"
     },
     {
       "id": "managed-presentation-identity",
@@ -161,7 +161,7 @@
     {
       "id": "managed-desktop-artifact-stager",
       "path": "patches/0034-managed-desktop-artifact-stager.patch",
-      "sha256": "dc28bc58dda4a8a59776f06c1731330084566238e28ac2b3d6bafe2fe9e4bfa2"
+      "sha256": "af12810c63b354e74140469b10914fc5ec1c752419d355bc7d0ba0c8ee90ae29"
     },
     {
       "id": "managed-desktop-artifact-capability",
@@ -191,7 +191,7 @@
     {
       "id": "managed-desktop-installer",
       "path": "patches/0040-managed-desktop-installer.patch",
-      "sha256": "e3be06cc6024ff5cc2a1166955cee7276f7b12ae5a64c162e51b1c1cc2b99bc6"
+      "sha256": "55f0714baaa5b5933e048a7dd00fc3db82383d598095f0abe835615336215549"
     },
     {
       "id": "managed-desktop-routing",
@@ -201,7 +201,7 @@
     {
       "id": "managed-desktop-scheduler",
       "path": "patches/0042-managed-desktop-scheduler.patch",
-      "sha256": "47c1b364fee700ca0b5b306b4d4398825621e2680508be13289f03e26e68e21c"
+      "sha256": "801e1dbd8f5bc97120198bdfaf4bdcd0cbfb53938e1d5dff7beff6b74534af14"
     },
     {
       "id": "managed-shared-connection",
@@ -221,7 +221,7 @@
     {
       "id": "managed-launcher-compat",
       "path": "patches/0046-managed-launcher-compat.patch",
-      "sha256": "c898d2ea22b15ee62603a778058c10189cdc3a69cb2b2db8ab81a948d9b197be"
+      "sha256": "55afd742b934474ecafe14bc7f1c94ca83134f904321be55d4381870273f847e"
     },
     {
       "id": "reasoning-identity",
