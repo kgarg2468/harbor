@@ -221,7 +221,7 @@
     {
       "id": "managed-launcher-compat",
       "path": "patches/0046-managed-launcher-compat.patch",
-      "sha256": "55afd742b934474ecafe14bc7f1c94ca83134f904321be55d4381870273f847e"
+      "sha256": "080f48b2972f4445668a3c6118540abc61a32658705caf0e03066af2337b6987"
     },
     {
       "id": "reasoning-identity",

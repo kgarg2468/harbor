@@ -35,8 +35,10 @@ feature ownership. The inactive thread-fork entry remains inactive.
   worktree preparation and clone send restrictions, and project lookup helpers.
 - An unsupported pinned connection reports the shared default as unreachable;
   it cannot disappear from the exhaustive connection-state handling.
-- Managed launcher fixtures use upstream's protocol 3, and the new worktree
-  startup fixture supplies the managed engine subscription contract.
+- Managed Node archives retain launcher protocol 2. Upstream's protocol 3 bump
+  describes its standalone executable layout; the managed compatibility patch
+  retains the Node package entry and existing protocol-2 boot-unit contract.
+  The new worktree startup fixture supplies the managed engine subscription contract.
 - Project clone start/retry/cancel and worktree cancellation participate in
   update admission. Detached clones hold activity through the post-clone hook;
   cancellation retains ownership through partial-checkout cleanup.
@@ -54,8 +56,13 @@ Validation for this port:
   maintenance. Server and contracts typechecks pass after this integration.
 - Contracts, client-runtime, server and web typechecks pass. The source delta
   passes `git diff --check`; Markdown lint passes.
-- Reasoning tree: `2d3f1f2e894881093211f1dda46a8b0185c0723b`.
-  Managed Nightly tree: `5d5ccea6c0cdbf81091ec16c16762f4f38b6ff4d`.
+- Launcher preflight regression: 85 source tests pass across eight files,
+  covering service and migration preflight, managed staging and launcher
+  lifecycle. The real non-SEA server bundle returns ready for protocol 2 and
+  blocked for protocol 3 without creating a database. Both prepared variants
+  execute their actual source preflight against the builder's protocol constant.
+- Reasoning tree: `fdc16ac8f21e85646a1988382b8be2bbbc99c6b1`.
+  Managed Nightly tree: `5f3a0520c401db7e0f44a1e3ef141e9aa4ff683c`.
   Dependencies installed frozen with Node 24.13.1 and pnpm 11.10.0.
   No desktop app was built, installed or deployed.
 
