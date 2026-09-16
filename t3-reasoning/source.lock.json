@@ -111,7 +111,7 @@
     {
       "id": "live-admission",
       "path": "patches/0024-live-admission.patch",
-      "sha256": "b785d6349aa9f0b945c434e03a2efbeb0cda35147d74d8798d4c3cedd1d02f69"
+      "sha256": "95f2e07b146e914e11f34e977f9435e51614f2d58f4ab961be782ee4d4269928"
     },
     {
       "id": "managed-desktop-identity",
@@ -126,7 +126,7 @@
     {
       "id": "managed-queue-controls",
       "path": "patches/0027-managed-queue-controls.patch",
-      "sha256": "9ea0bbdac75a96e08a7831ee93b8cfa6a5b2b4d838520babe04051cd5b3f1ccf"
+      "sha256": "70903316679b53a7738674ce56d6a3e309ac2b8d57e7bccdf2a2e7f1a880f018"
     },
     {
       "id": "desktop-reservation-transport",
@@ -141,7 +141,7 @@
     {
       "id": "server-desktop-reservation-receiver",
       "path": "patches/0030-server-desktop-reservation-receiver.patch",
-      "sha256": "014a3a7614e5e60414ca5cefa482fd65fdbfdac5713e026c0a942985d8500cd8"
+      "sha256": "d3ff5d646b748e2ff1f31e0177e5015ce71aa07b6ad14afaae08efbc604475e2"
     },
     {
       "id": "managed-presentation-identity",
@@ -201,7 +201,7 @@
     {
       "id": "managed-desktop-scheduler",
       "path": "patches/0042-managed-desktop-scheduler.patch",
-      "sha256": "801e1dbd8f5bc97120198bdfaf4bdcd0cbfb53938e1d5dff7beff6b74534af14"
+      "sha256": "6220df4acb3a3a65b45172eec9b5971bec37a15561d41fa858b9f44614118fb5"
     },
     {
       "id": "managed-shared-connection",

@@ -449,6 +449,181 @@ index 3f80e84e9a595b641c180716ca1a1d6ef1ee56db..c0d0229abdcc933d296028c5c47bbe1f
    }).annotate(Tool.Title, "Stop browser recording"),
  );
  
+diff --git a/apps/server/src/project/ProjectCloneTracker.test.ts b/apps/server/src/project/ProjectCloneTracker.test.ts
+index d26a2ed712ac14797834339723d830c0b59801ba..fb2bb17bca0b1af457f666560b63688b7c2c9e07 100644
+--- a/apps/server/src/project/ProjectCloneTracker.test.ts
++++ b/apps/server/src/project/ProjectCloneTracker.test.ts
+@@ -13,9 +13,11 @@ import * as TestClock from "effect/testing/TestClock";
+ 
+ import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+ import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
++import { UpdateActivity, UpdateActivityLive } from "../updateActivity.ts";
+ import { parseGitCloneProgressLine } from "./gitCloneProgress.ts";
+ 
+ const projectId = ProjectId.make("project-1");
++const trackedLayer = ProjectCloneTracker.layer.pipe(Layer.provideMerge(UpdateActivityLive));
+ const startInput = {
+   projectId,
+   title: "t3code",
+@@ -26,6 +28,7 @@ const startInput = {
+ 
+ function makeHarness(options?: {
+   readonly clone?: SourceControlRepositoryService.SourceControlRepositoryService["Service"]["cloneRepository"];
++  readonly discard?: SourceControlRepositoryService.SourceControlRepositoryService["Service"]["discardClone"];
+ }) {
+   const created: Array<{ projectId: ProjectId; workspaceRoot: string }> = [];
+   const cloned: Array<ProjectId> = [];
+@@ -37,7 +40,7 @@ function makeHarness(options?: {
+       }),
+     onCloned: (input) => Effect.sync(() => void cloned.push(input.projectId)),
+   };
+-  const layer = ProjectCloneTracker.layer.pipe(
++  const layer = trackedLayer.pipe(
+     Layer.provide(
+       Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+         prepareClone: (input) =>
+@@ -55,7 +58,9 @@ function makeHarness(options?: {
+               remoteUrl: input.remoteUrl ?? "",
+               repository: null,
+             })),
+-        discardClone: (destination) => Effect.sync(() => void discarded.push(destination)),
++        discardClone:
++          options?.discard ??
++          ((destination) => Effect.sync(() => void discarded.push(destination))),
+       }),
+     ),
+   );
+@@ -63,6 +68,27 @@ function makeHarness(options?: {
+ }
+ 
+ describe("ProjectCloneTracker", () => {
++  it.effect("keeps cleanup owned after cancellation interrupts the detached clone", () => {
++    const cleaning = Deferred.makeUnsafe<void>();
++    const release = Deferred.makeUnsafe<void>();
++    const harness = makeHarness({
++      clone: () => Effect.never,
++      discard: () =>
++        Deferred.succeed(cleaning, undefined).pipe(Effect.andThen(Deferred.await(release))),
++    });
++    return Effect.gen(function* () {
++      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
++      const activity = yield* UpdateActivity;
++      yield* tracker.start(startInput, harness.hooks);
++      const cancellation = yield* tracker.cancel(projectId).pipe(Effect.forkChild);
++      yield* Deferred.await(cleaning);
++      expect((yield* activity.trySealIdle).status).toBe("busy");
++      yield* Deferred.succeed(release, undefined);
++      expect(yield* Fiber.join(cancellation)).toBe(true);
++      expect((yield* activity.state).outstanding).toBe(0);
++    }).pipe(Effect.provide(harness.layer));
++  });
++
+   it.effect("creates the project first and reports the clone through the stream", () => {
+     const release = Deferred.makeUnsafe<void>();
+     const harness = makeHarness({
+@@ -147,15 +173,19 @@ describe("ProjectCloneTracker", () => {
+     const harness = makeHarness({ clone: () => Effect.never });
+     return Effect.gen(function* () {
+       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
++      const activity = yield* UpdateActivity;
+       yield* tracker.start(startInput, harness.hooks);
++      expect((yield* activity.trySealIdle).status).toBe("busy");
+       yield* Effect.yieldNow;
+ 
+       expect(yield* tracker.cancel(projectId)).toBe(true);
+       expect((yield* tracker.get(projectId))?.phase).toBe("cancelled");
+       expect(harness.discarded).toEqual(["/workspace/t3code"]);
++      expect((yield* activity.state).outstanding).toBe(0);
+       // Nothing left to cancel; retry is what brings it back.
+       expect(yield* tracker.cancel(projectId)).toBe(false);
+       expect(yield* tracker.retry(projectId)).toBe(true);
++      expect((yield* activity.trySealIdle).status).toBe("busy");
+     }).pipe(Effect.provide(harness.layer));
+   });
+ 
+@@ -169,12 +199,21 @@ describe("ProjectCloneTracker", () => {
+     };
+     return Effect.gen(function* () {
+       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
++      const activity = yield* UpdateActivity;
+       yield* tracker.start(startInput, hooks);
+       yield* Effect.yieldNow;
+       expect((yield* tracker.get(projectId))?.phase).toBe("done");
++      expect((yield* activity.trySealIdle).status).toBe("busy");
+       expect(yield* tracker.cancel(projectId)).toBe(false);
+       expect(harness.discarded).toEqual([]);
+       yield* Deferred.succeed(gate, undefined);
++      while ((yield* activity.state).outstanding > 0) {
++        const state = yield* activity.state;
++        if (state.outstanding > 0) yield* activity.awaitChange(state.revision);
++      }
++      const claim = yield* activity.trySealIdle;
++      expect(claim.status).toBe("sealed");
++      if (claim.status === "sealed") claim.seal.release();
+     }).pipe(Effect.provide(harness.layer));
+   });
+ 
+@@ -187,7 +226,7 @@ describe("ProjectCloneTracker", () => {
+           return { cwd: input.destinationPath, remoteUrl: "", repository: null };
+         }),
+     });
+-    const layer = ProjectCloneTracker.layer.pipe(
++    const layer = trackedLayer.pipe(
+       Layer.provide(
+         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+           prepareClone: (input) =>
+@@ -248,7 +287,7 @@ describe("ProjectCloneTracker", () => {
+ 
+   it.effect("does not create a project when the clone cannot be prepared", () => {
+     const harness = makeHarness();
+-    const layer = ProjectCloneTracker.layer.pipe(
++    const layer = trackedLayer.pipe(
+       Layer.provide(
+         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+           prepareClone: () =>
+diff --git a/apps/server/src/project/ProjectCloneTracker.ts b/apps/server/src/project/ProjectCloneTracker.ts
+index 854c97817529d6726ca4f734c251df4efff8b7ab..7b41490af65546676706ceb46733434c04381edf 100644
+--- a/apps/server/src/project/ProjectCloneTracker.ts
++++ b/apps/server/src/project/ProjectCloneTracker.ts
+@@ -29,6 +29,7 @@ import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ 
+ import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
++import { UpdateActivity } from "../updateActivity.ts";
+ 
+ /**
+  * Runs repository clones that back newly added projects and tracks their
+@@ -115,6 +116,7 @@ interface TrackedClone {
+ /** @public Service construction is part of the canonical Effect module API. */
+ export const make = Effect.gen(function* () {
+   const repositories = yield* SourceControlRepositoryService.SourceControlRepositoryService;
++  const activity = yield* UpdateActivity;
+   const clones = yield* Ref.make(new Map<ProjectId, TrackedClone>());
+   const changes = yield* PubSub.unbounded<ReadonlyArray<ProjectCloneSnapshot>>();
+   const retentionFibers = new Map<ProjectId, Fiber.Fiber<unknown, never>>();
+@@ -125,7 +127,10 @@ export const make = Effect.gen(function* () {
+   // start/cancel/retry/discard mutate the same entry and the same directory;
+   // one at a time keeps a double-clicked Retry from racing two clones into it.
+   const actionLock = yield* Semaphore.make(1);
+-  const locked = <A, E, R>(effect: Effect.Effect<A, E, R>) => actionLock.withPermits(1)(effect);
++  const locked = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
++    activity
++      .track("project clone action", actionLock.withPermits(1)(effect))
++      .pipe(Effect.catchTag("UpdateActivityUnavailableError", Effect.die));
+ 
+   const list = Ref.get(clones).pipe(
+     Effect.map((current) => Array.from(current.values(), (tracked) => tracked.snapshot)),
+@@ -249,7 +254,9 @@ export const make = Effect.gen(function* () {
+       const current = yield* Ref.get(clones);
+       const tracked = current.get(projectId);
+       if (!tracked) return;
+-      const fiber = yield* runClone(projectId, tracked).pipe(Effect.forkIn(cloneScope));
++      const fiber = yield* activity
++        .forkTracked("project clone", runClone(projectId, tracked), cloneScope)
++        .pipe(Effect.orDie);
+       yield* Ref.update(clones, (map) => {
+         const existing = map.get(projectId);
+         if (!existing) return map;
 diff --git a/apps/server/src/provider/AntigravityInstallation.test.ts b/apps/server/src/provider/AntigravityInstallation.test.ts
 index 0528cb4972c9b07866457d4fc9a2ebe8e6aecc6d..529f5f15ddc80c56778617007aed2ac7720c294b 100644
 --- a/apps/server/src/provider/AntigravityInstallation.test.ts
@@ -717,7 +892,7 @@ index aa1317f99901135d47279d44066078af900550e4..a5b1faa642b1b64d14397315e3877471
                  Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
                ),
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 199efdb3638522fb7506450351536caca8f45e78..fe45ed2694c8cabcadb4e02597b0fea6d46e0d41 100644
+index 199efdb3638522fb7506450351536caca8f45e78..fe7099fbf6cff0dc918d0802031ab97684502660 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -550,6 +550,7 @@ const buildAppUnderTest = (options?: {
@@ -728,7 +903,15 @@ index 199efdb3638522fb7506450351536caca8f45e78..fe45ed2694c8cabcadb4e02597b0fea6
      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
      externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
      vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
-@@ -1086,6 +1087,17 @@ const buildAppUnderTest = (options?: {
+@@ -965,6 +966,7 @@ const buildAppUnderTest = (options?: {
+           }),
+           WorktreeSetupTracker.layer,
+           ProjectCloneTracker.layer.pipe(
++            Layer.provide(UpdateActivityLive),
+             Layer.provide(
+               Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+                 ...options?.layers?.sourceControlRepositoryService,
+@@ -1086,6 +1088,17 @@ const buildAppUnderTest = (options?: {
      );
  
      const appLayer = servedRoutesLayer.pipe(
@@ -746,7 +929,7 @@ index 199efdb3638522fb7506450351536caca8f45e78..fe45ed2694c8cabcadb4e02597b0fea6
        Layer.provide(resourceTelemetryLayer),
        Layer.provide(UsageService.layerTest),
        Layer.provide(
-@@ -12841,3 +12853,229 @@ it.live(
+@@ -12841,3 +12854,244 @@ it.live(
      }).pipe(Effect.provide(NodeServices.layer)),
    120_000,
  );
@@ -873,6 +1056,21 @@ index 199efdb3638522fb7506450351536caca8f45e78..fe45ed2694c8cabcadb4e02597b0fea6
 +            );
 +            assert.equal(refused._tag, "UpdateAdmissionClosedError");
 +            assert.equal(updates, 0);
++
++            const cloneStart = yield* client[WS_METHODS.projectCloneStart]({
++              projectId: ProjectId.make("maintenance-clone"),
++              title: "Blocked clone",
++              createdAt: "2026-01-01T00:00:00.000Z",
++              remoteUrl: "https://github.com/example/repo.git",
++              destinationPath: "/tmp/maintenance-clone-must-not-start",
++            }).pipe(Effect.flip);
++            assert.equal(cloneStart._tag, "UpdateAdmissionClosedError");
++            for (const method of [WS_METHODS.projectCloneRetry, WS_METHODS.projectCloneCancel]) {
++              const refusedClone = yield* client[method]({
++                projectId: ProjectId.make("maintenance-clone"),
++              }).pipe(Effect.flip);
++              assert.equal(refusedClone._tag, "UpdateAdmissionClosedError");
++            }
 +
 +            const settings = yield* client[WS_METHODS.serverGetSettings]({});
 +            assert.isObject(settings);
@@ -1357,7 +1555,7 @@ index 978a0459e69bc46e8aa24a4ef4dca58081fb8b01..34f6683bbf023f22ad0ba712c8afa1aa
  export * from "./rpc.ts";
  export * from "./worktreeSetup.ts";
 diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
-index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd30fc1588 100644
+index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..d364d2cda9526862d5bbb335a0009a1afe23f437 100644
 --- a/packages/contracts/src/rpc.test.ts
 +++ b/packages/contracts/src/rpc.test.ts
 @@ -2,7 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
@@ -1370,7 +1568,7 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
  
  /**
   * The client always sends `environmentThemes`, including to servers built
-@@ -29,3 +30,166 @@ describe("subscribeServerConfig payload compatibility", () => {
+@@ -29,3 +30,174 @@ describe("subscribeServerConfig payload compatibility", () => {
      expect(decoded).toEqual({});
    });
  });
@@ -1383,6 +1581,10 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 + */
 +describe("update admission classification", () => {
 +  const admitted = [
++    "projectClone.start",
++    "projectClone.cancel",
++    "projectClone.retry",
++    "worktreeSetup.cancel",
 +    "orchestration.dispatchCommand",
 +    "server.refreshProviders",
 +    "server.updateProvider",
@@ -1443,6 +1645,10 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 +    "device.action",
 +  ];
 +  const excluded = [
++    "subscribeProjectClones",
++    "subscribeWorktreeSetup",
++    "pullRequests.routing",
++    "pullRequests.routingIdentity",
 +    // Reads.
 +    "server.probe",
 +    "server.getConfig",
@@ -1538,7 +1744,7 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 9096dd6e27f9dff508c26e6f1209a4f99ffbfde9..ada1da3a22bc9aa1a7a1e1ea2a93d4bcf4aaa192 100644
+index 9096dd6e27f9dff508c26e6f1209a4f99ffbfde9..39a78ecb2bdc0f8b7aceeb7b312c563405218616 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
 @@ -267,6 +267,7 @@ import {
@@ -1755,6 +1961,29 @@ index 9096dd6e27f9dff508c26e6f1209a4f99ffbfde9..ada1da3a22bc9aa1a7a1e1ea2a93d4bc
  
  // Clone-backed project creation. `start` returns once the project exists and
  // the clone is running; progress arrives on the subscription.
+@@ -864,19 +865,19 @@ const WsProjectCloneStartRpc = Rpc.make(WS_METHODS.projectCloneStart, {
+     OrchestrationDispatchCommandError,
+     EnvironmentAuthorizationError,
+   ]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProjectCloneCancelRpc = Rpc.make(WS_METHODS.projectCloneCancel, {
+   payload: ProjectCloneActionInput,
+   success: ProjectCloneActionResult,
+   error: EnvironmentAuthorizationError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProjectCloneRetryRpc = Rpc.make(WS_METHODS.projectCloneRetry, {
+   payload: ProjectCloneActionInput,
+   success: ProjectCloneActionResult,
+   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsSubscribeProjectClonesRpc = Rpc.make(WS_METHODS.subscribeProjectClones, {
+   payload: ProjectCloneSubscribeInput,
 @@ -889,7 +890,7 @@ const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPub
    payload: SourceControlPublishRepositoryInput,
    success: SourceControlPublishRepositoryResult,
@@ -1819,7 +2048,15 @@ index 9096dd6e27f9dff508c26e6f1209a4f99ffbfde9..ada1da3a22bc9aa1a7a1e1ea2a93d4bc
  
  const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
    payload: VcsStatusInput,
-@@ -1009,7 +1010,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+@@ -1002,14 +1003,14 @@ const WsWorktreeSetupCancelRpc = Rpc.make(WS_METHODS.worktreeSetupCancel, {
+   payload: WorktreeSetupCancelInput,
+   success: WorktreeSetupCancelResult,
+   error: EnvironmentAuthorizationError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+   payload: GitRunStackedActionInput,
    success: GitActionProgressEvent,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
    stream: true,

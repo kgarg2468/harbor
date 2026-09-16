@@ -352,7 +352,7 @@ index 64d8dfab1733cadba7c900ad08edbd298e9d20bb..ef67db87adcf4940ff0c879dd842903b
      },
    };
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index fe45ed2694c8cabcadb4e02597b0fea6d46e0d41..fddc7e84ef2eda7f530b3b36469939c950e5e002 100644
+index fe7099fbf6cff0dc918d0802031ab97684502660..3bb9f665460e7e3549ee7818d054d98d1f74989f 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -25,6 +25,7 @@ import {
@@ -397,7 +397,7 @@ index fe45ed2694c8cabcadb4e02597b0fea6d46e0d41..fddc7e84ef2eda7f530b3b36469939c9
  
      const servedRoutesLayer = HttpRouter.serve(
        makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
-@@ -1123,14 +1131,20 @@ const buildAppUnderTest = (options?: {
+@@ -1124,14 +1132,20 @@ const buildAppUnderTest = (options?: {
          }),
        ),
        Layer.provide(
@@ -426,7 +426,7 @@ index fe45ed2694c8cabcadb4e02597b0fea6d46e0d41..fddc7e84ef2eda7f530b3b36469939c9
        ),
        Layer.provide(
          Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-@@ -12561,6 +12575,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12562,6 +12576,519 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
    );
  });
  
@@ -1140,7 +1140,7 @@ index 6d5690187104e0f8bab51d06fa86cb22e6d7c81b..37d515d8c96e61dc03bc61822a4ecf4d
        currently leave this environment: the publish opt-in is enabled and the
        relay link credentials exist. Clients skip seeding a Live Activity when
 diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
-index 180f4408ec693336aae281e07d8938bd30fc1588..7609a66a13fdaf795b3d109e82bfbce8e4be3d9f 100644
+index d364d2cda9526862d5bbb335a0009a1afe23f437..433b1784b3d035098f3c60abedcc1ab620db03ce 100644
 --- a/packages/contracts/src/rpc.test.ts
 +++ b/packages/contracts/src/rpc.test.ts
 @@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
@@ -1153,7 +1153,7 @@ index 180f4408ec693336aae281e07d8938bd30fc1588..7609a66a13fdaf795b3d109e82bfbce8
  import { UpdateAdmissionRpcMiddleware } from "./updateAdmission.ts";
  
  /**
-@@ -156,6 +158,9 @@ describe("update admission classification", () => {
+@@ -164,6 +166,9 @@ describe("update admission classification", () => {
      "server.updateServer",
      "server.updateServerWithProgress",
      "server.commitDesktopUpdate",
@@ -1163,7 +1163,7 @@ index 180f4408ec693336aae281e07d8938bd30fc1588..7609a66a13fdaf795b3d109e82bfbce8
      // Automation host channel: the host answers admitted tool calls through it.
      "previewAutomation.connect",
      "previewAutomation.respond",
-@@ -173,6 +178,7 @@ describe("update admission classification", () => {
+@@ -181,6 +186,7 @@ describe("update admission classification", () => {
      "subscribeTerminalMetadata",
      "subscribeServerConfig",
      "subscribeServerLifecycle",
@@ -1171,7 +1171,7 @@ index 180f4408ec693336aae281e07d8938bd30fc1588..7609a66a13fdaf795b3d109e82bfbce8
      "subscribeAuthAccess",
      "subscribeBackgroundPolicy",
      "subscribeResourceTelemetry",
-@@ -193,3 +199,50 @@ describe("update admission classification", () => {
+@@ -201,3 +207,50 @@ describe("update admission classification", () => {
      expect([...admitted, ...excluded].sort()).toEqual(all);
    });
  });
@@ -1223,7 +1223,7 @@ index 180f4408ec693336aae281e07d8938bd30fc1588..7609a66a13fdaf795b3d109e82bfbce8
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index ada1da3a22bc9aa1a7a1e1ea2a93d4bcf4aaa192..379142294e68e933f8ca54c1fa85a10a6fdb8a45 100644
+index 39a78ecb2bdc0f8b7aceeb7b312c563405218616..3dd5445e0766e29a790aa1cfb45a0c6106e9c446 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
 @@ -215,6 +215,10 @@ import {

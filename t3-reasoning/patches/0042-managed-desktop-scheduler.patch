@@ -659,7 +659,7 @@ index 3370154db8d67b52395b360b198b7731d0f0ad1e..6e7c291aa3df2c661a204a75bda68214
  
  export const layer = Layer.effect(DesktopAppUpdate, make());
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 1f8b01d45bb614f0b4dc5527cb3af636dc8a5035..737c7cc4ad647d46a70844efd86e5b638082367b 100644
+index 4a3f42356b1b1795a9046060dcae12c68571bebc..3a5a80e35f49d0922febaf29b39f7e55e6f8b807 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -59,7 +59,7 @@ import {
@@ -679,7 +679,7 @@ index 1f8b01d45bb614f0b4dc5527cb3af636dc8a5035..737c7cc4ad647d46a70844efd86e5b63
    makeRoutesLayer,
    makeSelectionBoundManagedRuntimeResolver,
    resolveManagedServerTarget,
-@@ -1100,7 +1101,7 @@ const buildAppUnderTest = (options?: {
+@@ -1101,7 +1102,7 @@ const buildAppUnderTest = (options?: {
        ),
      );
  
@@ -688,7 +688,7 @@ index 1f8b01d45bb614f0b4dc5527cb3af636dc8a5035..737c7cc4ad647d46a70844efd86e5b63
        // Outside `HttpRouter.serve`, as in production: the WebSocket route reads
        // the RPC middleware from its handler context.
        Layer.provide(
-@@ -1269,6 +1270,8 @@ const buildAppUnderTest = (options?: {
+@@ -1270,6 +1271,8 @@ const buildAppUnderTest = (options?: {
        }),
        Layer.provideMerge(makeAuthTestLayer()),
        Layer.provideMerge(ServerSecretStore.layer),
@@ -697,7 +697,7 @@ index 1f8b01d45bb614f0b4dc5527cb3af636dc8a5035..737c7cc4ad647d46a70844efd86e5b63
        Layer.provide(workspaceAndProjectServicesLayer),
        Layer.provideMerge(FetchHttpClient.layer),
        Layer.provide(VcsProcess.layer),
-@@ -13900,3 +13903,40 @@ it.layer(NodeServices.layer)("update admission over the transports", (it) => {
+@@ -13916,3 +13919,40 @@ it.layer(NodeServices.layer)("update admission over the transports", (it) => {
        }).pipe(Effect.provide(NodeHttpServer.layerTest)),
    );
  });

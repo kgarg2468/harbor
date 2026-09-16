@@ -1086,7 +1086,7 @@ index 67842addd7df0e003b9924f34a9e7eaabfab3a39..1f59ab9e781ea5874d4fa41262312f40
      }),
    );
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636dc8a5035 100644
+index 3bb9f665460e7e3549ee7818d054d98d1f74989f..4a3f42356b1b1795a9046060dcae12c68571bebc 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
 @@ -12,6 +12,10 @@ import {
@@ -1116,7 +1116,7 @@ index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636
  import type { ProviderIdleRetirementResult } from "./provider/Services/ProviderAdapter.ts";
  import {
    type ProviderIdlePreparationResult,
-@@ -12168,6 +12174,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12169,6 +12175,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
    const MANAGED_UNKNOWN = "0.0.38-nightly.20260906.1.managed.3.p6d1933416d7a";
    const NOT_PREPARED = "busy: idle providers are not prepared";
    const ADMISSION_BUSY = "client commands or another maintenance own update admission";
@@ -1145,7 +1145,7 @@ index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636
  
    /** A distinguishable selection whose source and archive are never meant to be touched. */
    const makeSelection = (version: string, cut: number): ManagedReleaseSelection => ({
-@@ -12199,7 +12227,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12200,7 +12228,9 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
     * Builds `makeManagedUpdateRuntimeLayer` the way production does, over a
     * temp base directory, a fake exact resolver, fake launcher, fake provider
     * hooks, and the real gates, in a manually owned server scope. `hold`
@@ -1156,7 +1156,7 @@ index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636
     */
    const makeManagedFixture = Effect.fn("makeManagedFixture")(function* (input: {
      readonly hold: (targetVersion: string) => Effect.Effect<void>;
-@@ -12274,16 +12304,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12275,16 +12305,28 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
          }),
      });
  
@@ -1192,7 +1192,7 @@ index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636
          Layer.provideMerge(Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer)),
          Layer.provide(Layer.mergeAll(providerLayer, launcherLayer)),
        ),
-@@ -12299,10 +12341,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12300,10 +12342,54 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
        coordinator: Context.get(context, IdleUpdateCoordinator.IdleUpdateCoordinator),
        activity: Context.get(context, UpdateActivity),
        admission: Context.get(context, UpdateAdmission.UpdateAdmission),
@@ -1247,7 +1247,7 @@ index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636
    const untouched: ManagedCalls = {
      resolve: [],
      stage: 0,
-@@ -12409,6 +12495,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12410,6 +12496,8 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
            yield* Effect.yieldNow;
  
            assert.deepStrictEqual(fixture.calls, untouched);
@@ -1256,7 +1256,7 @@ index fddc7e84ef2eda7f530b3b36469939c950e5e002..1f8b01d45bb614f0b4dc5527cb3af636
            assert.include(yield* fixture.queue.getState, {
              stage: "current",
              installedVersion: packageJson.version,
-@@ -12573,6 +12661,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
+@@ -12574,6 +12662,212 @@ it.layer(NodeServices.layer)("managed update composition", (it) => {
        }),
      ),
    );

@@ -37,6 +37,9 @@ feature ownership. The inactive thread-fork entry remains inactive.
   it cannot disappear from the exhaustive connection-state handling.
 - Managed launcher fixtures use upstream's protocol 3, and the new worktree
   startup fixture supplies the managed engine subscription contract.
+- Project clone start/retry/cancel and worktree cancellation participate in
+  update admission. Detached clones hold activity through the post-clone hook;
+  cancellation retains ownership through partial-checkout cleanup.
 
 Validation for this port:
 
@@ -46,10 +49,13 @@ Validation for this port:
 - Focused reasoning, orchestration, provider and shared-default suites:
   1,135 passing tests across 54 files. Launcher and worktree startup: 22 passing
   tests across three files.
+- Clone lifecycle and complete RPC classification: 18 passing tests. Transport
+  admission checks pass, including refusal of all three clone mutations during
+  maintenance. Server and contracts typechecks pass after this integration.
 - Contracts, client-runtime, server and web typechecks pass. The source delta
   passes `git diff --check`; Markdown lint passes.
-- Reasoning tree: `a5bf1bdc29f88d5aacd4ea77996a474d5f51923a`.
-  Managed Nightly tree: `9d27962c80fe1370d20a3a25ca4751071cf561a2`.
+- Reasoning tree: `2d3f1f2e894881093211f1dda46a8b0185c0723b`.
+  Managed Nightly tree: `5d5ccea6c0cdbf81091ec16c16762f4f38b6ff4d`.
   Dependencies installed frozen with Node 24.13.1 and pnpm 11.10.0.
   No desktop app was built, installed or deployed.
 
