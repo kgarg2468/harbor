@@ -1110,10 +1110,10 @@ index 0000000000000000000000000000000000000000..cce6b676de51a98abce37557fc7b9138
 +    }),
 +  );
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 7d7e60de5a48db406c8eba34531708d7880bee48..90ea5e2655fe8ae18640a0c1ceb0f6292b47b0b7 100644
+index 59813b5a57951f190194e6181343c334e9859554..cf0d6c4fa32f85c5f1c399fc993bdd263c2e311e 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -133,6 +133,7 @@ import * as CloudCliState from "./cloud/CliState.ts";
+@@ -134,6 +134,7 @@ import * as CloudCliState from "./cloud/CliState.ts";
  import * as IdleUpdateCoordinator from "./cloud/idleUpdateCoordinator.ts";
  import * as IdleUpdatePreparation from "./cloud/idleUpdatePreparation.ts";
  import { makeManagedCandidateProcess } from "./cloud/managedCandidateProcess.ts";
@@ -1121,7 +1121,7 @@ index 7d7e60de5a48db406c8eba34531708d7880bee48..90ea5e2655fe8ae18640a0c1ceb0f629
  import type { ManagedServerTarget } from "./cloud/managedRelease.ts";
  import {
    type ManagedReleaseFeed,
-@@ -539,10 +540,11 @@ export const makeManagedUpdateRuntimeLayer = (input: {
+@@ -547,10 +548,11 @@ export const makeManagedUpdateRuntimeLayer = (input: {
  // the runtime dependencies so every consumer sees the same pair.
  const UpdateGatesLive = Layer.mergeAll(UpdateActivityLive, UpdateAdmission.layer);
  
@@ -1137,7 +1137,7 @@ index 7d7e60de5a48db406c8eba34531708d7880bee48..90ea5e2655fe8ae18640a0c1ceb0f629
  const ManagedUpdateRuntimeLive = Layer.unwrap(
    Effect.gen(function* () {
      const config = yield* ServerConfig.ServerConfig;
-@@ -554,6 +556,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -562,6 +564,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
      const hostTarget = resolveManagedServerTarget(platform, architecture, linuxLibc);
  
      let resolve: ManagedQueuedUpdate.ResolveManagedRuntime;
@@ -1145,7 +1145,7 @@ index 7d7e60de5a48db406c8eba34531708d7880bee48..90ea5e2655fe8ae18640a0c1ceb0f629
      if (hostTarget === undefined) {
        const unsupported = new ManagedArtifactSourceError({
          reason: `managed server updates are unsupported on ${platform}-${architecture}${
-@@ -572,6 +575,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -580,6 +583,7 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
          candidate,
        });
        const feed = yield* makeGitHubManagedReleaseFeed({ hostTarget });
@@ -1153,7 +1153,7 @@ index 7d7e60de5a48db406c8eba34531708d7880bee48..90ea5e2655fe8ae18640a0c1ceb0f629
        resolve = makeSelectionBoundManagedRuntimeResolver({
          feed,
          makeStager: (selection) =>
-@@ -585,13 +589,21 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
+@@ -593,13 +597,21 @@ const ManagedUpdateRuntimeLive = Layer.unwrap(
        });
      }
  

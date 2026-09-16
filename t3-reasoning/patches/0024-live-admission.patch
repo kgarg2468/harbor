@@ -19,7 +19,7 @@ index 3d53ee088376cd2f8cb3abf7da27c69f7e66dc54..5d1ff37ffce8b4650c27bc1ada197cb2
    Layer.provide(configLayer),
    Layer.provideMerge(
 diff --git a/apps/server/src/bin.test.ts b/apps/server/src/bin.test.ts
-index 7cb446fd0d2bad6dfdf32cbda54e4bede7229c40..b873808efd3c60c2f4d028e07cae0aa68e818e7f 100644
+index a4a0678e04e8fd71e8cf25f0bde3ab7462331852..ff9deab37b8e4cc46a7d200cb3b19acbd5027d92 100644
 --- a/apps/server/src/bin.test.ts
 +++ b/apps/server/src/bin.test.ts
 @@ -35,6 +35,7 @@ import {
@@ -30,9 +30,9 @@ index 7cb446fd0d2bad6dfdf32cbda54e4bede7229c40..b873808efd3c60c2f4d028e07cae0aa6
  import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
  import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
  import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
-@@ -367,6 +368,9 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
-     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
-       Layer.provide(orchestrationHttpApiLayer),
+@@ -377,6 +378,9 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
+         ),
+       ),
        Layer.provide(environmentAuthenticatedAuthLayer),
 +      Layer.provide(
 +        UpdateAdmission.middlewareLayer.pipe(Layer.provideMerge(UpdateAdmission.layer)),
@@ -449,6 +449,181 @@ index 3f80e84e9a595b641c180716ca1a1d6ef1ee56db..c0d0229abdcc933d296028c5c47bbe1f
    }).annotate(Tool.Title, "Stop browser recording"),
  );
  
+diff --git a/apps/server/src/project/ProjectCloneTracker.test.ts b/apps/server/src/project/ProjectCloneTracker.test.ts
+index d26a2ed712ac14797834339723d830c0b59801ba..fb2bb17bca0b1af457f666560b63688b7c2c9e07 100644
+--- a/apps/server/src/project/ProjectCloneTracker.test.ts
++++ b/apps/server/src/project/ProjectCloneTracker.test.ts
+@@ -13,9 +13,11 @@ import * as TestClock from "effect/testing/TestClock";
+ 
+ import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+ import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
++import { UpdateActivity, UpdateActivityLive } from "../updateActivity.ts";
+ import { parseGitCloneProgressLine } from "./gitCloneProgress.ts";
+ 
+ const projectId = ProjectId.make("project-1");
++const trackedLayer = ProjectCloneTracker.layer.pipe(Layer.provideMerge(UpdateActivityLive));
+ const startInput = {
+   projectId,
+   title: "t3code",
+@@ -26,6 +28,7 @@ const startInput = {
+ 
+ function makeHarness(options?: {
+   readonly clone?: SourceControlRepositoryService.SourceControlRepositoryService["Service"]["cloneRepository"];
++  readonly discard?: SourceControlRepositoryService.SourceControlRepositoryService["Service"]["discardClone"];
+ }) {
+   const created: Array<{ projectId: ProjectId; workspaceRoot: string }> = [];
+   const cloned: Array<ProjectId> = [];
+@@ -37,7 +40,7 @@ function makeHarness(options?: {
+       }),
+     onCloned: (input) => Effect.sync(() => void cloned.push(input.projectId)),
+   };
+-  const layer = ProjectCloneTracker.layer.pipe(
++  const layer = trackedLayer.pipe(
+     Layer.provide(
+       Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+         prepareClone: (input) =>
+@@ -55,7 +58,9 @@ function makeHarness(options?: {
+               remoteUrl: input.remoteUrl ?? "",
+               repository: null,
+             })),
+-        discardClone: (destination) => Effect.sync(() => void discarded.push(destination)),
++        discardClone:
++          options?.discard ??
++          ((destination) => Effect.sync(() => void discarded.push(destination))),
+       }),
+     ),
+   );
+@@ -63,6 +68,27 @@ function makeHarness(options?: {
+ }
+ 
+ describe("ProjectCloneTracker", () => {
++  it.effect("keeps cleanup owned after cancellation interrupts the detached clone", () => {
++    const cleaning = Deferred.makeUnsafe<void>();
++    const release = Deferred.makeUnsafe<void>();
++    const harness = makeHarness({
++      clone: () => Effect.never,
++      discard: () =>
++        Deferred.succeed(cleaning, undefined).pipe(Effect.andThen(Deferred.await(release))),
++    });
++    return Effect.gen(function* () {
++      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
++      const activity = yield* UpdateActivity;
++      yield* tracker.start(startInput, harness.hooks);
++      const cancellation = yield* tracker.cancel(projectId).pipe(Effect.forkChild);
++      yield* Deferred.await(cleaning);
++      expect((yield* activity.trySealIdle).status).toBe("busy");
++      yield* Deferred.succeed(release, undefined);
++      expect(yield* Fiber.join(cancellation)).toBe(true);
++      expect((yield* activity.state).outstanding).toBe(0);
++    }).pipe(Effect.provide(harness.layer));
++  });
++
+   it.effect("creates the project first and reports the clone through the stream", () => {
+     const release = Deferred.makeUnsafe<void>();
+     const harness = makeHarness({
+@@ -147,15 +173,19 @@ describe("ProjectCloneTracker", () => {
+     const harness = makeHarness({ clone: () => Effect.never });
+     return Effect.gen(function* () {
+       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
++      const activity = yield* UpdateActivity;
+       yield* tracker.start(startInput, harness.hooks);
++      expect((yield* activity.trySealIdle).status).toBe("busy");
+       yield* Effect.yieldNow;
+ 
+       expect(yield* tracker.cancel(projectId)).toBe(true);
+       expect((yield* tracker.get(projectId))?.phase).toBe("cancelled");
+       expect(harness.discarded).toEqual(["/workspace/t3code"]);
++      expect((yield* activity.state).outstanding).toBe(0);
+       // Nothing left to cancel; retry is what brings it back.
+       expect(yield* tracker.cancel(projectId)).toBe(false);
+       expect(yield* tracker.retry(projectId)).toBe(true);
++      expect((yield* activity.trySealIdle).status).toBe("busy");
+     }).pipe(Effect.provide(harness.layer));
+   });
+ 
+@@ -169,12 +199,21 @@ describe("ProjectCloneTracker", () => {
+     };
+     return Effect.gen(function* () {
+       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
++      const activity = yield* UpdateActivity;
+       yield* tracker.start(startInput, hooks);
+       yield* Effect.yieldNow;
+       expect((yield* tracker.get(projectId))?.phase).toBe("done");
++      expect((yield* activity.trySealIdle).status).toBe("busy");
+       expect(yield* tracker.cancel(projectId)).toBe(false);
+       expect(harness.discarded).toEqual([]);
+       yield* Deferred.succeed(gate, undefined);
++      while ((yield* activity.state).outstanding > 0) {
++        const state = yield* activity.state;
++        if (state.outstanding > 0) yield* activity.awaitChange(state.revision);
++      }
++      const claim = yield* activity.trySealIdle;
++      expect(claim.status).toBe("sealed");
++      if (claim.status === "sealed") claim.seal.release();
+     }).pipe(Effect.provide(harness.layer));
+   });
+ 
+@@ -187,7 +226,7 @@ describe("ProjectCloneTracker", () => {
+           return { cwd: input.destinationPath, remoteUrl: "", repository: null };
+         }),
+     });
+-    const layer = ProjectCloneTracker.layer.pipe(
++    const layer = trackedLayer.pipe(
+       Layer.provide(
+         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+           prepareClone: (input) =>
+@@ -248,7 +287,7 @@ describe("ProjectCloneTracker", () => {
+ 
+   it.effect("does not create a project when the clone cannot be prepared", () => {
+     const harness = makeHarness();
+-    const layer = ProjectCloneTracker.layer.pipe(
++    const layer = trackedLayer.pipe(
+       Layer.provide(
+         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+           prepareClone: () =>
+diff --git a/apps/server/src/project/ProjectCloneTracker.ts b/apps/server/src/project/ProjectCloneTracker.ts
+index 854c97817529d6726ca4f734c251df4efff8b7ab..7b41490af65546676706ceb46733434c04381edf 100644
+--- a/apps/server/src/project/ProjectCloneTracker.ts
++++ b/apps/server/src/project/ProjectCloneTracker.ts
+@@ -29,6 +29,7 @@ import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ 
+ import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
++import { UpdateActivity } from "../updateActivity.ts";
+ 
+ /**
+  * Runs repository clones that back newly added projects and tracks their
+@@ -115,6 +116,7 @@ interface TrackedClone {
+ /** @public Service construction is part of the canonical Effect module API. */
+ export const make = Effect.gen(function* () {
+   const repositories = yield* SourceControlRepositoryService.SourceControlRepositoryService;
++  const activity = yield* UpdateActivity;
+   const clones = yield* Ref.make(new Map<ProjectId, TrackedClone>());
+   const changes = yield* PubSub.unbounded<ReadonlyArray<ProjectCloneSnapshot>>();
+   const retentionFibers = new Map<ProjectId, Fiber.Fiber<unknown, never>>();
+@@ -125,7 +127,10 @@ export const make = Effect.gen(function* () {
+   // start/cancel/retry/discard mutate the same entry and the same directory;
+   // one at a time keeps a double-clicked Retry from racing two clones into it.
+   const actionLock = yield* Semaphore.make(1);
+-  const locked = <A, E, R>(effect: Effect.Effect<A, E, R>) => actionLock.withPermits(1)(effect);
++  const locked = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
++    activity
++      .track("project clone action", actionLock.withPermits(1)(effect))
++      .pipe(Effect.catchTag("UpdateActivityUnavailableError", Effect.die));
+ 
+   const list = Ref.get(clones).pipe(
+     Effect.map((current) => Array.from(current.values(), (tracked) => tracked.snapshot)),
+@@ -249,7 +254,9 @@ export const make = Effect.gen(function* () {
+       const current = yield* Ref.get(clones);
+       const tracked = current.get(projectId);
+       if (!tracked) return;
+-      const fiber = yield* runClone(projectId, tracked).pipe(Effect.forkIn(cloneScope));
++      const fiber = yield* activity
++        .forkTracked("project clone", runClone(projectId, tracked), cloneScope)
++        .pipe(Effect.orDie);
+       yield* Ref.update(clones, (map) => {
+         const existing = map.get(projectId);
+         if (!existing) return map;
 diff --git a/apps/server/src/provider/AntigravityInstallation.test.ts b/apps/server/src/provider/AntigravityInstallation.test.ts
 index 0528cb4972c9b07866457d4fc9a2ebe8e6aecc6d..529f5f15ddc80c56778617007aed2ac7720c294b 100644
 --- a/apps/server/src/provider/AntigravityInstallation.test.ts
@@ -673,10 +848,10 @@ index ebcbd496ee3e3d5718a49198d961d785d4dfd676..d2eab0aaff771a30818d9bf330b689cf
          return next;
        }).pipe(Effect.uninterruptible),
 diff --git a/apps/server/src/provider/Layers/ProviderRegistry.test.ts b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
-index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a09a4cc42d 100644
+index aa1317f99901135d47279d44066078af900550e4..a5b1faa642b1b64d14397315e387747163529e38 100644
 --- a/apps/server/src/provider/Layers/ProviderRegistry.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
-@@ -2273,8 +2273,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2288,8 +2288,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
            const providerRegistryLayer = ProviderRegistryLive.pipe(
              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -686,7 +861,7 @@ index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a0
              Layer.provideMerge(
                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
              ),
-@@ -2375,8 +2375,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2388,8 +2388,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
            const providerRegistryLayer = ProviderRegistryLive.pipe(
              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -696,7 +871,7 @@ index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a0
              Layer.provideMerge(
                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
              ),
-@@ -2492,8 +2492,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2505,8 +2505,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
            const providerRegistryLayer = ProviderRegistryLive.pipe(
              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -706,7 +881,7 @@ index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a0
              Layer.provideMerge(
                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
              ),
-@@ -2555,8 +2555,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2568,8 +2568,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
              yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
              const providerRegistryLayer = ProviderRegistryLive.pipe(
                Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -717,10 +892,10 @@ index 53d3362ee0c0748944a381d968c417acda67c065..74fc1fcfbc3a44c3f745d5250249a5a0
                  Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
                ),
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index 866246aabed3df96ab29ee1b130b49cdd9a83abb..48c3f95d5c3b02a299e75b662f774445c524f5d2 100644
+index 199efdb3638522fb7506450351536caca8f45e78..fe7099fbf6cff0dc918d0802031ab97684502660 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -547,6 +547,7 @@ const buildAppUnderTest = (options?: {
+@@ -550,6 +550,7 @@ const buildAppUnderTest = (options?: {
      providerAuth?: Partial<ProviderAuthService["Service"]>;
      providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
      antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
@@ -728,7 +903,15 @@ index 866246aabed3df96ab29ee1b130b49cdd9a83abb..48c3f95d5c3b02a299e75b662f774445
      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
      externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
      vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
-@@ -1076,6 +1077,17 @@ const buildAppUnderTest = (options?: {
+@@ -965,6 +966,7 @@ const buildAppUnderTest = (options?: {
+           }),
+           WorktreeSetupTracker.layer,
+           ProjectCloneTracker.layer.pipe(
++            Layer.provide(UpdateActivityLive),
+             Layer.provide(
+               Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+                 ...options?.layers?.sourceControlRepositoryService,
+@@ -1086,6 +1088,17 @@ const buildAppUnderTest = (options?: {
      );
  
      const appLayer = servedRoutesLayer.pipe(
@@ -746,7 +929,7 @@ index 866246aabed3df96ab29ee1b130b49cdd9a83abb..48c3f95d5c3b02a299e75b662f774445
        Layer.provide(resourceTelemetryLayer),
        Layer.provide(UsageService.layerTest),
        Layer.provide(
-@@ -12506,3 +12518,229 @@ it.live(
+@@ -12841,3 +12854,244 @@ it.live(
      }).pipe(Effect.provide(NodeServices.layer)),
    120_000,
  );
@@ -874,6 +1057,21 @@ index 866246aabed3df96ab29ee1b130b49cdd9a83abb..48c3f95d5c3b02a299e75b662f774445
 +            assert.equal(refused._tag, "UpdateAdmissionClosedError");
 +            assert.equal(updates, 0);
 +
++            const cloneStart = yield* client[WS_METHODS.projectCloneStart]({
++              projectId: ProjectId.make("maintenance-clone"),
++              title: "Blocked clone",
++              createdAt: "2026-01-01T00:00:00.000Z",
++              remoteUrl: "https://github.com/example/repo.git",
++              destinationPath: "/tmp/maintenance-clone-must-not-start",
++            }).pipe(Effect.flip);
++            assert.equal(cloneStart._tag, "UpdateAdmissionClosedError");
++            for (const method of [WS_METHODS.projectCloneRetry, WS_METHODS.projectCloneCancel]) {
++              const refusedClone = yield* client[method]({
++                projectId: ProjectId.make("maintenance-clone"),
++              }).pipe(Effect.flip);
++              assert.equal(refusedClone._tag, "UpdateAdmissionClosedError");
++            }
++
 +            const settings = yield* client[WS_METHODS.serverGetSettings]({});
 +            assert.isObject(settings);
 +            const policy = yield* client[WS_METHODS.subscribeBackgroundPolicy]({}).pipe(
@@ -977,10 +1175,10 @@ index 866246aabed3df96ab29ee1b130b49cdd9a83abb..48c3f95d5c3b02a299e75b662f774445
 +  );
 +});
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 818770933b0ff698193ee67fa24f4284be5a2bd2..7d7e60de5a48db406c8eba34531708d7880bee48 100644
+index fbaad63fad1867f1e9e1b725cf95741bec3d38f0..59813b5a57951f190194e6181343c334e9859554 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -656,15 +656,22 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -664,15 +664,22 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // `providerInstances` hydration merges `settings.providers.<kind>`
    // with explicit `providerInstances` entries on boot.
    Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -1346,10 +1544,10 @@ index 9cdd21393fead7190e485a65a4300f36975efc3c..da8448342d7b492612a0ebe27890e081
  
  export class EnvironmentHttpApi extends HttpApi.make("environment")
 diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
-index 007120dcba05f45161c596ed6cb796da3e17f74c..c078efb8b7a2c9a16522df9b41bb4bf1ba03dc49 100644
+index 978a0459e69bc46e8aa24a4ef4dca58081fb8b01..34f6683bbf023f22ad0ba712c8afa1aaaa8fccde 100644
 --- a/packages/contracts/src/index.ts
 +++ b/packages/contracts/src/index.ts
-@@ -41,5 +41,6 @@ export * from "./preview.ts";
+@@ -42,5 +42,6 @@ export * from "./preview.ts";
  export * from "./previewAutomation.ts";
  export * from "./resourceTelemetry.ts";
  export * from "./usage.ts";
@@ -1357,7 +1555,7 @@ index 007120dcba05f45161c596ed6cb796da3e17f74c..c078efb8b7a2c9a16522df9b41bb4bf1
  export * from "./rpc.ts";
  export * from "./worktreeSetup.ts";
 diff --git a/packages/contracts/src/rpc.test.ts b/packages/contracts/src/rpc.test.ts
-index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd30fc1588 100644
+index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..d364d2cda9526862d5bbb335a0009a1afe23f437 100644
 --- a/packages/contracts/src/rpc.test.ts
 +++ b/packages/contracts/src/rpc.test.ts
 @@ -2,7 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
@@ -1370,7 +1568,7 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
  
  /**
   * The client always sends `environmentThemes`, including to servers built
-@@ -29,3 +30,166 @@ describe("subscribeServerConfig payload compatibility", () => {
+@@ -29,3 +30,174 @@ describe("subscribeServerConfig payload compatibility", () => {
      expect(decoded).toEqual({});
    });
  });
@@ -1383,6 +1581,10 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 + */
 +describe("update admission classification", () => {
 +  const admitted = [
++    "projectClone.start",
++    "projectClone.cancel",
++    "projectClone.retry",
++    "worktreeSetup.cancel",
 +    "orchestration.dispatchCommand",
 +    "server.refreshProviders",
 +    "server.updateProvider",
@@ -1443,6 +1645,10 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 +    "device.action",
 +  ];
 +  const excluded = [
++    "subscribeProjectClones",
++    "subscribeWorktreeSetup",
++    "pullRequests.routing",
++    "pullRequests.routingIdentity",
 +    // Reads.
 +    "server.probe",
 +    "server.getConfig",
@@ -1538,10 +1744,10 @@ index 6a9adebd85d6eb6f47a678237ccb61a477b82a67..180f4408ec693336aae281e07d8938bd
 +  });
 +});
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf4c27c388 100644
+index 9096dd6e27f9dff508c26e6f1209a4f99ffbfde9..39a78ecb2bdc0f8b7aceeb7b312c563405218616 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
-@@ -259,6 +259,7 @@ import {
+@@ -267,6 +267,7 @@ import {
    SourceControlRepositoryInfo,
    SourceControlRepositoryLookupInput,
  } from "./sourceControl.ts";
@@ -1549,7 +1755,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  import { VcsError } from "./vcs.ts";
  
  export const WS_METHODS = {
-@@ -428,13 +429,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
+@@ -440,13 +441,13 @@ const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding,
    payload: ServerUpsertKeybindingInput,
    success: ServerUpsertKeybindingResult,
    error: Schema.Union([KeybindingsConfigError, EnvironmentAuthorizationError]),
@@ -1565,7 +1771,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
    payload: Schema.Struct({}),
-@@ -463,13 +464,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
+@@ -475,13 +476,13 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders,
    }),
    success: ServerProviderUpdatedPayload,
    error: Schema.Union([EnvironmentAuthorizationError, ProviderSetupError]),
@@ -1581,7 +1787,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const ProviderSetupRpcError = Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]);
  
-@@ -477,31 +478,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
+@@ -489,31 +490,31 @@ const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeReset
    payload: ProviderConsumeResetCreditInput,
    success: ProviderConsumeResetCreditResult,
    error: Schema.Union([ProviderSetupError, UsageLimitSourceError, EnvironmentAuthorizationError]),
@@ -1618,7 +1824,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsProviderAuthSubscribeRpc = Rpc.make(WS_METHODS.providerAuthSubscribe, {
    payload: ProviderSetupInput,
-@@ -514,13 +515,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
+@@ -526,13 +527,13 @@ const WsProviderInstallStartRpc = Rpc.make(WS_METHODS.providerInstallStart, {
    payload: ProviderSetupInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
@@ -1634,7 +1840,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsProviderInstallSubscribeRpc = Rpc.make(WS_METHODS.providerInstallSubscribe, {
    payload: ProviderSetupInput,
-@@ -533,7 +534,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
+@@ -545,7 +546,7 @@ const WsProviderInstallRemoveRpc = Rpc.make(WS_METHODS.providerInstallRemove, {
    payload: ProviderSetupInput,
    success: ProviderInstallState,
    error: ProviderSetupRpcError,
@@ -1643,7 +1849,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsServerUpdateServerRpc = Rpc.make(WS_METHODS.serverUpdateServer, {
    payload: ServerSelfUpdateInput,
-@@ -564,7 +565,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
+@@ -576,7 +577,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
    payload: Schema.Struct({ patch: ServerSettingsPatch }),
    success: ServerSettings,
    error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
@@ -1652,7 +1858,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
    payload: Schema.Struct({}),
-@@ -631,7 +632,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
+@@ -643,7 +644,7 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
    payload: ServerSignalProcessInput,
    success: ServerSignalProcessResult,
    error: EnvironmentAuthorizationError,
@@ -1661,7 +1867,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsCloudGetRelayClientStatusRpc = Rpc.make(WS_METHODS.cloudGetRelayClientStatus, {
    payload: Schema.Struct({}),
-@@ -644,7 +645,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
+@@ -656,7 +657,7 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
    success: RelayClientInstallProgressEventSchema,
    error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
    stream: true,
@@ -1670,7 +1876,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
    payload: ClientActivityReportInput,
-@@ -743,49 +744,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
+@@ -755,49 +756,49 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
    payload: PullRequestActionInput,
    success: Schema.Void,
    error: PullRequestRpcError,
@@ -1728,7 +1934,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsPullRequestsInvalidateRpc = Rpc.make(WS_METHODS.pullRequestsInvalidate, {
    payload: PullRequestInvalidateInput,
-@@ -815,7 +816,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
+@@ -827,7 +828,7 @@ const WsPullRequestsRequestReviewersRpc = Rpc.make(WS_METHODS.pullRequestsReques
    payload: PullRequestReviewerRequestInput,
    success: Schema.Void,
    error: PullRequestRpcError,
@@ -1737,7 +1943,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  /** Read when the label menu opens, for the same reason the reviewer candidates are. */
  const WsPullRequestsLabelCandidatesRpc = Rpc.make(WS_METHODS.pullRequestsLabelCandidates, {
-@@ -828,7 +829,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
+@@ -840,7 +841,7 @@ const WsPullRequestsSetLabelsRpc = Rpc.make(WS_METHODS.pullRequestsSetLabels, {
    payload: PullRequestLabelChangeInput,
    success: Schema.Void,
    error: PullRequestRpcError,
@@ -1746,14 +1952,39 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsSourceControlLookupRepositoryRpc = Rpc.make(WS_METHODS.sourceControlLookupRepository, {
    payload: SourceControlRepositoryLookupInput,
-@@ -840,13 +841,13 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
+@@ -852,7 +853,7 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
    payload: SourceControlCloneRepositoryInput,
    success: SourceControlCloneRepositoryResult,
    error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
 -});
 +}).middleware(UpdateAdmissionRpcMiddleware);
  
- const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPublishRepository, {
+ // Clone-backed project creation. `start` returns once the project exists and
+ // the clone is running; progress arrives on the subscription.
+@@ -864,19 +865,19 @@ const WsProjectCloneStartRpc = Rpc.make(WS_METHODS.projectCloneStart, {
+     OrchestrationDispatchCommandError,
+     EnvironmentAuthorizationError,
+   ]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProjectCloneCancelRpc = Rpc.make(WS_METHODS.projectCloneCancel, {
+   payload: ProjectCloneActionInput,
+   success: ProjectCloneActionResult,
+   error: EnvironmentAuthorizationError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsProjectCloneRetryRpc = Rpc.make(WS_METHODS.projectCloneRetry, {
+   payload: ProjectCloneActionInput,
+   success: ProjectCloneActionResult,
+   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsSubscribeProjectClonesRpc = Rpc.make(WS_METHODS.subscribeProjectClones, {
+   payload: ProjectCloneSubscribeInput,
+@@ -889,7 +890,7 @@ const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPub
    payload: SourceControlPublishRepositoryInput,
    success: SourceControlPublishRepositoryResult,
    error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
@@ -1762,7 +1993,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
    payload: ProjectSearchEntriesInput,
-@@ -876,12 +877,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
+@@ -919,12 +920,12 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
    payload: ProjectWriteFileInput,
    success: ProjectWriteFileResult,
    error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
@@ -1777,7 +2008,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
    payload: FilesystemBrowseInput,
-@@ -904,7 +905,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
+@@ -947,7 +948,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
      AgentSessionScanError,
      EnvironmentAuthorizationError,
    ]),
@@ -1786,7 +2017,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
    payload: AssetCreateUrlInput,
-@@ -916,18 +917,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
+@@ -959,18 +960,18 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
    payload: AttachmentCreateUploadUrlInput,
    success: AttachmentCreateUploadUrlResult,
    error: Schema.Union([AttachmentUploadSigningKeyError, EnvironmentAuthorizationError]),
@@ -1808,7 +2039,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
    payload: VcsStatusInput,
-@@ -940,7 +941,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
+@@ -983,7 +984,7 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
    payload: VcsPullInput,
    success: VcsPullResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
@@ -1817,7 +2048,15 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
    payload: VcsStatusInput,
-@@ -966,7 +967,7 @@ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+@@ -1002,14 +1003,14 @@ const WsWorktreeSetupCancelRpc = Rpc.make(WS_METHODS.worktreeSetupCancel, {
+   payload: WorktreeSetupCancelInput,
+   success: WorktreeSetupCancelResult,
+   error: EnvironmentAuthorizationError,
+-});
++}).middleware(UpdateAdmissionRpcMiddleware);
+ 
+ const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
+   payload: GitRunStackedActionInput,
    success: GitActionProgressEvent,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
    stream: true,
@@ -1826,7 +2065,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
    payload: GitPullRequestRefInput,
-@@ -978,7 +979,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
+@@ -1021,7 +1022,7 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
    payload: GitPreparePullRequestThreadInput,
    success: GitPreparePullRequestThreadResult,
    error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
@@ -1835,7 +2074,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
    payload: VcsListRefsInput,
-@@ -990,29 +991,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
+@@ -1033,29 +1034,29 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
    payload: VcsCreateWorktreeInput,
    success: VcsCreateWorktreeResult,
    error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
@@ -1870,7 +2109,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  /**
   * Ephemeral live diff preview for compact/mobile surfaces.
-@@ -1035,7 +1036,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
+@@ -1078,7 +1079,7 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
    payload: TerminalOpenInput,
    success: TerminalSessionSnapshot,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
@@ -1879,7 +2118,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
    payload: TerminalAttachInput,
-@@ -1047,56 +1048,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
+@@ -1090,56 +1091,56 @@ const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
  const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
    payload: TerminalWriteInput,
    error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
@@ -1946,7 +2185,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
    payload: PreviewListInput,
-@@ -1158,23 +1159,23 @@ const WsDeviceConfigureRpc = Rpc.make(WS_METHODS.deviceConfigure, {
+@@ -1201,23 +1202,23 @@ const WsDeviceConfigureRpc = Rpc.make(WS_METHODS.deviceConfigure, {
    payload: DeviceConfigureInput,
    success: DeviceServiceState,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
@@ -1974,7 +2213,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsDeviceDetailRpc = Rpc.make(WS_METHODS.deviceDetail, {
    payload: DeviceDetailInput,
-@@ -1186,7 +1187,7 @@ const WsDeviceActionRpc = Rpc.make(WS_METHODS.deviceAction, {
+@@ -1229,7 +1230,7 @@ const WsDeviceActionRpc = Rpc.make(WS_METHODS.deviceAction, {
    payload: DeviceActionInput,
    success: DeviceDetail,
    error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
@@ -1983,7 +2222,7 @@ index d792a31885c1a3ddc07277b02d54b1dc4b4ddf7f..996dee39fcd255e8d681b4bececa2dcf
  
  const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
    payload: Schema.Struct({}),
-@@ -1199,7 +1200,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
+@@ -1242,7 +1243,7 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
    payload: ClientOrchestrationCommand,
    success: OrchestrationRpcSchemas.dispatchCommand.output,
    error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),

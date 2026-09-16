@@ -1,5 +1,5 @@
 diff --git a/apps/server/integration/OrchestrationEngineHarness.integration.ts b/apps/server/integration/OrchestrationEngineHarness.integration.ts
-index 4d8a384ee9978a7e482f7f083235513504888f98..45ae7568f7b734f81f02459a0bd87d1ae352514d 100644
+index 510478a57a0230529ae360cc7dd121693378f3f3..628bbd0941cf853a2ba297482459ac69a3a0defb 100644
 --- a/apps/server/integration/OrchestrationEngineHarness.integration.ts
 +++ b/apps/server/integration/OrchestrationEngineHarness.integration.ts
 @@ -89,6 +89,7 @@ import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
@@ -69,7 +69,7 @@ index 0d041b36ecb8a01505b13c5f9298b5cafbe36f84..719499407d4a88ce6ac2eed9daddc011
  
      return {
 diff --git a/apps/server/src/bin.test.ts b/apps/server/src/bin.test.ts
-index 5ba2f281126cd410173cb1033fb01b61674f4680..7cb446fd0d2bad6dfdf32cbda54e4bede7229c40 100644
+index c1bea133f718c9c4f80c8fe79b618e295b0b52a8..a4a0678e04e8fd71e8cf25f0bde3ab7462331852 100644
 --- a/apps/server/src/bin.test.ts
 +++ b/apps/server/src/bin.test.ts
 @@ -34,6 +34,7 @@ import {
@@ -80,7 +80,7 @@ index 5ba2f281126cd410173cb1033fb01b61674f4680..7cb446fd0d2bad6dfdf32cbda54e4bed
  import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
  import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
  import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
-@@ -125,6 +126,7 @@ const makeCliTestServerConfig = (baseDir: string) =>
+@@ -126,6 +127,7 @@ const makeCliTestServerConfig = (baseDir: string) =>
  const makeProjectPersistenceLayer = (config: ServerConfig.ServerConfig["Service"]) =>
    Layer.mergeAll(
      OrchestrationLayerLive.pipe(
@@ -172,7 +172,7 @@ index dccb8b4be0f7bc35e700a4495296dca8a873766b..e9ef6074b12d3a7da70f640b67a1a2b3
  export type OrchestrationEngineError =
    | OrchestrationDispatchError
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
-index c1c6a8446a6a33fa89e8b4886832755e21573068..65562ccbd4123c595fe4729f51be302d93a0e9b6 100644
+index 7abc4f39f7f7e2f425703a90a43c96af70ca2a23..b31464cd182a4254938838089d16c9584d575012 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.test.ts
 @@ -27,7 +27,6 @@ import * as Effect from "effect/Effect";
@@ -436,7 +436,7 @@ index c1c6a8446a6a33fa89e8b4886832755e21573068..65562ccbd4123c595fe4729f51be302d
      const pullRequestRefreshCalls: string[] = [];
      const harness = await createHarness({
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index 147c36aaa8b4b99b739dbc1dd52b4539a72b24e4..dd3b9998da6d320a03c7ea6b0bf150861343feeb 100644
+index 72109501453cfd2dc3b92fa639ae986f0552cd7c..92120ef37c9d9d3b77fc49f7725d304c20aba7cf 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -19,8 +19,6 @@ import * as Effect from "effect/Effect";
@@ -479,7 +479,7 @@ index 147c36aaa8b4b99b739dbc1dd52b4539a72b24e4..dd3b9998da6d320a03c7ea6b0bf15086
      (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) =>
        refreshLocalGitStatusFromTurnCompletion(event).pipe(
          Effect.catchCause((cause) =>
-@@ -938,11 +942,23 @@ const make = Effect.gen(function* () {
+@@ -942,11 +946,23 @@ const make = Effect.gen(function* () {
        }),
      );
  
@@ -505,7 +505,7 @@ index 147c36aaa8b4b99b739dbc1dd52b4539a72b24e4..dd3b9998da6d320a03c7ea6b0bf15086
          if (
            event.type !== "thread.turn-start-requested" &&
            event.type !== "thread.message-sent" &&
-@@ -955,7 +971,7 @@ const make = Effect.gen(function* () {
+@@ -959,7 +975,7 @@ const make = Effect.gen(function* () {
      );
  
      yield* forkParked(
@@ -515,7 +515,7 @@ index 147c36aaa8b4b99b739dbc1dd52b4539a72b24e4..dd3b9998da6d320a03c7ea6b0bf15086
            event.type !== "turn.started" &&
            event.type !== "turn.completed" &&
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
-index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1ad7c22f61 100644
+index 4a2e99f3ebc01c7f478bb0140f5d23c138f264aa..ebc101bbceb1a393b01d0cd88a34d67cbc0718fe 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 @@ -19,12 +19,16 @@ import {
@@ -568,7 +568,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
      Layer.provideMerge(NodeServices.layer),
    );
  }
-@@ -470,6 +485,7 @@ describe("OrchestrationEngine", () => {
+@@ -471,6 +486,7 @@ describe("OrchestrationEngine", () => {
        Layer.provide(ThreadBackgroundLiveness.layer),
        Layer.provide(OrchestrationCommandReceiptRepositoryLive),
        Layer.provide(SqlitePersistenceMemory),
@@ -576,7 +576,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
        Layer.provideMerge(NodeServices.layer),
      );
  
-@@ -477,6 +493,7 @@ describe("OrchestrationEngine", () => {
+@@ -478,6 +494,7 @@ describe("OrchestrationEngine", () => {
  
      const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
      expect(await runtime.runPromise(engine.latestSequence)).toBe(7);
@@ -584,7 +584,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
      const result = await runtime.runPromise(
        engine.dispatch({
          type: "thread.meta.update",
-@@ -488,6 +505,8 @@ describe("OrchestrationEngine", () => {
+@@ -489,6 +506,8 @@ describe("OrchestrationEngine", () => {
  
      expect(result.sequence).toBe(8);
      expect(await runtime.runPromise(engine.latestSequence)).toBe(8);
@@ -593,7 +593,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
      expect(fullSnapshotReadCount).toBe(0);
  
      await runtime.dispose();
-@@ -1517,6 +1536,7 @@ describe("OrchestrationEngine", () => {
+@@ -1518,6 +1537,7 @@ describe("OrchestrationEngine", () => {
          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
          Layer.provide(RepositoryIdentityResolver.layer),
          Layer.provide(SqlitePersistenceMemory),
@@ -601,7 +601,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
          Layer.provideMerge(ServerConfigLayer),
          Layer.provideMerge(NodeServices.layer),
        ),
-@@ -1625,6 +1645,7 @@ describe("OrchestrationEngine", () => {
+@@ -1626,6 +1646,7 @@ describe("OrchestrationEngine", () => {
          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
          Layer.provide(RepositoryIdentityResolver.layer),
          Layer.provide(SqlitePersistenceMemory),
@@ -609,7 +609,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
          Layer.provide(NodeServices.layer),
        ),
      );
-@@ -1774,6 +1795,7 @@ describe("OrchestrationEngine", () => {
+@@ -1775,6 +1796,7 @@ describe("OrchestrationEngine", () => {
          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
          Layer.provide(RepositoryIdentityResolver.layer),
          Layer.provide(SqlitePersistenceMemory),
@@ -617,7 +617,7 @@ index 7ea1d588acfb9580821768918aa57c910e5b9d6b..d51061c93faa66e66c81be2d79265d1a
          Layer.provide(NodeServices.layer),
        ),
      );
-@@ -2125,3 +2147,297 @@ describe("OrchestrationEngine", () => {
+@@ -2126,3 +2148,297 @@ describe("OrchestrationEngine", () => {
      await system.dispose();
    });
  });
@@ -1056,7 +1056,7 @@ index fb2fadde5e63e61fb8e389b772304979580db4b3..29d17de12c71836f9e1a4f82921feef0
  });
  
 diff --git a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
-index f3df59a8e173522a5812710edea4ff1cbfa68ad8..2821167e1a9f9c27f43f825ae95db39716e4ffd9 100644
+index 6d25af4bfeb813ced0d5ae28b2570ceb98fdfdba..8896a6a53a91ae082a2b0d2cf1329a6ec061b5a6 100644
 --- a/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
 @@ -45,6 +45,7 @@ import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
@@ -1076,7 +1076,7 @@ index f3df59a8e173522a5812710edea4ff1cbfa68ad8..2821167e1a9f9c27f43f825ae95db397
      Layer.provideMerge(
        ServerConfig.layerTest(process.cwd(), {
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
-index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04491b0cec 100644
+index 000a3d9874adfcab91062474170fcb275eea014c..2b3daf09d9a37b60a88e37a6f57805c3a91d1104 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
 @@ -5,7 +5,7 @@ import * as NodePath from "node:path";
@@ -1146,7 +1146,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
  describe("ProviderCommandReactor", () => {
    let runtime: ManagedRuntime.ManagedRuntime<
      | OrchestrationEngineService
-@@ -174,6 +207,8 @@ describe("ProviderCommandReactor", () => {
+@@ -176,6 +209,8 @@ describe("ProviderCommandReactor", () => {
      readonly unreadableHistory?: boolean;
      readonly titleRegenerationCompletionDispatchFailures?: number;
      readonly titleRegenerationBeforeStart?: "one" | "two";
@@ -1155,7 +1155,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
      readonly serverActivation?: Effect.Effect<void>;
      readonly beforeReadySessionDispatch?: () => Effect.Effect<void>;
      readonly beforeTurnStartDispatch?: () => Effect.Effect<void>;
-@@ -192,7 +227,40 @@ describe("ProviderCommandReactor", () => {
+@@ -194,7 +229,40 @@ describe("ProviderCommandReactor", () => {
      createdBaseDirs.add(baseDir);
      const { stateDir } = deriveServerPathsSync(baseDir, undefined);
      createdStateDirs.add(stateDir);
@@ -1197,7 +1197,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
      const tryHandlePromptCommand = vi.fn<ProviderAuthService["Service"]["tryHandlePromptCommand"]>(
        input?.tryHandlePromptCommandEffect ?? (() => Effect.succeed(false)),
      );
-@@ -394,9 +462,8 @@ describe("ProviderCommandReactor", () => {
+@@ -396,9 +464,8 @@ describe("ProviderCommandReactor", () => {
        },
        rollbackConversation: () => unsupported(),
        uploadFeedback: () => unsupported(),
@@ -1209,7 +1209,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
      };
  
      const orchestrationLayer = OrchestrationEngineLive.pipe(
-@@ -427,12 +494,20 @@ describe("ProviderCommandReactor", () => {
+@@ -429,12 +496,20 @@ describe("ProviderCommandReactor", () => {
            dispatch: (command) => {
              if (command.type === "thread.title.regeneration.complete") {
                titleRegenerationCompletionDispatchAttempts += 1;
@@ -1234,7 +1234,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
              }
              const isReplay =
                command.type === "thread.turn.start" &&
-@@ -454,7 +529,25 @@ describe("ProviderCommandReactor", () => {
+@@ -456,7 +531,25 @@ describe("ProviderCommandReactor", () => {
              return engine.streamDomainEvents;
            },
            subscribeDomainEvents: engine.subscribeDomainEvents,
@@ -1260,7 +1260,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
          } satisfies OrchestrationEngineService["Service"];
        }),
      ).pipe(Layer.provide(orchestrationLayer));
-@@ -462,6 +555,7 @@ describe("ProviderCommandReactor", () => {
+@@ -464,6 +557,7 @@ describe("ProviderCommandReactor", () => {
        Layer.provideMerge(reactorOrchestrationLayer),
        Layer.provideMerge(projectionSnapshotLayer),
        Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -1268,53 +1268,60 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
        Layer.provide(Layer.mock(ProviderAuthService, { tryHandlePromptCommand })),
        Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
        Layer.provideMerge(
-@@ -579,16 +673,64 @@ describe("ProviderCommandReactor", () => {
+@@ -581,19 +675,69 @@ describe("ProviderCommandReactor", () => {
        );
      }
  
 -    scope = await Effect.runPromise(Scope.make("sequential"));
-     await Effect.runPromise(
--      reactor
--        .start()
--        .pipe(
--          Scope.provide(scope),
--          Effect.provideService(ServerActivation, input?.serverActivation),
--        ),
-+      Effect.gen(function* () {
-+        yield* reactor
-+          .start()
-+          .pipe(
-+            Scope.provide(startScope),
-+            Effect.provideService(ServerActivation, input?.serverActivation),
+-    const reactorScope = scope;
++    let reactorStarted = false;
+     const startReactor = () =>
+       Effect.runPromise(
+-        reactor
+-          .start()
+-          .pipe(
+-            Scope.provide(reactorScope),
+-            Effect.provideService(ServerActivation, input?.serverActivation),
+-          ),
++        Effect.gen(function* () {
++          yield* reactor
++            .start()
++            .pipe(
++              Scope.provide(startScope),
++              Effect.provideService(ServerActivation, input?.serverActivation),
++            );
++          // Events committed before registration were never queued for the reactor.
++          yield* engine.latestSequence.pipe(
++            Effect.flatMap((sequence) => SubscriptionRef.set(handledSequence, sequence)),
 +          );
-+        // Events committed before registration were never queued for the reactor.
-+        yield* engine.latestSequence.pipe(
-+          Effect.flatMap((sequence) => SubscriptionRef.set(handledSequence, sequence)),
-+        );
-+        // The other required consumers are not under test here; they consume
-+        // instantly so only this reactor's work can hold the registry busy.
-+        yield* Effect.forEach(passthroughConsumers, (name) =>
-+          engine.subscribeUpdateEvents(name).pipe(
-+            Effect.flatMap((subscription) =>
-+              Effect.forkScoped(
-+                subscription.run(() =>
-+                  SubscriptionRef.update(passthroughDeliveries, (count) => count + 1),
++          // The other required consumers are not under test here; they consume
++          // instantly so only this reactor's work can hold the registry busy.
++          yield* Effect.forEach(passthroughConsumers, (name) =>
++            engine.subscribeUpdateEvents(name).pipe(
++              Effect.flatMap((subscription) =>
++                Effect.forkScoped(
++                  subscription.run(() =>
++                    SubscriptionRef.update(passthroughDeliveries, (count) => count + 1),
++                  ),
++                  {
++                    startImmediately: true,
++                  },
 +                ),
-+                {
-+                  startImmediately: true,
-+                },
 +              ),
 +            ),
-+          ),
-+        ).pipe(Scope.provide(testScope));
-+      }),
-+    );
++          ).pipe(Scope.provide(testScope));
++          reactorStarted = true;
++        }),
+       );
+     if (!input?.deferReactorStart) await startReactor();
+-    const drain = () => Effect.runPromise(reactor.drain);
 +    // Local convenience: every committed event has reached every required
 +    // consumer and both reactor queues are empty. Detached children (title,
 +    // branch, send) are not awaited; the update activity registry owns those.
 +    const drain = () =>
 +      Effect.runPromise(
 +        Effect.gen(function* () {
++          if (!reactorStarted) return yield* reactor.drain;
 +          const latest = yield* engine.latestSequence;
 +          yield* SubscriptionRef.changes(handledSequence).pipe(
 +            Stream.filter((seen) => seen >= latest),
@@ -1334,25 +1341,25 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
 +      Stream.filter((sequence) => sequence > 0),
 +      Stream.runHead,
 +      Effect.asVoid,
-     );
--    const drain = () => Effect.runPromise(reactor.drain);
++    );
 +    // Kills the reactor's required consumer while the registry stays open.
 +    const stop = Scope.close(startScope, Exit.void);
  
      return {
        engine,
-@@ -621,7 +763,10 @@ describe("ProviderCommandReactor", () => {
+@@ -626,8 +770,11 @@ describe("ProviderCommandReactor", () => {
        generateThreadTitle,
        runtimeSessions,
        stateDir,
 +      activity,
        drain,
+       startReactor,
 +      awaitTitleRegenerationCompletionCommitted,
 +      stop,
        runEffect,
        get titleRegenerationCompletionDispatchAttempts() {
          return titleRegenerationCompletionDispatchAttempts;
-@@ -1009,6 +1154,164 @@ describe("ProviderCommandReactor", () => {
+@@ -1015,6 +1162,164 @@ describe("ProviderCommandReactor", () => {
      }),
    );
  
@@ -1517,7 +1524,7 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
    effectIt.effect("rejects /compact without conversation context", () =>
      Effect.gen(function* () {
        const harness = yield* Effect.promise(() => createHarness());
-@@ -1879,6 +2182,60 @@ describe("ProviderCommandReactor", () => {
+@@ -2008,6 +2313,60 @@ describe("ProviderCommandReactor", () => {
      expect(thread?.titleRegeneration).toBeNull();
    });
  
@@ -1579,10 +1586,10 @@ index 7f9796461cd58f935c1397a3ddcdc1f221c037f4..4037926f7fb628c0488675ea3daade04
      const harness = await createHarness({
        titleRegenerationBeforeStart: "two",
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a1e500a1f 100644
+index 5099df0eee3dd4e371218616247caa02f66659a8..70955341bc19daf7afe82255309c6b355eea2181 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-@@ -30,8 +30,6 @@ import * as Layer from "effect/Layer";
+@@ -29,8 +29,6 @@ import * as Layer from "effect/Layer";
  import * as Option from "effect/Option";
  import * as Schedule from "effect/Schedule";
  import * as Schema from "effect/Schema";
@@ -1591,15 +1598,15 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
  
  import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
  import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
-@@ -52,6 +50,7 @@ import {
-   type ProviderCommandReactorShape,
- } from "../Services/ProviderCommandReactor.ts";
- import { forkParked, ServerActivation } from "../../serverActivation.ts";
+@@ -55,6 +53,7 @@ import {
+   formatThreadTitleContext,
+   type ThreadTitleMessage,
+ } from "../../textGeneration/ThreadTitleContext.ts";
 +import { makeTrackedWorker, UpdateActivity } from "../../updateActivity.ts";
  import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
  import {
    resolveSourceControlWriterModelSelection,
-@@ -344,6 +343,14 @@ const make = Effect.gen(function* () {
+@@ -228,6 +227,14 @@ const make = Effect.gen(function* () {
      return resolveProjectSettings(settings, Option.isSome(thread) ? thread.value.projectId : null)
        .settings;
    });
@@ -1614,7 +1621,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
    const serverCommandId = (tag: string) =>
      crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
    const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
-@@ -807,9 +814,13 @@ const make = Effect.gen(function* () {
+@@ -691,9 +698,13 @@ const make = Effect.gen(function* () {
        projects: project ? [project] : [],
      });
      const refreshWorkspaceSnapshot = effectiveCwd
@@ -1631,7 +1638,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
        : Effect.void;
  
      const startProviderSession = (input?: {
-@@ -1273,7 +1284,9 @@ const make = Effect.gen(function* () {
+@@ -1189,7 +1200,9 @@ const make = Effect.gen(function* () {
          }),
        ),
    );
@@ -1642,7 +1649,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
      processThreadTitleRegenerationSafely,
    );
  
-@@ -1420,19 +1433,25 @@ const make = Effect.gen(function* () {
+@@ -1336,24 +1349,27 @@ const make = Effect.gen(function* () {
          ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
        };
  
@@ -1653,13 +1660,18 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
 -        ...generationInput,
 -      }).pipe(Effect.forkScoped);
 -
--      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
+-      if (
+-        thread.titleState?.source !== "manual" &&
+-        canReplaceThreadTitle(thread.title, event.payload.titleSeed)
+-      ) {
 -        yield* maybeGenerateThreadTitleForFirstTurn({
 +      yield* forkTracked(
 +        "worktree branch rename",
 +        maybeGenerateAndRenameWorktreeBranchForFirstTurn({
            threadId: event.payload.threadId,
 -          cwd: generationCwd,
+-          expectedTitle: thread.title,
+-          expectedVersion: thread.titleState?.version ?? null,
 +          branch: thread.branch,
 +          worktreePath: thread.worktreePath,
            ...generationInput,
@@ -1667,19 +1679,21 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
 +        }),
 +      );
 +
-+      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
++      if (thread.titleState?.source !== "manual" && canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
 +        yield* forkTracked(
 +          "thread title generation",
 +          maybeGenerateThreadTitleForFirstTurn({
 +            threadId: event.payload.threadId,
 +            cwd: generationCwd,
++            expectedTitle: thread.title,
++            expectedVersion: thread.titleState?.version ?? null,
 +            ...generationInput,
 +          }),
 +        );
        }
      }
  
-@@ -1533,7 +1552,7 @@ const make = Effect.gen(function* () {
+@@ -1454,7 +1470,7 @@ const make = Effect.gen(function* () {
              ),
            ),
          ),
@@ -1688,7 +1702,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
        );
        return;
      }
-@@ -1575,7 +1594,7 @@ const make = Effect.gen(function* () {
+@@ -1496,7 +1512,7 @@ const make = Effect.gen(function* () {
      if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
      yield* send.pipe(
        Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
@@ -1697,7 +1711,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
      );
    });
  
-@@ -1922,7 +1941,9 @@ const make = Effect.gen(function* () {
+@@ -1849,7 +1865,9 @@ const make = Effect.gen(function* () {
        }),
      );
  
@@ -1707,8 +1721,8 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
 +  const worker = yield* makeTrackedWorker(activity, "provider-command", processDomainEventSafely);
  
    const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
-     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
-@@ -1951,9 +1972,13 @@ const make = Effect.gen(function* () {
+     const pendingTitles = yield* findPendingThreadTitles().pipe(
+@@ -1881,9 +1899,13 @@ const make = Effect.gen(function* () {
        }
      });
  
@@ -1723,9 +1737,9 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
 +      .pipe(Effect.orDie);
 +    yield* forkParked(subscription.run(processEvent));
  
-     // The domain event stream is hot, so work pending before this reactor
-     // starts cannot be resumed. Correlated completions only clear the request
-@@ -1973,11 +1998,24 @@ const make = Effect.gen(function* () {
+     // Earlier events do not replay. Clear interrupted requests by their captured
+     // IDs, then schedule persisted refinements after subscribing to their events.
+@@ -1908,11 +1930,24 @@ const make = Effect.gen(function* () {
          );
        }),
      );
@@ -1734,18 +1748,18 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
 +    // acquired in this fiber, and the parked handshake matches forkParked.
      const activation = yield* ServerActivation;
      if (activation === undefined) {
--      yield* clearInterrupted;
+-      yield* recoverTitles;
 +      yield* activity
-+        .track("interrupted title regeneration cleanup", clearInterrupted)
++        .track("interrupted title regeneration cleanup", recoverTitles)
 +        .pipe(Effect.orDie);
      } else {
--      yield* forkParked(clearInterrupted);
+-      yield* forkParked(recoverTitles);
 +      const parked = yield* Deferred.make<void>();
 +      yield* forkTracked(
 +        "interrupted title regeneration cleanup",
 +        Deferred.succeed(parked, undefined).pipe(
 +          Effect.andThen(activation),
-+          Effect.andThen(clearInterrupted),
++          Effect.andThen(recoverTitles),
 +        ),
 +      ).pipe(Effect.orDie);
 +      yield* Deferred.await(parked);
@@ -1753,7 +1767,7 @@ index a9481d1502ebef35970e278473c4212a119dcc4c..53f7091c93dde909c36e8da9c9982f4a
    });
  
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
-index ce0420cb074a8a79d58759b9b587796b8a6f061d..0b2691ed716eca2a43380570df69544d244d3ddb 100644
+index b1204f5a7c55929889b828e15026c43037a60560..7ac894c557100dddf3e13bdc622c24e5babc5b85 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
 @@ -33,7 +33,6 @@ import * as Exit from "effect/Exit";
@@ -2040,7 +2054,7 @@ index ce0420cb074a8a79d58759b9b587796b8a6f061d..0b2691ed716eca2a43380570df69544d
      const harness = await createHarness();
      const now = "2026-01-01T00:00:00.000Z";
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index 5f33e25298a65373fe569d15c21972b9e88b66e7..ae87344dcdfca5a80623894f8c2c30fb7e38aa8a 100644
+index 26c55681a1bf663b037347db3e99917a391797d5..e2fa90f26c13ad84a70dcd9cbaa226e3140e0bff 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 @@ -29,8 +29,6 @@ import * as Effect from "effect/Effect";
@@ -2060,7 +2074,7 @@ index 5f33e25298a65373fe569d15c21972b9e88b66e7..ae87344dcdfca5a80623894f8c2c30fb
  import { canReplaceThreadTitle } from "../threadTitles.ts";
  
  const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
-@@ -1006,6 +1005,7 @@ const make = Effect.gen(function* () {
+@@ -1018,6 +1017,7 @@ const make = Effect.gen(function* () {
    const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
    const serverSettingsService = yield* ServerSettingsService;
    const checkpointStore = yield* CheckpointStore.CheckpointStore;
@@ -2068,7 +2082,7 @@ index 5f33e25298a65373fe569d15c21972b9e88b66e7..ae87344dcdfca5a80623894f8c2c30fb
    const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
      crypto.randomUUIDv4.pipe(
        Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
-@@ -2605,17 +2605,26 @@ const make = Effect.gen(function* () {
+@@ -2620,17 +2620,26 @@ const make = Effect.gen(function* () {
        }),
      );
  
@@ -3044,7 +3058,7 @@ index 4eb03a5cc036c868dd7681d7ce0b9d9af4136c15..9bd0eb50218925329cb4b8fcb975c83b
 +  });
 +}
 diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
-index 927d2a7d4b6f460573c82d9685ae1a9284d57f23..b4ca017b45b8a25ab5553130367f65c9b7e57c6f 100644
+index 1d86bc9813407f99eecba1b3a69307f1702b0f4f..d940d34e2e57dc168d8965ee239548aa891cd26c 100644
 --- a/apps/server/src/provider/Layers/ProviderService.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.test.ts
 @@ -76,8 +76,17 @@ import {
@@ -3193,7 +3207,7 @@ index 927d2a7d4b6f460573c82d9685ae1a9284d57f23..b4ca017b45b8a25ab5553130367f65c9
            Layer.provide(
              Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
            ),
-@@ -5017,6 +5042,7 @@ describe("agent browser access", () => {
+@@ -5018,6 +5043,7 @@ describe("agent browser access", () => {
              return undefined;
            }),
        }).pipe(
@@ -3201,7 +3215,7 @@ index 927d2a7d4b6f460573c82d9685ae1a9284d57f23..b4ca017b45b8a25ab5553130367f65c9
          Layer.provide(providerAdapterLayer),
          Layer.provide(directoryLayer),
          Layer.provide(options?.withoutOrchestration ? Layer.empty : projectionLayer),
-@@ -5148,3 +5174,723 @@ describe("agent browser access", () => {
+@@ -5149,3 +5175,723 @@ describe("agent browser access", () => {
      }).pipe(Effect.provide(NodeServices.layer)),
    );
  });
@@ -4360,7 +4374,7 @@ index cdac979c4dfdbf14f7323d12d82823bc18b6f03d..3b1733f6f7ea9f3475dcb0423f5bec3f
  });
  
 diff --git a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
-index a8036c426a94f5e8e1d6a41530769e9fead3c19e..8c0074df88b7a61f7d024403118257b4dcd9307c 100644
+index e36d04f08df31ab1a3546fc4f883b70bed2635a9..0d51b861aac4bb81bc414b6993e83babf27290f4 100644
 --- a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
 @@ -216,6 +216,7 @@ describe("ProviderSessionReaper", () => {
@@ -5422,10 +5436,10 @@ index 1e7cdc3f00e636e7e5347e427ad685154652673e..23a3267612507b1eeab1027f2912e889
            } satisfies OrchestrationEngineShape),
            Layer.succeed(ProjectionSnapshotQuery, {
 diff --git a/apps/server/src/server.test.ts b/apps/server/src/server.test.ts
-index d5ba7bc6bf565a8857d5f3c9e35340eda8faa18b..aef163b17faa2e5e7a0632ae39c76e792c425baf 100644
+index e24be9df8befef8ad0710a35488cae5955fe2b7f..7fa9189ee865a1d50fc41eaf79281c20df28282b 100644
 --- a/apps/server/src/server.test.ts
 +++ b/apps/server/src/server.test.ts
-@@ -972,6 +972,7 @@ const buildAppUnderTest = (options?: {
+@@ -982,6 +982,7 @@ const buildAppUnderTest = (options?: {
                }),
              dispatch: () => Effect.succeed({ sequence: 0 }),
              streamDomainEvents: Stream.empty,
@@ -5434,10 +5448,10 @@ index d5ba7bc6bf565a8857d5f3c9e35340eda8faa18b..aef163b17faa2e5e7a0632ae39c76e79
              ...options?.layers?.orchestrationEngine,
            }),
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 189d62dd8362222a077f17f52b197dfa3648defe..8c845bbbc4e1a05c84426c1eaff8f248f9f9e640 100644
+index e0aeecb3f7b86505df0754896e442b9a72d50564..a7ad54b2e14672a7567ddb0341456852c8538351 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -143,6 +143,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+@@ -144,6 +144,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
  import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
  import * as UsageService from "./usage/UsageService.ts";
  import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
@@ -5445,7 +5459,7 @@ index 189d62dd8362222a077f17f52b197dfa3648defe..8c845bbbc4e1a05c84426c1eaff8f248
  import {
    clearPersistedServerRuntimeState,
    makePersistedServerRuntimeState,
-@@ -483,6 +484,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -491,6 +492,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    Layer.provideMerge(GitLayerLive),
    Layer.provideMerge(VcsLayerLive),
    Layer.provideMerge(ProviderRuntimeLayerLive),
@@ -5487,10 +5501,10 @@ index 37fd210ee6da28ae63001381a57d66ef40e03ba0..bf6475d395616299cc65cf0d8f83e0ea
      }),
      Effect.provide(Layer.mergeAll(NodeServices.layer, ServerSettings.layerTest())),
 diff --git a/apps/server/src/serverRuntimeStartup.test.ts b/apps/server/src/serverRuntimeStartup.test.ts
-index 158606e95b19422e1735624751a17b110fc59af3..65619c3499ff88a6c521395c52128c5e3fa85f6c 100644
+index 4a8aca46bddae524a5317952bcbb80c06ae12bed..7e31d91873604c4cdf13092b4f1b8e42eb127180 100644
 --- a/apps/server/src/serverRuntimeStartup.test.ts
 +++ b/apps/server/src/serverRuntimeStartup.test.ts
-@@ -210,6 +210,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
+@@ -211,6 +211,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
            ),
          streamDomainEvents: Stream.empty,
          subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -5499,7 +5513,7 @@ index 158606e95b19422e1735624751a17b110fc59af3..65619c3499ff88a6c521395c52128c5e
          latestSequence: Effect.succeed(0),
        } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
        Effect.provide(NodeServices.layer),
-@@ -338,6 +340,8 @@ it.effect.each([
+@@ -340,6 +342,8 @@ it.effect.each([
            ),
          streamDomainEvents: Stream.empty,
          subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -5508,7 +5522,7 @@ index 158606e95b19422e1735624751a17b110fc59af3..65619c3499ff88a6c521395c52128c5e
          latestSequence: Effect.succeed(0),
        } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
        Effect.provide(NodeServices.layer),
-@@ -409,6 +413,8 @@ it.effect(
+@@ -412,6 +416,8 @@ it.effect(
              ),
            streamDomainEvents: Stream.empty,
            subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -5517,7 +5531,7 @@ index 158606e95b19422e1735624751a17b110fc59af3..65619c3499ff88a6c521395c52128c5e
            latestSequence: Effect.succeed(0),
          } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
          Effect.provide(NodeServices.layer),
-@@ -472,6 +478,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
+@@ -476,6 +482,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
            ),
          streamDomainEvents: Stream.empty,
          subscribeDomainEvents: Effect.succeed(Stream.empty),
@@ -5526,3 +5540,16 @@ index 158606e95b19422e1735624751a17b110fc59af3..65619c3499ff88a6c521395c52128c5e
          latestSequence: Effect.succeed(0),
        } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
        Effect.provideService(Crypto.Crypto, {
+diff --git a/apps/server/src/serverRuntimeStartup.worktreeSetup.test.ts b/apps/server/src/serverRuntimeStartup.worktreeSetup.test.ts
+index fda60d88971665c3fb4e290f3b163b5e8bab8c98..aaab24b4ce8ff8296593f3d5d322cfe5d543ab50 100644
+--- a/apps/server/src/serverRuntimeStartup.worktreeSetup.test.ts
++++ b/apps/server/src/serverRuntimeStartup.worktreeSetup.test.ts
+@@ -97,6 +97,8 @@ const run = (activities: ReadonlyArray<ReturnType<typeof recordedSetup>>) =>
+           }),
+         streamDomainEvents: Stream.empty,
+         subscribeDomainEvents: Effect.succeed(Stream.empty),
++        subscribeUpdateEvents: () => Effect.die("unused update subscription"),
++        initialSequence: 0,
+         latestSequence: Effect.succeed(0),
+       }),
+       Effect.provide(NodeServices.layer),

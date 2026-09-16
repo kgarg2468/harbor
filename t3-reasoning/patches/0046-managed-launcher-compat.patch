@@ -47,7 +47,7 @@ index 24495c4c2e8eb2684e198e126e0c517387f08ce1..35ad6cd6889ab373c6526589780bc8d3
        .makeDirectory(input.logsDir, { recursive: true })
 diff --git a/apps/server/src/cloud/managedServiceRuntime.test.ts b/apps/server/src/cloud/managedServiceRuntime.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8324a9da96fe92f2d34a028538f3a232b652d3e
+index 0000000000000000000000000000000000000000..050e2671c984879059ffb8149eea1aaba5179b98
 --- /dev/null
 +++ b/apps/server/src/cloud/managedServiceRuntime.test.ts
 @@ -0,0 +1,166 @@
@@ -154,7 +154,7 @@ index 0000000000000000000000000000000000000000..c8324a9da96fe92f2d34a028538f3a23
 +        }
 +        await expect(verifyManagedServiceRuntime(base, first)).rejects.toThrow();
 +        await expect(
-+          new Launcher(base, { protocol: 2, activeVersion: first }).run(),
++          new Launcher(base, { protocol: 3, activeVersion: first }).run(),
 +        ).rejects.toThrow();
 +      }));
 +  }
@@ -185,7 +185,7 @@ index 0000000000000000000000000000000000000000..c8324a9da96fe92f2d34a028538f3a23
 +            source,
 +          );
 +        await writeServiceState(statePath, {
-+          protocol: 2,
++          protocol: 3,
 +          activeVersion: first,
 +          ...(scenario === "recover"
 +            ? {

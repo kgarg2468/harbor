@@ -26,7 +26,7 @@ index c5871fa65d6638c5afff5d3d21eef0f98f664fa7..4c9cc99e6c173638a69a0ed27614ea6a
      () =>
        primary?.entry.target._tag === "PrimaryConnectionTarget"
 diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
-index 6769586f7fa86fe74d153d207f904b8266ad7243..fa1d7577ccef2700e230c80d937d9dd8e0807f3b 100644
+index c00565f45902521e02322764adf93abc32790433..c0b2c796f94c212595f3a530752d9af36b81cae7 100644
 --- a/apps/web/src/components/AppSidebarLayout.tsx
 +++ b/apps/web/src/components/AppSidebarLayout.tsx
 @@ -23,6 +23,7 @@ import {
@@ -55,21 +55,21 @@ index 6769586f7fa86fe74d153d207f904b8266ad7243..fa1d7577ccef2700e230c80d937d9dd8
        </SidebarProvider>
      </PanelAnimationSuppressionProvider>
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c869808a7c9 100644
+index 38f773cf037e0141d5a61cb326db2a92af551223..d0cb458f00f721eb32dfaed5ad4f1bde6651f5a0 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -227,6 +227,7 @@ import {
-   CheckCircle2Icon,
+@@ -228,6 +228,7 @@ import {
    ChevronDownIcon,
+   DownloadIcon,
    GitBranchIcon,
 +  LockIcon,
    Minimize2Icon,
    PaperclipIcon,
    WifiOffIcon,
-@@ -328,7 +329,13 @@ import {
- } from "@t3tools/client-runtime/state/threads";
- import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
- import { vcsEnvironment } from "../state/vcs";
+@@ -341,7 +342,13 @@ import { vcsEnvironment } from "../state/vcs";
+ import { sourceControlEnvironment } from "../state/sourceControl";
+ import { useProjectClone } from "../state/projectClones";
+ import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
 -import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 +import { useEnvironments, useNewWorkPolicy, usePrimaryEnvironment } from "../state/environments";
 +import { describeNewWorkDenial } from "../state/preferredEnvironment";
@@ -81,7 +81,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
  import {
    useProject,
    useProjects,
-@@ -876,6 +883,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -892,6 +899,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
    const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
    const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
    const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
@@ -91,7 +91,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
    const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
    const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
    const projectRef = serverThread
-@@ -1034,7 +1044,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1050,7 +1060,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
    );
  
    const splitTerminal = useCallback(() => {
@@ -100,7 +100,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        return;
      }
      const terminalId = nextTerminalId(allocatableTerminalIds);
-@@ -1055,6 +1065,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1071,6 +1081,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      bumpFocusRequestId,
      cwd,
      effectiveWorktreePath,
@@ -108,7 +108,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      runtimeEnv,
      storeSplitTerminal,
      threadId,
-@@ -1062,7 +1073,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1078,7 +1089,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      openTerminal,
    ]);
    const splitTerminalVertical = useCallback(() => {
@@ -117,7 +117,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        return;
      }
      const terminalId = nextTerminalId(allocatableTerminalIds);
-@@ -1083,6 +1094,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1099,6 +1110,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      bumpFocusRequestId,
      cwd,
      effectiveWorktreePath,
@@ -125,7 +125,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      openTerminal,
      runtimeEnv,
      storeSplitTerminalVertical,
-@@ -1091,7 +1103,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1107,7 +1119,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
    ]);
  
    const createNewTerminal = useCallback(() => {
@@ -134,7 +134,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        return;
      }
      const terminalId = nextTerminalId(allocatableTerminalIds);
-@@ -1112,6 +1124,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+@@ -1128,6 +1140,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
      cwd,
      effectiveWorktreePath,
      allocatableTerminalIds,
@@ -142,7 +142,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      runtimeEnv,
      storeNewTerminal,
      threadId,
-@@ -1499,6 +1512,14 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1515,6 +1528,14 @@ export default function ChatView(props: ChatViewProps) {
    const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
    const { environments } = useEnvironments();
    const primaryEnvironment = usePrimaryEnvironment();
@@ -157,7 +157,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
    const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
    const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
      reportFailure: false,
-@@ -3837,6 +3858,10 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3990,6 +4011,10 @@ export default function ChatView(props: ChatViewProps) {
        if (!activeThreadId || !activeProject) {
          return;
        }
@@ -168,7 +168,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
        if (!cwdForOpen) {
          return;
-@@ -3878,6 +3903,11 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4031,6 +4056,11 @@ export default function ChatView(props: ChatViewProps) {
        if (!activeThreadRef || hasReachedSplitLimit || !activeThreadId || !activeProject) {
          return;
        }
@@ -180,7 +180,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
        if (!cwdForOpen) {
          return;
-@@ -3921,6 +3951,9 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4074,6 +4104,9 @@ export default function ChatView(props: ChatViewProps) {
      if (!activeThreadRef || !activeThreadId || !activeProject) {
        return;
      }
@@ -190,7 +190,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
      if (!cwdForOpen) {
        return;
-@@ -3997,6 +4030,13 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4150,6 +4183,13 @@ export default function ChatView(props: ChatViewProps) {
        },
      ) => {
        if (!activeThreadId || !activeProject || !activeThread) return;
@@ -204,7 +204,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        if (options?.rememberAsLastInvoked !== false) {
          setLastInvokedScriptByProjectId((current) => {
            if (current[activeProject.id] === script.id) return current;
-@@ -4323,7 +4363,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4476,7 +4516,7 @@ export default function ChatView(props: ChatViewProps) {
    );
    const createBrowserSurface = useCallback(
      (profileId?: string) => {
@@ -213,7 +213,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        void addBrowserSurface({
          threadRef: activeThreadRef,
          openPreview,
-@@ -4342,7 +4382,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4495,7 +4535,7 @@ export default function ChatView(props: ChatViewProps) {
          }
        });
      },
@@ -222,7 +222,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
    );
    const addDiffSurface = useCallback(() => {
      if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-@@ -4645,7 +4685,9 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4798,7 +4838,9 @@ export default function ChatView(props: ChatViewProps) {
      previewPanelOpen,
    ]);
    const addTerminalSurface = useCallback(() => {
@@ -233,7 +233,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      const cwd = gitCwd ?? activeProject.workspaceRoot;
      const terminalId = nextTerminalId(allocatableActiveTerminalIds);
      useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
-@@ -4670,6 +4712,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4823,6 +4865,7 @@ export default function ChatView(props: ChatViewProps) {
      activeThreadWorktreePath,
      allocatableActiveTerminalIds,
      gitCwd,
@@ -241,7 +241,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      openTerminal,
    ]);
    const splitPanelTerminal = useCallback(
-@@ -4683,6 +4726,9 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4836,6 +4879,9 @@ export default function ChatView(props: ChatViewProps) {
        ) {
          return;
        }
@@ -251,7 +251,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
        const terminalId = nextTerminalId(allocatableActiveTerminalIds);
        const cwd = gitCwd ?? activeProject.workspaceRoot;
        useRightPanelStore
-@@ -6218,12 +6264,32 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6371,12 +6417,32 @@ export default function ChatView(props: ChatViewProps) {
      selectedProvider,
    ]);
    const handleRestoreThreadBranch = useCallback(() => {
@@ -285,7 +285,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
    const feedbackBannerItems = useMemo(
      () =>
        feedbackSubmissions.flatMap((submission) => {
-@@ -6240,6 +6306,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6393,6 +6459,7 @@ export default function ChatView(props: ChatViewProps) {
      [feedbackSubmissions, routeThreadKey],
    );
    const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
@@ -293,23 +293,23 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      const backgroundLivenessItems =
        backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
      const resumeCompactionItems =
-@@ -6252,6 +6319,7 @@ export default function ChatView(props: ChatViewProps) {
-       return [
+@@ -6407,6 +6474,7 @@ export default function ChatView(props: ChatViewProps) {
          ...feedbackBannerItems,
          ...usageLimitsItems,
+         ...projectCloneItems,
 +        ...newWorkBlockedItems,
          ...systemComposerBannerItems,
          ...backgroundLivenessItems,
          ...resumeCompactionItems,
-@@ -6262,6 +6330,7 @@ export default function ChatView(props: ChatViewProps) {
-     return [
+@@ -6418,6 +6486,7 @@ export default function ChatView(props: ChatViewProps) {
        ...feedbackBannerItems,
        ...usageLimitsItems,
+       ...projectCloneItems,
 +      ...newWorkBlockedItems,
        ...systemComposerBannerItems,
        ...backgroundLivenessItems,
        ...resumeCompactionItems,
-@@ -6533,6 +6602,8 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6690,6 +6759,8 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.split") {
          event.preventDefault();
          event.stopPropagation();
@@ -318,7 +318,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
          if (terminalFocusOwner === "right-panel") {
            splitPanelTerminal();
            return;
-@@ -6547,6 +6618,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6704,6 +6775,7 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.splitVertical") {
          event.preventDefault();
          event.stopPropagation();
@@ -326,7 +326,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
          if (terminalFocusOwner === "right-panel") {
            splitPanelTerminal("vertical");
            return;
-@@ -6573,6 +6645,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6730,6 +6802,7 @@ export default function ChatView(props: ChatViewProps) {
        if (command === "terminal.new") {
          event.preventDefault();
          event.stopPropagation();
@@ -334,7 +334,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
          if (terminalFocusOwner === "right-panel") {
            addTerminalSurface();
            return;
-@@ -6660,6 +6733,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -6829,6 +6902,7 @@ export default function ChatView(props: ChatViewProps) {
      requestCloseTerminal,
      requestClosePanelTerminal,
      createNewTerminal,
@@ -342,7 +342,7 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      setTerminalOpen,
      runProjectScript,
      splitTerminal,
-@@ -6982,6 +7056,22 @@ export default function ChatView(props: ChatViewProps) {
+@@ -7229,6 +7303,22 @@ export default function ChatView(props: ChatViewProps) {
        notifyDirectAnnotationAttached();
        return;
      }
@@ -365,31 +365,30 @@ index 0b6262387a96eee6538993095265e08b0370e15a..d4636a61c45db5bb38a94c0e06c76c86
      if (needsLoadBalancing) {
        toastManager.add({
          type: "warning",
-@@ -9156,13 +9246,15 @@ export default function ChatView(props: ChatViewProps) {
+@@ -9622,7 +9712,11 @@ export default function ChatView(props: ChatViewProps) {
                              isSendBusy={isSendBusy}
                              isRevertingCheckpoint={isRevertingCheckpoint}
                              sendDisabledReason={
 -                              isRevertingCheckpoint
--                                ? "Rewinding conversation"
--                                : feedbackUploading
--                                  ? "Sending feedback"
--                                  : threadDetailLoading
--                                    ? "Messages loading"
--                                    : null
 +                              resolveNewWorkSendDisabledReason({
 +                                newWorkBlocked: newWorkBlockedMessage !== null,
 +                                hasPendingUserInput: activePendingProgress !== null,
 +                              }) ??
-+                              (isRevertingCheckpoint ? "Rewinding conversation" : feedbackUploading
-+                                ? "Sending feedback"
-+                                : threadDetailLoading
-+                                  ? "Messages loading"
-+                                  : null)
++                              (isRevertingCheckpoint
+                                 ? "Rewinding conversation"
+                                 : feedbackUploading
+                                   ? "Sending feedback"
+@@ -9630,7 +9724,7 @@ export default function ChatView(props: ChatViewProps) {
+                                     ? "Messages loading"
+                                     : worktreeSetupBlocksSend
+                                       ? "Preparing worktree"
+-                                      : projectCloneSendBlockReason
++                                      : projectCloneSendBlockReason)
                              }
                              isPreparingWorktree={isPreparingWorktree}
                              bannerItems={composerBannerItems}
 diff --git a/apps/web/src/components/CommandPalette.tsx b/apps/web/src/components/CommandPalette.tsx
-index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7cd626ec4 100644
+index a8d1e57e51722c1053851689fbd3d4846aded012..5bf36b7724ce9bf700d7f4aa341309379a4de758 100644
 --- a/apps/web/src/components/CommandPalette.tsx
 +++ b/apps/web/src/components/CommandPalette.tsx
 @@ -83,8 +83,12 @@ import { useEnvironmentQuery } from "../state/query";
@@ -397,17 +396,17 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
  import { useAtomCommand } from "../state/use-atom-command";
  import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 -import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
--import { useProjects, useServerConfigs, useThreadShells } from "../state/entities";
+-import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
 +import {
 +  useEnvironments,
 +  usePrimaryEnvironmentId,
 +  useWorkEnvironments,
 +} from "../state/environments";
-+import { useProjects, useServerConfigs, useThreadShells, useWorkProjects } from "../state/entities";
++import { useProjects, useServerConfigs, useThreadShells, useWorkProjects, waitForProject } from "../state/entities";
  import { useThreadSearch } from "../state/queries";
  import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
  import {
-@@ -644,12 +648,16 @@ function OpenCommandPaletteDialog(props: {
+@@ -647,12 +651,16 @@ function OpenCommandPaletteDialog(props: {
      reportFailure: false,
    });
    const { environments } = useEnvironments();
@@ -424,7 +423,7 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
    const referenceThreadRef =
      pathname === "/pull-requests"
        ? environments.some(
-@@ -788,7 +796,7 @@ function OpenCommandPaletteDialog(props: {
+@@ -791,7 +799,7 @@ function OpenCommandPaletteDialog(props: {
    const orderedProjects = useMemo(
      () =>
        orderItemsByPreferredIds({
@@ -433,7 +432,7 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
          preferredIds: projectOrder,
          getId: getProjectOrderKey,
          getPreferenceIds: (project) => [
-@@ -796,12 +804,13 @@ function OpenCommandPaletteDialog(props: {
+@@ -799,12 +807,13 @@ function OpenCommandPaletteDialog(props: {
            legacyProjectCwdPreferenceKey(project.workspaceRoot),
          ],
        }),
@@ -449,7 +448,7 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
          settings: projectGroupingSettings,
          primaryEnvironmentId,
          resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
-@@ -812,7 +821,7 @@ function OpenCommandPaletteDialog(props: {
+@@ -815,7 +824,7 @@ function OpenCommandPaletteDialog(props: {
        orderedProjects,
        primaryEnvironmentId,
        projectGroupingSettings,
@@ -458,7 +457,7 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
      ],
    );
    const projectGroups = useMemo(
-@@ -862,7 +871,7 @@ function OpenCommandPaletteDialog(props: {
+@@ -865,7 +874,7 @@ function OpenCommandPaletteDialog(props: {
    );
  
    const addProjectEnvironmentOptions = useMemo(() => {
@@ -467,7 +466,7 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
        const isPrimary = environment.entry.target._tag === "PrimaryConnectionTarget";
        return {
          environmentId: environment.environmentId,
-@@ -886,7 +895,7 @@ function OpenCommandPaletteDialog(props: {
+@@ -889,7 +898,7 @@ function OpenCommandPaletteDialog(props: {
      });
  
      return options;
@@ -476,7 +475,7 @@ index f33a9cce63b05f788a6df91beab76a00ba1b6546..13d48a7029411fa941ee0a9a563a6bf7
    const defaultAddProjectEnvironmentId =
      addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ?? null;
    const wslAddProjectEnvironmentOption = useMemo(
-@@ -1646,7 +1655,7 @@ function OpenCommandPaletteDialog(props: {
+@@ -1649,7 +1658,7 @@ function OpenCommandPaletteDialog(props: {
  
    const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
  
@@ -570,10 +569,10 @@ index 0000000000000000000000000000000000000000..d39bc058e13ad5043f8411b423f358a6
 +  );
 +}
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbcc8b70c69 100644
+index e5a86ff98a3c088e4d55c2cdcabfded966b38298..caedac5b4353f0488b5bdc82246b3f31014cd390 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -122,12 +122,17 @@ import { useClientSettings } from "../hooks/useSettings";
+@@ -123,12 +123,17 @@ import { useClientSettings } from "../hooks/useSettings";
  import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
  import { useLocalStorage } from "../hooks/useLocalStorage";
  import { useNowMinute } from "../hooks/useNowMinute";
@@ -592,7 +591,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
  } from "../state/entities";
  import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
  import { vcsEnvironment } from "../state/vcs";
-@@ -804,6 +809,9 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+@@ -819,6 +824,9 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
    projectByKey: ReadonlyMap<string, EnvironmentProject>;
    projectDisplayNameByKey: ReadonlyMap<string, string>;
    scopedProjectKeys: ReadonlySet<string> | null;
@@ -602,7 +601,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
    routeDraftId: string | null;
    onNavigateToDraft: (draftId: DraftId) => void;
  }) {
-@@ -843,6 +851,12 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+@@ -858,6 +866,12 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
        if (session.promotedTo != null) {
          continue;
        }
@@ -615,7 +614,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
        if (
          props.scopedProjectKeys !== null &&
          !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-@@ -870,6 +884,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+@@ -885,6 +899,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
      draftThreadsByThreadKey,
      draftsByThreadKey,
      frozenActive,
@@ -623,7 +622,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
      props.routeDraftId,
      props.scopedProjectKeys,
    ]);
-@@ -2113,6 +2128,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
+@@ -2128,6 +2143,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
  
  export default function Sidebar() {
    const projects = useProjects();
@@ -633,7 +632,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
    const projectOrder = useUiStateStore((store) => store.projectOrder);
    const threads = useThreadShells();
    const router = useRouter();
-@@ -2201,6 +2219,7 @@ export default function Sidebar() {
+@@ -2216,6 +2234,7 @@ export default function Sidebar() {
    );
    const { environments } = useEnvironments();
    const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -641,7 +640,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
    const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
    const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
    const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
-@@ -2428,6 +2447,12 @@ export default function Sidebar() {
+@@ -2443,6 +2462,12 @@ export default function Sidebar() {
        if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
          continue;
        }
@@ -654,7 +653,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
        if (
          scopedProjectKeys !== null &&
          !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-@@ -4329,7 +4354,7 @@ export default function Sidebar() {
+@@ -4375,7 +4400,7 @@ export default function Sidebar() {
            <SidebarGroup className="relative z-[1] p-[var(--sidebar-content-inset)] pt-1">
              <SidebarThreadHeader
                searchFieldRef={headerSearchRef}
@@ -663,7 +662,7 @@ index cc3487b595ed05ad083f4b0a05d5d2c24f74639d..317b818c0fa139ddec20be4d036fccbc
                projectScope={
                  <Combobox
                    items={projectScopeItems}
-@@ -4708,6 +4733,7 @@ export default function Sidebar() {
+@@ -4754,6 +4779,7 @@ export default function Sidebar() {
                            projectByKey={projectByKey}
                            projectDisplayNameByKey={projectDisplayNameByKey}
                            scopedProjectKeys={scopedProjectKeys}
@@ -932,7 +931,7 @@ index d683efab3a4a6d2c0060a54786523433715abf34..43de15d0de60ff444301b052ee1b0913
   * A QR code encoding a loopback URL makes the scanning device dial itself, so
   * loopback endpoints stay copyable from the endpoint menu but are never
 diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
-index f76e6ef10d64eb7021b187c219029760cec6f30b..0a08f34783a38e831524b07b0eb00deb9a3f0ffd 100644
+index 49f312f3ddbde8a076ad0ecfe3f82ae74d3c8ebb..28229d790147b471709c355a5f37f07b80151236 100644
 --- a/apps/web/src/components/settings/ConnectionsSettings.tsx
 +++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
 @@ -56,6 +56,7 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
@@ -970,7 +969,7 @@ index f76e6ef10d64eb7021b187c219029760cec6f30b..0a08f34783a38e831524b07b0eb00deb
  };
  
  /**
-@@ -1477,7 +1486,10 @@ function SavedBackendListRow({
+@@ -1480,7 +1489,10 @@ function SavedBackendListRow({
    environment,
    removingEnvironmentId,
    onSetEnabled,
@@ -980,8 +979,8 @@ index f76e6ef10d64eb7021b187c219029760cec6f30b..0a08f34783a38e831524b07b0eb00deb
 +  onUseAsSharedDefault,
  }: SavedBackendListRowProps) {
    const environmentId = environment.environmentId;
-   const enabled = environment.entry.enabled;
-@@ -1566,6 +1578,11 @@ function SavedBackendListRow({
+   const unsupported = environment.connection.phase === "unsupported";
+@@ -1573,6 +1585,11 @@ function SavedBackendListRow({
          ) : null
        }
      >
@@ -993,7 +992,7 @@ index f76e6ef10d64eb7021b187c219029760cec6f30b..0a08f34783a38e831524b07b0eb00deb
        {showUpdateAction ? (
          <ServerUpdateAction
            environmentId={environmentId}
-@@ -1615,6 +1632,14 @@ function SavedBackendListRow({
+@@ -1624,6 +1641,14 @@ function SavedBackendListRow({
            {errorTraceId ? (
              <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
            ) : null}
@@ -1008,7 +1007,7 @@ index f76e6ef10d64eb7021b187c219029760cec6f30b..0a08f34783a38e831524b07b0eb00deb
            <MenuSeparator />
            <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
              {isRemoving ? "Removing…" : "Remove from this device…"}
-@@ -1795,7 +1820,58 @@ export function ConnectionsSettings() {
+@@ -1804,7 +1829,58 @@ export function ConnectionsSettings() {
    const desktopBridge = window.desktopBridge;
    const keybindings = useAtomValue(primaryServerKeybindingsAtom);
    const { environments } = useEnvironments();
@@ -1068,7 +1067,7 @@ index f76e6ef10d64eb7021b187c219029760cec6f30b..0a08f34783a38e831524b07b0eb00deb
    const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
    const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
      reportFailure: false,
-@@ -3733,12 +3809,39 @@ export function ConnectionsSettings() {
+@@ -3742,12 +3818,39 @@ export function ConnectionsSettings() {
            </div>
          }
        >
@@ -1711,10 +1710,10 @@ index 194cc36c55f4ac0674ad75acf5df2ae383bcb0f9..f4a0118abc9f2191e62b1cc3d844b378
 +  publishPreferredEnvironment();
  }
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1fff4cd1a3c 100644
+index 42e40842a721cdd1074d0bb2861f19ea737f01ca..740daa1163a47f4bc0fd4bae50426c2da66aecd8 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
-@@ -58,7 +58,11 @@ import { isLocalEnvironmentDisabled } from "../localEnvironment";
+@@ -60,7 +60,11 @@ import { isLocalEnvironmentDisabled } from "../localEnvironment";
  import { shellEnvironment } from "../state/shell";
  import { useAtomValue } from "@effect/atom-react";
  import { useAtomCommand } from "../state/use-atom-command";
@@ -1727,7 +1726,7 @@ index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1ff
  import {
    primaryServerConfigAtom,
    primaryServerConfigEventAtom,
-@@ -330,8 +334,16 @@ function DocumentTitleSync() {
+@@ -335,8 +339,16 @@ function DocumentTitleSync() {
  function HostedStaticEnvironmentBootstrap() {
    const { environments } = useEnvironments();
    const activeEnvironmentId = useActiveEnvironmentId();
@@ -1744,7 +1743,7 @@ index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1ff
      if (
        environments.some(
          (environment) => environment.entry.target._tag === "PrimaryConnectionTarget",
-@@ -350,7 +362,7 @@ function HostedStaticEnvironmentBootstrap() {
+@@ -355,7 +367,7 @@ function HostedStaticEnvironmentBootstrap() {
      }
  
      setActiveEnvironmentId(firstSavedEnvironment.environmentId);
@@ -1753,7 +1752,7 @@ index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1ff
  
    return null;
  }
-@@ -479,6 +491,11 @@ function EventRouter({
+@@ -484,6 +496,11 @@ function EventRouter({
    const pathname = useLocation({ select: (loc) => loc.pathname });
    const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
    const primaryEnvironment = usePrimaryEnvironment();
@@ -1765,7 +1764,7 @@ index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1ff
    const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
      reportFailure: false,
    });
-@@ -496,7 +513,9 @@ function EventRouter({
+@@ -501,7 +518,9 @@ function EventRouter({
    const handleWelcome = useEffectEvent((payload: ServerLifecycleWelcomePayload | null) => {
      if (!payload) return;
  
@@ -1776,7 +1775,7 @@ index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1ff
      void (async () => {
        if (!payload.bootstrapProjectId || !payload.bootstrapThreadId) {
          return;
-@@ -516,7 +535,7 @@ function EventRouter({
+@@ -521,7 +540,7 @@ function EventRouter({
          );
        useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
  
@@ -1785,7 +1784,7 @@ index 89a1ff23cc833dff5e2b908406fc3c8745c5c319..f0116aa26b839e772476f7392669e1ff
          return;
        }
        if (skipInitialBootstrapNavigationRef.current) {
-@@ -599,12 +618,12 @@ function EventRouter({
+@@ -604,12 +623,12 @@ function EventRouter({
    });
  
    useEffect(() => {
@@ -1962,7 +1961,7 @@ index f085075fdd7c23c1c54bfc49f9dd108a87ba14ec..330b5ec7990630945ea2870de036ac72
    return Option.isSome(prepared) ? prepared.value.httpBaseUrl : null;
 diff --git a/apps/web/src/state/preferredEnvironment.test.ts b/apps/web/src/state/preferredEnvironment.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea8361582e8984b95ee19eef2d6d4d7bb78ec76d
+index 0000000000000000000000000000000000000000..6807bfc5a509c09919fcc9830513ef673095e9f9
 --- /dev/null
 +++ b/apps/web/src/state/preferredEnvironment.test.ts
 @@ -0,0 +1,261 @@
@@ -2106,7 +2105,7 @@ index 0000000000000000000000000000000000000000..ea8361582e8984b95ee19eef2d6d4d7b
 +  });
 +
 +  it("reports an unreachable pinned environment", () => {
-+    for (const connectionPhase of ["available", "offline", "error"] as const) {
++    for (const connectionPhase of ["available", "offline", "error", "unsupported"] as const) {
 +      expect(resolveSharedEnvironmentIssue({ resolution: pinned, connectionPhase })).toBe(
 +        "unreachable",
 +      );
@@ -2229,10 +2228,10 @@ index 0000000000000000000000000000000000000000..ea8361582e8984b95ee19eef2d6d4d7b
 +});
 diff --git a/apps/web/src/state/preferredEnvironment.ts b/apps/web/src/state/preferredEnvironment.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef2b0ee1de2c20586dbee924669f52492a4f9e72
+index 0000000000000000000000000000000000000000..31e4ba218e989125e1cf9533b1a109d67df89ae5
 --- /dev/null
 +++ b/apps/web/src/state/preferredEnvironment.ts
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,247 @@
 +import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 +import type { EnvironmentId } from "@t3tools/contracts";
 +import { Atom } from "effect/unstable/reactivity";
@@ -2475,6 +2474,7 @@ index 0000000000000000000000000000000000000000..ef2b0ee1de2c20586dbee924669f5249
 +        case "available":
 +        case "offline":
 +        case "error":
++        case "unsupported":
 +          return "unreachable";
 +      }
 +  }
@@ -3063,7 +3063,7 @@ index 37ce280e9f41b5b7a1483f40e58d152b32fff320..b7564bf62c49f30a496e328f409a2c94
    );
  }
 diff --git a/packages/contracts/src/settings.test.ts b/packages/contracts/src/settings.test.ts
-index b090b47fba5b97673f7e2b5679aa28918bdf9f0e..555b5e73bba90f5851b7958e21b4be52ac7aa8cd 100644
+index ba612edaf26b00be4b30717af86ad82107467258..4ac49d3dd8cd0b54b7b322b124ad967ed8427be7 100644
 --- a/packages/contracts/src/settings.test.ts
 +++ b/packages/contracts/src/settings.test.ts
 @@ -49,6 +49,37 @@ describe("ServerSettings default permissions", () => {
@@ -3105,7 +3105,7 @@ index b090b47fba5b97673f7e2b5679aa28918bdf9f0e..555b5e73bba90f5851b7958e21b4be52
    const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
  
 diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
-index 7b3715d704beb91ed6b357e0930bd1d25b4cbcac..4e0a8a9258bb85c548b3dc01080c70df2e9ce15d 100644
+index 1c53b36037ba3981c783c7b36f3a275867b1282c..1af6ba4faf98d6a834ecd34fd999e7d8fda83c38 100644
 --- a/packages/contracts/src/settings.ts
 +++ b/packages/contracts/src/settings.ts
 @@ -4,6 +4,7 @@ import * as Duration from "effect/Duration";
@@ -3132,7 +3132,7 @@ index 7b3715d704beb91ed6b357e0930bd1d25b4cbcac..4e0a8a9258bb85c548b3dc01080c70df
    glassOpacity: GlassOpacity.pipe(
      Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
    ),
-@@ -1461,6 +1471,7 @@ export const ClientSettingsPatch = Schema.Struct({
+@@ -1464,6 +1474,7 @@ export const ClientSettingsPatch = Schema.Struct({
    diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
    diffLayout: Schema.optionalKey(DiffLayout),
    environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),

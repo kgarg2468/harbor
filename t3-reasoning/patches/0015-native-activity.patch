@@ -353,7 +353,7 @@ index cdeeb3b922d4c7c69b9d3b961afccd9bd5e1c5ad..be7f3282ba6dda2b3da7f44d1ca761d4
 +  // or closed registry refuses the operation before any routing or recovery.
 +  | UpdateActivityUnavailableError;
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
-index 4544e645f68f479122238a93527080f26e062a8a..7808095a6f2e442c202811bbcd6c083cc57498c4 100644
+index 9690c98ec1090fe456b9522704cf93715350ad96..fbfbf862f29ac46661943e7b0c9af6a97dc9bd75 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.test.ts
 @@ -39,6 +39,12 @@ import * as TestClock from "effect/testing/TestClock";
@@ -550,7 +550,7 @@ index 4544e645f68f479122238a93527080f26e062a8a..7808095a6f2e442c202811bbcd6c083c
      getLastCreateQueryInput: () => createInput,
    };
  }
-@@ -7492,3 +7597,1871 @@ describe("ClaudeAdapterLive", () => {
+@@ -8126,3 +8231,1871 @@ describe("ClaudeAdapterLive", () => {
      );
    });
  });
@@ -2423,10 +2423,10 @@ index 4544e645f68f479122238a93527080f26e062a8a..7808095a6f2e442c202811bbcd6c083c
 +  );
 +});
 diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d462cb16d4 100644
+index b0dce40371eade0869168f053b8a03c7b1df5b91..26613f693cd103279875ca4ddcf729358ae68a65 100644
 --- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
 +++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-@@ -88,11 +88,13 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+@@ -89,11 +89,13 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
  import { resolveAttachmentPath } from "../../attachmentStore.ts";
  import { ServerConfig } from "../../config.ts";
  import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -2440,7 +2440,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  import {
    BUNDLED_CLAUDE_MODEL_CATALOG,
    type ClaudeModelCatalog,
-@@ -113,8 +115,13 @@ import {
+@@ -114,8 +116,13 @@ import {
    ProviderAdapterValidationError,
    type ProviderAdapterError,
  } from "../Errors.ts";
@@ -2454,7 +2454,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
  const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
  const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
-@@ -157,6 +164,14 @@ type PromptQueueItem =
+@@ -246,6 +253,14 @@ type PromptQueueItem =
        readonly type: "terminate";
      };
  
@@ -2469,7 +2469,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  interface ClaudeResumeState {
    readonly threadId?: ThreadId;
    readonly resume?: string;
-@@ -312,10 +327,77 @@ function rememberPendingTaskModel(
+@@ -401,10 +416,77 @@ function rememberPendingTaskModel(
    }
  }
  
@@ -2547,7 +2547,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
    readonly promptQueue: Queue.Queue<PromptQueueItem>;
    readonly query: ClaudeQueryRuntime;
    streamFiber: Fiber.Fiber<void, Error> | undefined;
-@@ -360,6 +442,7 @@ interface ClaudeSessionContext {
+@@ -449,6 +531,7 @@ interface ClaudeSessionContext {
    /** Limits already announced for the running turn, keyed `window:resetsAt`. */
    announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
    stopped: boolean;
@@ -2555,7 +2555,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  }
  
  interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
-@@ -367,6 +450,15 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
+@@ -456,6 +539,15 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
    readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
    readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
    readonly close: () => void;
@@ -2571,7 +2571,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  }
  
  export interface ClaudeAdapterLiveOptions {
-@@ -383,6 +475,14 @@ export interface ClaudeAdapterLiveOptions {
+@@ -472,6 +564,14 @@ export interface ClaudeAdapterLiveOptions {
    readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
    /** Scoped-bucket names the driver's status probe last saw; see `claudeUsageLimits`. */
    readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
@@ -2586,7 +2586,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  }
  
  function isUuid(value: string): boolean {
-@@ -1980,19 +2080,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -2069,19 +2169,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const managedNativeEventLogger =
      options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
  
@@ -2624,7 +2624,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  
    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
    const randomUUIDv4 = crypto.randomUUIDv4.pipe(
-@@ -2009,8 +2121,327 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -2098,8 +2210,327 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const nextEventId = Effect.map(randomUUIDv4, (id) => EventId.make(id));
    const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
  
@@ -2954,7 +2954,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  
    const logNativeSdkMessage = Effect.fnUntraced(function* (
      context: ClaudeSessionContext,
-@@ -3190,6 +3621,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3279,6 +3710,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      // Auto-start a synthetic turn for assistant messages that arrive without
      // an active turn (e.g., background agent/subagent responses between user prompts).
      if (!context.turnState) {
@@ -2964,7 +2964,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        const turnId = TurnId.make(yield* randomUUIDv4);
        const startedAt = yield* nowIso;
        context.turnStartMessageIds.push(message.uuid);
-@@ -3312,6 +3746,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3401,6 +3835,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          : undefined);
      const { status, errorMessage } = resultOutcome(message, failureHint);
  
@@ -2976,7 +2976,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
      if (status === "failed") {
        yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
      }
-@@ -3577,6 +4016,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3666,6 +4105,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            effort,
          });
          context.liveTaskIds.add(message.task_id);
@@ -2988,7 +2988,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          yield* offerRuntimeEvent({
            ...base,
            type: "task.started",
-@@ -3659,6 +4103,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3748,6 +4192,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              ...taskLinkageFor(context.taskAgents, message.task_id),
            },
          });
@@ -2998,7 +2998,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          return;
        }
        case "task_notification": {
-@@ -3685,6 +4132,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3774,6 +4221,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              ...taskLinkageFor(context.taskAgents, message.task_id),
            },
          });
@@ -3008,7 +3008,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          return;
        }
        case "files_persisted":
-@@ -3740,6 +4190,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3829,6 +4279,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              reason: `session_state:${message.state}`,
            },
          });
@@ -3029,7 +3029,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          return;
        case "notification":
          // User-facing CLI notification (e.g. context-limit warnings). Only
-@@ -3756,20 +4220,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -3845,20 +4309,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          // by a different model.
          yield* emitRuntimeWarning(context, message.content, message);
          return;
@@ -3060,7 +3060,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        case "control_request_progress":
        case "worker_shutting_down":
          return;
-@@ -4028,7 +4495,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4117,7 +4584,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      ).pipe(
        Stream.takeWhile(() => !context.stopped),
        Stream.runForEach((message) =>
@@ -3069,7 +3069,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
            Effect.mapError(
              (cause) =>
                new ProviderAdapterProcessError({
-@@ -4056,6 +4523,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4145,6 +4612,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            yield* completeTurn(context, "interrupted", "Claude runtime interrupted.");
          }
        } else {
@@ -3082,7 +3082,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          const failures = exit.cause.reasons.flatMap((reason) =>
            Cause.isFailReason(reason) ? [reason.error] : [],
          );
-@@ -4080,6 +4553,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4169,6 +4642,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      options?: { readonly emitExitEvent?: boolean },
    ) {
      if (context.stopped) return;
@@ -3101,7 +3101,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  
      // Schedule process termination before any cleanup that can wait on the
      // provider. The SDK closes stdin, then escalates from SIGTERM to SIGKILL.
-@@ -4092,7 +4577,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4181,7 +4666,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            detail: "Failed to close Claude runtime query.",
            cause,
          }),
@@ -3144,7 +3144,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  
      context.stopped = true;
  
-@@ -4182,6 +4701,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4271,6 +4790,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      if (sessions.get(context.session.threadId) === context) {
        sessions.delete(context.session.threadId);
      }
@@ -3194,7 +3194,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
    });
  
    const requireSession = (
-@@ -4196,7 +4758,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4285,7 +4847,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          }),
        );
      }
@@ -3210,7 +3210,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        return Effect.fail(
          new ProviderAdapterSessionClosedError({
            provider: PROVIDER,
-@@ -4426,35 +4995,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4515,35 +5084,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            ageMinutes: finiteNonNegativeInteger(request.payload.sessionAgeMinutes) ?? 0,
            estimatedTokens: finiteNonNegativeInteger(request.payload.estimatedTokens) ?? 0,
          });
@@ -3278,7 +3278,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          );
  
          if (result.behavior !== "allow") {
-@@ -4493,7 +5066,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4582,7 +5155,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          // user via the user-input runtime event channel, regardless of
          // runtime mode (plan mode relies on this heavily).
          if (toolName === "AskUserQuestion") {
@@ -3291,7 +3291,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          }
  
          if (toolName === "ExitPlanMode") {
-@@ -4526,6 +5103,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4615,6 +5192,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            } satisfies PermissionResult;
          }
  
@@ -3311,7 +3311,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
          const requestType = classifyRequestType(toolName);
          const detail = summarizeToolRequest(toolName, toolInput);
-@@ -4834,6 +5424,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4923,6 +5513,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          turnStartMessageIds: resumeState?.turnStartMessageIds
            ? [...resumeState.turnStartMessageIds]
            : Array.from({ length: resumeState?.turnCount ?? 0 }, () => null),
@@ -3319,7 +3319,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
          promptQueue,
          query: queryRuntime,
          streamFiber: undefined,
-@@ -4859,6 +5450,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -4948,6 +5539,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
          lastThreadStartedId: undefined,
          announcedUsageLimits: undefined,
          stopped: false,
@@ -3327,7 +3327,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        };
        yield* Ref.set(contextRef, context);
        sessions.set(threadId, context);
-@@ -4916,6 +5508,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5005,6 +5597,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
              if (context.streamFiber === streamFiber) {
                context.streamFiber = undefined;
              }
@@ -3341,7 +3341,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
              return handleStreamExit(context, exit).pipe(
                Effect.catch((cause) =>
                  Effect.logError("Failed to close Claude runtime stream.", { cause }),
-@@ -4939,6 +5538,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5028,6 +5627,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
  
    const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
      const context = yield* requireSession(input.threadId);
@@ -3377,7 +3377,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
      const modelCatalog = yield* modelCatalogEffect;
      const selectedModel =
        input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
-@@ -5054,7 +5682,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5143,7 +5771,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
        Effect.provideService(FileSystem.FileSystem, fileSystem),
        Effect.provideService(Path.Path, path),
      );
@@ -3386,7 +3386,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        fileSystem,
        attachmentsDir: serverConfig.attachmentsDir,
        boundInstanceId,
-@@ -5065,16 +5693,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5154,16 +5782,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
            .map((skill) => skill.name),
        ),
      });
@@ -3448,7 +3448,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
  
      return {
        threadId: context.session.threadId,
-@@ -5334,7 +6000,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5409,7 +6075,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
  
    const stopSession: ClaudeAdapterShape["stopSession"] = Effect.fn("stopSession")(
      function* (threadId) {
@@ -3461,7 +3461,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        yield* stopSessionInternal(context, {
          emitExitEvent: true,
        });
-@@ -5368,12 +6038,270 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5443,12 +6113,270 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    const stopAll: ClaudeAdapterShape["stopAll"] = () =>
      stopSessions(Array.from(sessions.values()), true);
  
@@ -3733,7 +3733,7 @@ index a43049ce131d6b636fc64632779f8aa50270da55..f4fed4900daac51103db60f6f436f0d4
        Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
      ),
    );
-@@ -5395,8 +6323,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+@@ -5470,8 +6398,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
      listSessions,
      hasSession,
      stopAll,
@@ -8156,7 +8156,7 @@ index 67ccbd167c304cdcbfb63de366abf01ead27bbdb..e42deaab03f93ffda446280c54485700
 +    R | UpdateActivity
 +  >;
 diff --git a/apps/server/src/provider/Layers/ProviderRegistry.test.ts b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
-index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417acda67c065 100644
+index caee1981d79f3fd269a42ed3161818dfbf5a1ea3..aa1317f99901135d47279d44066078af900550e4 100644
 --- a/apps/server/src/provider/Layers/ProviderRegistry.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderRegistry.test.ts
 @@ -49,6 +49,7 @@ import {
@@ -8167,7 +8167,7 @@ index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417ac
  import {
    readProviderStatusCache,
    resolveProviderStatusCachePath,
-@@ -2272,6 +2273,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2287,6 +2288,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
            const providerRegistryLayer = ProviderRegistryLive.pipe(
              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -8175,7 +8175,7 @@ index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417ac
              Layer.provideMerge(AntigravityInstallation.layer),
              Layer.provideMerge(
                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
-@@ -2373,6 +2375,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2386,6 +2388,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
            const providerRegistryLayer = ProviderRegistryLive.pipe(
              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -8183,7 +8183,7 @@ index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417ac
              Layer.provideMerge(AntigravityInstallation.layer),
              Layer.provideMerge(
                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
-@@ -2489,6 +2492,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2502,6 +2505,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
            const providerRegistryLayer = ProviderRegistryLive.pipe(
              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -8191,7 +8191,7 @@ index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417ac
              Layer.provideMerge(AntigravityInstallation.layer),
              Layer.provideMerge(
                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
-@@ -2551,6 +2555,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
+@@ -2564,6 +2568,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
              yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
              const providerRegistryLayer = ProviderRegistryLive.pipe(
                Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
@@ -8200,7 +8200,7 @@ index 988c89e1e679d5782c0b1c4ba08af3195e73cf35..53d3362ee0c0748944a381d968c417ac
                Layer.provideMerge(
                  Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
 diff --git a/apps/server/src/provider/Layers/ProviderService.test.ts b/apps/server/src/provider/Layers/ProviderService.test.ts
-index b4ca017b45b8a25ab5553130367f65c9b7e57c6f..169019696f06af079ee58d2d57b493d800f2f065 100644
+index d940d34e2e57dc168d8965ee239548aa891cd26c..a2ad2558d4d068eb6a96541b69d48211cb202eb3 100644
 --- a/apps/server/src/provider/Layers/ProviderService.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderService.test.ts
 @@ -80,6 +80,7 @@ import {
@@ -8211,7 +8211,7 @@ index b4ca017b45b8a25ab5553130367f65c9b7e57c6f..169019696f06af079ee58d2d57b493d8
    type UpdateActivityShape,
    type UpdateActivityState,
  } from "../../updateActivity.ts";
-@@ -5556,7 +5557,7 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5557,7 +5558,7 @@ describe("ProviderServiceLive update activity", () => {
      });
  
    // Publishes an early terminal into the compaction buffer and proves it was
@@ -8220,7 +8220,7 @@ index b4ca017b45b8a25ab5553130367f65c9b7e57c6f..169019696f06af079ee58d2d57b493d8
    const parkEarlyTerminal = (
      input: Effect.Success<ReturnType<typeof startOwnedFallbackSession>>,
      threadId: ThreadId,
-@@ -5566,7 +5567,7 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5567,7 +5568,7 @@ describe("ProviderServiceLive update activity", () => {
        yield* input.cursor.publish(fallbackTerminal("evt-early-terminal", threadId, turnId));
        yield* input.cursor.publish(fallbackDelta("evt-after-early", threadId, turnId));
        yield* input.consumers.awaitEvent("evt-after-early");
@@ -8229,7 +8229,7 @@ index b4ca017b45b8a25ab5553130367f65c9b7e57c6f..169019696f06af079ee58d2d57b493d8
        assert.deepEqual(parked.blockers, []);
        assert.equal((yield* input.activity.trySealIdle).status, "busy");
        assert.equal(input.consumers.seen.includes("checkpoint:evt-early-terminal"), false);
-@@ -5764,7 +5765,8 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5765,7 +5766,8 @@ describe("ProviderServiceLive update activity", () => {
        // With the turn id known, an unrelated terminal publishes straight through.
        yield* session.cursor.publish(fallbackTerminal("evt-other-turn", threadId, "turn-other"));
        yield* session.consumers.awaitEvent("evt-other-turn");
@@ -8239,7 +8239,7 @@ index b4ca017b45b8a25ab5553130367f65c9b7e57c6f..169019696f06af079ee58d2d57b493d8
        assert.equal(compactFiber.pollUnsafe(), undefined);
  
        yield* advanceTestClock(600_001);
-@@ -5893,4 +5895,189 @@ describe("ProviderServiceLive update activity", () => {
+@@ -5894,4 +5896,189 @@ describe("ProviderServiceLive update activity", () => {
        assert.equal((yield* scenario.activity.trySealIdle).status, "busy");
      }),
    );
@@ -8479,7 +8479,7 @@ index 3b1733f6f7ea9f3475dcb0423f5bec3f4b75c7df..7b4a6fd7c2bd595f37123f12aba04028
      // consumers (usage ingestion, relays, etc.) each independently receive all
      // runtime events without holding update activity.
 diff --git a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
-index 8c0074df88b7a61f7d024403118257b4dcd9307c..b31fb1fc98d3ebabcf577b87aad10ef3f4be4457 100644
+index 0d51b861aac4bb81bc414b6993e83babf27290f4..60f1c104e9ba10de6d73507db8377adada3ac205 100644
 --- a/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
 +++ b/apps/server/src/provider/Layers/ProviderSessionReaper.test.ts
 @@ -20,6 +20,12 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -8539,7 +8539,7 @@ index 8c0074df88b7a61f7d024403118257b4dcd9307c..b31fb1fc98d3ebabcf577b87aad10ef3
      const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
        (request) =>
          (input.stopSessionImplementation
-@@ -253,21 +278,27 @@ describe("ProviderSessionReaper", () => {
+@@ -254,21 +279,27 @@ describe("ProviderSessionReaper", () => {
            getThreadRuntimeContext: () => Effect.die("unused"),
            getTurnStartMessage: () => Effect.die("unused"),
            getThreadShellById: (threadId) =>
@@ -8573,7 +8573,7 @@ index 8c0074df88b7a61f7d024403118257b4dcd9307c..b31fb1fc98d3ebabcf577b87aad10ef3
    }
  
    it("reaps stale persisted sessions without active turns", async () => {
-@@ -732,4 +763,87 @@ describe("ProviderSessionReaper", () => {
+@@ -733,4 +764,87 @@ describe("ProviderSessionReaper", () => {
        reapedThreadId,
      ]);
    });
@@ -9434,10 +9434,10 @@ index 0000000000000000000000000000000000000000..d340e237bdee782a5e364c7d2b288ae2
 +  };
 +};
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 8c845bbbc4e1a05c84426c1eaff8f248f9f9e640..a884b0c10b53b0732ceb08e6fd845093b77a70c9 100644
+index a7ad54b2e14672a7567ddb0341456852c8538351..4a109c8fbf6c00ad43c6b46a55d63d11ec4c6a95 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -484,10 +484,6 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -492,10 +492,6 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    Layer.provideMerge(GitLayerLive),
    Layer.provideMerge(VcsLayerLive),
    Layer.provideMerge(ProviderRuntimeLayerLive),
@@ -9448,7 +9448,7 @@ index 8c845bbbc4e1a05c84426c1eaff8f248f9f9e640..a884b0c10b53b0732ceb08e6fd845093
    Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
    Layer.provideMerge(PersistenceLayerLive),
    // Both read a user-owned file out of the state directory and stream changes
-@@ -502,6 +498,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+@@ -510,6 +506,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
    // `providerInstances` hydration merges `settings.providers.<kind>`
    // with explicit `providerInstances` entries on boot.
    Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
