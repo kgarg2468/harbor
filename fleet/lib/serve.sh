@@ -60,10 +60,40 @@ harbor_serve_loopback_host() {
   esac
 }
 
+# harbor_serve_header_port HEADER: the port a listener header announces. The host
+# carries it as a suffix, and no suffix means 443 -- which is the vendor's own
+# default and the only port this adapter reports on.
+harbor_serve_header_port() {
+  local hostpart="${1#https://}"
+  hostpart="${hostpart%% *}"
+  case "${hostpart}" in
+    *:*) printf '%s' "${hostpart##*:}" ;;
+    *) printf '443' ;;
+  esac
+}
+
 # harbor_serve_mapping: the normalized HTTPS 443 mapping, "absent", or
 # "unnormalizable". Requires harbor_serve_status to have run.
+#
+# This walks the body listener by listener rather than reading the first line and
+# then grepping the whole document for a proxy target. The short version was wrong
+# in a way that mattered: `tailscale serve status` lists one header per listener
+# with that listener's handlers indented beneath it, so a node with an 8443
+# listener above its 443 one made the first-line read announce "not 443" while the
+# global grep would happily have returned the 443 listener's target. The two
+# halves disagreed, and the half that won returned `absent` -- which
+# harbor_pair_precheck treats as permission to create a mapping. A parse bug that
+# ends in Harbor mutating Serve on a node that already had a 443 listener defeats
+# the one invariant this whole file exists to hold.
+#
+# Two root handlers inside the same 443 listener is not a mapping either. It is a
+# configuration this adapter cannot reduce to one comparable string, and guessing
+# which of them is the real one is exactly the guess `unnormalizable` exists to
+# refuse. Likewise a 443 listener with handlers but no root handler: something is
+# at 443, so the answer is not `absent`, and Harbor cannot describe it, so the
+# answer is not a mapping.
 harbor_serve_mapping() {
-  local header target host port
+  local line target='' host port seen443=0 in443=0 ambiguous=0
   # An empty body is not an empty config: `tailscale serve status` says so in
   # words when there is nothing configured. Zero bytes means the command did not
   # answer, which is a reading Harbor cannot use.
@@ -77,29 +107,51 @@ harbor_serve_mapping() {
       return 0
       ;;
   esac
-  # The header line carries the port. No :port suffix on the host means 443, which
-  # is the port this adapter reports on; an explicit other port is a mapping this
-  # adapter does not describe, and at 443 there is nothing.
-  header="$(printf '%s\n' "${HARBOR_SERVE_RAW}" | sed -n '1p')"
-  case "${header}" in
-    'https://'*' ('*')') ;;
-    *)
-      printf 'unnormalizable'
-      return 0
-      ;;
-  esac
-  case "${header}" in
-    *.ts.net' '*) ;;
-    *)
-      printf 'absent'
-      return 0
-      ;;
-  esac
-  target="$(printf '%s\n' "${HARBOR_SERVE_RAW}" | sed -n 's#^|-- / proxy \(http://.*\)$#\1#p')"
-  [ -n "${target}" ] || {
+  while IFS= read -r line; do
+    case "${line}" in
+      '')
+        continue
+        ;;
+      'https://'*' ('*')')
+        if [ "$(harbor_serve_header_port "${line}")" = 443 ]; then
+          in443=1
+          seen443=1
+        else
+          in443=0
+        fi
+        ;;
+      '|-- / proxy http://'*)
+        if [ "${in443}" = 1 ]; then
+          if [ -n "${target}" ]; then
+            ambiguous=1
+          fi
+          target="${line#'|-- / proxy '}"
+        fi
+        ;;
+      '|--'*)
+        # A handler on some other path, or a handler whose target is not an http
+        # proxy. It belongs to a listener but it is not the root mapping, so it
+        # neither supplies a target nor makes the body unreadable.
+        continue
+        ;;
+      *)
+        # A line this adapter has no reading for. Refusing here is what keeps a
+        # future vendor format from being silently parsed as the old one.
+        printf 'unnormalizable'
+        return 0
+        ;;
+    esac
+  done <<EOF
+${HARBOR_SERVE_RAW}
+EOF
+  if [ "${seen443}" = 0 ]; then
+    printf 'absent'
+    return 0
+  fi
+  if [ "${ambiguous}" = 1 ] || [ -z "${target}" ]; then
     printf 'unnormalizable'
     return 0
-  }
+  fi
   host="${target#http://}"
   port="${host##*:}"
   host="${host%:*}"

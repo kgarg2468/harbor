@@ -157,11 +157,15 @@ harbor_serve_funnel                  -> "none" | "present" | "unknown"
 
 **Contract.** The normalized mapping is one string, `https:443 -> http://<canonical-host>:<port>`, where `<canonical-host>` is the literal word `loopback` when the proxy target's host is any of `localhost`, `127.0.0.1`, `::1`, or `[::1]`, and the host verbatim otherwise. Section 5.5 requires this: "Normalization canonicalizes the proxy target's loopback host before any comparison, so `localhost`, `127.0.0.1`, and `::1` are one loopback identity and a spelling difference never fails the prediction." Anything the adapter cannot reduce to that form is `unnormalizable` — never a guess, and never `absent`, because "I could not read it" and "there is nothing there" lead to opposite decisions and must never be spelled the same way.
 
-- [ ] **Step 1: Capture the fixtures**
+- [ ] **Step 1: Write the fixtures, and record which of them are evidence**
 
-These are the seven inputs the adapter must classify. Write them exactly, one file each, under `tests/fixtures/tailscale/serve-status/`. They are the shapes `tailscale serve status` prints at `tailscale_version=1.102.3`; the `vendor-443` one is what `t3 pair --tailscale` leaves behind, per the measured `tailscale serve --bg --https=443 http://127.0.0.1:<port>`.
+These are the inputs the adapter must classify. Write them one file each under `tests/fixtures/tailscale/serve-status/`, **and write `PROVENANCE.md` beside them** saying which were measured and which were constructed. That file is not documentation politeness; it is the difference between a fixture that constrains the adapter and a fixture the adapter constrains.
 
-`absent` — the empty state, one line:
+Only one of them is measured. `absent` is byte-exact against a real `tailscale` CLI 1.96.4 talking to a tailscaled 1.98.2 — `No serve config\n` on stdout — and capturing it is what found correction 35. **Every populated-listener fixture below is hand-written**, because applying a Serve config to capture one was attempted and the vendor hung (correction 36). Their layout — one header per listener, handlers indented beneath as `|-- <path> proxy <target>` — is this adapter's assumption and is not vendor-confirmed.
+
+Do not describe them in the fixture file, the commit, or the PR as captured output. An earlier draft of this plan said they were "the shapes `tailscale serve status` prints at `tailscale_version=1.102.3`" while correction 36 in the same document said they were unverified, and a reader who believed the first sentence would have treated a guess as evidence. When a populated body is eventually captured on a real node, move that row from the constructed table to the measured one in `PROVENANCE.md`; do not adjust the parser until the constructed fixtures pass.
+
+`absent` — the empty state, one line, and the only measured fixture here:
 
 ```text
 No serve config
@@ -202,6 +206,30 @@ tailscale: unrecognized subcommand "serve"
 ```
 
 `empty` — no output at all, zero bytes.
+
+`mixed-listeners` — a non-443 listener **above** the 443 one. This is the fixture that forces the adapter to walk listeners instead of reading line 1 and grepping the rest; see correction 37:
+
+```text
+https://harbor-node.TAILNET.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:9000
+https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:3773
+```
+
+`ambiguous-443` — two root handlers inside one 443 listener, which is not a mapping and must not be reduced to whichever one the parser happens to see last:
+
+```text
+https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:3773
+|-- / proxy http://127.0.0.1:9000
+```
+
+`no-root-443` — a 443 listener with handlers but no root handler. Something is at 443, so the answer is not `absent`; Harbor cannot describe it, so the answer is not a mapping either:
+
+```text
+https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- /api proxy http://127.0.0.1:3773
+```
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -2844,6 +2872,51 @@ The general lesson is the one Correction 34 started: a measurement that fails to
 produce the artifact you wanted has still measured something. Here the artifact was
 a fixture and the finding was a hang in a code path two slices away, and the
 finding was worth more.
+
+### Correction 37: two halves of a parser that disagree, and the half that wins
+
+`harbor_serve_mapping` shipped to review reading the **first line** to decide which
+port the listener was on, and then grepping the **whole body** for a proxy target.
+Each half is defensible alone. Together they describe two different documents.
+
+`tailscale serve status` prints one header per listener with that listener's
+handlers indented beneath it. Give it a node with an 8443 listener above its 443
+one and the halves disagree outright: the first-line read says "this is 8443, so
+there is nothing at 443" and returns `absent`, while the grep it never reaches
+would have returned the 443 listener's target. The half that won is the one that
+returns `absent` — and `harbor_pair_precheck` treats `absent` as permission to
+create a mapping. A parse bug therefore ended in Harbor calling the vendor to
+mutate Serve on a node that already had a 443 listener, defeating the single
+invariant `lib/serve.sh` exists to hold.
+
+The fix walks the body listener by listener, tracks which listener it is inside,
+and takes a target only from the 443 one. It also names two states the short
+version could not express: two root handlers in one listener is `unnormalizable`
+rather than whichever the parser saw last, and a 443 listener with handlers but no
+root handler is `unnormalizable` rather than `absent`.
+
+Three things generalize:
+
+**A reader built from two independent scans of the same text has a consistency
+requirement nobody wrote down.** The first-line read and the global grep were never
+checked against each other, and there was no place in the code where they met and
+could have been. The walk has one cursor and one notion of "which listener am I
+in", so the question cannot arise. Prefer the parser that cannot hold two opinions
+over the one that happens to hold the same opinion on your fixtures.
+
+**All seven original fixtures were single-listener.** They agreed with the parser
+because they were written from the same mental model as the parser, which is
+correction 33 restated at the level of shape rather than value: the fixtures
+covered the cases the author had already thought of, so passing them measured only
+that the author was self-consistent. The bug needed a fixture whose *structure*,
+not whose *content*, was new.
+
+**The reviewer found this and the measurement did not.** Correction 35 came from
+running the real vendor; this came from Greptile reading the code and asking what
+happens with two listeners. Neither technique subsumes the other: measurement finds
+the things the world does that you did not imagine, and review finds the things
+your code does that you did not intend. A change to a vendor adapter wants both,
+and this slice needed both.
 
 ## Open questions for the owner
 

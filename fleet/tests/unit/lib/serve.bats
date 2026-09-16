@@ -54,6 +54,45 @@ serve_fixture_body() {
   assert_equal "$(harbor_serve_mapping)" absent
 }
 
+@test "a 443 listener below a non-443 one is still found" {
+  # The bug this replaces read line 1 to decide the port and then grepped the whole
+  # body for a target. On this input those two halves disagree: line 1 says 8443,
+  # and the grep would have returned the 443 listener's target. The half that won
+  # returned absent, and harbor_pair_precheck treats absent as permission to
+  # create a mapping -- so a parse bug ended in Harbor mutating a node that
+  # already had a 443 listener.
+  serve_fixture mixed-listeners
+  assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
+}
+
+@test "a non-443 listener's target is never borrowed for the 443 answer" {
+  # The same disagreement in the other direction: only an 8443 listener exists, so
+  # there is nothing at 443, and its target must not be reported as if there were.
+  serve_fixture_body "https://harbor-node.TAILNET.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:9000"
+  assert_equal "$(harbor_serve_mapping)" absent
+}
+
+@test "two root handlers in one 443 listener is unnormalizable, not a coin flip" {
+  serve_fixture ambiguous-443
+  assert_equal "$(harbor_serve_mapping)" unnormalizable
+}
+
+@test "a 443 listener with no root handler is unnormalizable, never absent" {
+  # Something is at 443, so absent would be false and would license a create.
+  # Harbor cannot describe it, so it is not a mapping either.
+  serve_fixture no-root-443
+  assert_equal "$(harbor_serve_mapping)" unnormalizable
+}
+
+@test "a line this adapter has no reading for makes the whole body unnormalizable" {
+  # A future vendor format must not be silently parsed as the current one.
+  serve_fixture_body "https://harbor-node.TAILNET.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:3773
+some new line a later tailscale prints"
+  assert_equal "$(harbor_serve_mapping)" unnormalizable
+}
+
 @test "output this adapter cannot reduce is unnormalizable, never absent" {
   local name
   for name in garbage empty; do
