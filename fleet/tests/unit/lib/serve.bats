@@ -352,13 +352,53 @@ assert_serve_unreadable() {
   assert_serve_unreadable
 }
 
-@test "finding 4: a real here-document tempfile failure cannot license a write" {
+@test "finding 4: a walk that consumed nothing cannot license a write" {
+  # The portable half of finding 4, and the one that states the actual property:
+  # if the loop body never ran, the parser has read nothing, and reading nothing
+  # is not the same as reading a body with no 443 listener. Overriding the `read`
+  # builtin with a function -- functions win over builtins -- reproduces exactly
+  # the state a failed here-document redirection leaves behind, on every platform
+  # and without depending on how any shell chooses to back a here-document.
   serve_adversarial_body 4
-  # Large enough to force tempfile use on Bash 5 as well as Bash 3.2. Empty
-  # lines do not change the mapping and the positive control proves that.
+  assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
+  run /bin/bash -euo pipefail -c '
+    . "${1}/lib/serve.sh"
+    HARBOR_SERVE_RAW="${2}"
+    read() { return 1; }
+    harbor_serve_mapping
+    printf " / "
+    harbor_serve_funnel
+  ' bash "${HARBOR_ROOT}" "${HARBOR_SERVE_RAW}"
+  assert_success
+  assert_output 'unnormalizable / unknown'
+}
+
+@test "finding 4: a real here-document failure cannot license a write" {
+  # The other half: prove the guard also fires on a genuine redirection failure,
+  # not just a simulated one. This can only be induced where the shell backs the
+  # here-document with a temporary file. Bash 3.2 always does, which is what the
+  # macOS runners use; bash 5.1 and later write small documents into a pipe
+  # instead, so `ulimit -f 0` never touches them. Padding past bash's pipe
+  # threshold is not reliable either, so this probes whether the induction
+  # actually works in this shell and skips honestly when it does not, rather
+  # than asserting something the platform cannot produce.
+  serve_adversarial_body 4
   local i
   for ((i = 0; i < 9000; i++)); do HARBOR_SERVE_RAW+=$'\n'; done
   assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
+  # Probe: under the same limits, does a here-document redirection still deliver
+  # its body? If it does, the induction is a no-op here and proves nothing.
+  run /bin/bash -c '
+    exec 2>/dev/null
+    trap "" XFSZ
+    ulimit -f 0
+    while IFS= read -r l; do printf "delivered"; break; done <<EOF
+${1}
+EOF
+  ' bash "${HARBOR_SERVE_RAW}"
+  if [ "${output}" = delivered ]; then
+    skip "this shell does not back this here-document with a temporary file, so a file-size limit cannot fail it"
+  fi
   run /bin/bash -euo pipefail -c '
     exec 2>/dev/null
     . "${1}/lib/serve.sh"

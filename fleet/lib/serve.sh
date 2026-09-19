@@ -176,20 +176,25 @@ harbor_serve_parse() {
     HARBOR_SERVE_FUNNEL=none
     return 0
   fi
-  # Two guards on the walk itself, because the walk not happening must not read as
-  # a walk that found nothing. Bash implements this here-document with a temporary
-  # file, so on a filesystem that refuses the create -- a read-only or exhausted
-  # /tmp -- the redirection fails, the body never runs, and a node with a perfectly
-  # good 443 mapping would otherwise fall through to absent with status 0.
+  # The walk not happening must not read as a walk that found nothing. Where bash
+  # backs this here-document with a temporary file -- always under 3.2, and for
+  # documents over its pipe threshold under 5.1 and later -- a filesystem that
+  # refuses the create makes the redirection fail, the body never run, and a node
+  # with a perfectly good 443 mapping fall through to absent with status 0.
   #
-  # The `|| return 0` catches that failure, and the trailing `:` below is what
-  # makes it mean only that: a while loop's status is the status of the last
-  # command its body ran, so without a deterministic final command the guard would
-  # fire or not depending on which arm the last line happened to take, and a later
-  # edit that ended an arm with a non-zero test would silently turn the parser into
-  # one that refuses every body. `lines` is the independent check on the same
-  # question, kept because this is the one failure whose signature is indistinguish
-  # able from success.
+  # `lines` is the guard that detects this: the loop body cannot have run, so the
+  # count cannot have moved. Removing it turns the failure back into a licence to
+  # write, which is what the tests check.
+  #
+  # The `|| return 0` is redundant reinforcement rather than a second detector --
+  # it catches the same setup failure `lines` already catches, and neither can see
+  # a read that fails partway and leaves a truncated document looking complete.
+  # It is kept because the cost of missing this particular failure is a write, but
+  # it needs the trailing `:` below to be safe: a while loop's status is that of
+  # the last command its body ran, so without a deterministic final command the
+  # guard would fire or not depending on which arm the last line happened to take,
+  # and a later edit ending an arm with a non-zero test would silently turn the
+  # parser into one that refuses every body.
   while IFS= read -r line; do
     lines=$((lines + 1))
     case "${line}" in
