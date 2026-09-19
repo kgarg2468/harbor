@@ -76,10 +76,24 @@ access_run provision
 it_eq 'fresh provision succeeds' 0 "${ACCESS_RC}"
 it_file_absent 'provision released the operator lock' "${op_root}/lock.d"
 
+# access get's whole contract is one word on stdout. Comparing it against the
+# merged capture above would compare it against HARBOR_VERBOSE's trace on stderr
+# as well, and this is also the only spelling that asserts what a caller piping
+# harbor access get actually receives -- with no HARBOR_VERBOSE, because such a
+# caller would not set one.
+access_stdout() {
+  runuser -u "${IT_OPERATOR}" -- env -i \
+    "PATH=${IT_PATH}" \
+    "HOME=${operator_home}" \
+    "XDG_RUNTIME_DIR=/run/user/${operator_uid}" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${operator_uid}/bus" \
+    "${IT_LINK}" "$@" 2>/dev/null
+}
+
 section 'access get on the freshly provisioned node'
 access_run access get
 it_eq 'access get succeeds' 0 "${ACCESS_RC}"
-it_eq 'default access mode' connect "${ACCESS_OUT}"
+it_eq 'default access mode on stdout alone' connect "$(access_stdout access get)"
 it_file_absent 'get leaves no operator lock' "${op_root}/lock.d"
 
 section 'switch to ssh at the real config path'
