@@ -45,6 +45,31 @@ printf 'Status: install ok installed\nVersion: 1.80.0\n'
 SH
   chmod 0755 "${BIN}/dpkg-query"
   printf 'VERSION_ID="24.04"\n' >"${BATS_TEST_TMPDIR}/os-release"
+  # Boot identity is a system boundary, not the behavior under test. A fixed
+  # fixture also works when the macOS sandbox denies kern.boottime reads.
+  mkdir -p "${BIN}"
+  cat >"${BIN}/sysctl" <<'SH'
+#!/bin/bash
+[ "$#" = 2 ] && [ "${1}" = -n ] && [ "${2}" = kern.boottime ] || exit 97
+printf '{ sec = 1234567890, usec = 0 }\n'
+SH
+  chmod 0755 "${BIN}/sysctl"
+  # ps is also sandbox-restricted. Preserve liveness via kill -0 while
+  # supplying a stable start identity for this isolated fixture process.
+  cat >"${BIN}/ps" <<'SH'
+#!/bin/bash
+[ "$#" = 4 ] || exit 97
+if [ "${1}" = -p ] && [ "${3}" = -o ] && [ "${4}" = pid= ]; then
+  kill -0 "${2}" 2>/dev/null || exit 1
+  printf '%s\n' "${2}"
+elif [ "${1}" = -o ] && [ "${2}" = lstart= ] && [ "${3}" = -p ]; then
+  kill -0 "${4}" 2>/dev/null || exit 1
+  printf 'Fri Sep 18 00:00:00 2026\n'
+else
+  exit 97
+fi
+SH
+  chmod 0755 "${BIN}/ps"
   provision_vendor_fixtures
   NODE_LOCKED="$(sed -n 's/^nodejs_version=//p' "${HARBOR_ROOT}/versions.lock")"
 }
@@ -345,11 +370,12 @@ service install'
   assert_output --partial 'harbor auth connect'
 }
 
-@test "connect link is attended and names the PR 5 link step" {
+@test "the needs_connect_link report names the command that now exists" {
   run provision TEST_CONNECT=needs-link
   assert_equal "${status}" 1
   assert_output --partial needs_connect_link
-  assert_output --partial 'PR 5'
+  assert_output --partial 'run harbor auth connect, then rerun harbor provision'
+  refute_output --partial 'once that release is available'
   assert_output --partial 'harbor auth connect'
 }
 

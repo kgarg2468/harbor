@@ -210,7 +210,7 @@ harbor_provision_rows() {
           ;;
         */true/false/available)
           access_state=needs_connect_link
-          harbor_provision_attended needs_connect_link "run the PR 5 link step, harbor auth connect, once that release is available; this release provides login only"
+          harbor_provision_attended needs_connect_link "run harbor auth connect, then rerun harbor provision"
           ;;
         # Exactly one combination reaches here: authorized, linked, relay available,
         # and desired false. It is attended because the row's healthy definition
