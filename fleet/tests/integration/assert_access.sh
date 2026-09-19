@@ -44,6 +44,23 @@ access_journal() {
     | LC_ALL=C sort | sha256sum | cut -d ' ' -f 1
 }
 
+# Every "the journal is unchanged" assertion below is a hash compared to a hash,
+# and over an empty journal both sides are the hash of nothing -- so the check
+# would pass however badly the run behaved. Provision populates it and the
+# entry-count assertions above depend on that, but depending on it is not the
+# same as stating it, and this is what stops those comparisons from going quietly
+# vacuous if a later change stops the journal from being written at all.
+access_journal_nonempty() {
+  local entry
+  for entry in "${op_journal}"/*.json; do
+    if [ -f "${entry}" ]; then
+      printf 'yes'
+      return 0
+    fi
+  done
+  printf 'no'
+}
+
 # The same fixed environment as assert_provision.sh, with no test hooks.
 access_run() {
   local -a argv
@@ -138,6 +155,7 @@ it_file_absent 'ssh provision released the operator lock' "${op_root}/lock.d"
 section 'tailnet is gated on this release'
 before_config="$(access_sha "${config}")"
 before_journal="$(access_journal)"
+it_eq 'there are journal entries for the refusal to leave alone' yes "$(access_journal_nonempty)"
 access_run access set tailnet
 it_eq 'unsupported tailnet exits 3' 3 "${ACCESS_RC}"
 it_eq 'tailnet refusal leaves ssh configured' access_mode=ssh "$(cat "${config}")"
@@ -153,6 +171,8 @@ for entry in "${op_journal}"/*.json; do
   [ -f "${entry}" ] || continue
   before_sha["${entry}"]="$(access_sha "${entry}")"
 done
+# Same reason: a loop over an empty array emits no checks and reports nothing.
+it_eq 'there are existing entries to prove the switch left alone' yes "$(access_journal_nonempty)"
 access_run access set connect
 it_eq 'connect switch succeeds' 0 "${ACCESS_RC}"
 it_eq 'connect config contents' access_mode=connect "$(cat "${config}")"

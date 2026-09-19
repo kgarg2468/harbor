@@ -64,12 +64,30 @@ it_version_file=/usr/share/harbor-integration/tailscale-version
 # secret is involved.
 it_login_url="https://login.tailscale-integration.invalid/a/f00dcafe0123456789"
 
+# Secret-shaped arguments are redacted here rather than in each arm, because the
+# arms that refuse an auth key log the argv before they refuse it -- the refusal
+# is loud and correct, and the log line still carried the key. The lane holds no
+# auth key and Harbor has no path that passes one; this is for the run where that
+# stops being true, which is exactly the run whose shim.log the failure
+# diagnostics publish. stub/t3 reaches the same end by validating before it logs;
+# this stub keeps the record of a refused call, so it redacts instead. The flag
+# name is not a secret and stays: knowing an auth key was attempted is the point.
 it_log() {
-  local kind line arg
+  local kind line arg redact_next=no
   kind="${1}"
   shift
   line="$(date -u +%s)"$'\t'"${kind}"$'\t'tailscale
   for arg in "$@"; do
+    if [ "${redact_next}" = yes ]; then
+      arg=REDACTED
+      redact_next=no
+    else
+      case "${arg}" in
+        --auth-key | --authkey) redact_next=yes ;;
+        --auth-key=* | --authkey=*) arg="${arg%%=*}=REDACTED" ;;
+        tskey-*) arg=REDACTED ;;
+      esac
+    fi
     line="${line}"$'\t'"${arg}"
   done
   # The lane's state directory only exists once setup.sh has run. The stub is
@@ -212,7 +230,9 @@ case "${1:-}" in
           exit 64
           ;;
         *)
-          printf 'integration tailscale stub: unsupported "up" flag: %s\n' "${it_arg}" >&2
+          # The flag name, not whatever follows its "=". An unsupported flag is
+          # the diagnosis; its value might be the thing that must not be printed.
+          printf 'integration tailscale stub: unsupported "up" flag: %s\n' "${it_arg%%=*}" >&2
           exit 64
           ;;
       esac
@@ -267,7 +287,10 @@ case "${1:-}" in
     ;;
   *)
     it_log inspect "$@"
-    printf 'integration tailscale stub: unsupported invocation: %s\n' "${*}" >&2
+    # The subcommand alone. shim.log above already holds the whole call with any
+    # secret-shaped argument redacted, and that is the copy meant for diagnosis;
+    # this message would put the raw argv on a stderr the lane publishes.
+    printf 'integration tailscale stub: unsupported invocation: %s\n' "${1:-}" >&2
     exit 64
     ;;
 esac
