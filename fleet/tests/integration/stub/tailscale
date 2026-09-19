@@ -26,8 +26,16 @@
 #                             the "approval" is the printed URL and nothing else,
 #                             and an --authkey of any spelling is refused.
 #   tailscale version         prints the version the package carries.
-# Anything else is refused loudly. tailscale login, logout, serve, funnel and down
-# stay refused on purpose: the lane never logs a node in to a real tailnet.
+#   tailscale serve status    prints the lane's synthetic Serve config, or the
+#                             empty-state wording a real 1.96.4 client prints.
+#   tailscale serve --https=443 off
+#                             removes it. These two are the only Serve verbs, and
+#                             they touch a file in this lane and nothing else.
+# Anything else is refused loudly. tailscale login, logout, funnel and down stay
+# refused on purpose: the lane never logs a node in to a real tailnet, and Harbor
+# has no code path that runs funnel at all. "serve reset" is not in the table
+# above and is refused with everything else, which is the point: a Harbor that
+# started running it would fail this lane rather than pass it quietly.
 #
 # The daemon this stands in for is never contacted, so this stub CANNOT settle
 # issue #63 (whether a real never-logged-in tailscaled exits 0 for
@@ -40,6 +48,11 @@ it_shim_log="${it_state}/shim.log"
 it_mut_log="${it_state}/mutations.log"
 it_operator_file="${it_state}/tailscale.operator"
 it_backend_file="${it_state}/tailscale.backend"
+# The lane's whole Serve config: present means one HTTPS 443 mapping, absent means
+# none. Written by stub/t3's pair --tailscale, because on a real node the Serve
+# mapping is the vendor's side effect and not something Harbor or the operator
+# applies directly.
+it_serve_file="${it_state}/tailscale.serve"
 it_version_file=/usr/share/harbor-integration/tailscale-version
 # The login URL "up" prints. Design section 3.6 says that URL reaches the operator's
 # terminal and no log, and an absence assertion proves nothing unless the string it
@@ -51,12 +64,30 @@ it_version_file=/usr/share/harbor-integration/tailscale-version
 # secret is involved.
 it_login_url="https://login.tailscale-integration.invalid/a/f00dcafe0123456789"
 
+# Secret-shaped arguments are redacted here rather than in each arm, because the
+# arms that refuse an auth key log the argv before they refuse it -- the refusal
+# is loud and correct, and the log line still carried the key. The lane holds no
+# auth key and Harbor has no path that passes one; this is for the run where that
+# stops being true, which is exactly the run whose shim.log the failure
+# diagnostics publish. stub/t3 reaches the same end by validating before it logs;
+# this stub keeps the record of a refused call, so it redacts instead. The flag
+# name is not a secret and stays: knowing an auth key was attempted is the point.
 it_log() {
-  local kind line arg
+  local kind line arg redact_next=no
   kind="${1}"
   shift
   line="$(date -u +%s)"$'\t'"${kind}"$'\t'tailscale
   for arg in "$@"; do
+    if [ "${redact_next}" = yes ]; then
+      arg=REDACTED
+      redact_next=no
+    else
+      case "${arg}" in
+        --auth-key | --authkey) redact_next=yes ;;
+        --auth-key=* | --authkey=*) arg="${arg%%=*}=REDACTED" ;;
+        tskey-*) arg=REDACTED ;;
+      esac
+    fi
     line="${line}"$'\t'"${arg}"
   done
   # The lane's state directory only exists once setup.sh has run. The stub is
@@ -199,7 +230,9 @@ case "${1:-}" in
           exit 64
           ;;
         *)
-          printf 'integration tailscale stub: unsupported "up" flag: %s\n' "${it_arg}" >&2
+          # The flag name, not whatever follows its "=". An unsupported flag is
+          # the diagnosis; its value might be the thing that must not be printed.
+          printf 'integration tailscale stub: unsupported "up" flag: %s\n' "${it_arg%%=*}" >&2
           exit 64
           ;;
       esac
@@ -218,14 +251,46 @@ case "${1:-}" in
     printf 'Running\n' >"${it_backend_file}"
     printf 'Success.\n'
     ;;
-  login | logout | serve | funnel | down)
+  serve)
+    # Dispatch on the argument vector, element by element, with the count checked
+    # first. Matching on "${*}" would make ("serve" "status") and the single
+    # argument ("serve status") the same string -- the PR 4 review's finding about
+    # this dispatcher, and the reason neither stub is allowed to take that shortcut.
+    if [ "$#" = 2 ] && [ "${2}" = status ]; then
+      it_log inspect "$@"
+      if [ -f "${it_serve_file}" ]; then
+        cat "${it_serve_file}"
+      else
+        # The empty-state wording measured on a real 1.96.4 client, plan
+        # correction 35. The warning that client also prints went to stderr, and
+        # this stub keeps that boundary: data on stdout, nothing else.
+        printf 'No serve config\n'
+      fi
+      exit 0
+    fi
+    if [ "$#" = 3 ] && [ "${2}" = --https=443 ] && [ "${3}" = off ]; then
+      it_log mutate "$@"
+      rm -f "${it_serve_file}"
+      exit 0
+    fi
+    # Every other spelling, including any form of reset, lands here. Logged as an
+    # inspection because nothing was mutated: a refused call must not show up in
+    # the mutation log that the assert scripts read to prove a run changed nothing.
+    it_log inspect "$@"
+    printf 'integration tailscale stub: unsupported "serve" invocation\n' >&2
+    exit 64
+    ;;
+  login | logout | funnel | down)
     it_log mutate "$@"
     printf 'integration tailscale stub: refusing "%s"; the lane never logs a node in and holds no auth key\n' "${1}" >&2
     exit 64
     ;;
   *)
     it_log inspect "$@"
-    printf 'integration tailscale stub: unsupported invocation: %s\n' "${*}" >&2
+    # The subcommand alone. shim.log above already holds the whole call with any
+    # secret-shaped argument redacted, and that is the copy meant for diagnosis;
+    # this message would put the raw argv on a stderr the lane publishes.
+    printf 'integration tailscale stub: unsupported invocation: %s\n' "${1:-}" >&2
     exit 64
     ;;
 esac

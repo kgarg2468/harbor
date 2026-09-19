@@ -72,7 +72,12 @@ case "${1:-}" in
     if [ "$#" = 2 ] && [ "${2}" = status ]; then it_cmd=service-status; fi
     if [ "$#" = 2 ] && [ "${2}" = install ]; then it_cmd=service-install; fi
     ;;
+  pair)
+    if [ "$#" = 2 ] && [ "${2}" = --tailscale ]; then it_cmd=pair-tailscale; fi
+    ;;
   connect)
+    if [ "$#" = 2 ] && [ "${2}" = link ]; then it_cmd=connect-link; fi
+    if [ "$#" = 2 ] && [ "${2}" = unlink ]; then it_cmd=connect-unlink; fi
     if [ "$#" = 3 ] && [ "${2}" = status ] && [ "${3}" = --json ]; then it_cmd=connect-status; fi
     ;;
 esac
@@ -81,11 +86,12 @@ esac
   exit 64
 }
 case "${it_cmd}" in
-  service-install) it_log mutate "$@" ;;
+  service-install | pair-tailscale | connect-link | connect-unlink) it_log mutate "$@" ;;
   *) it_log inspect "$@" ;;
 esac
 it_version="$(sed -n 's/^t3_version=//p' "${it_lock}")"
 it_unit="${HOME}/.config/systemd/user/t3code.service"
+it_linked_file="${it_state}/t3.linked"
 case "${it_cmd}" in
   version) printf 't3 v%s\n' "${it_version}" ;;
   service-status)
@@ -95,8 +101,25 @@ case "${it_cmd}" in
       printf '  Status: not installed\n'
     fi
     ;;
+  pair-tailscale)
+    # The vendor's side effect, not Harbor's: the real t3 shells out to tailscale
+    # serve --bg internally, so the mapping appears in the Serve config without
+    # Harbor ever running a serve command. Writing the file stub/tailscale reads
+    # is how the two stubs model one node. The port is the lane's own listener.
+    # No pairing token is printed: this lane has no tailnet to pair with, and a
+    # stub that printed something token-shaped would put it in a CI log.
+    printf 'https://harbor-node.TAILNET.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:18743\n' \
+      >"${it_state}/tailscale.serve"
+    ;;
+  connect-link) printf 'true\n' >"${it_linked_file}" ;;
+  connect-unlink) printf 'false\n' >"${it_linked_file}" ;;
   connect-status)
-    printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": true,\n  "relayClient": {\n    "status": "available"\n  }\n}\n'
+    # true until a link or unlink has said otherwise, so every caller that ran
+    # before this file existed reads exactly what it read before.
+    it_linked=true
+    if [ -f "${it_linked_file}" ]; then it_linked="$(cat "${it_linked_file}")"; fi
+    printf '{\n  "desired": true,\n  "authenticated": true,\n  "linked": %s,\n  "relayClient": {\n    "status": "available"\n  }\n}\n' \
+      "${it_linked}"
     ;;
   service-install)
     mkdir -p "${HOME}/.config/systemd/user" "${HOME}/.local/share/harbor-it"

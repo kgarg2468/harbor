@@ -277,6 +277,52 @@ else
   fi
   verdict=fail
 fi
+# ---------------------------------------------------------------------------
+banner 'the pinned t3 pair --tailscale guard, with no server and no tailnet'
+# ---------------------------------------------------------------------------
+# Revalidation B of design section 5.5. Harbor's own pre-check in lib/pair.sh is
+# authoritative and does not rely on this guard -- Harbor reads Serve itself and
+# decides before the vendor runs. What this records is what the pinned version
+# does when asked to pair with nothing to pair, so that a version which starts
+# acting where it used to refuse is a version Harbor noticed.
+#
+# There is no running T3 server here and no Tailscale at all, so the question
+# this answers is which refusal the guard reaches. It is NOT Revalidation A:
+# whether the vendor would reuse an existing mapping, and whether a node can
+# fetch its own descriptor through MagicDNS, both need a real tailnet and are
+# recorded separately in fleet/vendor-smoke/tailnet-environment.probe.
+#
+# stdin is closed. The command is interactive by design and would otherwise be
+# entitled to wait for a human the lane does not have.
+pair_rc=0
+timeout --kill-after=5s 60s "${vendor_env[@]}" "${prefix}/bin/t3" pair --tailscale \
+  </dev/null >"${work}/pair.out" 2>&1 || pair_rc="$?"
+# Fixed words only. The vendor's own text stays in the private capture, which the
+# EXIT trap removes: this lane publishes what Harbor concluded, never what a
+# vendor printed.
+if [ "${pair_rc}" = 0 ]; then
+  # The one answer that is a finding rather than a measurement. With no server
+  # and no tailnet there is nothing a success could mean, so it means the guard
+  # is gone -- and Harbor's pre-check would then be the only thing between an
+  # operator and a vendor acting on a node it cannot have read.
+  emit pair_guard unexpected-success
+  verdict=fail
+elif [ "${pair_rc}" = 124 ] || [ "${pair_rc}" = 137 ]; then
+  # Correction 36 measured tailscale serve --bg hanging indefinitely on a real
+  # client. A guard that hangs instead of refusing is not a refusal, and it is
+  # the shape slice 5d's bounded vendor call exists for -- worth its own word
+  # rather than being folded into "unexpected".
+  emit pair_guard did-not-return
+  verdict=fail
+elif grep -q 'No running T3 Code server found' "${work}/pair.out"; then
+  emit pair_guard no-running-server
+elif grep -q 'Could not talk to Tailscale' "${work}/pair.out"; then
+  emit pair_guard tailscale-unavailable
+else
+  emit pair_guard unexpected
+  verdict=fail
+fi
+
 emit result "${verdict}"
 publish
 [ "${verdict}" = pass ] || fail assertion-failed
