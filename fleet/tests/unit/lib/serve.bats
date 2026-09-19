@@ -212,6 +212,11 @@ STUB
   serve_stub 'No serve config' 'Warning: client version mismatch' 0
   assert_equal "$(tailscale serve status 2>&1 >/dev/null)" 'Warning: client version mismatch'
   assert_equal "$(tailscale serve status 2>/dev/null)" 'No serve config'
+  HARBOR_SERVE_RAW=stale
+  harbor_serve_status
+  assert_equal "${HARBOR_SERVE_RAW:-}" 'No serve config'
+  assert_equal "$(harbor_serve_mapping)" absent
+  assert_equal "$(harbor_serve_funnel)" none
 }
 
 @test "a vendor that exited non-zero is not parsed, whatever it printed" {
@@ -257,13 +262,13 @@ STUB
   # appearances of the word are in prose -- a comment or a message telling the
   # operator what the vendor command would be -- never as a command.
   local hits
-  hits="$(grep -rn 'tailscale funnel' "${HARBOR_ROOT}/lib" "${HARBOR_ROOT}/node" \
+  hits="$(grep -rnE 'tailscale[[:blank:]]+funnel' "${HARBOR_ROOT}/lib" "${HARBOR_ROOT}/node" \
     "${HARBOR_ROOT}/bin" || :)"
   # Every hit must be inside a comment or a quoted message. A bare invocation is
   # a line whose first word after optional whitespace is `tailscale`.
   local bare
-  bare="$(printf '%s\n' "${hits}" | sed -n 's/^[^:]*:[0-9]*: *//p' \
-    | grep -c '^tailscale funnel' || :)"
+  bare="$(printf '%s\n' "${hits}" | sed -n 's/^[^:]*:[0-9]*:[[:blank:]]*//p' \
+    | grep -cE '^tailscale[[:blank:]]+funnel' || :)"
   assert_equal "${bare}" 0
 }
 
@@ -271,9 +276,202 @@ STUB
   # Correction 30: a refutation that has never failed is not a test. Prove this
   # one can fail by giving it a file that violates the rule.
   mkdir -p "${BATS_TEST_TMPDIR}/lib"
-  printf '#!/bin/bash\ntailscale funnel 443 on\n' >"${BATS_TEST_TMPDIR}/lib/bad.sh"
+  printf '#!/bin/bash\ntailscale funnel 443 on\ntailscale\tfunnel 443 on\ntailscale  funnel 443 on\n' >"${BATS_TEST_TMPDIR}/lib/bad.sh"
   local bare
-  bare="$(grep -rn 'tailscale funnel' "${BATS_TEST_TMPDIR}/lib" \
-    | sed -n 's/^[^:]*:[0-9]*: *//p' | grep -c '^tailscale funnel' || :)"
-  assert_equal "${bare}" 1
+  bare="$(grep -rnE 'tailscale[[:blank:]]+funnel' "${BATS_TEST_TMPDIR}/lib" \
+    | sed -n 's/^[^:]*:[0-9]*:[[:blank:]]*//p' | grep -cE '^tailscale[[:blank:]]+funnel' || :)"
+  assert_equal "${bare}" 3
+  serve_fixture funnel
+  assert_equal "$(harbor_serve_funnel)" present
+  serve_fixture vendor-443
+  assert_equal "$(harbor_serve_funnel)" none
+  serve_fixture garbage
+  assert_equal "$(harbor_serve_funnel)" unknown
+}
+
+# CONSTRUCTED review inputs, not captured vendor output. Keep these shared with
+# the absence invariant so every reproduction participates in that sweep.
+serve_adversarial_body() {
+  local header='https://TAILNET.ts.net (tailnet only)'
+  local root='|-- / proxy http://127.0.0.1:3773'
+  case "${1}" in
+    1) HARBOR_SERVE_RAW="No serve configuration
+https://TAILNET.ts.net (Funnel on)
+${root}" ;;
+    2a) HARBOR_SERVE_RAW="https://[2001:db8::1] (tailnet only)
+${root}" ;;
+    2b) HARBOR_SERVE_RAW="https://TAILNET.ts.net:8443/path:443 (tailnet only)
+${root}" ;;
+    3) HARBOR_SERVE_RAW="https://TAILNET.ts.net:8443 (tailnet only)
+|-- definitely not a handler" ;;
+    4 | 10) HARBOR_SERVE_RAW="${header}
+${root}" ;;
+    5) HARBOR_SERVE_RAW="${header}
+${root}
+${header}" ;;
+    6) HARBOR_SERVE_RAW="${header}
+${root}
+|-- / proxy https://127.0.0.1:9000" ;;
+    7) HARBOR_SERVE_RAW="https:// (tailnet (only))
+${root}" ;;
+    8) HARBOR_SERVE_RAW="${header}
+|-- / proxy http://::1:3773" ;;
+    9) HARBOR_SERVE_RAW='https://TAILNET.ts.net(tailnet only)' ;;
+    11) HARBOR_SERVE_RAW="${header}
+|-- / proxy http://bad$(printf '\r')host:3773" ;;
+    12) HARBOR_SERVE_RAW="${header}
+|-- /public/(Funnel on) proxy http://127.0.0.1:3773" ;;
+  esac
+}
+
+assert_serve_unreadable() {
+  assert_equal "$(harbor_serve_mapping)" unnormalizable
+  assert_equal "$(harbor_serve_funnel)" unknown
+}
+
+@test "finding 1: the empty config sentinel requires exact equality" {
+  serve_adversarial_body 1
+  assert_serve_unreadable
+  HARBOR_SERVE_RAW='No serve config'
+  assert_equal "$(harbor_serve_mapping)" absent
+  assert_equal "$(harbor_serve_funnel)" none
+}
+
+@test "finding 2: header ports come from authorities including bracketed IPv6" {
+  serve_adversarial_body 2a
+  assert_equal "$(harbor_serve_header_port 'https://[2001:db8::1] (tailnet only)')" 443
+  assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
+  assert_equal "$(harbor_serve_funnel)" none
+  serve_adversarial_body 2b
+  assert_equal "$(harbor_serve_header_port 'https://TAILNET.ts.net:8443/path:443 (tailnet only)')" unreadable
+  assert_serve_unreadable
+}
+
+@test "finding 3: unknown handler shapes refuse even on a non-443 listener" {
+  serve_adversarial_body 3
+  assert_serve_unreadable
+}
+
+@test "finding 4: a real here-document tempfile failure cannot license a write" {
+  serve_adversarial_body 4
+  # Large enough to force tempfile use on Bash 5 as well as Bash 3.2. Empty
+  # lines do not change the mapping and the positive control proves that.
+  local i
+  for ((i = 0; i < 9000; i++)); do HARBOR_SERVE_RAW+=$'\n'; done
+  assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
+  run /bin/bash -euo pipefail -c '
+    exec 2>/dev/null
+    . "${1}/lib/serve.sh"
+    HARBOR_SERVE_RAW="${2}"
+    trap "" XFSZ
+    ulimit -f 0
+    harbor_serve_mapping
+    printf " / "
+    harbor_serve_funnel
+  ' bash "${HARBOR_ROOT}" "${HARBOR_SERVE_RAW}"
+  assert_success
+  assert_output 'unnormalizable / unknown'
+}
+
+@test "finding 5: a repeated 443 header cannot inherit the previous target" {
+  serve_adversarial_body 5
+  assert_serve_unreadable
+}
+
+@test "finding 6: a second root handler is ambiguous regardless of scheme" {
+  serve_adversarial_body 6
+  assert_serve_unreadable
+}
+
+@test "finding 7: empty header authorities are unreadable" {
+  serve_adversarial_body 7
+  assert_equal "$(harbor_serve_header_port 'https:// (tailnet (only))')" unreadable
+  assert_serve_unreadable
+}
+
+@test "finding 8: colon-bearing backend hosts require brackets" {
+  serve_adversarial_body 8
+  assert_serve_unreadable
+}
+
+@test "finding 9: unreadable headers cannot establish no Funnel" {
+  serve_adversarial_body 9
+  assert_serve_unreadable
+}
+
+@test "finding 10: an unavailable or failed JSON escaper emits no journal value" {
+  serve_adversarial_body 10
+  serve_fixture_body "${HARBOR_SERVE_RAW}"
+  unset -f harbor_json_escape
+  run -127 --separate-stderr harbor_observe_op_tailscale_serve https-443
+  assert_failure 127
+  assert_output ''
+  harbor_json_escape() {
+    printf partial
+    return 42
+  }
+  run harbor_observe_op_tailscale_serve https-443
+  assert_failure 42
+  assert_output ''
+}
+
+@test "finding 11: a control byte in a backend never enters journal JSON" {
+  serve_adversarial_body 11
+  assert_serve_unreadable
+  serve_fixture_body "${HARBOR_SERVE_RAW}"
+  assert_equal "$(harbor_observe_op_tailscale_serve https-443)" '"unnormalizable"'
+}
+
+@test "finding 12: only listener suffixes supply Funnel markers" {
+  serve_adversarial_body 12
+  assert_serve_unreadable
+  HARBOR_SERVE_RAW="${HARBOR_SERVE_RAW}
+|-- / proxy http://127.0.0.1:3773"
+  assert_equal "$(harbor_serve_mapping)" 'https:443 -> http://loopback:3773'
+  assert_equal "$(harbor_serve_funnel)" none
+}
+
+@test "absent across every fixture and adversarial body requires proven no 443 listener" {
+  local file got positive=0 finding
+  for file in "${HARBOR_ROOT}/tests/fixtures/tailscale/serve-status/"*; do
+    [ "${file##*/}" != PROVENANCE.md ] || continue
+    HARBOR_SERVE_RAW="$(cat "${file}")"
+    got="$(harbor_serve_mapping)"
+    case "${file##*/}" in
+      absent | non-443)
+        assert_equal "${got}" absent
+        positive=$((positive + 1))
+        ;;
+      *) assert [ "${got}" != absent ] ;;
+    esac
+  done
+  assert_equal "${positive}" 2
+  for finding in 1 2a 2b 3 4 5 6 7 8 9 10 11 12; do
+    serve_adversarial_body "${finding}"
+    assert [ "$(harbor_serve_mapping)" != absent ]
+  done
+}
+
+@test "header authority failures refuse and explicit bracketed ports parse" {
+  local header
+  for header in 'https://[] (tailnet only)' 'https://[::1]oops (tailnet only)' \
+    'https://[::1 (tailnet only)' 'https://host: (tailnet only)' \
+    'https://host:abc (tailnet only)' 'https://:443 (tailnet only)'; do
+    assert_equal "$(harbor_serve_header_port "${header}")" unreadable
+    HARBOR_SERVE_RAW="${header}"
+    assert_serve_unreadable
+  done
+  assert_equal "$(harbor_serve_header_port 'https://[::1]:8443 (tailnet only)')" 8443
+}
+
+@test "the shared walker prints nothing and resets both globals on every call" {
+  serve_fixture vendor-443
+  harbor_serve_parse >"${BATS_TEST_TMPDIR}/parse.out"
+  assert [ ! -s "${BATS_TEST_TMPDIR}/parse.out" ]
+  assert_equal "${HARBOR_SERVE_MAPPING:-}" 'https:443 -> http://loopback:3773'
+  assert_equal "${HARBOR_SERVE_FUNNEL:-}" none
+  unset HARBOR_SERVE_RAW
+  harbor_serve_parse
+  assert_equal "${HARBOR_SERVE_MAPPING:-}" unnormalizable
+  assert_equal "${HARBOR_SERVE_FUNNEL:-}" unknown
 }
