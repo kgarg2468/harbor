@@ -53,7 +53,7 @@ runtime_read() {
 }
 descriptor_read() {
   local HARBOR_T3_DESCRIPTOR_ID
-  harbor_t3_descriptor_id http://loopback.invalid/.well-known/t3/environment >/dev/null
+  harbor_t3_descriptor_read http://loopback.invalid/.well-known/t3/environment >/dev/null
   assert_equal "${HARBOR_T3_DESCRIPTOR_ID:-}" "${1}"
 }
 environment_read() {
@@ -124,18 +124,21 @@ serve_fixture() {
 
 @test "the reader never writes to the vendor's directory" {
   runtime_fixture healthy
+  # cksum, not sha256sum: this suite runs on the macOS runners too, and stock
+  # macOS has no sha256sum. lib/t3.bats already hashes this way for the same
+  # reason; sha256sum appears only in the integration lane, which is Ubuntu only.
   local before
-  before="$(find "${FIX_HOME}/.t3" -type f -exec sha256sum {} + | LC_ALL=C sort)"
+  before="$(find "${FIX_HOME}/.t3" -type f -exec cksum {} + | LC_ALL=C sort)"
   harbor_t3_runtime_port "${FIX_HOME}" >/dev/null
-  assert_equal "$(find "${FIX_HOME}/.t3" -type f -exec sha256sum {} + | LC_ALL=C sort)" \
+  assert_equal "$(find "${FIX_HOME}/.t3" -type f -exec cksum {} + | LC_ALL=C sort)" \
     "${before}"
 }
 @test "a valid descriptor yields its environmentId" {
   descriptor_shim valid
   descriptor_read env_2f7a91c4
-  run harbor_t3_descriptor_id http://loopback.invalid/.well-known/t3/environment
+  run harbor_t3_descriptor_read http://loopback.invalid/.well-known/t3/environment
   assert_success
-  assert_output env_2f7a91c4
+  assert_output ''
 }
 
 @test "a body that is not a T3 descriptor is refused with its own reason" {
@@ -155,7 +158,7 @@ serve_fixture() {
 
 @test "the fetch carries no credential and follows no redirect" {
   descriptor_shim valid
-  harbor_t3_descriptor_id http://loopback.invalid/.well-known/t3/environment >/dev/null
+  harbor_t3_descriptor_read http://loopback.invalid/.well-known/t3/environment >/dev/null
   local argv
   argv="$(cat "${FIX_SHIM_LOG}")"
   # The positive form as well as the refutations, because a refutation whose
@@ -183,4 +186,46 @@ http://loopback.invalid/.well-known/t3/environment'
   local argv='--location -u --user --header Authorization --netrc'
   assert_regex "${argv}" '--location'
   assert_regex "${argv}" '(-u|--user|--header|Authorization|--netrc)'
+}
+
+@test "descriptor structure rejects missing-label despite a valid ID" {
+  descriptor_shim missing-label
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "descriptor structure rejects missing-platform despite a valid ID" {
+  descriptor_shim missing-platform
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "descriptor structure rejects missing-serverVersion despite a valid ID" {
+  descriptor_shim missing-serverVersion
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "descriptor structure rejects missing-capabilities despite a valid ID" {
+  descriptor_shim missing-capabilities
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "descriptor structure rejects missing-os despite a valid ID" {
+  descriptor_shim missing-os
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "descriptor structure rejects missing-arch despite a valid ID" {
+  descriptor_shim missing-arch
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "descriptor structure rejects non-object despite a valid ID" {
+  descriptor_shim non-object
+  descriptor_read ''
+  assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
 }

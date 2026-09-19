@@ -30,3 +30,18 @@ inspection confirms their shape, not that any real server emitted these bytes.
 | `valid-other-id` | Same schema with synthetic ID `env_9b3e04d1` and another label |
 | `not-t3` | Hand-written HTML, not a vendor response |
 | `empty` | Zero bytes, representing an endpoint that answered with no body |
+
+The following fixtures are CONSTRUCTED from the inspected `t3@0.0.38`
+schema recorded above and the review’s required-field inventory; no new package
+measurement or HTTP capture was performed for this revision. Each retains the
+synthetic ID from `valid`.
+
+| Fixture | Construction |
+| --- | --- |
+| `missing-label` | CONSTRUCTED: omit required `label` from the descriptor |
+| `missing-platform` | CONSTRUCTED: omit required `platform` from the descriptor |
+| `missing-serverVersion` | CONSTRUCTED: omit required `serverVersion` from the descriptor |
+| `missing-capabilities` | CONSTRUCTED: omit required `capabilities` from the descriptor |
+| `missing-os` | CONSTRUCTED: omit required `os` from platform |
+| `missing-arch` | CONSTRUCTED: omit required `arch` from platform |
+| `non-object` | CONSTRUCTED: wrap the complete descriptor in HTML |

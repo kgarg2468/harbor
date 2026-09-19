@@ -629,8 +629,11 @@ harbor_t3_runtime_port() {
   printf '%s' "${port}"
 }
 
-# Direct callers must scope HARBOR_T3_DESCRIPTOR_ID locally and discard it.
-# harbor_t3_descriptor_id URL: the environmentId at URL, or "" with
+# Internal only: harbor_t3_descriptor_read must only ever be called inside
+# harbor_t3_environment's trace-suspended region. It is not a public reader:
+# the moment its result is readable with tracing on, the no-ID-disclosure
+# guarantee is gone. The environment wrapper owns comparison and disposal.
+# harbor_t3_descriptor_read URL: sets the in-memory environmentId, or "" with
 # HARBOR_T3_DESCRIPTOR_WHY naming the reason. The body is never printed, never
 # logged, and never kept: section 5.5 says the IDs are never logged, journaled,
 # persisted, or bundled, and the only way to hold to that is for the body to reach
@@ -642,10 +645,8 @@ harbor_t3_runtime_port() {
 # inside harbor pair between a prediction and a vendor invocation and must not hang
 # there. Transport failures are unreachable (unknown); an HTTP error is an
 # answer without a descriptor (broken at the MagicDNS endpoint).
-harbor_t3_descriptor_id() {
-  local url="${1}" body id xt=0 rc=0
-  case "$-" in *x*) xt=1 ;; esac
-  [ "${xt}" = 0 ] || set +x
+harbor_t3_descriptor_read() {
+  local url="${1}" body id rc=0
   HARBOR_T3_DESCRIPTOR_WHY=""
   HARBOR_T3_DESCRIPTOR_ID=""
   body="$(curl -q -fsS --no-progress-meter --connect-timeout 5 --max-time 15 "${url}" 2>/dev/null)" || rc="$?"
@@ -653,21 +654,34 @@ harbor_t3_descriptor_id() {
   # body is suppressed, so classify it as not-a-descriptor below.
   if [ "${rc}" != 0 ] && [ "${rc}" != 22 ]; then
     HARBOR_T3_DESCRIPTOR_WHY=unreachable
-    [ "${xt}" = 0 ] || set -x
     return 0
   fi
-  id="$(printf '%s' "${body}" | tr -d '\n' \
+  body="$(printf '%s' "${body}" | tr -d '\n')"
+  # Structural check of the required fields in t3@0.0.38's inspected
+  # ExecutionEnvironmentDescriptor and ExecutionEnvironmentPlatform schemas,
+  # not a JSON parser. Reject an unfamiliar shape before extracting an ID.
+  if ! printf '%s\n' "${body}" | awk '
+    /^[[:space:]]*[{].*[}][[:space:]]*$/ &&
+    /"label"[[:space:]]*:/ &&
+    /"platform"[[:space:]]*:[[:space:]]*[{]/ &&
+    /"serverVersion"[[:space:]]*:/ &&
+    /"capabilities"[[:space:]]*:[[:space:]]*[{]/ &&
+    /"os"[[:space:]]*:/ &&
+    /"arch"[[:space:]]*:/ { shaped = 1 }
+    END { exit !shaped }
+  '; then
+    HARBOR_T3_DESCRIPTOR_WHY=not-a-descriptor
+    return 0
+  fi
+  id="$(printf '%s' "${body}" \
     | sed -n 's/.*"environmentId"[ ]*:[ ]*"\([^"]*\)".*/\1/p')"
   unset body
   if [ -z "${id}" ]; then
     HARBOR_T3_DESCRIPTOR_WHY=not-a-descriptor
-    [ "${xt}" = 0 ] || set -x
     return 0
   fi
   HARBOR_T3_DESCRIPTOR_ID="${id}"
-  printf '%s' "${id}"
   unset id
-  [ "${xt}" = 0 ] || set -x
   return 0
 }
 
@@ -698,14 +712,14 @@ harbor_t3_environment_read() {
     printf 'unknown'
     return 0
   fi
-  harbor_t3_descriptor_id "http://127.0.0.1:${port}/.well-known/t3/environment" >/dev/null
+  harbor_t3_descriptor_read "http://127.0.0.1:${port}/.well-known/t3/environment" >/dev/null
   local_id="${HARBOR_T3_DESCRIPTOR_ID:-}"
   if [ -z "${local_id}" ]; then
     HARBOR_T3_ENVIRONMENT_WHY="service.t3: ${HARBOR_T3_DESCRIPTOR_WHY:-}; the local T3 server did not answer its own descriptor, so there is nothing to compare the tailnet route against"
     printf 'unknown'
     return 0
   fi
-  harbor_t3_descriptor_id "https://${magicdns}/.well-known/t3/environment" >/dev/null
+  harbor_t3_descriptor_read "https://${magicdns}/.well-known/t3/environment" >/dev/null
   remote_id="${HARBOR_T3_DESCRIPTOR_ID:-}"
   if [ -z "${remote_id}" ]; then
     case "${HARBOR_T3_DESCRIPTOR_WHY:-}" in

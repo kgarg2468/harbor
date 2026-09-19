@@ -53,7 +53,7 @@ runtime_read() {
 }
 descriptor_read() {
   local HARBOR_T3_DESCRIPTOR_ID
-  harbor_t3_descriptor_id http://loopback.invalid/.well-known/t3/environment >/dev/null
+  harbor_t3_descriptor_read http://loopback.invalid/.well-known/t3/environment >/dev/null
   assert_equal "${HARBOR_T3_DESCRIPTOR_ID:-}" "${1}"
 }
 environment_read() {
@@ -180,9 +180,18 @@ serve_fixture() {
       set -x
       harbor_t3_environment "${FIX_HOME}" harbor-node.TAILNET.ts.net
       case "$-" in *x*) ;; *) exit 91 ;; esac
-      set +x
+      # Read the result while caller tracing is still enabled.
+      id="${HARBOR_T3_DESCRIPTOR_ID:-}"
+      test -z "${id}"
       # The environment check must discard its in-memory descriptor result.
       test -z "${HARBOR_T3_DESCRIPTOR_ID:-}"
+      # The former public reader must not offer a second way to recover an ID
+      # after the protected comparison returns. Exercise that escape if present.
+      if command -v harbor_t3_descriptor_id >/dev/null; then
+        harbor_t3_descriptor_id http://loopback.invalid/.well-known/t3/environment >/dev/null
+        id="${HARBOR_T3_DESCRIPTOR_ID:-}"
+      fi
+      set +x
     ) >"${FIX_ROOT}/trace-out" 2>"${FIX_ROOT}/trace-err"
     for id in env_2f7a91c4 env_9b3e04d1; do
       run grep -r "${id}" "${FIX_HOME}"
@@ -202,4 +211,15 @@ serve_fixture() {
     rm "${FIX_ROOT}/planted"
   done
   assert_regex 'http://127.0.0.1:8080/' 'http://127\.0\.0\.1:8080/'
+}
+
+@test "malformed MagicDNS descriptors with the same local ID are broken" {
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  local fixture
+  for fixture in missing-label missing-platform missing-serverVersion missing-capabilities missing-os missing-arch non-object; do
+    descriptor_shim_for magicdns "${fixture}"
+    environment_read broken
+    assert_regex "${HARBOR_T3_ENVIRONMENT_WHY:-}" '^tailscale\.serve: not-a-descriptor'
+  done
 }
