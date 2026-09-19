@@ -589,6 +589,81 @@ harbor_t3_state_dir() {
 harbor_t3_runtime_path() {
   printf '%s/server-runtime.json' "$(harbor_t3_state_dir "${1}")"
 }
+# harbor_t3_json_top KEY: one raw top-level token, with no decoding or output
+# until the entire object has been checked. Exit 2 means absent; other failures
+# mean malformed or ambiguous. Values travel only on stdin, never awk arguments.
+harbor_t3_json_top() {
+  LC_ALL=C awk -v wanted="${1}" '
+    function ws() { while (substr(doc, pos, 1) ~ /^[ \t\r\n]$/) pos++ }
+    function string(    c, escape, i) {
+      if (substr(doc, pos++, 1) != "\"") return 0
+      while (pos <= length(doc)) {
+        c = substr(doc, pos++, 1)
+        if (c == "\"") return 1
+        if (c ~ /[[:cntrl:]]/) return 0
+        if (c == "\\") {
+          escape = substr(doc, pos++, 1)
+          if (escape == "u") {
+            for (i = 0; i < 4; i++)
+              if (substr(doc, pos++, 1) !~ /^[0123456789abcdefABCDEF]$/) return 0
+          } else if (escape !~ /^["\\\/bfnrt]$/) return 0
+        }
+      }
+      return 0
+    }
+    function value(depth,    c, start, key, token, closing) {
+      ws()
+      c = substr(doc, pos, 1)
+      if (c == "\"") return string()
+      if (c == "{" || c == "[") {
+        closing = (c == "{" ? "}" : "]")
+        pos++
+        ws()
+        if (substr(doc, pos, 1) == closing) { pos++; return 1 }
+        while (pos <= length(doc)) {
+          key = ""
+          if (c == "{") {
+            start = pos
+            if (!string()) return 0
+            key = substr(doc, start + 1, pos - start - 2)
+            # Escaped member names could alias a required name. Refuse rather
+            # than decode or overlook an ambiguously spelled duplicate.
+            if (index(key, "\\")) return 0
+            ws()
+            if (substr(doc, pos++, 1) != ":") return 0
+          }
+          ws()
+          start = pos
+          if (!value(depth + 1)) return 0
+          if (depth == 0 && c == "{" && key == wanted) {
+            count++
+            result = substr(doc, start, pos - start)
+          }
+          ws()
+          token = substr(doc, pos++, 1)
+          if (token == closing) return 1
+          if (token != ",") return 0
+          ws()
+        }
+        return 0
+      }
+      start = pos
+      while (pos <= length(doc) && substr(doc, pos, 1) !~ /^[ \t\r\n,}\]]$/) pos++
+      token = substr(doc, start, pos - start)
+      return token ~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/
+    }
+    { doc = doc (NR == 1 ? "" : "\n") $0 }
+    END {
+      pos = 1
+      ws()
+      if (substr(doc, pos, 1) != "{" || !value(0)) exit 1
+      ws()
+      if (pos <= length(doc) || count > 1) exit 1
+      if (count != 1) exit 2
+      printf "%s", result
+    }
+  '
+}
 # Direct callers also receive HARBOR_T3_RUNTIME_PORT alongside the reason.
 # harbor_t3_runtime_port HOME: the loopback port of the running T3 server, or the
 # empty string with HARBOR_T3_RUNTIME_WHY naming which of the six reasons applies.
@@ -602,10 +677,10 @@ harbor_t3_runtime_path() {
 # The body is one line. persistServerRuntimeState writes JSON.stringify(state)
 # with no indent argument, unlike t3 connect status --json, which is
 # JSON.stringify(x, null, 2). A reader copied from the connect adapter matches
-# nothing here and reports every field missing on a healthy node. The sed below
-# is written against the value, not the line, so both shapes answer.
+# nothing here and reports every field missing on a healthy node. The structural
+# reader below accepts both layouts.
 harbor_t3_runtime_port() {
-  local file body version host port
+  local file body version host port rc=0
   HARBOR_T3_RUNTIME_WHY=""
   HARBOR_T3_RUNTIME_PORT=""
   file="$(harbor_t3_runtime_path "${1}")"
@@ -624,97 +699,139 @@ harbor_t3_runtime_port() {
     HARBOR_T3_RUNTIME_WHY=unreadable
     return 0
   fi
-  # Newlines squeezed out so one pattern reads both the pinned single-line form
-  # and a pretty-printed one. This is a value reader, not a line reader: the
-  # fields it wants are scalars whose spelling does not depend on layout.
-  if ! body="$(tr -d '\n' <"${file}" 2>/dev/null)"; then
+  if ! body="$(cat "${file}" 2>/dev/null)"; then
     HARBOR_T3_RUNTIME_WHY=unreadable
     return 0
   fi
   case "${body}" in
-    '{'*'}') ;;
+    *'{'*'}'*) ;;
     *)
       HARBOR_T3_RUNTIME_WHY=unreadable
       return 0
       ;;
   esac
-  version="$(printf '%s' "${body}" | sed -n 's/.*"version"[ ]*:[ ]*\([0-9][0-9]*\).*/\1/p')"
+  # Exit 1 is "I could not read this document", which is unreadable rather than a
+  # statement about any one field; exit 2 is "the document is fine, that member is
+  # absent", which each field below answers for itself. Keeping the two apart is
+  # what stops a malformed file from being reported as a healthy server missing a
+  # port -- the reason word an operator acts on differs in each case.
+  version="$(printf '%s' "${body}" | harbor_t3_json_top version)" || rc="$?"
+  if [ "${rc}" = 1 ]; then
+    HARBOR_T3_RUNTIME_WHY=unreadable
+    return 0
+  fi
+  # An absent version left rc=2 and version empty, which is not 1 either.
   if [ "${version}" != 1 ]; then
     HARBOR_T3_RUNTIME_WHY=unrecognized-version
     return 0
   fi
-  # host is optional in the schema. Present and non-loopback means the server is
-  # not where Harbor's prediction would put it, which is a refusal rather than a
-  # port Harbor would go on to describe as loopback.
-  host="$(printf '%s' "${body}" | sed -n 's/.*"host"[ ]*:[ ]*"\([^"]*\)".*/\1/p')"
-  if [ -n "${host}" ] && [ "$(harbor_serve_loopback_host "${host}")" != loopback ]; then
-    HARBOR_T3_RUNTIME_WHY=not-loopback
-    return 0
+  # Missing host is fine. A present empty string matches the vendor default.
+  rc=0
+  host="$(printf '%s' "${body}" | harbor_t3_json_top host)" || rc="$?"
+  if [ "${rc}" != 2 ]; then
+    case "${host}" in
+      \"*\")
+        host="${host#\"}"
+        host="${host%\"}"
+        ;;
+      *) host=invalid ;;
+    esac
+    if [ "${rc}" != 0 ] || { [ -n "${host}" ] && [ "$(harbor_serve_loopback_host "${host}")" != loopback ]; }; then
+      HARBOR_T3_RUNTIME_WHY=not-loopback
+      return 0
+    fi
   fi
-  port="$(printf '%s' "${body}" | sed -n 's/.*"port"[ ]*:[ ]*\([0-9][0-9]*\).*/\1/p')"
-  case "${port}" in
-    '' | *[!0123456789]*)
+  rc=0
+  port="$(printf '%s' "${body}" | harbor_t3_json_top port)" || rc="$?"
+  # A leading zero is not a JSON numeral, so 00080 is refused rather than read as
+  # 80: a spelling the vendor cannot have written is a file Harbor does not own.
+  case "${rc}:${port}" in
+    0:[0123456789]*) ;;
+    *)
       HARBOR_T3_RUNTIME_WHY=no-port
       return 0
       ;;
   esac
+  case "${port}" in
+    *[!0123456789]* | 0*)
+      HARBOR_T3_RUNTIME_WHY=no-port
+      return 0
+      ;;
+  esac
+  # Bound the length before arithmetic: shell integer overflow must not wrap a
+  # foreign port back into the usable range.
+  if [ "${#port}" -gt 5 ] || [ "${port}" -gt 65535 ]; then
+    HARBOR_T3_RUNTIME_WHY=no-port
+    return 0
+  fi
   HARBOR_T3_RUNTIME_PORT="${port}"
   printf '%s' "${port}"
 }
 
-# Internal only: harbor_t3_descriptor_read must only ever be called inside
-# harbor_t3_environment's trace-suspended region. It is not a public reader:
-# the moment its result is readable with tracing on, the no-ID-disclosure
-# guarantee is gone. The environment wrapper owns comparison and disposal.
-# harbor_t3_descriptor_read URL: sets the in-memory environmentId, or "" with
-# HARBOR_T3_DESCRIPTOR_WHY naming the reason. The body is never printed, never
-# logged, and never kept: section 5.5 says the IDs are never logged, journaled,
-# persisted, or bundled, and the only way to hold to that is for the body to reach
-# nothing but this function's own local.
+# Still internal, for a reason the xtrace suspension below does not cover: this
+# function returns with HARBOR_T3_DESCRIPTOR_ID holding the ID, because its caller
+# needs it to compare. Tracing is restored before that return, so a traced caller
+# that so much as mentions the variable discloses it. Only harbor_t3_environment
+# may call this, and it owns the comparison and the disposal.
 #
-# -q as the first option prevents ~/.curlrc from supplying credentials; no
-# --location, because a descriptor Harbor reached by being redirected somewhere
-# else is a descriptor for somewhere else; a bounded --max-time, because this runs
-# inside harbor pair between a prediction and a vendor invocation and must not hang
-# there. Transport failures are unreachable (unknown); an HTTP error is an
-# answer without a descriptor (broken at the MagicDNS endpoint).
+# harbor_t3_descriptor_read URL: return the ID only in memory. Tracing is suspended
+# for direct callers too, so the body and the ID never reach an xtrace line here;
+# the environment wrapper holds the same guarantee across the comparison. A
+# caller-installed DEBUG trap already has arbitrary code execution in the shell
+# holding the ID, so no in-function defense against one is meaningful.
+# -q must remain first to ignore curlrc credentials. No redirects or credentials,
+# and both timeouts bound the probe. HTTP answers outside 2xx are not descriptors.
 harbor_t3_descriptor_read() {
-  local url="${1}" body id rc=0
+  local trace_flags="$-"
+  case "${trace_flags}" in *x*) set +x ;; esac
+  local url="${1}" body id="" platform token key code rc=0 shaped=1
   HARBOR_T3_DESCRIPTOR_WHY=""
   HARBOR_T3_DESCRIPTOR_ID=""
-  body="$(curl -q -fsS --no-progress-meter --connect-timeout 5 --max-time 15 "${url}" 2>/dev/null)" || rc="$?"
-  # curl's HTTP failure is an answer, not a transport failure. With -f its
-  # body is suppressed, so classify it as not-a-descriptor below.
+  body="$(curl -q -fsS --no-progress-meter --connect-timeout 5 --max-time 15 \
+    -w '\nHARBOR_HTTP_CODE:%{http_code}' "${url}" 2>/dev/null)" || rc="$?"
   if [ "${rc}" != 0 ] && [ "${rc}" != 22 ]; then
     HARBOR_T3_DESCRIPTOR_WHY=unreachable
-    return 0
+  else
+    # ## selects the last sentinel; % removes just that final status trailer.
+    code="${body##*$'\nHARBOR_HTTP_CODE:'}"
+    body="${body%$'\nHARBOR_HTTP_CODE:'*}"
+    case "${code}" in 2[0123456789][0123456789]) ;; *) shaped=0 ;; esac
+    [ "${rc}" = 0 ] || shaped=0
+    if [ "${shaped}" = 1 ]; then
+      for key in environmentId label platform serverVersion capabilities; do
+        token="$(printf '%s' "${body}" | harbor_t3_json_top "${key}")" || shaped=0
+        case "${key}" in
+          environmentId) id="${token}" ;;
+          platform) platform="${token}" ;;
+          capabilities) case "${token}" in '{'*'}') ;; *) shaped=0 ;; esac ;;
+        esac
+      done
+      for key in os arch; do
+        printf '%s' "${platform:-}" | harbor_t3_json_top "${key}" >/dev/null || shaped=0
+      done
+      # The raw token, with only its delimiting quotes removed -- escapes are kept
+      # exactly as they arrived and are never decoded. Two spellings that decode
+      # alike would compare unequal, which reports broken; that is the safe
+      # direction. The unsafe direction is closed outright, because equal raw text
+      # is equal decoded text, so pass still means the two servers agree.
+      case "${id}" in
+        \"*\")
+          id="${id#\"}"
+          id="${id%\"}"
+          ;;
+        *) shaped=0 ;;
+      esac
+      [ -n "${id}" ] || shaped=0
+    fi
+    if [ "${shaped}" = 1 ]; then
+      HARBOR_T3_DESCRIPTOR_ID="${id}"
+    else
+      HARBOR_T3_DESCRIPTOR_WHY=not-a-descriptor
+    fi
   fi
-  body="$(printf '%s' "${body}" | tr -d '\n')"
-  # Structural check of the required fields in t3@0.0.38's inspected
-  # ExecutionEnvironmentDescriptor and ExecutionEnvironmentPlatform schemas,
-  # not a JSON parser. Reject an unfamiliar shape before extracting an ID.
-  if ! printf '%s\n' "${body}" | awk '
-    /^[[:space:]]*[{].*[}][[:space:]]*$/ &&
-    /"label"[[:space:]]*:/ &&
-    /"platform"[[:space:]]*:[[:space:]]*[{]/ &&
-    /"serverVersion"[[:space:]]*:/ &&
-    /"capabilities"[[:space:]]*:[[:space:]]*[{]/ &&
-    /"os"[[:space:]]*:/ &&
-    /"arch"[[:space:]]*:/ { shaped = 1 }
-    END { exit !shaped }
-  '; then
-    HARBOR_T3_DESCRIPTOR_WHY=not-a-descriptor
-    return 0
-  fi
-  id="$(printf '%s' "${body}" \
-    | sed -n 's/.*"environmentId"[ ]*:[ ]*"\([^"]*\)".*/\1/p')"
-  unset body
-  if [ -z "${id}" ]; then
-    HARBOR_T3_DESCRIPTOR_WHY=not-a-descriptor
-    return 0
-  fi
-  HARBOR_T3_DESCRIPTOR_ID="${id}"
+  unset body platform token code
   unset id
+  case "${trace_flags}" in *x*) set -x ;; esac
   return 0
 }
 

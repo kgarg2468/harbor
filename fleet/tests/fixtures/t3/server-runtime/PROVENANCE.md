@@ -35,3 +35,8 @@ and addresses are synthetic; they were not observed in a live runtime file.
 | `wrong-version` | Deliberately changes the schema literal to 2 |
 | `pretty-printed` | Same values as healthy, with synthetic indentation |
 | `garbage` | Deliberately truncated JSON |
+
+## Nondefault port regression (2026-09-18)
+
+`nondefault` derives from `healthy`, with port and origin changed to 41773, so
+the endpoint integration test fails if production hard-codes the usual port.

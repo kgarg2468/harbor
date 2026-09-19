@@ -45,3 +45,10 @@ synthetic ID from `valid`.
 | `missing-os` | CONSTRUCTED: omit required `os` from platform |
 | `missing-arch` | CONSTRUCTED: omit required `arch` from platform |
 | `non-object` | CONSTRUCTED: wrap the complete descriptor in HTML |
+
+## Adversarial JSON reader fixtures (2026-09-18)
+
+`escaped-local` and `escaped-remote` reproduce the escaped-quote collision from
+the review using synthetic IDs. `nested-wrapper`, `tabs`, `duplicate-id`,
+`nested-platform`, and `sentinel-body` derive from `valid` by changing only the
+structure or spelling named by the file. No live environment was queried.
