@@ -11,6 +11,12 @@ name: vendor-smoke
 # and Codex measurements section 7 also names belong to the PRs that pin those
 # components, and this file is where they are added.
 #
+# PR 5 adds Revalidation B of section 5.5 to the t3 half: what the pinned
+# t3 pair --tailscale does when there is nothing to pair. Revalidation A --
+# whether a node can fetch its own Serve descriptor through its MagicDNS name --
+# needs a real tailnet, so it cannot be measured here at all and is recorded by
+# hand in fleet/vendor-smoke/tailnet-environment.probe instead.
+#
 # The lane holds no Tailscale account, no auth key, and no tailnet. It installs
 # the pinned package, starts tailscaled from the vendor's own systemd unit, and
 # leaves it logged out, which is precisely the state a freshly bootstrapped
@@ -49,6 +55,10 @@ on:
       # the only lane that would notice, and waiting for the weekly run means
       # noticing after the merge.
       - fleet/lib/t3.sh
+      # Same reasoning for the pair adapter: what it believes the vendor does when
+      # it refuses to pair is measured by the pair guard in the t3 job and by
+      # nothing else in the repository.
+      - fleet/lib/pair.sh
 
 # Read-only. The lane checks out the repository, measures, and uploads its record
 # as an artifact; it writes nothing back.
@@ -101,7 +111,7 @@ jobs:
           systemctl --no-pager status tailscaled || true
 
   t3:
-    name: the pinned T3 engines and absent service
+    name: the pinned T3 engines, absent service, and pair guard
     runs-on: ubuntu-24.04
     permissions:
       contents: read

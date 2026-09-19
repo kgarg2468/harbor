@@ -329,3 +329,46 @@ jobs:
           # difference between a Harbor bug and a harness that did not hold.
           sudo getfacl -p /home /home/harbor /home/harbor/.config 2>&1 || printf '(getfacl unavailable)\n'
           printf 'mount: %s\n' "$(findmnt -no SOURCE,FSTYPE,OPTIONS --target /home/harbor || true)"
+
+  # Task 21: real operator access switches on one freshly bootstrapped runner.
+  access:
+    needs: bootstrap
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Prepare the runner
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/setup.sh ufw-inactive
+
+      - name: Bootstrap at the real paths
+        run: |
+          set -euo pipefail
+          fleet/tests/integration/run_root.sh --from checkout
+
+      - name: Assert access switches as the real operator
+        run: |
+          set -euo pipefail
+          sudo bash fleet/tests/integration/assert_access.sh
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          for log in /opt/harbor-it/state/shim.log /opt/harbor-it/state/mutations.log /home/harbor/.local/state/harbor/harbor.log; do
+            printf '\n===== %s\n' "${log}"
+            if sudo test -f "${log}"; then sudo cat "${log}"; else printf '(absent)\n'; fi
+          done
+          printf '\n===== journal\n'
+          if sudo test -d /home/harbor/.local/state/harbor/journal; then
+            sudo grep -r . /home/harbor/.local/state/harbor/journal || printf '(no entries)\n'
+          else
+            printf '(absent)\n'
+          fi
