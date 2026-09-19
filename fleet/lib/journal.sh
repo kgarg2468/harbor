@@ -135,7 +135,21 @@ harbor_journal_observe() {
     *)
       fn="harbor_observe_op_$(printf '%s' "${op}" | tr '-' '_')"
       if [ "$(command -v "${fn}" 2>/dev/null)" = "${fn}" ]; then
-        "${fn}" "${2}"
+        # The observer's status is the answer's status, so it is returned rather
+        # than replaced with 0. An observer that could not read the world prints
+        # nothing and says so, and recovery's caller already stops on a failed
+        # observation -- but only if the failure survives this far. Returning 0
+        # here turned "I could not look" into the empty string, and recovery then
+        # compared that against the entry's recorded state and decided it.
+        #
+        # Most observers say this by calling exit, which ends the command
+        # substitution recovery reads them through and so never reaches this line.
+        # That is why the gap went unnoticed: the one observer that reports failure
+        # by returning, rather than by exiting, was the one whose status was
+        # discarded. A dispatcher that only propagates some failures is a
+        # dispatcher whose contract depends on how each observer happens to be
+        # written.
+        "${fn}" "${2}" || return "$?"
         return 0
       fi
       ;;

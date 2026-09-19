@@ -455,6 +455,28 @@ EOF
   assert_output ''
 }
 
+@test "finding 10: a failed observation fails through the dispatcher recovery uses" {
+  # The observer refusing to print is only half the guarantee. Recovery never
+  # calls an observer directly -- it goes through harbor_journal_observe, and
+  # that dispatcher used to replace the observer's status with 0. The failure
+  # then arrived at recovery as an empty observation, which recovery compared
+  # against the entry's recorded state and decided. Asserting on the observer
+  # alone would have passed against exactly that bug, so this asserts on the
+  # path the product actually takes.
+  serve_adversarial_body 10
+  serve_fixture_body "${HARBOR_SERVE_RAW}"
+  # Positive control first: the dispatcher does route to this observer and does
+  # return its value, so a failure below is the status being propagated rather
+  # than the dispatcher never having found the observer at all.
+  run harbor_journal_observe tailscale-serve https-443
+  assert_success
+  assert_output '"https:443 -> http://loopback:3773"'
+  harbor_json_escape() { return 42; }
+  run harbor_journal_observe tailscale-serve https-443
+  assert_failure 42
+  assert_output ''
+}
+
 @test "finding 11: a control byte in a backend never enters journal JSON" {
   serve_adversarial_body 11
   assert_serve_unreadable
