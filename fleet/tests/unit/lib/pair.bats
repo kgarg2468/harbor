@@ -263,8 +263,11 @@ teardown() { harbor_lock_release "${FIX_ROOT}"; }
       run harbor_pair "${FIX_ROOT}" "${FIX_HOME}" "${MAGICDNS}"
     case "${after}" in
       # 2, not the vendor's 124: Harbor has five exit codes and a mapping that
-      # was meant to be created and was not is what 2 means.
-      absent) assert_equal "${status}" 2; expected=reverted ;;
+      # was meant to be created and was not is what 2 means. The entry stays
+      # PREPARED rather than reverted -- the vendor's surviving Tailscale child
+      # can still apply the mapping, and recovery skips reverted entries, so
+      # reverting would orphan a mapping this command caused.
+      absent) assert_equal "${status}" 2; expected=prepared ;;
       vendor-443) assert_success; expected=applied ;;
       foreign-443) assert_equal "${status}" 2; expected=prepared ;;
     esac
@@ -309,4 +312,43 @@ teardown() { harbor_lock_release "${FIX_ROOT}"; }
   harbor_pair_environment "${FIX_HOME}" "${MAGICDNS}"
   assert_equal "${HARBOR_PAIR_VERDICT}" pass
   assert_equal "${HARBOR_PAIR_ENVIRONMENT_WHY}" ''
+}
+
+@test "a timed-out vendor that created nothing yet leaves the entry for recovery, not reverted" {
+  # Greptile on PR 139: reverting here loses the mapping. Recovery ignores
+  # reverted entries, so a mapping the surviving child applies afterwards is
+  # later met as a stranger's, journaled observed, and never removed by teardown.
+  serve_fixture absent
+  runtime_fixture healthy
+  pair_shim hang
+  serve_fixture_after_pair absent
+  HARBOR_TEST_HOOKS=1 HARBOR_PAIR_TIMEOUT_SECONDS=1 \
+    run harbor_pair "${FIX_ROOT}" "${FIX_HOME}" "${MAGICDNS}"
+  assert_equal "${status}" 2
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_output --partial 'stays prepared'
+  # And the entry recovery will decide is the one that claims ownership, so a
+  # late mapping becomes Harbor's rather than a stranger's.
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" '"created"'
+}
+
+@test "recovery decides a timed-out pair entry from the world, both ways" {
+  runtime_fixture healthy
+  local after
+  for after in vendor-443 absent; do
+    serve_fixture absent
+    pair_shim hang
+    serve_fixture_after_pair absent
+    HARBOR_TEST_HOOKS=1 HARBOR_PAIR_TIMEOUT_SECONDS=1 \
+      run harbor_pair "${FIX_ROOT}" "${FIX_HOME}" "${MAGICDNS}"
+    assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+    # The child finished after Harbor gave up, or it never did.
+    serve_fixture "${after}"
+    harbor_journal_recover "${FIX_ROOT}"
+    case "${after}" in
+      vendor-443) assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied ;;
+      absent) assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" reverted ;;
+    esac
+    rm -f "${FIX_ROOT}"/journal/0001-*.json
+  done
 }

@@ -121,6 +121,22 @@ harbor_pair() {
   harbor_serve_status
   after="$(harbor_serve_mapping)"
   if [ "${after}" = absent ]; then
+    # A timeout is the one arm where "nothing is there" is not yet a conclusion.
+    # The vendor's surviving child is what hangs, and it can still apply the
+    # mapping after this read. Reverting here would be a claim that nothing
+    # happened, and recovery skips reverted entries -- so a mapping this command
+    # caused would be met by a later run, found to front this node, and journaled
+    # observed, which teardown never removes. Harbor would have created a mapping
+    # and recorded it as a stranger's.
+    #
+    # Leaving it prepared says the true thing: Harbor does not know yet. Recovery
+    # decides it against the world on the next run -- the prediction appeared, so
+    # applied and owned created; or it did not, so reverted -- and that is the
+    # question recovery exists to answer.
+    if [ "${rc}" = 124 ]; then
+      harbor_pair_check_funnel
+      harbor_die 2 pair.vendor_timeout "t3 pair --tailscale did not finish within the time Harbor allows it and was stopped, and no HTTPS 443 mapping is there yet; the vendor's own Tailscale child may still be working, so Harbor will not claim nothing happened; $(basename "${entry}") stays prepared and the next Harbor run decides it against what is actually there; inspect with: tailscale serve status"
+    fi
     harbor_journal_set_phase "${entry}" reverted || exit "$?"
     harbor_pair_check_funnel
     # Exit 2, not the vendor's own code. The plan wrote harbor_die "${rc}" here,
@@ -130,7 +146,6 @@ harbor_pair() {
     # Serve was meant to be mutated and was not, which is exactly what 2 means.
     # The vendor's own status stays in the message, where it is diagnostic.
     case "${rc}" in
-      124) why="did not finish within the time Harbor allows it and was stopped" ;;
       0) why="reported success but left no HTTPS 443 mapping" ;;
       *) why="exited ${rc} and left no HTTPS 443 mapping" ;;
     esac
