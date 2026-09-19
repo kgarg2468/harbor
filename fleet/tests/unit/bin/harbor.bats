@@ -68,3 +68,22 @@ harbor_pair_cmd_test() (
   assert_output --partial 'pair'
   assert_output --partial 'tailnet'
 }
+
+@test "access dispatch reads the real config path and documents all modes" {
+  config_fixture ssh
+  run "${HARBOR}" access get
+  assert_success
+  assert_output ssh
+  run "${HARBOR}" help
+  assert_success
+  assert_output --partial 'access get'
+  assert_output --partial 'access set <connect|tailnet|ssh>'
+}
+
+@test "access dispatch refuses unmeasured tailnet before mutation" {
+  config_fixture connect
+  run "${HARBOR}" access set tailnet
+  assert_equal "${status}" 3
+  assert_output --partial access.tailnet_unverified
+  assert_equal "$(cat "${FIX_HOME}/.config/harbor/config")" access_mode=connect
+}

@@ -10,9 +10,18 @@ setup() {
   . "${HARBOR_ROOT}/lib/journal.sh"
   # shellcheck source=lib/config.sh
   . "${HARBOR_ROOT}/lib/config.sh"
+  # shellcheck source=lib/access.sh
+  . "${HARBOR_ROOT}/lib/access.sh"
   fixture_state_root
   HARBOR_PID="$$"
   HOME="${FIX_HOME}"
+  HARBOR_LOCK_ID_PID=$$
+  HARBOR_LOCK_ID_HOSTNAME=fixture
+  HARBOR_LOCK_ID_BOOT_ID=fixture
+  HARBOR_LOCK_ID_START_TIME=fixture
+  HARBOR_LOCK_ID_CMDLINE=config-test
+  FIX_PROBE="${BATS_TEST_TMPDIR}/probe"
+  harbor_access_probe_path() { printf '%s' "${FIX_PROBE}"; }
   CONFIG="${FIX_HOME}/.config/harbor/config"
 }
 
@@ -67,23 +76,6 @@ seed_config() {
   assert_equal "$(cat "${CONFIG}")" 'access_mode=connect'
 }
 
-@test "tailnet exits 3 naming PR 5's command" {
-  seed_config tailnet
-  run harbor_config_access_mode "${FIX_HOME}"
-  assert_equal "${status}" 3
-  assert_output --partial 'harbor pair'
-  assert_output --partial "${CONFIG}"
-  run harbor_config_create "${FIX_ROOT}" "${FIX_HOME}" tailnet
-  assert_equal "${status}" 3
-  assert_output --partial 'harbor pair'
-  # "configuration was not accepted" is a claim about the node, not just an exit
-  # code: the refusal precedes every write, so the journal stays empty and the
-  # file on disk is the one that was already there.
-  set -- "${FIX_ROOT}/journal/"*.json
-  assert_equal "$*" "${FIX_ROOT}/journal/*.json"
-  assert_equal "$(cat "${CONFIG}")" 'access_mode=tailnet'
-}
-
 @test "an unknown mode exits 3" {
   seed_config unknown
   run harbor_config_access_mode "${FIX_HOME}"
@@ -92,9 +84,7 @@ seed_config() {
   assert_output --partial unknown
   assert_output --partial connect
   assert_output --partial tailnet
-  # Naming tailnet without this would send a typo to a value the same function
-  # refuses, and the operator would learn that only on the next run.
-  assert_output --partial 'only connect can be provisioned by this release'
+  assert_output --partial ssh
 }
 
 @test "a 0644 file exits 3 before its otherwise valid contents are read" {
@@ -180,4 +170,88 @@ seed_config() {
   assert_equal "${status}" 3
   assert_output --partial "${CONFIG}"
   assert_output --partial 'harbor provision'
+}
+
+probe_fixture() {
+  # The gate reads the two measured_ pins as well as the result, so a fixture that
+  # writes only a result is a fixture that can never say supported. Taking the
+  # values from the lock the code will compare against keeps the fixture honest
+  # about what it is asserting: the result word, not a stale pin.
+  printf 'result=%s\nmeasured_tailscale_version=%s\nmeasured_t3_version=%s\n' "${1}" \
+    "$(sed -n 's/^tailscale_version=//p' "${HARBOR_ROOT}/versions.lock")" \
+    "$(sed -n 's/^t3_version=//p' "${HARBOR_ROOT}/versions.lock")" >"${FIX_PROBE}"
+}
+@test "ssh is an accepted access mode" {
+  run harbor_config_validate_mode "${CONFIG}" ssh
+  assert_success
+}
+
+@test "connect is accepted and an unknown mode names all three" {
+  run harbor_config_validate_mode "${CONFIG}" connect
+  assert_success
+  run harbor_config_validate_mode "${CONFIG}" wireguard
+  assert_equal "${status}" 3
+  assert_output --partial 'connect'
+  assert_output --partial 'tailnet'
+  assert_output --partial 'ssh'
+}
+
+@test "tailnet parses, and the gate is what refuses it" {
+  # The distinction matters: tailnet is a real mode this release implements, and
+  # the refusal is about a measurement, not about a missing command. A parse-time
+  # rejection would make the message unfixable by measuring anything.
+  run harbor_config_validate_mode "${CONFIG}" tailnet
+  assert_success
+}
+
+@test "the recorded probe decides whether tailnet is supported" {
+  probe_fixture unsupported
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  assert_output --partial 'has not been verified on the pinned tailscale and t3 versions'
+  assert_output --partial 'tailnet-environment.probe'
+  probe_fixture supported
+  run harbor_access_require_tailnet_supported
+  assert_success
+}
+
+@test "a probe file that is missing or unreadable is unsupported, never supported" {
+  rm -f "${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+}
+
+@test "a result measured on other pins does not carry across a version bump" {
+  # The whole point of the two measured_ fields. A supported recorded against an
+  # older tailscale or t3 is an answer about software this node is no longer
+  # running, and reading only result= would let it keep tailnet open through
+  # exactly the bump the measurement was supposed to be redone for.
+  local locked_ts locked_t3
+  locked_ts="$(sed -n 's/^tailscale_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  locked_t3="$(sed -n 's/^t3_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  printf 'result=supported\nmeasured_tailscale_version=0.0.0\nmeasured_t3_version=%s\n' \
+    "${locked_t3}" >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  printf 'result=supported\nmeasured_tailscale_version=%s\nmeasured_t3_version=0.0.0\n' \
+    "${locked_ts}" >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  # Both matching is the only spelling that opens the gate.
+  probe_fixture supported
+  run harbor_access_require_tailnet_supported
+  assert_success
+}
+
+@test "a result with no measured pins at all is refused" {
+  # The spelling the probe ships with, edited to say supported and nothing else.
+  # An empty field can never equal a pin, so this fails closed without needing a
+  # rule of its own -- and the test is here because that is a property of the
+  # comparison rather than something the code says out loud.
+  printf 'result=supported\nmeasured_tailscale_version=\nmeasured_t3_version=\n' >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  printf 'result=supported\n' >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
 }
