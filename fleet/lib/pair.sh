@@ -156,6 +156,11 @@ harbor_pair() {
     # said would be. Print both sides and stop; reconciliation is the runbook's.
     harbor_msg "pair: Harbor predicted ${prediction}"
     harbor_msg "pair: the node now has ${after}"
+    # Public exposure outranks an undecidable mapping, and the other two arms
+    # already say so by checking here. Leaving it out of this one meant the one
+    # post-state Harbor cannot account for was also the one it never checked for
+    # a Funnel -- a node published to the internet, reported only as ambiguous.
+    harbor_pair_check_funnel
     harbor_die 2 pair.undecidable "the HTTPS 443 mapping after t3 pair --tailscale is not the one Harbor predicted, so Harbor cannot tell whether the vendor created it or something else did, and it will not claim ownership of a mapping it cannot account for; $(basename "${entry}") stays prepared; inspect with: tailscale serve status, and when you have decided, resolve the entry with: harbor journal resolve $(basename "${entry}" .json | sed 's/-.*//') --reverted; Harbor made no further changes"
   fi
   harbor_journal_set_phase "${entry}" applied || exit "$?"
@@ -164,6 +169,21 @@ harbor_pair() {
   verdict="${HARBOR_PAIR_VERDICT:-unknown}"
   case "${verdict}" in
     pass)
+      # The mapping is the vendor's side effect, not its purpose. A vendor Harbor
+      # had to stop, or that exited nonzero, did not finish minting and handing
+      # over the one-time pairing token -- and rc was not read here at all, so
+      # that run ended in the success message and exit 0. The mapping is real and
+      # journaled either way; what is missing is the token, and only the operator
+      # can see whether they got one. Attended, not success.
+      case "${rc}" in
+        0) ;;
+        124)
+          harbor_die 1 pair.vendor_timeout_paired "the HTTPS 443 mapping Harbor predicted is there and is recorded as $(basename "${entry}"), and the route reaches this node's T3 server — but t3 pair --tailscale did not finish within the time Harbor allows it and was stopped, so it may never have handed you a pairing token; if no pairing URL or QR code reached your terminal, mint one with: t3 pair --tailscale, which reuses the mapping Harbor already recorded"
+          ;;
+        *)
+          harbor_die 1 pair.vendor_exit_paired "the HTTPS 443 mapping Harbor predicted is there and is recorded as $(basename "${entry}"), and the route reaches this node's T3 server — but t3 pair --tailscale exited ${rc}, so it may never have handed you a pairing token; its own output above says why; if no pairing URL or QR code reached your terminal, mint one with: t3 pair --tailscale, which reuses the mapping Harbor already recorded"
+          ;;
+      esac
       harbor_msg "pair: this node now publishes its own T3 server over HTTPS 443 on the tailnet, and the environment check confirms the route reaches it; recorded as $(basename "${entry}")"
       return 0
       ;;

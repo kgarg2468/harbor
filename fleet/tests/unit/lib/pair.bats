@@ -268,7 +268,11 @@ teardown() { harbor_lock_release "${FIX_ROOT}"; }
       # can still apply the mapping, and recovery skips reverted entries, so
       # reverting would orphan a mapping this command caused.
       absent) assert_equal "${status}" 2; expected=prepared ;;
-      vendor-443) assert_success; expected=applied ;;
+      # 1, not 0. The mapping is there and Harbor owns it, so the entry is
+      # applied -- but the vendor was killed, and the pairing token is the thing
+      # the operator actually came for. A success claim here would tell them the
+      # node is paired when nothing may have reached their terminal.
+      vendor-443) assert_equal "${status}" 1; expected=applied ;;
       foreign-443) assert_equal "${status}" 2; expected=prepared ;;
     esac
     assert_equal "$(entry_phase "${FIX_ROOT}" "000${seq}")" "${expected}"
@@ -289,6 +293,54 @@ teardown() { harbor_lock_release "${FIX_ROOT}"; }
   assert_equal "${status}" 2
   assert_output --partial Funnel
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+}
+
+@test "a stopped vendor that did leave the mapping is attended, and names the token as what is missing" {
+  serve_fixture absent
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid
+  pair_shim hang
+  serve_fixture_after_pair vendor-443
+  HARBOR_TEST_HOOKS=1 HARBOR_PAIR_TIMEOUT_SECONDS=1 \
+    run harbor_pair "${FIX_ROOT}" "${FIX_HOME}" "${MAGICDNS}"
+  assert_equal "${status}" 1
+  assert_output --partial pair.vendor_timeout_paired
+  assert_output --partial 'may never have handed you a pairing token'
+  # The mapping is Harbor's: it matched the prediction, so ownership is settled
+  # and applied is right. Only the claim of success was wrong.
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+}
+
+@test "a vendor that exits nonzero but leaves the predicted mapping is attended, not a success" {
+  serve_fixture absent
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid
+  pair_shim failure-after
+  serve_fixture_after_pair vendor-443
+  run harbor_pair "${FIX_ROOT}" "${FIX_HOME}" "${MAGICDNS}"
+  assert_equal "${status}" 1
+  assert_output --partial pair.vendor_exit_paired
+  assert_output --partial 'exited 7'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+}
+
+@test "an undecidable post-state still reports a Funnel, which outranks it" {
+  # The mapping Harbor cannot account for was the one post-state that never
+  # reached the Funnel check, so a publicly exposed node was reported only as
+  # ambiguous.
+  serve_fixture absent
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid
+  pair_shim success
+  serve_fixture_after_pair foreign-443-funnel
+  run harbor_pair "${FIX_ROOT}" "${FIX_HOME}" "${MAGICDNS}"
+  assert_equal "${status}" 2
+  assert_output --partial Funnel
+  assert_output --partial 'Harbor predicted'
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
 }
 
 @test "a vendor that exits 0 without creating the mapping is a failed pair, not a success" {

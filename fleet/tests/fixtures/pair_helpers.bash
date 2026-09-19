@@ -72,6 +72,11 @@ if [ "${FIX_PAIR_MODE}" = hang ]; then
 fi
 # Same log as refusal tests; a simulated vendor mutation, never real Serve.
 printf 'tailscale serve --bg --https=443 http://127.0.0.1:3773\n' >>"${FIX_SHIM_LOG}"
+# failure-after is the order the pinned t3 actually uses: Serve is applied first
+# and the pairing token is minted after it, so a vendor can fail having already
+# published the node. "failure" above is the opposite order and keeps its
+# callers' meaning: exited nonzero having published nothing.
+[ "${FIX_PAIR_MODE}" != failure-after ] || exit 7
 SH
   chmod +x "${BATS_TEST_TMPDIR}/bin/"* "${FIX_HOME}/.local/harbor/npm/bin/t3"
   export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
