@@ -768,6 +768,23 @@ harbor_t3_runtime_port() {
   printf '%s' "${port}"
 }
 
+# harbor_t3_descriptor_string TOKEN: true when TOKEN is a JSON string with
+# something in it. The token arrives exactly as it was spelled in the body, so the
+# quotes are the type and the length between them is the constraint; nothing here
+# decodes an escape, and nothing needs to.
+harbor_t3_descriptor_string() {
+  local inner
+  case "${1}" in
+    \"*\")
+      inner="${1#\"}"
+      inner="${inner%\"}"
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "${inner}" ] || return 1
+  return 0
+}
+
 # Still internal, for a reason the xtrace suspension below does not cover: this
 # function returns with HARBOR_T3_DESCRIPTOR_ID holding the ID, because its caller
 # needs it to compare. Tracing is restored before that return, so a traced caller
@@ -803,11 +820,19 @@ harbor_t3_descriptor_read() {
         case "${key}" in
           environmentId) id="${token}" ;;
           platform) platform="${token}" ;;
+          label | serverVersion) harbor_t3_descriptor_string "${token}" || shaped=0 ;;
           capabilities) case "${token}" in '{'*'}') ;; *) shaped=0 ;; esac ;;
         esac
       done
+      # Present is not the same as conforming. The pinned schema types these as
+      # nonempty strings, so a body carrying "label":123 is not the descriptor it
+      # is claiming to be, and a check that only counted key names would call it
+      # one. That does not hand an attacker anything -- reaching pass still needs
+      # the matching ID, which is the hard part -- but this function's answer is
+      # "that is a T3 descriptor", and it should only say so when it is.
       for key in os arch; do
-        printf '%s' "${platform:-}" | harbor_t3_json_top "${key}" >/dev/null || shaped=0
+        token="$(printf '%s' "${platform:-}" | harbor_t3_json_top "${key}")" || shaped=0
+        harbor_t3_descriptor_string "${token}" || shaped=0
       done
       # The raw token, with only its delimiting quotes removed -- escapes are kept
       # exactly as they arrived and are never decoded. Two spellings that decode

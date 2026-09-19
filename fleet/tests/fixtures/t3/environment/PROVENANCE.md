@@ -52,3 +52,10 @@ synthetic ID from `valid`.
 the review using synthetic IDs. `nested-wrapper`, `tabs`, `duplicate-id`,
 `nested-platform`, and `sentinel-body` derive from `valid` by changing only the
 structure or spelling named by the file. No live environment was queried.
+
+## Wrong-type field fixtures (2026-09-18)
+
+`typed-label`, `typed-serverversion`, `typed-platform` and `typed-empty-label`
+derive from `valid` by retyping one required field that the pinned schema
+declares a nonempty string. Each keeps `valid`'s ID, so a presence-only check
+would accept them and return `pass`. No live environment was queried.

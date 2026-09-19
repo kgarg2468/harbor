@@ -266,3 +266,17 @@ serve_fixture() {
     environment_read broken
   done
 }
+
+@test "a body whose required fields are the wrong type is not a descriptor" {
+  # The ID matches the local one in every fixture here, so presence-only checking
+  # would call each of these a descriptor and return pass. The pinned schema types
+  # label, serverVersion, os and arch as nonempty strings.
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  local fixture
+  for fixture in typed-label typed-serverversion typed-platform typed-empty-label; do
+    descriptor_shim_for magicdns "${fixture}"
+    environment_read broken
+    assert_regex "${HARBOR_T3_ENVIRONMENT_WHY:-}" '^tailscale\.serve: not-a-descriptor'
+  done
+}
