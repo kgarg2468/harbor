@@ -60,148 +60,279 @@ harbor_serve_loopback_host() {
   esac
 }
 
-# harbor_serve_header_port HEADER: the port a listener header announces. The host
-# carries it as a suffix, and no suffix means 443 -- which is the vendor's own
-# default and the only port this adapter reports on.
+# harbor_serve_header_port HEADER: the port a listener header announces, or the
+# word "unreadable". No port suffix means 443, the vendor's own default and the
+# only port this adapter reports on.
+#
+# Three answers rather than two, because the short version could only ever return
+# a port, and so had to invent one for a header it could not read. It took the
+# text after the last colon, which is not where a port lives in either direction:
+#
+#   https://[2001:db8::1] (tailnet only)        -> "1]",  so a real 443 listener
+#                                                  read as non-443, the whole body
+#                                                  read as absent, and absent is
+#                                                  what lets harbor pair create a
+#                                                  mapping on a node that already
+#                                                  had one.
+#   https://node:8443/path:443 (tailnet only)   -> "443", so an 8443 listener was
+#                                                  mistaken for the 443 one and
+#                                                  its target reported as the
+#                                                  mapping Harbor would compare.
+#
+# So this parses the authority: everything between the scheme and the
+# parenthesized suffix, with a bracketed IPv6 host's port taken only from a colon
+# that follows the closing bracket, and a path rejected outright rather than
+# scanned for colons. A header that does not reduce to a host and a numeric port
+# answers "unreadable", and the walker turns that into unnormalizable. Guessing a
+# port is how a misread header becomes a licence to write.
 harbor_serve_header_port() {
-  local hostpart="${1#https://}"
-  hostpart="${hostpart%% *}"
-  case "${hostpart}" in
-    *:*) printf '%s' "${hostpart##*:}" ;;
-    *) printf '443' ;;
-  esac
-}
-
-# harbor_serve_mapping: the normalized HTTPS 443 mapping, "absent", or
-# "unnormalizable". Requires harbor_serve_status to have run.
-#
-# This walks the body listener by listener rather than reading the first line and
-# then grepping the whole document for a proxy target. The short version was wrong
-# in a way that mattered: `tailscale serve status` lists one header per listener
-# with that listener's handlers indented beneath it, so a node with an 8443
-# listener above its 443 one made the first-line read announce "not 443" while the
-# global grep would happily have returned the 443 listener's target. The two
-# halves disagreed, and the half that won returned `absent` -- which
-# harbor_pair_precheck treats as permission to create a mapping. A parse bug that
-# ends in Harbor mutating Serve on a node that already had a 443 listener defeats
-# the one invariant this whole file exists to hold.
-#
-# Two root handlers inside the same 443 listener is not a mapping either. It is a
-# configuration this adapter cannot reduce to one comparable string, and guessing
-# which of them is the real one is exactly the guess `unnormalizable` exists to
-# refuse. Likewise a 443 listener with handlers but no root handler: something is
-# at 443, so the answer is not `absent`, and Harbor cannot describe it, so the
-# answer is not a mapping.
-harbor_serve_mapping() {
-  local line target='' host port seen443=0 in443=0 ambiguous=0 in_listener=0
-  # An empty body is not an empty config: `tailscale serve status` says so in
-  # words when there is nothing configured. Zero bytes means the command did not
-  # answer, which is a reading Harbor cannot use.
-  [ -n "${HARBOR_SERVE_RAW:-}" ] || {
-    printf 'unnormalizable'
-    return 0
-  }
-  case "${HARBOR_SERVE_RAW:-}" in
-    'No serve config'*)
-      printf 'absent'
+  local header="${1:-}" authority host rest port=443
+  case "${header}" in
+    'https://'*' ('*')') ;;
+    *)
+      printf 'unreadable'
       return 0
       ;;
   esac
+  authority="${header#https://}"
+  authority="${authority%% (*}"
+  case "${authority}" in
+    '' | *[[:space:]]* | */*)
+      printf 'unreadable'
+      return 0
+      ;;
+    '['*)
+      rest="${authority#'['}"
+      case "${rest}" in
+        *']'*) ;;
+        *)
+          printf 'unreadable'
+          return 0
+          ;;
+      esac
+      host="${rest%%']'*}"
+      rest="${rest#*']'}"
+      case "${rest}" in
+        '') ;;
+        :*) port="${rest#:}" ;;
+        *)
+          printf 'unreadable'
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      host="${authority}"
+      case "${authority}" in
+        *:*)
+          host="${authority%:*}"
+          port="${authority##*:}"
+          ;;
+      esac
+      ;;
+  esac
+  if [ -z "${host}" ]; then
+    printf 'unreadable'
+    return 0
+  fi
+  case "${port}" in
+    '' | *[!0123456789]*) printf 'unreadable' ;;
+    *) printf '%s' "${port}" ;;
+  esac
+}
+
+# harbor_serve_parse: walk the body ONCE and set both HARBOR_SERVE_MAPPING and
+# HARBOR_SERVE_FUNNEL. Prints nothing. Requires harbor_serve_status to have run.
+#
+# One walker for both readings, because two independent readings of the same
+# document can disagree, and when they disagreed here the fail-open half won. The
+# mapping reader walked listener by listener while the Funnel reader pattern
+# matched the whole body, so a body the walker called unnormalizable could still
+# answer "no Funnel" -- a body Harbor could not read reported as evidence that
+# nothing is exposed -- and the marker text appearing inside a handler path
+# answered "Funnel" on a node that had none. Both readings now come from the same
+# pass over the same lines, so they cannot contradict each other.
+#
+# The fail-closed words are the initial values, not a final else. Every arm below
+# that cannot explain what it read simply returns, and returning leaves
+# unnormalizable/unknown standing. This inverts the earlier shape, where each
+# refusal had to remember to print the right word and a missed arm fell through to
+# absent. There is now exactly one assignment of absent and one of a mapping, both
+# at the end, both reached only after the whole document parsed.
+#
+# That matters because absent is not a neutral word. It is the ONLY word that
+# later lets harbor pair create a Serve mapping, so every path to it has to have
+# established that nothing is at 443 -- not merely have failed to notice
+# something. A parser that can be confused into absent is a way to authorize a
+# mutation by feeding Harbor a body it does not understand.
+harbor_serve_parse() {
+  HARBOR_SERVE_MAPPING=unnormalizable
+  HARBOR_SERVE_FUNNEL=unknown
+  local line target='' host port suffix path handler
+  local seen443=0 in443=0 in_listener=0 roots=0 lines=0 funnel=none
+  [ -n "${HARBOR_SERVE_RAW:-}" ] || return 0
+  if [ "${HARBOR_SERVE_RAW:-}" = 'No serve config' ]; then
+    HARBOR_SERVE_MAPPING=absent
+    HARBOR_SERVE_FUNNEL=none
+    return 0
+  fi
+  # The walk not happening must not read as a walk that found nothing. Where bash
+  # backs this here-document with a temporary file -- always under 3.2, and for
+  # documents over its pipe threshold under 5.1 and later -- a filesystem that
+  # refuses the create makes the redirection fail, the body never run, and a node
+  # with a perfectly good 443 mapping fall through to absent with status 0.
+  #
+  # `lines` is the guard that detects this: the loop body cannot have run, so the
+  # count cannot have moved. Removing it turns the failure back into a licence to
+  # write, which is what the tests check.
+  #
+  # The `|| return 0` is redundant reinforcement rather than a second detector --
+  # it catches the same setup failure `lines` already catches, and neither can see
+  # a read that fails partway and leaves a truncated document looking complete.
+  # It is kept because the cost of missing this particular failure is a write, but
+  # it needs the trailing `:` below to be safe: a while loop's status is that of
+  # the last command its body ran, so without a deterministic final command the
+  # guard would fire or not depending on which arm the last line happened to take,
+  # and a later edit ending an arm with a non-zero test would silently turn the
+  # parser into one that refuses every body.
   while IFS= read -r line; do
+    lines=$((lines + 1))
     case "${line}" in
-      '')
-        continue
-        ;;
+      '') continue ;;
       'https://'*' ('*')')
+        port="$(harbor_serve_header_port "${line}")"
+        [ "${port}" != unreadable ] || return 0
         in_listener=1
-        if [ "$(harbor_serve_header_port "${line}")" = 443 ]; then
+        in443=0
+        if [ "${port}" = 443 ]; then
+          # A second 443 listener header is not a second chance to find the
+          # mapping, it is a document describing 443 twice. Harbor cannot say
+          # which one the vendor would act on, and a reader that quietly kept the
+          # first would also let a later empty 443 listener inherit the earlier
+          # one's target and report a mapping nothing is serving.
+          [ "${seen443}" = 0 ] || return 0
           in443=1
           seen443=1
-        else
-          in443=0
         fi
-        ;;
-      '|--'*)
-        # A handler with no listener above it is a body Harbor cannot account for,
-        # and the fail-closed word for that is unnormalizable -- not absent.
-        # Skipping it and falling through to "no 443 header was seen" would report
-        # a malformed body as an empty one, and harbor_pair_precheck reads absent
-        # as permission to create a mapping. Every arm of this parser that cannot
-        # explain what it read has to end somewhere other than absent, or the
-        # parser becomes a way to authorize a mutation by confusing it.
-        if [ "${in_listener}" = 0 ]; then
-          printf 'unnormalizable'
-          return 0
-        fi
-        case "${line}" in
-          '|-- / proxy http://'*)
-            if [ "${in443}" = 1 ]; then
-              if [ -n "${target}" ]; then
-                ambiguous=1
-              fi
-              target="${line#'|-- / proxy '}"
-            fi
-            ;;
-          *)
-            # A handler on some other path, or one whose target is not an http
-            # proxy. It belongs to a listener but is not the root mapping, so it
-            # neither supplies a target nor makes the body unreadable.
-            ;;
+        suffix="${line#* (}"
+        suffix="${suffix%)}"
+        case "${suffix}" in
+          *'Funnel on'*) funnel=present ;;
         esac
         ;;
-      *)
-        # A line this adapter has no reading for. Refusing here is what keeps a
-        # future vendor format from being silently parsed as the old one.
-        printf 'unnormalizable'
-        return 0
+      '|--'*)
+        # A handler with no listener header above it is a body Harbor cannot
+        # account for. Skipping it and falling through to "no 443 header was
+        # seen" would report a malformed body as an empty one.
+        [ "${in_listener}" = 1 ] || return 0
+        # Only `PATH proxy TARGET` is a shape this adapter has measured. Serve
+        # has other handler kinds -- static text, a filesystem path -- whose
+        # printed form Harbor has never seen, so they are refused rather than
+        # guessed at, and refused under every listener rather than only under
+        # 443. The earlier reader treated any line beginning `|--` that it did
+        # not recognize as a handler it simply had no use for, which meant a
+        # document it could not read was walked to the end and answered absent.
+        # Being conservative here can only ever cause a refusal; being permissive
+        # here is how an unreadable body becomes permission to write.
+        case "${line}" in
+          '|-- '*' proxy '*) ;;
+          *) return 0 ;;
+        esac
+        handler="${line#'|-- '}"
+        path="${handler%%' proxy '*}"
+        [ -n "${path}" ] || return 0
+        handler="${handler#*' proxy '}"
+        case "${handler}" in
+          '' | *[[:space:]]*) return 0 ;;
+        esac
+        if [ "${in443}" = 1 ] && [ "${path}" = / ]; then
+          # Every root handler counts, whatever its target, because the question
+          # is how many things claim / at 443 -- not how many of them Harbor can
+          # describe. Counting only the http ones let a second root handler with
+          # another scheme sit beside the first and be reported as if the first
+          # were alone.
+          roots=$((roots + 1))
+          [ "${roots}" = 1 ] || return 0
+          case "${handler}" in
+            http://*) target="${handler}" ;;
+            # Something is at / on 443 and Harbor's mapping vocabulary cannot
+            # express it, so the answer is neither absent nor a mapping.
+            *) return 0 ;;
+          esac
+        fi
         ;;
+      *) return 0 ;;
     esac
-  done <<EOF
+    # Deterministic body status; see the guard note above the loop.
+    :
+  done <<EOF || return 0
 ${HARBOR_SERVE_RAW:-}
 EOF
+  [ "${lines}" -gt 0 ] || return 0
   if [ "${seen443}" = 0 ]; then
-    printf 'absent'
+    HARBOR_SERVE_MAPPING=absent
+    HARBOR_SERVE_FUNNEL="${funnel}"
     return 0
   fi
-  if [ "${ambiguous}" = 1 ] || [ -z "${target}" ]; then
-    printf 'unnormalizable'
-    return 0
-  fi
+  # A 443 listener whose handlers never named a root. Something is at 443, so the
+  # answer is not absent; Harbor cannot describe it, so it is not a mapping.
+  [ -n "${target}" ] || return 0
   host="${target#http://}"
+  case "${host}" in
+    *:*) ;;
+    *) return 0 ;;
+  esac
   port="${host##*:}"
   host="${host%:*}"
   case "${port}" in
-    '' | *[!0123456789]*)
-      printf 'unnormalizable'
-      return 0
+    '' | *[!0123456789]*) return 0 ;;
+  esac
+  # The host is spelled out as an allowed set rather than checked for the one or
+  # two characters that would obviously break something. This string is about to
+  # become a JSON value in the journal, and a target carrying a carriage return
+  # or a quote would otherwise be written into an entry that no longer parses --
+  # recovery reads those entries, so a body Harbor merely disliked would become a
+  # journal Harbor cannot use. Refusing the host here keeps that from being
+  # harbor_json_escape's problem to solve.
+  case "${host}" in
+    '' | *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:\[\]-]*) return 0 ;;
+  esac
+  # A colon survived the port split, so this is an IPv6 literal and the only
+  # spelling Harbor will read is the bracketed one. Unbracketed, there is no
+  # answer to which colon was the port, and http://::1:3773 would normalize to
+  # the same loopback mapping a well-formed target produces -- agreeing, by
+  # accident, with the thing it was supposed to be checked against.
+  case "${host}" in
+    *:*)
+      case "${host}" in
+        '['*']') ;;
+        *) return 0 ;;
+      esac
       ;;
   esac
-  printf 'https:443 -> http://%s:%s' "$(harbor_serve_loopback_host "${host}")" "${port}"
+  host="$(harbor_serve_loopback_host "${host}")"
+  HARBOR_SERVE_MAPPING="https:443 -> http://${host}:${port}"
+  HARBOR_SERVE_FUNNEL="${funnel}"
 }
 
-# harbor_serve_funnel: whether any Funnel exposure exists. Section 3.3 makes this
-# exit 2 wherever it is asked, whoever created the exposure, which is why the
-# unknown arm exists: a body this adapter cannot read is not evidence of no Funnel.
+# harbor_serve_mapping: the normalized HTTPS 443 mapping, "absent", or
+# "unnormalizable". harbor_serve_funnel: "none", "present", or "unknown". Both
+# require harbor_serve_status to have run.
+#
+# Each runs the walk itself rather than reading globals a caller was supposed to
+# have filled. These are called from inside $( ), which forks, so a walk done by
+# the caller would set its globals in the parent and a walk done here would set
+# them in a subshell that exits immediately -- either way the reader would be
+# printing whatever the last unrelated walk happened to leave behind. Walking
+# per call costs one pass over a body that is a handful of lines.
+harbor_serve_mapping() {
+  harbor_serve_parse
+  printf '%s' "${HARBOR_SERVE_MAPPING:-}"
+}
+
 harbor_serve_funnel() {
-  [ -n "${HARBOR_SERVE_RAW:-}" ] || {
-    printf 'unknown'
-    return 0
-  }
-  case "${HARBOR_SERVE_RAW:-}" in
-    'No serve config'*)
-      printf 'none'
-      return 0
-      ;;
-    *'(Funnel on)'*)
-      printf 'present'
-      return 0
-      ;;
-    'https://'*)
-      printf 'none'
-      return 0
-      ;;
-  esac
-  printf 'unknown'
+  harbor_serve_parse
+  printf '%s' "${HARBOR_SERVE_FUNNEL:-}"
 }
 
 # harbor_observe_op_tailscale_serve TARGET: the tailscale-serve op's observer, found
@@ -212,5 +343,7 @@ harbor_serve_funnel() {
 # reading that cannot decide anything.
 harbor_observe_op_tailscale_serve() {
   harbor_serve_status
-  printf '"%s"' "$(harbor_json_escape "$(harbor_serve_mapping)")"
+  local escaped
+  escaped="$(harbor_json_escape "$(harbor_serve_mapping)")" || return "$?"
+  printf '"%s"' "${escaped}"
 }
