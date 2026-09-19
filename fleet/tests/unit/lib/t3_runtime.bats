@@ -15,7 +15,11 @@ setup() {
 #!/bin/bash
 set -euo pipefail
 printf '%s\n' "$@" >>"${FIX_SHIM_LOG}"
-for arg in "$@"; do url="${arg}"; done
+write_code=no
+for arg in "$@"; do
+  [ "${arg}" != -w ] || write_code=yes
+  url="${arg}"
+done
 case "${url}" in
   http://*) fixture="${FIX_LOOPBACK}" ;;
   https://*) fixture="${FIX_MAGICDNS}" ;;
@@ -26,6 +30,11 @@ case "${fixture}" in
   http-error) exit 22 ;;
 esac
 cat "${HARBOR_ROOT}/tests/fixtures/t3/environment/${fixture}"
+if [ "${write_code}" = yes ]; then
+  code=200
+  case "${url}" in https://*) code="${FIX_HTTP_CODE:-200}" ;; esac
+  printf '\nHARBOR_HTTP_CODE:%s' "${code}"
+fi
 SHIM
   chmod +x "${BATS_TEST_TMPDIR}/bin/curl"
   export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
@@ -124,14 +133,16 @@ serve_fixture() {
 
 @test "the reader never writes to the vendor's directory" {
   runtime_fixture healthy
-  # cksum, not sha256sum: this suite runs on the macOS runners too, and stock
-  # macOS has no sha256sum. lib/t3.bats already hashes this way for the same
-  # reason; sha256sum appears only in the integration lane, which is Ubuntu only.
-  local before
+  local before paths ref="${BATS_TEST_TMPDIR}/reference"
+  paths="$(find "${FIX_HOME}/.t3" -print | LC_ALL=C sort)"
   before="$(find "${FIX_HOME}/.t3" -type f -exec cksum {} + | LC_ALL=C sort)"
+  touch "${ref}"
+  # Ensure a subsequent touch is newer even on coarse timestamp filesystems.
+  sleep 1
   harbor_t3_runtime_port "${FIX_HOME}" >/dev/null
-  assert_equal "$(find "${FIX_HOME}/.t3" -type f -exec cksum {} + | LC_ALL=C sort)" \
-    "${before}"
+  assert_equal "$(find "${FIX_HOME}/.t3" -print | LC_ALL=C sort)" "${paths}"
+  assert_equal "$(find "${FIX_HOME}/.t3" -type f -exec cksum {} + | LC_ALL=C sort)" "${before}"
+  assert_equal "$(find "${FIX_HOME}/.t3" -newer "${ref}")" ''
 }
 @test "a valid descriptor yields its environmentId" {
   descriptor_shim valid
@@ -170,6 +181,8 @@ serve_fixture() {
 5
 --max-time
 15
+-w
+\nHARBOR_HTTP_CODE:%{http_code}
 http://loopback.invalid/.well-known/t3/environment'
   assert_regex "${argv}" '--max-time'
   refute_regex "${argv}" '--location'
@@ -228,4 +241,127 @@ http://loopback.invalid/.well-known/t3/environment'
   descriptor_shim non-object
   descriptor_read ''
   assert_equal "${HARBOR_T3_DESCRIPTOR_WHY:-}" not-a-descriptor
+}
+
+@test "top-level runtime port ignores nested port" {
+  runtime_fixture healthy
+  printf '%s' '{"version":1,"port":3773,"extra":{"port":8080}}' >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+  runtime_read 3773
+}
+
+@test "top-level runtime version cannot be overridden by nested version" {
+  runtime_fixture healthy
+  printf '%s' '{"version":2,"port":3773,"extra":{"version":1}}' >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+  runtime_read ''
+  assert_equal "${HARBOR_T3_RUNTIME_WHY}" unrecognized-version
+}
+
+@test "runtime ports reject invalid spelling and range without arithmetic overflow" {
+  runtime_fixture healthy
+  local port
+  # Legal JSON numbers that are not usable ports. The file is readable and says
+  # what it says; what it says is not a port Harbor can dial.
+  for port in 0 65536 999999999999999999999999999999999 -1 1.5 1e3; do
+    printf '{"version":1,"port":%s}' "${port}" >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+    runtime_read ''
+    assert_equal "${HARBOR_T3_RUNTIME_WHY}" no-port
+  done
+}
+
+@test "a port spelled in a way JSON does not allow makes the whole file unreadable" {
+  # 00080 is not a JSON numeral, so the document does not parse at all. Reporting
+  # no-port here would describe a corrupt file as a healthy server that happens to
+  # be missing a port, and send the operator looking for the wrong thing.
+  runtime_fixture healthy
+  printf '%s' '{"version":1,"port":00080}' >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+  runtime_read ''
+  assert_equal "${HARBOR_T3_RUNTIME_WHY}" unreadable
+}
+
+@test "JSON tabs around the environment ID colon are accepted" {
+  descriptor_shim tabs
+  descriptor_read env_2f7a91c4
+}
+
+@test "direct descriptor calls suspend and restore inherited tracing on every path" {
+  local fixture
+  for fixture in valid not-t3 empty unreachable http-error escaped-local; do
+    descriptor_shim "${fixture}"
+    (
+      set -x
+      harbor_t3_descriptor_read http://loopback.invalid/.well-known/t3/environment
+      case "$-" in *x*) ;; *) exit 91 ;; esac
+      set +x
+    ) >"${BATS_TEST_TMPDIR}/trace-out" 2>"${BATS_TEST_TMPDIR}/trace-err"
+    run grep -E 'env_2f7a91c4|env_prefix' "${BATS_TEST_TMPDIR}/trace-out" "${BATS_TEST_TMPDIR}/trace-err"
+    assert_failure 1
+  done
+}
+
+@test "JSON extractor preserves tokens and refuses ambiguous or malformed documents" {
+  local body
+  run harbor_t3_json_top port <<'JSON'
+ {"extra":{"port":8080}, "port" : [ "a,}\\\"b", {"x":true} ] }
+JSON
+  assert_success
+  assert_output '[ "a,}\\\"b", {"x":true} ]'
+  for body in '{"port":1,"port":2}' '{"port":1} garbage' '[{"port":1}]' '{"port":1' '{"port":"unterminated}' '{"port":1,}' '{"port":[1,]}' '{"port":true false}' '{"port":"bad\q"}'; do
+    run harbor_t3_json_top port <<<"${body}"
+    assert_failure
+    assert_output ''
+  done
+}
+
+@test "a raw control byte inside a string makes the document unreadable" {
+  # JSON requires control characters below 0x20 to be escaped, so a raw one is a
+  # byte no conforming writer produced. Refusing the whole document is the only
+  # answer that does not involve guessing what the writer meant -- and it keeps
+  # the extractor from handing back a token whose bytes it never validated.
+  runtime_fixture healthy
+  local body
+  body="$(printf '{"label":"a\001b","port":3773}')"
+  run harbor_t3_json_top port <<<"${body}"
+  assert_failure
+  assert_output ''
+  printf '%s' "${body}" >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+  runtime_read ''
+  assert_equal "${HARBOR_T3_RUNTIME_WHY}" unreadable
+}
+
+@test "runtime host must be a top-level quoted loopback value and may be empty" {
+  runtime_fixture healthy
+  local host
+  for host in '""' '"127.0.0.1"'; do
+    printf '{"version":1,"port":65535,"host":%s,"extra":{"host":"foreign"}}' "${host}" >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+    runtime_read 65535
+  done
+  for host in null true 127 '"foreign"'; do
+    printf '{"version":1,"port":1,"host":%s}' "${host}" >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+    runtime_read ''
+    assert_equal "${HARBOR_T3_RUNTIME_WHY}" not-loopback
+  done
+  printf '%s' '{"version":1.0,"port":1}' >"${FIX_HOME}/.t3/userdata/server-runtime.json"
+  runtime_read ''
+  assert_equal "${HARBOR_T3_RUNTIME_WHY}" unrecognized-version
+}
+
+@test "JSON extractor keeps multiline token bytes and whitespace out of scalar tokens" {
+  run harbor_t3_json_top value <<'JSON'
+{
+  "value": {
+    "text": "literal {}[],: and \\" ,
+    "array": [false, null, -1.2e+3]
+  }
+}
+JSON
+  assert_success
+  assert_output '{
+    "text": "literal {}[],: and \\" ,
+    "array": [false, null, -1.2e+3]
+  }'
+  run harbor_t3_json_top value <<'JSON'
+ { "value" : 1 }
+JSON
+  assert_success
+  assert_output 1
 }

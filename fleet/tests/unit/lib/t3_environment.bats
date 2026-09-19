@@ -15,7 +15,11 @@ setup() {
 #!/bin/bash
 set -euo pipefail
 printf '%s\n' "$@" >>"${FIX_SHIM_LOG}"
-for arg in "$@"; do url="${arg}"; done
+write_code=no
+for arg in "$@"; do
+  [ "${arg}" != -w ] || write_code=yes
+  url="${arg}"
+done
 case "${url}" in
   http://*) fixture="${FIX_LOOPBACK}" ;;
   https://*) fixture="${FIX_MAGICDNS}" ;;
@@ -26,6 +30,11 @@ case "${fixture}" in
   http-error) exit 22 ;;
 esac
 cat "${HARBOR_ROOT}/tests/fixtures/t3/environment/${fixture}"
+if [ "${write_code}" = yes ]; then
+  code=200
+  case "${url}" in https://*) code="${FIX_HTTP_CODE:-200}" ;; esac
+  printf '\nHARBOR_HTTP_CODE:%s' "${code}"
+fi
 SHIM
   chmod +x "${BATS_TEST_TMPDIR}/bin/curl"
   export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
@@ -120,12 +129,12 @@ serve_fixture() {
   # Section 5.5: "Harbor never uses the proxy target to locate the T3 server."
   # A Serve mapping pointing somewhere else must not change which local endpoint
   # Harbor asks, or a foreign mapping could make itself agree with itself.
-  runtime_fixture healthy
+  runtime_fixture nondefault
   serve_fixture foreign-443
   descriptor_shim_for loopback valid
   descriptor_shim_for magicdns valid
   harbor_t3_environment "${FIX_HOME}" harbor-node.TAILNET.ts.net >/dev/null
-  assert_regex "$(cat "${FIX_SHIM_LOG}")" 'http://127\.0\.0\.1:3773/\.well-known/t3/environment'
+  assert_regex "$(cat "${FIX_SHIM_LOG}")" 'http://127\.0\.0\.1:41773/\.well-known/t3/environment'
   refute_regex "$(cat "${FIX_SHIM_LOG}")" 'http://127\.0\.0\.1:8080/'
 }
 @test "no environment ID reaches the log, the journal, stdout, or any file Harbor wrote" {
@@ -134,6 +143,8 @@ serve_fixture() {
   descriptor_shim_for magicdns valid-other-id
   harbor_log_open "${FIX_ROOT}/harbor.log" 0600
   harbor_journal_init "${FIX_ROOT}"
+  export TMPDIR="${BATS_TEST_TMPDIR}/owned-tmp"
+  mkdir -p "${TMPDIR}"
   local out
   environment_read broken
   out="$(cat "${FIX_ROOT}/verdict")"
@@ -143,7 +154,7 @@ serve_fixture() {
   for id in env_2f7a91c4 env_9b3e04d1; do
     refute_regex "${out}" "${id}"
     refute_regex "${HARBOR_T3_ENVIRONMENT_WHY}" "${id}"
-    assert_equal "$({ grep -rl "${id}" "${FIX_HOME}" 2>/dev/null || :; } | wc -l | tr -d ' ')" 0
+    assert_equal "$({ grep -rl "${id}" "${FIX_HOME}" "${TMPDIR}" "${BATS_TEST_TMPDIR}" 2>/dev/null || :; } | wc -l | tr -d ' ')" 0
   done
 }
 
@@ -218,6 +229,52 @@ serve_fixture() {
   descriptor_shim_for loopback valid
   local fixture
   for fixture in missing-label missing-platform missing-serverVersion missing-capabilities missing-os missing-arch non-object; do
+    descriptor_shim_for magicdns "${fixture}"
+    environment_read broken
+    assert_regex "${HARBOR_T3_ENVIRONMENT_WHY:-}" '^tailscale\.serve: not-a-descriptor'
+  done
+}
+
+@test "escaped different IDs never compare equal" {
+  runtime_fixture healthy
+  descriptor_shim_for loopback escaped-local
+  descriptor_shim_for magicdns escaped-remote
+  environment_read broken
+}
+
+@test "nested wrapper with the local ID is not a descriptor" {
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns nested-wrapper
+  environment_read broken
+}
+
+@test "redirect descriptor bodies cannot verify the MagicDNS route" {
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid
+  export FIX_HTTP_CODE=302
+  environment_read broken
+}
+
+@test "duplicate descriptor members and nested platform fields cannot verify a route" {
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  local fixture
+  for fixture in duplicate-id nested-platform sentinel-body; do
+    descriptor_shim_for magicdns "${fixture}"
+    environment_read broken
+  done
+}
+
+@test "a body whose required fields are the wrong type is not a descriptor" {
+  # The ID matches the local one in every fixture here, so presence-only checking
+  # would call each of these a descriptor and return pass. The pinned schema types
+  # label, serverVersion, os and arch as nonempty strings.
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  local fixture
+  for fixture in typed-label typed-serverversion typed-platform typed-empty-label; do
     descriptor_shim_for magicdns "${fixture}"
     environment_read broken
     assert_regex "${HARBOR_T3_ENVIRONMENT_WHY:-}" '^tailscale\.serve: not-a-descriptor'
