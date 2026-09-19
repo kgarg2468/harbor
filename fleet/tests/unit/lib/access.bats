@@ -95,7 +95,10 @@ connect_unlink_noop() { export FIX_UNLINK_APPLIES=no; }
     '"https:443 -> http://loopback:3773"' '"https:443 -> http://loopback:3773"'
   serve_fixture vendor-443
   run harbor_access_revert "${FIX_ROOT}" tailnet
-  assert_success
+  # 1, not 0: the mapping is still published, so the old route may still reach
+  # this node. Harbor will not remove what it did not create and will not call
+  # that a clean switch either.
+  assert_equal "${status}" 1
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
   assert_output --partial 'Harbor did not create'
   refute_regex "$(cat "${FIX_SHIM_LOG}")" 'serve --https=443 off'
@@ -165,6 +168,37 @@ connect_unlink_noop() { export FIX_UNLINK_APPLIES=no; }
   assert_equal "$(cat "${FIX_CONFIG}")" access_mode=connect
 }
 
+@test "an inverse whose result is neither pre_state nor post_state is not a reversion" {
+  # Both observers have a third answer. harbor_t3_connect_status leaves linked
+  # unknown for a body it cannot parse; harbor_serve_mapping answers
+  # unnormalizable for a Serve config it cannot reduce. Rejecting only the
+  # post_state would record a reversion on a reading that says "I could not
+  # tell", against an entry recovery then skips forever.
+  seed_entry 0001 t3-connect-link connect created applied '"false"' '"true"'
+  connect_status_fixture healthy
+  # The unlink succeeds and leaves the vendor answering a body the reader cannot
+  # parse, which is what the unparseable fixture is: linked comes back unknown.
+  harbor_access_inverse() {
+    printf 't3 connect unlink\n' >>"${FIX_SHIM_LOG}"
+    export FIX_CONNECT=unparseable
+  }
+  run harbor_access_revert "${FIX_ROOT}" connect
+  assert_equal "${status}" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_output --partial 'neither the state the entry recorded before the mutation nor the one it recorded after'
+}
+
+@test "an observed entry makes the whole switch attended, not a clean one" {
+  config_fixture connect
+  seed_entry 0001 t3-connect-link connect observed applied '"true"' '"true"'
+  connect_status_fixture healthy
+  run access_cmd set ssh
+  assert_equal "${status}" 1
+  assert_output --partial 'Harbor did not create'
+  assert_output --partial access.previous_mode_attended
+  assert_equal "$(cat "${FIX_CONFIG}")" access_mode=ssh
+}
+
 @test "an inverse Harbor cannot verify afterwards is exit 2, and the entry stays applied" {
   seed_entry 0001 tailscale-serve https-443 created applied \
     '"absent"' '"https:443 -> http://loopback:3773"'
@@ -210,7 +244,7 @@ connect_unlink_noop() { export FIX_UNLINK_APPLIES=no; }
     '"absent"' '"https:443 -> http://loopback:3773"'
   serve_fixture vendor-443
   run harbor_access_revert "${FIX_ROOT}" tailnet
-  assert_success
+  assert_equal "${status}" 1
   assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
   refute_regex "$(cat "${FIX_SHIM_LOG}")" 'serve --https=443 off'
 }

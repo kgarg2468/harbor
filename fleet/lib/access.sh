@@ -65,7 +65,7 @@ harbor_access_mode_ops() {
 # anything else has been touched since, and unwinding it would unwind someone
 # else's change. Newest first, so dependent mutations unwind in the order made.
 harbor_access_revert() {
-  local root="${1}" mode="${2}" ops entry base seq op ownership phase post observed entries attended=0
+  local root="${1}" mode="${2}" ops entry base seq op ownership phase pre post observed entries attended=0
   ops="$(harbor_access_mode_ops "${mode}")"
   [ -n "${ops}" ] || return 0
   entries="$(harbor_access_entries_newest_first "${root}")" \
@@ -83,9 +83,16 @@ harbor_access_revert() {
     seq="${base%%-*}"
     ownership="$(harbor_journal_string "${entry}" ownership)"
     if [ "${ownership}" != created ]; then
+      # Attended, even though Harbor owes nothing here. The artifact is still in
+      # place, and for both of these ops "still in place" means the old route may
+      # still reach this node -- which is the thing a mode switch is supposed to
+      # end. Harbor will not remove what it did not create, and it will not call
+      # that a clean switch either.
       harbor_msg "access: ${base} records a ${op} Harbor did not create, so it is left exactly as it is; remove it yourself if it is yours"
+      attended=1
       continue
     fi
+    pre="$(harbor_journal_raw "${entry}" pre_state)"
     post="$(harbor_journal_raw "${entry}" post_state)"
     observed="$(harbor_journal_observe "${op}" "$(harbor_journal_string "${entry}" target)")" || harbor_die 2 access.observe_failed "could not inspect ${base}; the entry was not reverted and the new mode was not configured"
     if [ "${observed}" != "${post}" ]; then
@@ -110,6 +117,18 @@ harbor_access_revert() {
       || harbor_die 2 access.revert_unverifiable "the inverse of ${op} recorded in ${base} reported success, but Harbor could not then read the world to confirm it, and it will not record a reversion it did not verify; ${base} stays applied and the new mode was not configured; inspect with: tailscale serve status"
     if [ "${observed}" = "${post}" ]; then
       harbor_msg "access: the inverse of ${op} recorded in ${base} reported success and changed nothing, so Harbor will not record a reversion that did not happen and ${base} stays applied; inspect it and, when you have decided, resolve the entry with: harbor journal resolve ${seq} --reverted"
+      attended=1
+      continue
+    fi
+    # "Not the post_state" is not the same claim as "the pre_state", and both
+    # observers have a third answer. harbor_t3_connect_status leaves linked
+    # unknown for any body it cannot parse, and harbor_serve_mapping answers
+    # unnormalizable for a Serve config it cannot reduce. Either would be
+    # recorded reverted by a check that only rejects the post_state -- a
+    # reversion claimed on a reading that says "I could not tell", against an
+    # entry recovery will then skip forever.
+    if [ "${observed}" != "${pre}" ]; then
+      harbor_msg "access: the inverse of ${op} recorded in ${base} reported success, but the node is now in neither the state the entry recorded before the mutation nor the one it recorded after, so Harbor cannot confirm the reversion and ${base} stays applied; inspect it and, when you have decided, resolve the entry with: harbor journal resolve ${seq} --reverted"
       attended=1
       continue
     fi
