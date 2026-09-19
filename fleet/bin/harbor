@@ -39,6 +39,8 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/runtime.sh"
 # shellcheck source=lib/agents.sh
 . "${HARBOR_ROOT}/lib/agents.sh"
+# shellcheck source=lib/serve.sh
+. "${HARBOR_ROOT}/lib/serve.sh"
 # shellcheck source=lib/t3.sh
 . "${HARBOR_ROOT}/lib/t3.sh"
 # shellcheck source=lib/auth.sh
