@@ -26,6 +26,7 @@ classify, not transcripts of a vendor run.
 | `mixed-listeners` | a non-443 listener **above** the 443 one | same |
 | `ambiguous-443` | two root handlers inside one 443 listener | same |
 | `no-root-443` | a 443 listener with handlers but no root handler | same |
+| `foreign-443-funnel` | a 443 listener Harbor did not predict, publicly exposed | `foreign-443`'s handler under `funnel`'s header; both halves are already in this table and neither can be captured by running Harbor |
 | `funnel` | a public Funnel exposure | Harbor never creates a Funnel, so this can never be captured by running Harbor, and creating one by hand publishes a host on the public internet |
 | `garbage` | output from a version or state this adapter does not recognize | it is by definition not a shape any pinned version prints |
 | `empty` | the command answering nothing at all | same |
