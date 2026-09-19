@@ -45,6 +45,8 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/t3.sh"
 # shellcheck source=lib/config.sh
 . "${HARBOR_ROOT}/lib/config.sh"
+# shellcheck source=lib/access.sh
+. "${HARBOR_ROOT}/lib/access.sh"
 # shellcheck source=lib/pair.sh
 . "${HARBOR_ROOT}/lib/pair.sh"
 # shellcheck source=lib/auth.sh
@@ -70,6 +72,9 @@ subcommands:
                                       mint a one-time pairing token, attended, as the operator
                                       (design section 3.6); tailnet mode only, and Harbor never
                                       touches a Serve mapping it did not create
+  access get                          print this node's access mode
+  access set <connect|tailnet|ssh>    switch modes: revert the previous mode's journal entries,
+                                      write the new mode, and report its attended step
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
   provision                           run the operator provision preflight
@@ -109,6 +114,10 @@ case "${harbor_cmd}" in
   auth)
     shift
     harbor_auth_cmd ${1+"$@"}
+    ;;
+  access)
+    shift
+    harbor_access_cmd ${1+"$@"}
     ;;
   pair)
     shift

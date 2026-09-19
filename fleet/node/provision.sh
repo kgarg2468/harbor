@@ -40,6 +40,10 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/t3.sh"
 # shellcheck source=../lib/config.sh
 . "${HARBOR_ROOT}/lib/config.sh"
+# shellcheck source=../lib/access.sh
+. "${HARBOR_ROOT}/lib/access.sh"
+# shellcheck source=../lib/pair.sh
+. "${HARBOR_ROOT}/lib/pair.sh"
 # shellcheck source=../lib/auth.sh
 . "${HARBOR_ROOT}/lib/auth.sh"
 # shellcheck source=../lib/apt.sh
@@ -141,6 +145,79 @@ harbor_provision_attended() {
   harbor_log provision "attended: ${1}: ${2}"
 }
 
+# The SSH row probes the launcher's login shell without changing lib/t3.sh's
+# already-reviewed install-time engines check. Unreadable and malformed answers
+# are attended here, never a pass and never a raw shell/vendor exit status.
+harbor_provision_login_shell_node() {
+  local out version range
+  HARBOR_PROVISION_LOGIN_NODE_WHY=""
+  out="$(HOME="${1}" sh -lc 'command -v node >/dev/null && node --version' 2>/dev/null)" || {
+    HARBOR_PROVISION_LOGIN_NODE_WHY="the login shell could not resolve node"
+    return 1
+  }
+  case "${out}" in
+    v*) version="${out#v}" ;;
+    *)
+      HARBOR_PROVISION_LOGIN_NODE_WHY="node --version did not report a recognizable version"
+      return 1
+      ;;
+  esac
+  range="$(harbor_version_require t3_engines_node)" || {
+    HARBOR_PROVISION_LOGIN_NODE_WHY="the locked Node requirement could not be read"
+    return 1
+  }
+  # The semver reader can exit 3 on malformed input. A subshell makes that a
+  # failed reading for this reporting row instead of aborting provision.
+  if (harbor_semver_satisfies "${version}" "${range}") >/dev/null 2>&1; then
+    return 0
+  fi
+  HARBOR_PROVISION_LOGIN_NODE_WHY="the login shell's Node version is unrecognized or does not satisfy the locked range"
+  return 1
+}
+
+harbor_provision_broken() {
+  HARBOR_PROVISION_BROKEN=1
+  HARBOR_PROVISION_NOTES="${HARBOR_PROVISION_NOTES:-}  ${1}: ${2}
+"
+  harbor_msg "${1}: broken: ${2}"
+  harbor_log provision "broken: ${1}: ${2}"
+}
+
+harbor_provision_tailnet_mapping() {
+  local mapping magicdns
+  mapping="$(harbor_serve_mapping)"
+  case "${mapping}" in
+    absent)
+      # Step 2: no mapping is the one pairing need. An existing mapping never is.
+      access_state=needs_pairing
+      harbor_provision_attended needs_pairing "run harbor pair, which publishes this node's T3 server over Tailscale Serve and mints a one-time pairing token, then rerun harbor provision"
+      return 0
+      ;;
+    unnormalizable)
+      access_state=unknown
+      harbor_provision_attended tailnet.serve_unknown "this node has a Serve configuration Harbor could not reduce to a comparable HTTPS 443 mapping; inspect it with: tailscale serve status, then rerun harbor provision"
+      return 0
+      ;;
+  esac
+  magicdns="$(harbor_tailscale_magicdns)" || {
+    access_state=unknown
+    harbor_provision_attended tailnet.no_magicdns "this node has no MagicDNS name, so the tailnet route cannot be checked; log in with: harbor auth tailscale and confirm MagicDNS is enabled, then rerun harbor provision"
+    return 0
+  }
+  # Keep the verdict and non-secret diagnostic together across the subshell.
+  harbor_pair_environment "${HOME}" "${magicdns}"
+  case "${HARBOR_PAIR_VERDICT:-unknown}" in
+    pass) return 0 ;;
+    broken)
+      access_state=broken
+      harbor_provision_broken tailnet.environment "${HARBOR_PAIR_ENVIRONMENT_WHY:-}; minting another pairing token would not change the route — inspect it with: tailscale serve status"
+      return 0
+      ;;
+  esac
+  access_state=unknown
+  harbor_provision_attended tailnet.environment_unknown "${HARBOR_PAIR_ENVIRONMENT_WHY:-}; rerun harbor provision once the tailnet has settled"
+}
+
 harbor_provision_rows() {
   local mode=connect config agent status claude_auth codex_auth service_state access_state=healthy stamp snapshot
   harbor_step provision-journal-config
@@ -152,6 +229,7 @@ harbor_provision_rows() {
   if [ -e "${config}" ] || [ -L "${config}" ]; then
     mode="$(harbor_config_access_mode "${HOME}")" || exit "$?"
   fi
+  [ "${mode}" != tailnet ] || harbor_access_require_tailnet_supported
   harbor_config_create "${HARBOR_STATE_ROOT}" "${HOME}" "${mode}"
 
   harbor_step provision-runtime-install
@@ -228,6 +306,54 @@ harbor_provision_rows() {
           ;;
       esac
       ;;
+    tailnet)
+      harbor_access_require_tailnet_supported
+      harbor_t3_connect_status "${HOME}"
+      harbor_serve_status
+      # Public exposure is broken even when Connect is still active or unreadable.
+      case "$(harbor_serve_funnel)" in
+        present)
+          access_state=broken
+          harbor_provision_broken tailnet.funnel "this node has a Funnel exposure, which publishes it beyond the tailnet; Harbor never creates or removes a Funnel; inspect it with: tailscale serve status and remove it with the vendor command it names"
+          ;;
+        *)
+          case "${HARBOR_T3_CONNECT_DESIRED:-unknown}" in
+            true)
+              access_state=connect_still_active
+              # Not "harbor access set tailnet". This row is only reachable while
+              # access_mode already IS tailnet, and harbor access set returns
+              # early on an unchanged mode without reverting anything, so that
+              # advice sends the operator to a command that does nothing. Harbor
+              # reverts a mode's own entries only while switching away from it,
+              # and the entries that need reverting here belong to connect, so
+              # the node has to pass through connect to unwind them.
+              harbor_provision_attended tailnet.connect_active "T3 Connect is still active on this node, so two routes would claim it; Harbor reverts a mode's entries only while switching away from that mode, and this node is already on tailnet, so the connect link has to be unwound by passing through connect: run harbor access set connect, then harbor access set tailnet, which reverts the connect link on the way back, then harbor pair and harbor provision"
+              ;;
+            false)
+              case "$(harbor_serve_funnel)" in
+                none) harbor_provision_tailnet_mapping ;;
+                *)
+                  access_state=unknown
+                  harbor_provision_attended tailnet.serve_unknown "Harbor could not read this node's Serve configuration; inspect it with: tailscale serve status, then rerun harbor provision"
+                  ;;
+              esac
+              ;;
+            *)
+              access_state=unknown
+              harbor_provision_attended tailnet.connect_unknown "Harbor could not determine whether Connect is still desired; inspect t3 connect status --json, then rerun harbor provision"
+              ;;
+          esac
+          ;;
+      esac
+      ;;
+    ssh)
+      if harbor_provision_login_shell_node "${HOME}"; then
+        :
+      else
+        access_state=needs_node
+        harbor_provision_attended ssh.node "the T3 SSH launcher runs sh -lc 'command -v node && node --version' on this node and this release's check of that command failed (${HARBOR_PROVISION_LOGIN_NODE_WHY:-}); make node resolvable from the operator's login shell, then rerun harbor provision"
+      fi
+      ;;
   esac
   # Task 19: the State record is last, including on attended runs.
   harbor_step provision-state-record
@@ -253,6 +379,7 @@ harbor_provision_main() {
   HARBOR_CMDLINE="${HARBOR_CMDLINE:-harbor provision ${*:-}}"
   [ "$#" -eq 0 ] || harbor_die 3 usage "usage: harbor provision"
   harbor_provision_preflight
+  HARBOR_PROVISION_BROKEN=0
   HARBOR_PROVISION_ATTENDED=0
   HARBOR_PROVISION_NOTES=""
   harbor_provision_rows
@@ -265,6 +392,11 @@ harbor_provision_main() {
   # Read by the EXIT trap, which otherwise treats a zero exit as an incomplete run.
   # shellcheck disable=SC2034
   HARBOR_COMPLETED=1
+  if [ "${HARBOR_PROVISION_BROKEN:-0}" = 1 ]; then
+    harbor_msg "provision.broken: these rows need attention:"
+    printf '%s' "${HARBOR_PROVISION_NOTES:-}" >&2
+    exit 2
+  fi
   [ "${HARBOR_PROVISION_ATTENDED}" = 1 ] || return 0
   harbor_msg "provision.attended: these steps still need attention:"
   printf '%s' "${HARBOR_PROVISION_NOTES}" >&2

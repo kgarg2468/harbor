@@ -21,8 +21,12 @@ setup() {
   printf '{\n  "tailscale_ownership": "harbor-installed"\n}\n' >"${RECORD}"
   cat >"${BIN}/tailscale" <<'SH'
 #!/bin/bash
+if [ "$#" = 2 ] && [ "${1}" = serve ] && [ "${2}" = status ]; then
+  cat "${TEST_FIXTURE}/serve"
+  exit 0
+fi
 [ "$*" = 'status --json' ] || exit 99
-printf '{"BackendState":"%s"}\n' "${TEST_BACKEND:-Running}"
+printf '{"BackendState":"%s","Self":{"DNSName":"%s"}}\n' "${TEST_BACKEND:-Running}" "${TEST_DNS-harbor-node.TAILNET.ts.net.}"
 exit "${TEST_BACKEND_RC:-0}"
 SH
   cat >"${BIN}/loginctl" <<'SH'
@@ -33,6 +37,12 @@ exit "${TEST_LINGER_RC:-0}"
 SH
   cat >"${BIN}/sh" <<'SH'
 #!/bin/bash
+if [ "$#" = 2 ] && [ "${1}" = -lc ] && [ "${2}" = 'command -v node >/dev/null && node --version' ]; then
+  printf 'ssh-probe\n' >>"${TEST_FIXTURE}/ssh-probes"
+  [ "${TEST_SSH_NODE:-v24.20.0}" != absent ] || exit 97
+  printf '%s\n' "${TEST_SSH_NODE:-v24.20.0}"
+  exit 0
+fi
 [ "$*" = '-lc node --version' ] || exit 99
 printf '%s\n' "${TEST_NODE}"
 exit "${TEST_NODE_RC:-0}"
@@ -441,13 +451,13 @@ service install'
   refute_output --partial 'provision.attended:'
 }
 
-@test "invalid existing access mode refuses before runtime calls and is preserved" {
+@test "unmeasured tailnet refuses before runtime calls and is preserved" {
   mkdir -p "${FIX_HOME}/.config/harbor"
   printf 'access_mode=tailnet\n' >"${FIX_HOME}/.config/harbor/config"
   chmod 0600 "${FIX_HOME}/.config/harbor/config"
   run provision
   assert_equal "${status}" 3
-  assert_output --partial config.tailnet
+  assert_output --partial access.tailnet_unverified
   assert_equal "$(cat "${FIX_HOME}/.config/harbor/config")" access_mode=tailnet
   assert [ ! -e "${BATS_TEST_TMPDIR}/calls" ]
 }
@@ -626,5 +636,213 @@ SH
     run provision
     assert_success
     assert_equal "$(entry_phase "${FIX_ROOT}" "${seq}")" applied
+  done
+}
+
+provision_config() {
+  mkdir -p "${FIX_HOME}/.config/harbor"
+  printf 'access_mode=%s\n' "${1}" >"${FIX_HOME}/.config/harbor/config"
+  chmod 0600 "${FIX_HOME}/.config/harbor/config"
+}
+probe_fixture() {
+  mkdir -p "${RELEASE}/vendor-smoke"
+  printf 'result=%s\n' "${1}" >"${RELEASE}/vendor-smoke/tailnet-environment.probe"
+}
+provision_connect_fixture() {
+  case "${1}" in
+    desired-true) export TEST_CONNECT=healthy ;;
+    desired-false)
+      sed 's/"desired": true/"desired": false/' "${BATS_TEST_TMPDIR}/t3-fixtures/connect-status/healthy" >"${BATS_TEST_TMPDIR}/t3-fixtures/connect-status/undesired"
+      export TEST_CONNECT=undesired ;;
+    *) export TEST_CONNECT=unparseable ;;
+  esac
+}
+serve_fixture() { cp "${HARBOR_ROOT}/tests/fixtures/tailscale/serve-status/${1}" "${BATS_TEST_TMPDIR}/serve"; }
+runtime_fixture() {
+  mkdir -p "${FIX_HOME}/.t3/userdata"
+  cp "${HARBOR_ROOT}/tests/fixtures/t3/server-runtime/${1}" "${FIX_HOME}/.t3/userdata/server-runtime.json"
+}
+descriptor_shim_for() {
+  case "${1}" in
+    loopback) export TEST_LOOPBACK="${2}" ;;
+    magicdns) export TEST_MAGICDNS="${2}" ;;
+  esac
+  cat >"${BIN}/curl" <<'SH'
+#!/bin/bash
+set -euo pipefail
+for arg in "$@"; do url="${arg}"; done
+printf '%s\n' "${url}" >>"${TEST_FIXTURE}/descriptor-calls"
+case "${url}" in
+  http://*) fixture="${TEST_LOOPBACK:-unreachable}" ;;
+  https://*) fixture="${TEST_MAGICDNS:-unreachable}" ;;
+  *) exit 97 ;;
+esac
+[ "${fixture}" != unreachable ] || exit 7
+cat "${TEST_FIXTURE}/t3-fixtures/environment/${fixture}"
+printf '\nHARBOR_HTTP_CODE:200'
+SH
+  chmod 0755 "${BIN}/curl"
+}
+login_shell_node_shim() {
+  case "${1}" in
+    absent) export TEST_SSH_NODE=absent ;;
+    *) export TEST_SSH_NODE="v${1}" ;;
+  esac
+}
+provision_run() { provision; }
+@test "tailnet with connect still desired reports that connect is active" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-true
+  run provision_run
+  assert_equal "${status}" 1
+  assert_output --partial 'Connect is still active'
+  # The remedy has to be the round trip. This row is only reachable while the mode
+  # already IS tailnet, and harbor access set returns early on an unchanged mode
+  # without reverting anything, so naming "harbor access set tailnet" alone would
+  # send the operator to a command that does nothing.
+  assert_output --partial 'harbor access set connect, then harbor access set tailnet'
+}
+
+@test "tailnet with no mapping reports needs_pairing and names harbor pair" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-false
+  serve_fixture absent
+  run provision_run
+  assert_equal "${status}" 1
+  assert_output --partial 'needs_pairing'
+  assert_output --partial 'harbor pair'
+}
+
+@test "tailnet with a passing mapping and no funnel is healthy" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-false
+  serve_fixture vendor-443
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid
+  run provision_run
+  assert_success
+  assert_regex "$(cat "${BATS_TEST_TMPDIR}/descriptor-calls")" 'https://harbor-node\.TAILNET\.ts\.net/'
+}
+
+@test "an existing mapping is never a pairing need, whatever the environment check says" {
+  # Section 5.5 step 2, exactly: "An existing mapping is never a pairing need; the
+  # environment check judges it." Reporting needs_pairing here would tell the
+  # operator to mint a token as the fix for a foreign route, which section 5.5
+  # forbids in those words.
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-false
+  serve_fixture vendor-443
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid-other-id
+  run provision_run
+  assert_equal "${status}" 2
+  assert_output --partial 'broken'
+  refute_output --partial 'needs_pairing'
+}
+
+@test "any funnel exposure is exit 2 in the tailnet row" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-false
+  serve_fixture funnel
+  run provision_run
+  assert_equal "${status}" 2
+  assert_output --partial 'Funnel'
+}
+
+@test "tailnet is refused entirely while the revalidation is unrecorded" {
+  provision_config tailnet
+  probe_fixture unsupported
+  run provision_run
+  assert_equal "${status}" 3
+  assert_output --partial 'has not been verified on the pinned tailscale and t3 versions'
+}
+
+@test "ssh verifies the operator's login shell can resolve a satisfying node" {
+  provision_config ssh
+  login_shell_node_shim 24.20.0
+  run provision_run
+  assert_success
+  assert_equal "$(cat "${BATS_TEST_TMPDIR}/ssh-probes")" ssh-probe
+}
+
+@test "ssh reports the launcher's own check failing, with the command T3 runs" {
+  provision_config ssh
+  login_shell_node_shim absent
+  run provision_run
+  assert_equal "${status}" 1
+  assert_output --partial "sh -lc 'command -v node && node --version'"
+}
+
+@test "unknown Connect desired never establishes a tailnet pass" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture unknown
+  serve_fixture vendor-443
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns valid
+  run provision
+  assert_equal "${status}" 1
+  assert_output --partial 'could not determine'
+  assert_equal "$(jq -r .access_state "${FIX_ROOT}/provision.json")" unknown
+}
+
+@test "Funnel wins even while Connect is active or unknown" {
+  provision_config tailnet
+  probe_fixture supported
+  serve_fixture funnel
+  for desired in desired-true unknown; do
+    provision_connect_fixture "${desired}"
+    run provision
+    assert_equal "${status}" 2
+    assert_output --partial Funnel
+    assert_equal "$(jq -r .access_state "${FIX_ROOT}/provision.json")" broken
+  done
+}
+
+@test "unreadable Serve and unreachable descriptors are unknown, with the reason preserved" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-false
+  serve_fixture garbage
+  run provision
+  assert_equal "${status}" 1
+  assert_output --partial 'could not read'
+  serve_fixture vendor-443
+  runtime_fixture healthy
+  descriptor_shim_for loopback valid
+  descriptor_shim_for magicdns unreachable
+  run provision
+  assert_equal "${status}" 1
+  assert_output --partial unreachable
+  assert_equal "$(jq -r .access_state "${FIX_ROOT}/provision.json")" unknown
+  refute_output --partial needs_pairing
+}
+
+@test "missing MagicDNS cannot pass an existing mapping" {
+  provision_config tailnet
+  probe_fixture supported
+  provision_connect_fixture desired-false
+  serve_fixture vendor-443
+  run provision TEST_DNS=
+  assert_equal "${status}" 1
+  assert_output --partial 'no MagicDNS'
+  assert_equal "$(jq -r .access_state "${FIX_ROOT}/provision.json")" unknown
+}
+
+@test "ssh rejects malformed and incompatible versions as attended" {
+  provision_config ssh
+  for version in v1.0.0 v24.20.0.extra nonsense; do
+    run provision TEST_SSH_NODE="${version}"
+    assert_equal "${status}" 1
+    assert_output --partial ssh.node
+    assert_equal "$(jq -r .access_state "${FIX_ROOT}/provision.json")" needs_node
   done
 }

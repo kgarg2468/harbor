@@ -10,9 +10,18 @@ setup() {
   . "${HARBOR_ROOT}/lib/journal.sh"
   # shellcheck source=lib/config.sh
   . "${HARBOR_ROOT}/lib/config.sh"
+  # shellcheck source=lib/access.sh
+  . "${HARBOR_ROOT}/lib/access.sh"
   fixture_state_root
   HARBOR_PID="$$"
   HOME="${FIX_HOME}"
+  HARBOR_LOCK_ID_PID=$$
+  HARBOR_LOCK_ID_HOSTNAME=fixture
+  HARBOR_LOCK_ID_BOOT_ID=fixture
+  HARBOR_LOCK_ID_START_TIME=fixture
+  HARBOR_LOCK_ID_CMDLINE=config-test
+  FIX_PROBE="${BATS_TEST_TMPDIR}/probe"
+  harbor_access_probe_path() { printf '%s' "${FIX_PROBE}"; }
   CONFIG="${FIX_HOME}/.config/harbor/config"
 }
 
@@ -67,23 +76,6 @@ seed_config() {
   assert_equal "$(cat "${CONFIG}")" 'access_mode=connect'
 }
 
-@test "tailnet exits 3 naming PR 5's command" {
-  seed_config tailnet
-  run harbor_config_access_mode "${FIX_HOME}"
-  assert_equal "${status}" 3
-  assert_output --partial 'harbor pair'
-  assert_output --partial "${CONFIG}"
-  run harbor_config_create "${FIX_ROOT}" "${FIX_HOME}" tailnet
-  assert_equal "${status}" 3
-  assert_output --partial 'harbor pair'
-  # "configuration was not accepted" is a claim about the node, not just an exit
-  # code: the refusal precedes every write, so the journal stays empty and the
-  # file on disk is the one that was already there.
-  set -- "${FIX_ROOT}/journal/"*.json
-  assert_equal "$*" "${FIX_ROOT}/journal/*.json"
-  assert_equal "$(cat "${CONFIG}")" 'access_mode=tailnet'
-}
-
 @test "an unknown mode exits 3" {
   seed_config unknown
   run harbor_config_access_mode "${FIX_HOME}"
@@ -92,9 +84,7 @@ seed_config() {
   assert_output --partial unknown
   assert_output --partial connect
   assert_output --partial tailnet
-  # Naming tailnet without this would send a typo to a value the same function
-  # refuses, and the operator would learn that only on the next run.
-  assert_output --partial 'only connect can be provisioned by this release'
+  assert_output --partial ssh
 }
 
 @test "a 0644 file exits 3 before its otherwise valid contents are read" {
@@ -180,4 +170,45 @@ seed_config() {
   assert_equal "${status}" 3
   assert_output --partial "${CONFIG}"
   assert_output --partial 'harbor provision'
+}
+
+probe_fixture() { printf 'result=%s\n' "${1}" >"${FIX_PROBE}"; }
+@test "ssh is an accepted access mode" {
+  run harbor_config_validate_mode "${CONFIG}" ssh
+  assert_success
+}
+
+@test "connect is accepted and an unknown mode names all three" {
+  run harbor_config_validate_mode "${CONFIG}" connect
+  assert_success
+  run harbor_config_validate_mode "${CONFIG}" wireguard
+  assert_equal "${status}" 3
+  assert_output --partial 'connect'
+  assert_output --partial 'tailnet'
+  assert_output --partial 'ssh'
+}
+
+@test "tailnet parses, and the gate is what refuses it" {
+  # The distinction matters: tailnet is a real mode this release implements, and
+  # the refusal is about a measurement, not about a missing command. A parse-time
+  # rejection would make the message unfixable by measuring anything.
+  run harbor_config_validate_mode "${CONFIG}" tailnet
+  assert_success
+}
+
+@test "the recorded probe decides whether tailnet is supported" {
+  probe_fixture unsupported
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  assert_output --partial 'has not been verified on the pinned tailscale and t3 versions'
+  assert_output --partial 'tailnet-environment.probe'
+  probe_fixture supported
+  run harbor_access_require_tailnet_supported
+  assert_success
+}
+
+@test "a probe file that is missing or unreadable is unsupported, never supported" {
+  rm -f "${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
 }

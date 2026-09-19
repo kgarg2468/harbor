@@ -1,0 +1,21 @@
+# Revalidation A of design section 5.5, recorded by PR 5.
+#
+# Question: on the exact pinned tailscale_version and t3_version, can the node
+# fetch its own Serve descriptor at
+# https://harbor-node.TAILNET.ts.net/.well-known/t3/environment?
+#
+# This cannot be measured in CI: the integration lane has no Tailscale account,
+# no tailnet, and no MagicDNS name, and its tailscale is a stand-in that never
+# logs in. It is an attended measurement on a real node, recorded here by hand
+# after the owner runs the procedure in the PR body, exactly as PR 3 recorded the
+# --ssh probe. lib/access.sh reads result= and gates tailnet mode on it.
+#
+# Until result=supported, harbor provision with access_mode=tailnet, harbor access
+# set tailnet, and harbor pair exit 3 naming the limitation, and t3.environment
+# is never reported as pass or unknown in its place (section 5.5).
+# This is a gate awaiting measurement, not a finding about self-fetch support.
+result=unsupported
+measured_tailscale_version=
+measured_t3_version=
+measured_on=
+note=not yet measured; see the PR 5 body for the procedure

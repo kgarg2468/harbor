@@ -6,17 +6,12 @@ harbor_config_path() {
 harbor_config_validate_mode() {
   local file="${1}" mode="${2}"
   case "${mode}" in
-    connect) ;;
-    tailnet)
-      # Refuse rather than silently downgrade to connect: provisioning the wrong
-      # access mode is worse than not provisioning.
-      harbor_die 3 config.tailnet "${file}: access_mode=tailnet cannot be provisioned by this release because harbor pair does not exist yet; configuration was not accepted"
-      ;;
-    # Both words, because both are the vocabulary and a reader of this message is
-    # entitled to know the mode exists -- but with what the tailnet arm above would
-    # say, so that a typo is not answered by naming a value this release also
-    # refuses, one round trip later.
-    *) harbor_die 3 config.access_mode "${file}: access_mode '${mode}' is unknown; the modes are connect and tailnet, and only connect can be provisioned by this release; configuration was not accepted" ;;
+    connect | ssh | tailnet) ;;
+    # All three words, because all three are the vocabulary of section 3.3 and a
+    # reader of this message is entitled to the whole list. tailnet is accepted
+    # here and gated separately by the recorded revalidation: refusing it at parse
+    # time would produce a message no measurement could ever fix.
+    *) harbor_die 3 config.access_mode "${file}: access_mode '${mode}' is unknown; the modes are connect, tailnet, and ssh; configuration was not accepted" ;;
   esac
 }
 harbor_config_create() {
