@@ -1326,17 +1326,30 @@ connect status --json'
   assert_output 'connect status --json'
 }
 
-@test "auth connect: authorized but unlinked reports needs_connect_link without login or entry" {
+@test "auth connect: authorized but unlinked runs the link and leaves a prepared entry when the vendor refuses it" {
+  # This is where the seam used to be: the arm reported t3.needs_connect_link and
+  # journaled nothing, because the link step had not shipped. It ships now, so the
+  # same fixture has to prove the opposite -- that the link is attempted, and that
+  # a vendor which does not complete it leaves an entry recovery can decide rather
+  # than a silent refusal.
+  #
+  # This harness's vendor shim answers only `connect status --json` and exits 97
+  # for anything else, so it stands in for a link that failed. The completed path
+  # is covered in tests/unit/lib/t3_connect.bats, which shims the link properly.
   fake_connect_t3 needs-link
   connect_auth
   assert_failure 1
-  assert_output --partial 't3.needs_connect_link:'
-  assert_output --partial 'link step is not in this release'
-  assert_output --partial 'harbor auth connect in a later release'
-  assert_equal "$(journal_names)" ''
-  assert_no_connect_link
+  assert_output --partial 'is authorized but not linked; running its own link'
+  assert_output --partial 't3.link_incomplete:'
+  # The entry is the point: prepared, not absent and not applied.
+  assert_equal "$(journal_names)" 0001-t3-connect-link.json
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  assert_equal "$(entry_raw "${FIX_ROOT}" 0001 ownership)" '"created"'
+  harbor_journal_validate "${FIX_ROOT}/journal/0001-t3-connect-link.json"
+  # And the operator is told the rerun is safe, because the entry makes it so.
+  assert_output --partial 'rerunning is safe'
   run cat "${BATS_TEST_TMPDIR}/connect-calls"
-  assert_output 'connect status --json'
+  assert_output --partial 'connect link'
 }
 
 @test "auth connect: unknown before login refuses without login or entry" {

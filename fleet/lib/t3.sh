@@ -272,6 +272,16 @@ harbor_t3_connect_login() {
   harbor_log t3 "connect login exited ${rc}"
   return "${rc}"
 }
+# harbor_t3_connect_link HOME: the vendor's own link command, streams untouched.
+# Section 3.6 requires the relay-client download prompt to reach the operator
+# rather than being pre-answered, so nothing here redirects stdin or stdout, and
+# harbor_t3_run already emits the vendor line after its version guard.
+harbor_t3_connect_link() {
+  local home="${1}" rc=0
+  harbor_t3_run "${home}" connect link || rc="$?"
+  harbor_log t3 "connect link exited ${rc}"
+  return "${rc}"
+}
 # harbor_t3_connect STATE_ROOT HOME: recovery precedes the attended login for the
 # same reason it does for the agents: this operator journal can contain a crashed
 # provision. Only a false-to-true authenticated pair is recorded, already applied,
@@ -312,9 +322,32 @@ harbor_t3_connect() {
       return 0
       ;;
     true:false)
-      # The link step and its t3-connect-link entry belong to spec section 8 row 5;
-      # PR 4 ships only login, so this gap must not become an implicit link attempt.
-      harbor_die 1 t3.needs_connect_link "needs_connect_link: T3 Connect is authorized but not linked; the link step is not in this release; harbor auth connect in a later release performs it; nothing was journaled"
+      # Journaled the ordinary way, unlike the auth entry beside it. That one is
+      # written already-applied because Harbor has no inverse for a vendor login
+      # and can only record a transition it read both ends of. The link does have
+      # an inverse -- t3 connect unlink, which PR 8's teardown runs -- so it is a
+      # prepared-then-applied transaction and a crash in the middle leaves an
+      # entry recovery can decide against the vendor's own status.
+      harbor_msg "auth.connect: T3 Connect is authorized but not linked; running its own link below — follow what it prints, including any relay-client prompt, which Harbor passes through rather than answering for you"
+      harbor_journal_create "${root}" t3-connect-link connect created prepared '"false"' '"true"' || exit "$?"
+      entry="${HARBOR_JOURNAL_ENTRY}"
+      harbor_step "connect-link-prepared"
+      harbor_t3_connect_link "${home}" || rc="$?"
+      harbor_step "connect-link"
+      harbor_t3_connect_status "${home}"
+      case "${HARBOR_T3_CONNECT_LINKED}" in
+        true) ;;
+        *)
+          harbor_die 1 t3.link_incomplete "T3 Connect still reports linked=${HARBOR_T3_CONNECT_LINKED} after its own link exited ${rc}, so the link was not completed; $(basename "${entry}") stays prepared and rerunning is safe: harbor auth connect"
+          ;;
+      esac
+      harbor_journal_set_phase "${entry}" applied || exit "$?"
+      # Restart so the running service reconciles the link it did not have when it
+      # started (section 5.5 step 2). The vendor's own verb, through the vendor's
+      # own CLI: Harbor never runs systemctl against this unit.
+      HOME="${home}" harbor_service_cmd restart || harbor_die 1 t3.link_unreconciled "T3 Connect is linked and $(basename "${entry}") is applied, but the service restart that makes the running server pick the link up failed; run: harbor service restart"
+      harbor_msg "T3 Connect is linked on this node; recorded it as $(basename "${entry}") and restarted the service so it reconciles"
+      return 0
       ;;
     false:*) ;;
     *)
@@ -760,4 +793,15 @@ harbor_t3_environment() {
   unset HARBOR_T3_DESCRIPTOR_ID
   [ "${xt}" = 0 ] || set -x
   return "${rc}"
+}
+
+# harbor_observe_op_t3_connect_link TARGET: the linked field, as the journal's
+# own string form, so recovery of a crashed link decides against the vendor's
+# status rather than against a file. TARGET is the literal word connect; the op
+# has one target on a node.
+harbor_observe_op_t3_connect_link() {
+  local home
+  home="$(harbor_agents_home)" || exit "$?"
+  harbor_t3_connect_status "${home}"
+  printf '"%s"' "${HARBOR_T3_CONNECT_LINKED}"
 }
