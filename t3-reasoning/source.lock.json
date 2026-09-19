@@ -224,6 +224,11 @@
       "sha256": "080f48b2972f4445668a3c6118540abc61a32658705caf0e03066af2337b6987"
     },
     {
+      "id": "managed-physical-fs",
+      "path": "patches/0047-managed-physical-fs.patch",
+      "sha256": "310370886181322b8cb14988c022cf77f90a5fa092575e823f280be2f27507b5"
+    },
+    {
       "id": "reasoning-identity",
       "path": "patches/0002-reasoning-identity.patch",
       "sha256": "b07d4d34cf6179510e8aba703f1aab38fe9782093822b49ff7da1ec601c2199d"
@@ -273,7 +278,8 @@
       "managed-shared-connection",
       "external-reconnect",
       "desktop-cleanup-retry",
-      "managed-launcher-compat"
+      "managed-launcher-compat",
+      "managed-physical-fs"
     ],
     "reasoning": [
       "reasoning-full",
@@ -319,6 +325,7 @@
       "external-reconnect",
       "desktop-cleanup-retry",
       "managed-launcher-compat",
+      "managed-physical-fs",
       "reasoning-identity"
     ]
   }
