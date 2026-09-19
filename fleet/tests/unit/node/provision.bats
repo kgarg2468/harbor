@@ -646,7 +646,13 @@ provision_config() {
 }
 probe_fixture() {
   mkdir -p "${RELEASE}/vendor-smoke"
-  printf 'result=%s\n' "${1}" >"${RELEASE}/vendor-smoke/tailnet-environment.probe"
+  # The gate reads the two measured_ pins as well as the result, so a fixture that
+  # writes only a result is a fixture that can never say supported. Taking the
+  # values from the lock the code will compare against keeps the fixture honest
+  # about what it is asserting: the result word, not a stale pin.
+  printf 'result=%s\nmeasured_tailscale_version=%s\nmeasured_t3_version=%s\n' "${1}" \
+    "$(sed -n 's/^tailscale_version=//p' "${RELEASE}/versions.lock")" \
+    "$(sed -n 's/^t3_version=//p' "${RELEASE}/versions.lock")" >"${RELEASE}/vendor-smoke/tailnet-environment.probe"
 }
 provision_connect_fixture() {
   case "${1}" in

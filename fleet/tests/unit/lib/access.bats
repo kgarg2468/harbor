@@ -9,6 +9,9 @@ setup() {
   FIX_PROBE="${BATS_TEST_TMPDIR}/probe"
   harbor_access_probe_path() { printf '%s' "${FIX_PROBE}"; }
   export FIX_OFF_RC=0 FIX_CONNECT=healthy
+  FIX_SERVE_ABSENT="${HARBOR_ROOT}/tests/fixtures/tailscale/serve-status/absent"
+  export FIX_SERVE_ABSENT
+  rm -f "${FIX_PAIR_DIR}/connect.override"
   cat >"${BATS_TEST_TMPDIR}/bin/tailscale" <<'SH'
 #!/bin/bash
 set -euo pipefail
@@ -16,6 +19,13 @@ printf 'tailscale %s\n' "$*" >>"${FIX_SHIM_LOG}"
 if [ "$#" = 2 ] && [ "${1}" = serve ] && [ "${2}" = status ]; then
   cat "${FIX_PAIR_DIR}/serve"
 elif [ "$#" = 3 ] && [ "${1}" = serve ] && [ "${2}" = --https=443 ] && [ "${3}" = off ]; then
+  # A shim that only reports success is a shim that cannot tell a reversion from
+  # a vendor that did nothing, which is the distinction the code now checks for.
+  # FIX_OFF_APPLIES=no is the vendor Corrections 35 and 36 measured: exit 0, world
+  # unchanged.
+  if [ "${FIX_OFF_RC}" = 0 ] && [ "${FIX_OFF_APPLIES:-yes}" = yes ]; then
+    cp "${FIX_SERVE_ABSENT}" "${FIX_PAIR_DIR}/serve"
+  fi
   exit "${FIX_OFF_RC}"
 else
   exit 97
@@ -28,8 +38,19 @@ printf 't3 %s\n' "$*" >>"${FIX_SHIM_LOG}"
 if [ "$#" = 1 ] && [ "${1}" = --version ]; then
   printf 't3 v%s\n' "${FIX_T3_VERSION}"
 elif [ "$#" = 3 ] && [ "${1}" = connect ] && [ "${2}" = status ] && [ "${3}" = --json ]; then
-  cat "${HARBOR_ROOT}/tests/fixtures/t3/connect-status/${FIX_CONNECT}"
+  fix_connect="${FIX_CONNECT}"
+  if [ -f "${FIX_PAIR_DIR}/connect.override" ]; then
+    . "${FIX_PAIR_DIR}/connect.override"
+    fix_connect="${FIX_CONNECT}"
+  fi
+  cat "${HARBOR_ROOT}/tests/fixtures/t3/connect-status/${fix_connect}"
 elif [ "$#" = 2 ] && [ "${1}" = connect ] && [ "${2}" = unlink ]; then
+  # Same reason as the serve shim: the unlink has to move the world the observer
+  # reads, or "the entry was reverted" is asserted against a node that still says
+  # linked.
+  if [ "${FIX_UNLINK_APPLIES:-yes}" = yes ]; then
+    printf 'FIX_CONNECT=needs-link\n' >"${FIX_PAIR_DIR}/connect.override"
+  fi
   exit 0
 else
   exit 97
@@ -38,9 +59,20 @@ SH
 }
 teardown() { harbor_lock_release "${FIX_ROOT}"; }
 seed_entry() { fixture_entry "${FIX_ROOT}" "$@"; }
-probe_fixture() { printf 'result=%s\n' "${1}" >"${FIX_PROBE}"; }
+probe_fixture() {
+  # The gate reads the two measured_ pins as well as the result, so a fixture that
+  # writes only a result is a fixture that can never say supported. Taking the
+  # values from the lock the code will compare against keeps the fixture honest
+  # about what it is asserting: the result word, not a stale pin.
+  printf 'result=%s\nmeasured_tailscale_version=%s\nmeasured_t3_version=%s\n' "${1}" \
+    "$(sed -n 's/^tailscale_version=//p' "${HARBOR_ROOT}/versions.lock")" \
+    "$(sed -n 's/^t3_version=//p' "${HARBOR_ROOT}/versions.lock")" >"${FIX_PROBE}"
+}
 connect_status_fixture() { export FIX_CONNECT="${1}"; }
 serve_off_shim() { export FIX_OFF_RC=97; }
+# The vendor that reports success and changes nothing.
+serve_off_noop() { export FIX_OFF_APPLIES=no; }
+connect_unlink_noop() { export FIX_UNLINK_APPLIES=no; }
 
 @test "each mode owns exactly the ops it journals" {
   assert_equal "$(harbor_access_mode_ops connect)" 't3-connect-link'
@@ -80,15 +112,77 @@ serve_off_shim() { export FIX_OFF_RC=97; }
   refute_regex "$(cat "${FIX_SHIM_LOG}")" 'serve --https=443 off'
 }
 
-@test "the inverse is run once per entry, newest first" {
+@test "newest first, and the inverse is never run twice for one artifact" {
+  # Two entries recording the same link is the shape a crashed-and-rerun session
+  # leaves. Once 0002's unlink has actually moved the world, 0001's recorded
+  # post_state no longer describes what is there -- and the rule that a created
+  # entry is reverted only while the world still equals its post_state is exactly
+  # what stops Harbor unlinking a second time on behalf of an entry whose
+  # artifact is already gone.
   seed_entry 0001 t3-connect-link connect created applied '"false"' '"true"'
   seed_entry 0002 t3-connect-link connect created applied '"false"' '"true"'
   connect_status_fixture healthy
   run harbor_access_revert "${FIX_ROOT}" connect
-  assert_success
-  assert_equal "$(grep -c 'connect unlink' "${FIX_SHIM_LOG}")" 2
-  # Newest first: 0002's unlink is logged before 0001's.
-  assert_regex "$(cat "${FIX_ROOT}/harbor.log")" '0002-.*reverted(.|\n)*0001-.*reverted'
+  # Attended, because 0001 was reported rather than reverted.
+  assert_equal "${status}" 1
+  assert_equal "$(grep -c 'connect unlink' "${FIX_SHIM_LOG}")" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0002)" reverted
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_output --partial 'has changed since Harbor created it'
+  # Newest first is what made that the order: 0002 is the one that ran.
+  assert_regex "$(cat "${FIX_ROOT}/harbor.log")" '0002-.*reverted'
+  refute_regex "$(cat "${FIX_ROOT}/harbor.log")" '0001-.*reverted'
+}
+
+@test "an inverse that reports success and changes nothing is not recorded as a reversion" {
+  # The vendor Corrections 35 and 36 measured: exit 0, world untouched. Recording
+  # reverted here would be the worst of both -- the mapping is still published,
+  # and reverted is the one phase harbor_journal_recover skips, so nothing would
+  # ever come back to it and a later run would meet the mapping as a stranger's.
+  seed_entry 0001 tailscale-serve https-443 created applied \
+    '"absent"' '"https:443 -> http://loopback:3773"'
+  serve_fixture vendor-443
+  serve_off_noop
+  run harbor_access_revert "${FIX_ROOT}" tailnet
+  assert_equal "${status}" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_output --partial 'reported success and changed nothing'
+  assert_equal "$(grep -c 'serve --https=443 off' "${FIX_SHIM_LOG}")" 1
+}
+
+@test "a switch whose previous mode was not fully unwound exits 1, not 0" {
+  config_fixture tailnet
+  probe_fixture supported
+  seed_entry 0001 tailscale-serve https-443 created applied \
+    '"absent"' '"https:443 -> http://loopback:3773"'
+  serve_fixture vendor-443
+  serve_off_noop
+  run access_cmd set connect
+  assert_equal "${status}" 1
+  assert_output --partial access.previous_mode_attended
+  assert_output --partial 'may still be reachable the old way'
+  # The switch itself still happened: the attended work is about the old mode.
+  assert_equal "$(cat "${FIX_CONFIG}")" access_mode=connect
+}
+
+@test "an inverse Harbor cannot verify afterwards is exit 2, and the entry stays applied" {
+  seed_entry 0001 tailscale-serve https-443 created applied \
+    '"absent"' '"https:443 -> http://loopback:3773"'
+  serve_fixture vendor-443
+  # The first observation, before the inverse, must succeed; only the confirming
+  # read fails. A counter in a file is the only way to make one shim answer twice.
+  printf '0' >"${FIX_PAIR_DIR}/observe.count"
+  harbor_journal_observe() {
+    local n
+    n="$(cat "${FIX_PAIR_DIR}/observe.count")"
+    printf '%s' "$((n + 1))" >"${FIX_PAIR_DIR}/observe.count"
+    [ "${n}" = 0 ] || return 97
+    printf '"https:443 -> http://loopback:3773"'
+  }
+  run harbor_access_revert "${FIX_ROOT}" tailnet
+  assert_equal "${status}" 2
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" applied
+  assert_output --partial access.revert_unverifiable
 }
 
 @test "another mode's entries are not touched" {

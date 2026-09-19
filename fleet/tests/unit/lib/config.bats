@@ -172,7 +172,15 @@ seed_config() {
   assert_output --partial 'harbor provision'
 }
 
-probe_fixture() { printf 'result=%s\n' "${1}" >"${FIX_PROBE}"; }
+probe_fixture() {
+  # The gate reads the two measured_ pins as well as the result, so a fixture that
+  # writes only a result is a fixture that can never say supported. Taking the
+  # values from the lock the code will compare against keeps the fixture honest
+  # about what it is asserting: the result word, not a stale pin.
+  printf 'result=%s\nmeasured_tailscale_version=%s\nmeasured_t3_version=%s\n' "${1}" \
+    "$(sed -n 's/^tailscale_version=//p' "${HARBOR_ROOT}/versions.lock")" \
+    "$(sed -n 's/^t3_version=//p' "${HARBOR_ROOT}/versions.lock")" >"${FIX_PROBE}"
+}
 @test "ssh is an accepted access mode" {
   run harbor_config_validate_mode "${CONFIG}" ssh
   assert_success
@@ -209,6 +217,41 @@ probe_fixture() { printf 'result=%s\n' "${1}" >"${FIX_PROBE}"; }
 
 @test "a probe file that is missing or unreadable is unsupported, never supported" {
   rm -f "${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+}
+
+@test "a result measured on other pins does not carry across a version bump" {
+  # The whole point of the two measured_ fields. A supported recorded against an
+  # older tailscale or t3 is an answer about software this node is no longer
+  # running, and reading only result= would let it keep tailnet open through
+  # exactly the bump the measurement was supposed to be redone for.
+  local locked_ts locked_t3
+  locked_ts="$(sed -n 's/^tailscale_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  locked_t3="$(sed -n 's/^t3_version=//p' "${HARBOR_ROOT}/versions.lock")"
+  printf 'result=supported\nmeasured_tailscale_version=0.0.0\nmeasured_t3_version=%s\n' \
+    "${locked_t3}" >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  printf 'result=supported\nmeasured_tailscale_version=%s\nmeasured_t3_version=0.0.0\n' \
+    "${locked_ts}" >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  # Both matching is the only spelling that opens the gate.
+  probe_fixture supported
+  run harbor_access_require_tailnet_supported
+  assert_success
+}
+
+@test "a result with no measured pins at all is refused" {
+  # The spelling the probe ships with, edited to say supported and nothing else.
+  # An empty field can never equal a pin, so this fails closed without needing a
+  # rule of its own -- and the test is here because that is a property of the
+  # comparison rather than something the code says out loud.
+  printf 'result=supported\nmeasured_tailscale_version=\nmeasured_t3_version=\n' >"${FIX_PROBE}"
+  run harbor_access_require_tailnet_supported
+  assert_equal "${status}" 3
+  printf 'result=supported\n' >"${FIX_PROBE}"
   run harbor_access_require_tailnet_supported
   assert_equal "${status}" 3
 }
