@@ -43,6 +43,10 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/serve.sh"
 # shellcheck source=lib/t3.sh
 . "${HARBOR_ROOT}/lib/t3.sh"
+# shellcheck source=lib/config.sh
+. "${HARBOR_ROOT}/lib/config.sh"
+# shellcheck source=lib/pair.sh
+. "${HARBOR_ROOT}/lib/pair.sh"
 # shellcheck source=lib/auth.sh
 . "${HARBOR_ROOT}/lib/auth.sh"
 harbor_usage() {
@@ -62,6 +66,10 @@ subcommands:
   auth connect                        run T3 Connect's own login, attended, as the
                                       operator, and journal only a false-to-true
                                       authenticated transition its status reported
+  pair                                publish this node's T3 server over Tailscale Serve and
+                                      mint a one-time pairing token, attended, as the operator
+                                      (design section 3.6); tailnet mode only, and Harbor never
+                                      touches a Serve mapping it did not create
   journal resolve <NNNN> --reverted   mark an undecidable prepared journal entry reverted
                                       without touching its artifact (design section 3.7)
   provision                           run the operator provision preflight
@@ -101,6 +109,10 @@ case "${harbor_cmd}" in
   auth)
     shift
     harbor_auth_cmd ${1+"$@"}
+    ;;
+  pair)
+    shift
+    harbor_pair_cmd ${1+"$@"}
     ;;
   service)
     shift
