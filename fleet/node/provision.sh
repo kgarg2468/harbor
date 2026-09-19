@@ -30,6 +30,12 @@ export HARBOR_ROOT
 . "${HARBOR_ROOT}/lib/runtime.sh"
 # shellcheck source=../lib/agents.sh
 . "${HARBOR_ROOT}/lib/agents.sh"
+# Before lib/t3.sh, which is not self-contained: harbor_t3_runtime_port reads the
+# runtime state's optional host through harbor_serve_loopback_host, so a provision
+# run that sourced t3.sh alone would die on an unbound command the first time a
+# caller asked for the port. bin/harbor orders these the same way.
+# shellcheck source=../lib/serve.sh
+. "${HARBOR_ROOT}/lib/serve.sh"
 # shellcheck source=../lib/t3.sh
 . "${HARBOR_ROOT}/lib/t3.sh"
 # shellcheck source=../lib/config.sh

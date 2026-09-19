@@ -542,3 +542,208 @@ harbor_t3_service_install() {
 # Register beside the definition so every process sourcing this library can observe
 # a prepared t3 runtime-install entry, including recovery without an install.
 harbor_runtime_reader_register t3 harbor_t3_reader
+
+# harbor_t3_state_dir HOME: the pinned T3 state directory. Measured from the
+# pinned package rather than assumed: deriveServerPaths joins the base directory
+# with "userdata" (the "dev" sibling appears only when devUrl is set, which Harbor
+# never sets), and resolveBaseDir defaults the base directory to ~/.t3 when
+# T3CODE_HOME is unset. Harbor never sets T3CODE_HOME and never writes here.
+harbor_t3_state_dir() {
+  printf '%s/.t3/userdata' "${1}"
+}
+# harbor_t3_runtime_path HOME: where a live T3 server persists its runtime state.
+# Asking creates nothing, the same rule harbor_t3_bin holds.
+harbor_t3_runtime_path() {
+  printf '%s/server-runtime.json' "$(harbor_t3_state_dir "${1}")"
+}
+# Direct callers also receive HARBOR_T3_RUNTIME_PORT alongside the reason.
+# harbor_t3_runtime_port HOME: the loopback port of the running T3 server, or the
+# empty string with HARBOR_T3_RUNTIME_WHY naming which of the six reasons applies.
+#
+# The port, not the origin. Both are in the file, but origin is a URL whose host
+# the vendor normalizes to 127.0.0.1 only for a wildcard bind -- a routable host
+# reaches origin unchanged -- and section 5.5 requires Harbor's own loopback
+# canonicalization to be what decides. So Harbor reads port as the number it is,
+# and reads host only to refuse a server its loopback assumption does not cover.
+#
+# The body is one line. persistServerRuntimeState writes JSON.stringify(state)
+# with no indent argument, unlike t3 connect status --json, which is
+# JSON.stringify(x, null, 2). A reader copied from the connect adapter matches
+# nothing here and reports every field missing on a healthy node. The sed below
+# is written against the value, not the line, so both shapes answer.
+harbor_t3_runtime_port() {
+  local file body version host port
+  HARBOR_T3_RUNTIME_WHY=""
+  HARBOR_T3_RUNTIME_PORT=""
+  file="$(harbor_t3_runtime_path "${1}")"
+  # Before -f, which follows a link, as does the read below. A link accepted here
+  # would let a file outside the vendor's own state directory name the port Harbor
+  # goes on to journal as a prediction.
+  if [ -L "${file}" ]; then
+    HARBOR_T3_RUNTIME_WHY=foreign
+    return 0
+  fi
+  if [ ! -f "${file}" ]; then
+    HARBOR_T3_RUNTIME_WHY=not-running
+    return 0
+  fi
+  if [ ! -r "${file}" ]; then
+    HARBOR_T3_RUNTIME_WHY=unreadable
+    return 0
+  fi
+  # Newlines squeezed out so one pattern reads both the pinned single-line form
+  # and a pretty-printed one. This is a value reader, not a line reader: the
+  # fields it wants are scalars whose spelling does not depend on layout.
+  if ! body="$(tr -d '\n' <"${file}" 2>/dev/null)"; then
+    HARBOR_T3_RUNTIME_WHY=unreadable
+    return 0
+  fi
+  case "${body}" in
+    '{'*'}') ;;
+    *)
+      HARBOR_T3_RUNTIME_WHY=unreadable
+      return 0
+      ;;
+  esac
+  version="$(printf '%s' "${body}" | sed -n 's/.*"version"[ ]*:[ ]*\([0-9][0-9]*\).*/\1/p')"
+  if [ "${version}" != 1 ]; then
+    HARBOR_T3_RUNTIME_WHY=unrecognized-version
+    return 0
+  fi
+  # host is optional in the schema. Present and non-loopback means the server is
+  # not where Harbor's prediction would put it, which is a refusal rather than a
+  # port Harbor would go on to describe as loopback.
+  host="$(printf '%s' "${body}" | sed -n 's/.*"host"[ ]*:[ ]*"\([^"]*\)".*/\1/p')"
+  if [ -n "${host}" ] && [ "$(harbor_serve_loopback_host "${host}")" != loopback ]; then
+    HARBOR_T3_RUNTIME_WHY=not-loopback
+    return 0
+  fi
+  port="$(printf '%s' "${body}" | sed -n 's/.*"port"[ ]*:[ ]*\([0-9][0-9]*\).*/\1/p')"
+  case "${port}" in
+    '' | *[!0123456789]*)
+      HARBOR_T3_RUNTIME_WHY=no-port
+      return 0
+      ;;
+  esac
+  HARBOR_T3_RUNTIME_PORT="${port}"
+  printf '%s' "${port}"
+}
+
+# Direct callers must scope HARBOR_T3_DESCRIPTOR_ID locally and discard it.
+# harbor_t3_descriptor_id URL: the environmentId at URL, or "" with
+# HARBOR_T3_DESCRIPTOR_WHY naming the reason. The body is never printed, never
+# logged, and never kept: section 5.5 says the IDs are never logged, journaled,
+# persisted, or bundled, and the only way to hold to that is for the body to reach
+# nothing but this function's own local.
+#
+# -q as the first option prevents ~/.curlrc from supplying credentials; no
+# --location, because a descriptor Harbor reached by being redirected somewhere
+# else is a descriptor for somewhere else; a bounded --max-time, because this runs
+# inside harbor pair between a prediction and a vendor invocation and must not hang
+# there. Transport failures are unreachable (unknown); an HTTP error is an
+# answer without a descriptor (broken at the MagicDNS endpoint).
+harbor_t3_descriptor_id() {
+  local url="${1}" body id xt=0 rc=0
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
+  HARBOR_T3_DESCRIPTOR_WHY=""
+  HARBOR_T3_DESCRIPTOR_ID=""
+  body="$(curl -q -fsS --no-progress-meter --connect-timeout 5 --max-time 15 "${url}" 2>/dev/null)" || rc="$?"
+  # curl's HTTP failure is an answer, not a transport failure. With -f its
+  # body is suppressed, so classify it as not-a-descriptor below.
+  if [ "${rc}" != 0 ] && [ "${rc}" != 22 ]; then
+    HARBOR_T3_DESCRIPTOR_WHY=unreachable
+    [ "${xt}" = 0 ] || set -x
+    return 0
+  fi
+  id="$(printf '%s' "${body}" | tr -d '\n' \
+    | sed -n 's/.*"environmentId"[ ]*:[ ]*"\([^"]*\)".*/\1/p')"
+  unset body
+  if [ -z "${id}" ]; then
+    HARBOR_T3_DESCRIPTOR_WHY=not-a-descriptor
+    [ "${xt}" = 0 ] || set -x
+    return 0
+  fi
+  HARBOR_T3_DESCRIPTOR_ID="${id}"
+  printf '%s' "${id}"
+  unset id
+  [ "${xt}" = 0 ] || set -x
+  return 0
+}
+
+# harbor_t3_environment HOME MAGICDNS: the t3.environment identifier of section
+# 5.5, as one of pass, broken, or unknown, with HARBOR_T3_ENVIRONMENT_WHY carrying
+# "<identifier>: <reason>" for the status row PR 7 will print.
+#
+# The asymmetry between broken and unknown is the whole check and is the thing to
+# get right: a MagicDNS endpoint that answered with something other than this
+# node's descriptor means the route fronts something else, which is a finding; a
+# MagicDNS endpoint that did not answer means Harbor could not look, which is not.
+# Reporting the second as broken would tell an operator to go hunt a foreign
+# mapping every time their tailnet hiccuped; reporting the first as unknown would
+# let a stranger's route pass as merely unverified. Neither is ever a pass.
+#
+# The local endpoint is built from the runtime state's port, never from the Serve
+# mapping's proxy target (section 5.5: "Harbor never uses the proxy target to
+# locate the T3 server"). Using the target would let a foreign mapping be compared
+# against the thing it points at, which agrees with itself by construction.
+# Internal comparison; called only through the trace-protected wrapper below.
+harbor_t3_environment_read() {
+  local home="${1}" magicdns="${2}" port local_id remote_id
+  HARBOR_T3_ENVIRONMENT_WHY=""
+  harbor_t3_runtime_port "${home}" >/dev/null
+  port="${HARBOR_T3_RUNTIME_PORT:-}"
+  if [ -z "${port}" ]; then
+    HARBOR_T3_ENVIRONMENT_WHY="service.t3: ${HARBOR_T3_RUNTIME_WHY:-}; the local T3 server could not be located, so there is nothing to compare the tailnet route against"
+    printf 'unknown'
+    return 0
+  fi
+  harbor_t3_descriptor_id "http://127.0.0.1:${port}/.well-known/t3/environment" >/dev/null
+  local_id="${HARBOR_T3_DESCRIPTOR_ID:-}"
+  if [ -z "${local_id}" ]; then
+    HARBOR_T3_ENVIRONMENT_WHY="service.t3: ${HARBOR_T3_DESCRIPTOR_WHY:-}; the local T3 server did not answer its own descriptor, so there is nothing to compare the tailnet route against"
+    printf 'unknown'
+    return 0
+  fi
+  harbor_t3_descriptor_id "https://${magicdns}/.well-known/t3/environment" >/dev/null
+  remote_id="${HARBOR_T3_DESCRIPTOR_ID:-}"
+  if [ -z "${remote_id}" ]; then
+    case "${HARBOR_T3_DESCRIPTOR_WHY:-}" in
+      unreachable)
+        HARBOR_T3_ENVIRONMENT_WHY="tailscale.serve: unreachable; https://${magicdns}/ did not answer, so the route could not be checked; this is not a verified pass"
+        printf 'unknown'
+        return 0
+        ;;
+    esac
+    # It answered, and what it answered was not a T3 descriptor. That is the route
+    # fronting something else, which is exactly what this check exists to find.
+    HARBOR_T3_ENVIRONMENT_WHY="tailscale.serve: not-a-descriptor; https://${magicdns}/ answered, but not with a T3 environment descriptor, so the route fronts something other than this node's T3 server"
+    printf 'broken'
+    return 0
+  fi
+  if [ "${remote_id}" = "${local_id}" ]; then
+    printf 'pass'
+    return 0
+  fi
+  # The two IDs are never named in the message. Section 5.5: the IDs are never
+  # logged, journaled, persisted, or bundled, and a message is all three.
+  # Consumed by status callers after this reader returns.
+  # shellcheck disable=SC2034
+  HARBOR_T3_ENVIRONMENT_WHY="tailscale.serve: different-environment; https://${magicdns}/ answered with a T3 descriptor for a different environment, so the route fronts something other than this node's T3 server"
+  printf 'broken'
+}
+
+# Keep the entire comparison off xtrace, including assignments and tests in the
+# caller of the fetch. Dynamic locals carry values and reasons across direct
+# calls without subshell loss, and discard every ID before tracing is restored.
+harbor_t3_environment() {
+  local xt=0 rc=0
+  local HARBOR_T3_RUNTIME_PORT HARBOR_T3_RUNTIME_WHY
+  local HARBOR_T3_DESCRIPTOR_ID HARBOR_T3_DESCRIPTOR_WHY
+  case "$-" in *x*) xt=1 ;; esac
+  [ "${xt}" = 0 ] || set +x
+  harbor_t3_environment_read "${1}" "${2}" || rc="$?"
+  unset HARBOR_T3_DESCRIPTOR_ID
+  [ "${xt}" = 0 ] || set -x
+  return "${rc}"
+}
