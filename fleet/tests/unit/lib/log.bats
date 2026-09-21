@@ -248,6 +248,22 @@ setup() {
   assert_equal "${output}" '{"error":"interrupted"}'
 }
 
+@test "the EXIT trap removes nothing it inherited through the environment" {
+  # The staging paths the trap cleans are set by the run that made them and are
+  # never exported, so a value already present when the trap goes in came from
+  # outside this process. Left trusted, that is an rm -rf of the caller's
+  # choosing wearing Harbor's exit trap: any harbor command, any path.
+  local decoy="${BATS_TEST_TMPDIR}/not-ours"
+  mkdir -p "${decoy}/contents"
+  printf 'theirs\n' >"${decoy}/contents/file"
+  printf 'theirs\n' >"${BATS_TEST_TMPDIR}/not-ours.txt"
+  run env HARBOR_CLIENT_STAGE="${decoy}" HARBOR_CLIENT_STAGE_TMP="${BATS_TEST_TMPDIR}/not-ours.txt" \
+    bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_COMPLETED=1; exit 0'
+  assert_equal "${status}" 0
+  assert [ -f "${decoy}/contents/file" ]
+  assert [ -f "${BATS_TEST_TMPDIR}/not-ours.txt" ]
+}
+
 @test "HUP exits 4 and prints the interrupted JSON object under HARBOR_JSON=1" {
   run --separate-stderr bash -c '. "${HARBOR_ROOT}/lib/log.sh"; set -euo pipefail; harbor_install_traps; HARBOR_JSON=1; kill -HUP $$; sleep 5; echo survived'
   assert_equal "${status}" 4
