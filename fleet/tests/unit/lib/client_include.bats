@@ -136,6 +136,75 @@ entry() {
   assert_equal "$(printf 'Host example\nHost added-since')" "$(cat "${CONFIG}")"
 }
 
+@test "the config is checked for changes only once the copy that would replace it exists" {
+  # What the check is worth is decided by where it stands. Taken before the
+  # staged copy is built, it leaves the whole of mktemp and install between the
+  # look and the rename -- and that stretch is long enough for the editor this
+  # test stands in for. Taken after, the only thing left is the rename itself,
+  # which is the irreducible window POSIX gives no way to close.
+  #
+  # The order is measured rather than inferred, because an assertion about the
+  # outcome cannot tell the two placements apart: both make the same second
+  # observe call, and both refuse the same edit. install is shadowed by a
+  # function, which bash resolves before /usr/bin/install, so the trace records
+  # the staging step itself and not a stand-in for it.
+  printf 'Host example\n' >"${CONFIG}"
+  local trace="${BATS_TEST_TMPDIR}/trace"
+  run bash -c '
+    set -euo pipefail
+    . "${HARBOR_ROOT}/lib/log.sh"
+    . "${HARBOR_ROOT}/lib/checks.sh"
+    . "${HARBOR_ROOT}/lib/lock.sh"
+    . "${HARBOR_ROOT}/lib/journal.sh"
+    . "${HARBOR_ROOT}/lib/client.sh"
+    HARBOR_LOCK_ID_PID=$$
+    harbor_lock_acquire "${1}" operator
+    trace="${3}"
+    harbor_journal_observe() {
+      printf "observe\n" >>"${trace}"
+      harbor_observe_file "${2}"
+    }
+    install() {
+      printf "install\n" >>"${trace}"
+      command install "$@"
+    }
+    harbor_client_include_add "${1}" "${2}"
+  ' bash "${ROOT}" "${CONFIG}" "${trace}"
+  assert_success
+  assert_equal "$(printf 'observe\ninstall\nobserve')" "$(cat "${trace}")"
+}
+
+@test "a fifo where the config belongs is refused, not destroyed and journaled as created" {
+  # -f is false for a fifo, so ownership came out "created" -- Harbor claiming an
+  # object it did not make -- and harbor_observe_file answers
+  # "unobservable:not-a-regular-file" for it, which compares equal to itself, so
+  # the moved-config check passed too. The rename then replaced the fifo with a
+  # regular file and the entry recorded created/applied: a destroyed object,
+  # reported as a success.
+  rm -f "${CONFIG}"
+  mkfifo "${CONFIG}"
+  run harbor_client_include_add "${ROOT}" "${CONFIG}"
+  assert_failure 3
+  assert_output --partial 'client.path_irregular'
+  assert [ -p "${CONFIG}" ]
+  assert_equal 0 "$(find "${ROOT}/journal" -name '*.json' | wc -l | tr -d ' ')"
+}
+
+@test "a directory where the config belongs is refused rather than written inside" {
+  # The other half of the same hole, and the quieter one: mv -f onto a directory
+  # succeeds by moving the staged file into it, so the entry would be marked
+  # applied while the path itself is still a directory and ssh still has no
+  # include.
+  rm -f "${CONFIG}"
+  mkdir "${CONFIG}"
+  run harbor_client_include_add "${ROOT}" "${CONFIG}"
+  assert_failure 3
+  assert_output --partial 'client.path_irregular'
+  assert [ -d "${CONFIG}" ]
+  assert_equal 0 "$(find "${CONFIG}" -type f | wc -l | tr -d ' ')"
+  assert_equal 0 "$(find "${ROOT}/journal" -name '*.json' | wc -l | tr -d ' ')"
+}
+
 @test "a symlink planted at the include writer's temp path is not written through" {
   # This writer uses install rather than a redirection, and measured, BSD install
   # replaces a symlink at its destination instead of following it -- so unlike

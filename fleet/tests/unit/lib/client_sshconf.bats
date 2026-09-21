@@ -7,13 +7,39 @@ setup() {
   . "${HARBOR_ROOT}/lib/client.sh"
 }
 
-@test "the block is exactly the three directives section 5.5 names" {
+@test "the block is exactly the three directives section 5.5 names, and nothing else" {
+  # Compared whole rather than line by line. assert_line only proves the expected
+  # lines are present, so any directive added alongside them -- a ProxyCommand, a
+  # ForwardAgent, an IdentityFile pointing somewhere Harbor does not control --
+  # passes a per-line check while changing what ssh does. "Exactly" is the claim
+  # in the name of this test, so the assertion has to be able to fail on extras.
   run harbor_client_conf_body harbor-node.TAILNET.ts.net harbor
   assert_success
-  assert_line 'Host harbor-node'
-  assert_line '  HostName harbor-node.TAILNET.ts.net'
-  assert_line '  User harbor'
-  assert_line '  IdentitiesOnly yes'
+  assert_equal "${output}" 'Host harbor-node
+  HostName harbor-node.TAILNET.ts.net
+  User harbor
+  IdentitiesOnly yes'
+}
+
+@test "a fifo where harbor.conf belongs is refused, not replaced" {
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  mkfifo "${out}"
+  run harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_failure 3
+  assert_output --partial 'not a regular file'
+  assert [ -p "${out}" ]
+}
+
+@test "a directory where harbor.conf belongs is refused rather than quietly written inside" {
+  # mv -f onto a directory succeeds by moving the staged file into it, so without
+  # this guard the run exits 0 with harbor.conf still a directory and the
+  # generated block sitting one level down where ssh will never read it.
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  mkdir "${out}"
+  run harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_failure 3
+  assert_output --partial 'not a regular file'
+  assert_equal 0 "$(find "${out}" -type f | wc -l | tr -d ' ')"
 }
 
 @test "the file is written 0600 and its bytes are the body" {

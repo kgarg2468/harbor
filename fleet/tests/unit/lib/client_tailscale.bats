@@ -47,6 +47,35 @@ fixture() {
   assert_output --partial 'MagicDNS'
 }
 
+@test "MagicDNS off is caught on the vendor's own shape, where the suffix is still there" {
+  # The shape the pinned Tailscale actually produces. From
+  # ipn/ipnstate/ipnstate.go at v1.102.3: CurrentTailnet.MagicDNSSuffix "should
+  # be populated regardless of whether a domain has MagicDNS enabled", and the
+  # top-level MagicDNSSuffix is "Deprecated: use CurrentTailnet.MagicDNSSuffix
+  # instead". A check for a non-empty suffix therefore passes here -- on exactly
+  # the tailnet it exists to refuse -- and setup goes on to write an ssh block
+  # for a name that does not resolve. MagicDNSEnabled is the flag.
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","CurrentTailnet":{"MagicDNSSuffix":"TAILNET.ts.net","MagicDNSEnabled":false},"Peer":{}}'
+  run harbor_client_preflight "${FLAT}"
+  assert_failure 3
+  assert_output --partial 'MagicDNS'
+}
+
+@test "MagicDNS on in the current tailnet passes" {
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","CurrentTailnet":{"MagicDNSSuffix":"TAILNET.ts.net","MagicDNSEnabled":true},"Peer":{}}'
+  run harbor_client_preflight "${FLAT}"
+  assert_success
+}
+
+@test "a client that reports no flag at all is judged on the suffix it does report" {
+  # Absent is not false: a status document without the field is one Harbor cannot
+  # read the flag out of, and refusing it would turn an unreadable answer into a
+  # verdict about the tailnet. The legacy suffix is what is left to go on.
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","Peer":{}}'
+  run harbor_client_preflight "${FLAT}"
+  assert_success
+}
+
 @test "a logged-in client with MagicDNS on passes and leaves the status flattened" {
   fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","Peer":{"k1":{"HostName":"harbor-node","DNSName":"harbor-node.TAILNET.ts.net."}}}'
   run harbor_client_preflight "${FLAT}"
@@ -80,6 +109,27 @@ EOF
   chmod 0755 "${HARBOR_CLIENT_TAILSCALE}"
   run harbor_client_preflight "${FLAT}"
   assert_failure 3
+}
+
+@test "two peers calling themselves the same thing do not decide which node is reached" {
+  # Tailscale documents PeerStatus.HostName as "not a DNS name or necessarily
+  # unique" (ipnstate.go, v1.102.3) and resolves the collision in DNSName, where
+  # the loser becomes harbor-node-1. Keyed off HostName this returns whichever
+  # peer the flattener emitted first -- here harbor-node-1, listed first on
+  # purpose -- and the ssh block points at a machine chosen by iteration order.
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","Peer":{"k1":{"HostName":"harbor-node","DNSName":"harbor-node-1.TAILNET.ts.net."},"k2":{"HostName":"harbor-node","DNSName":"harbor-node.TAILNET.ts.net."}}}'
+  harbor_client_preflight "${FLAT}"
+  run harbor_client_magicdns "${FLAT}" harbor-node
+  assert_success
+  assert_output 'harbor-node.TAILNET.ts.net'
+}
+
+@test "the other machine in that collision is still reachable by the name it actually has" {
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","Peer":{"k1":{"HostName":"harbor-node","DNSName":"harbor-node-1.TAILNET.ts.net."},"k2":{"HostName":"harbor-node","DNSName":"harbor-node.TAILNET.ts.net."}}}'
+  harbor_client_preflight "${FLAT}"
+  run harbor_client_magicdns "${FLAT}" harbor-node-1
+  assert_success
+  assert_output 'harbor-node-1.TAILNET.ts.net'
 }
 
 @test "a peer that matches but carries no MagicDNS name is a precondition, not an empty name" {

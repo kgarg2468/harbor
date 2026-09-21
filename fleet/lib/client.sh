@@ -162,10 +162,27 @@ harbor_client_preflight() {
   backend="$(harbor_client_json_field "${flat}" BackendState)"
   [ "${backend}" = Running ] \
     || harbor_die 3 client.tailscale_not_running "the Tailscale client on this Mac reports BackendState ${backend}, not Running; log in through the app, then rerun"
-  suffix="$(harbor_client_json_field "${flat}" MagicDNSSuffix)"
   # Section 5.5 names this one: without MagicDNS there is no harbor-node name to
   # put in an ssh block and no HTTPS MagicDNS URL to reach, so
   # this is a precondition for both halves rather than a warning for one.
+  #
+  # The suffix is not the flag, which is the trap here. In the pinned Tailscale
+  # (1.102.3, ipn/ipnstate/ipnstate.go) CurrentTailnet.MagicDNSSuffix carries
+  # "MagicDNSSuffix should be populated regardless of whether a domain has
+  # MagicDNS enabled", and the top-level MagicDNSSuffix this used to read is
+  # marked "Deprecated: use CurrentTailnet.MagicDNSSuffix instead". So a tailnet
+  # with MagicDNS switched off still answers with a suffix, and a check for a
+  # non-empty one passes on exactly the tailnet it exists to refuse.
+  # CurrentTailnet.MagicDNSEnabled is the flag.
+  if harbor_client_json_has "${flat}" CurrentTailnet.MagicDNSEnabled; then
+    [ "$(harbor_client_json_field "${flat}" CurrentTailnet.MagicDNSEnabled)" = true ] \
+      || harbor_die 3 client.magicdns_off "this tailnet has MagicDNS turned off, so the node has no name this Mac can use; turn MagicDNS on in the Tailscale admin console, then rerun"
+  fi
+  # Read after the flag, and from the current-tailnet field first: a client too
+  # old to report the flag at all still has to name the tailnet, and an empty
+  # suffix is a tailnet with no names in it whatever the flag says.
+  suffix="$(harbor_client_json_field "${flat}" CurrentTailnet.MagicDNSSuffix)"
+  [ -n "${suffix}" ] || suffix="$(harbor_client_json_field "${flat}" MagicDNSSuffix)"
   [ -n "${suffix}" ] \
     || harbor_die 3 client.magicdns_off "this tailnet has MagicDNS turned off, so the node has no name this Mac can use; turn MagicDNS on in the Tailscale admin console, then rerun"
 }
@@ -174,22 +191,36 @@ harbor_client_preflight() {
 # trailing dot the status document carries. Refusing here rather than returning
 # an empty string is the point: an empty HostName in an ssh block is a block that
 # silently connects somewhere else.
+#
+# Matched on the first label of DNSName, not on HostName. The pinned Tailscale
+# (1.102.3, ipn/ipnstate/ipnstate.go) documents PeerStatus.HostName as "HostInfo's
+# Hostname (not a DNS name or necessarily unique)" -- two machines that both call
+# themselves harbor-node are a status document Tailscale considers valid, and it
+# resolves the collision in DNSName, where one becomes harbor-node and the other
+# harbor-node-1. Keying off HostName returns whichever of the two the flattener
+# happened to emit first, so the ssh block Harbor writes points at a machine
+# chosen by map iteration order. DNSName is unique by construction and is the
+# name the operator sees in the admin console, which is where the message below
+# sends them.
 harbor_client_magicdns() {
   local flat="${1}" want="${2}" key name
   # The tab in the sed pattern is written with printf rather than typed: a literal
   # tab in a source file is invisible and the next editor to touch this line will
   # turn it into spaces.
+  for key in $(sed -n "s/^Peer\.\([^.]*\)\.DNSName$(printf '\t').*\$/\1/p" "${flat}"); do
+    name="$(harbor_client_json_field "${flat}" "Peer.${key}.DNSName")"
+    name="${name%.}"
+    if [ "${name%%.*}" = "${want}" ]; then
+      printf '%s' "${name}"
+      return 0
+    fi
+  done
+  # No peer answers to that name, but one calls itself that. Reporting it as
+  # absent would send the operator to re-register a node that is already there;
+  # what it is missing is the MagicDNS name, which is a different thing to fix.
   for key in $(sed -n "s/^Peer\.\([^.]*\)\.HostName$(printf '\t').*\$/\1/p" "${flat}"); do
     if [ "$(harbor_client_json_field "${flat}" "Peer.${key}.HostName")" = "${want}" ]; then
-      name="$(harbor_client_json_field "${flat}" "Peer.${key}.DNSName")"
-      # The peer is there and still has no name. Returning the empty string here
-      # would be this function doing the exact thing its comment says it exists to
-      # prevent, one step further in: an empty HostName in an ssh block, reached
-      # through a peer that matched rather than through a peer that was missing.
-      [ -n "${name%.}" ] \
-        || harbor_die 3 client.node_unnamed "this Mac's tailnet has a node named ${want} but reports no MagicDNS name for it; check that MagicDNS is on and that the node has finished registering, then rerun"
-      printf '%s' "${name%.}"
-      return 0
+      harbor_die 3 client.node_unnamed "this Mac's tailnet has a node named ${want} but reports no MagicDNS name for it; check that MagicDNS is on and that the node has finished registering, then rerun"
     fi
   done
   harbor_die 3 client.node_absent "this Mac's tailnet has no node named ${want}; run 'harbor auth tailscale' on the node first, and check it appears in the Tailscale admin console"
@@ -203,6 +234,28 @@ harbor_client_conf_body() {
   printf '  HostName %s\n' "${1}"
   printf '  User %s\n' "${2}"
   printf '  IdentitiesOnly yes\n'
+}
+
+# harbor_client_refuse_irregular PATH: stop before a rename that would either
+# destroy something Harbor did not create or quietly do nothing.
+#
+# Both halves of this are measured. mv -f replaces a fifo, a socket or a device
+# node with a regular file, and the file that was there is gone -- and because
+# harbor_observe_file answers "unobservable:not-a-regular-file" for all of them,
+# the entry would record ownership "created", a pre_state that matches the
+# post-check, and phase "applied": Harbor destroying an operator's object and
+# journaling it as its own. mv -f onto a *directory* is the opposite failure and
+# just as bad: it succeeds by moving the staged file inside the directory, so the
+# path itself still is not a config, and the run reports success anyway.
+#
+# A symlink to a regular file is not this function's case: -f follows the link
+# and answers true, and harbor_client_include_add has already refused symlinked
+# configs above with a message that can name what the link points at.
+harbor_client_refuse_irregular() {
+  local path="${1}"
+  if [ -e "${path}" ] && [ ! -f "${path}" ]; then
+    harbor_die 3 client.path_irregular "${path} exists but is not a regular file, and Harbor will not replace something it did not create; move it aside yourself, then rerun"
+  fi
 }
 
 # Written at 0600 before it moves into place. An ssh configuration that is
@@ -227,8 +280,10 @@ harbor_client_conf_body() {
 # and recovery only ever looks at entries. The two writers share the one
 # variable because setup runs them in sequence, never at once, and a second name
 # would only be a second thing to forget.
+
 harbor_client_conf_write() {
   local path="${1}" tmp
+  harbor_client_refuse_irregular "${path}"
   tmp="$(
     umask 077
     mktemp "$(dirname "${path}")/.harbor.XXXXXX"
@@ -292,6 +347,10 @@ harbor_client_include_add() {
   if [ -L "${config}" ]; then
     harbor_die 3 client.config_symlink "${config} is a symlink to $(readlink "${config}"), and adding the include would replace the link with a regular file and orphan what it points at; add this line to the file the link points at yourself, then rerun: $(harbor_client_include_line)"
   fi
+  # Before ownership is decided, because a fifo or a directory at this path is
+  # neither of the two answers below: -f is false for both, so ownership would
+  # come out "created" for something Harbor is about to destroy.
+  harbor_client_refuse_irregular "${config}"
   if [ -f "${config}" ]; then ownership=modified; else ownership=created; fi
   pre="$(harbor_journal_observe file "${config}")"
   # The new contents are built somewhere that is not the operator's ~/.ssh, and
