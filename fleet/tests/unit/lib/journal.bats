@@ -296,6 +296,12 @@ refuse_malformed() {
   # only the rename fail: the entry is marked immutable, which mv cannot move
   # over. Without the guard on that line the function would carry on to the log
   # call and return 0, reporting a phase it had not written.
+  #
+  # Darwin only, because making a rename fail while everything before it
+  # succeeds needs a file the owner cannot replace, and chflags is the only way
+  # to get one without root. Linux's equivalent, chattr +i, needs privilege this
+  # lane does not have and must not take.
+  [ "$(uname -s)" = Darwin ] || skip 'chflags is macOS-only'
   acquire
   harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '"absent"'
   e="${HARBOR_JOURNAL_ENTRY}"
