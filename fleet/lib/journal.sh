@@ -319,11 +319,18 @@ harbor_journal_recover() {
     post="$(harbor_journal_raw "${entry}" post_state)"
     # An observer that cannot observe fails closed with its own exit code.
     observed="$(harbor_journal_observe "${op}" "${target}")" || exit "$?"
+    # The same reason set_phase spells out its own steps, one level up. Callers
+    # write "harbor_journal_recover ... || harbor_die 2 ..." -- lib/access.sh
+    # does -- which suppresses set -e for everything in here, so a set_phase
+    # that returns 1 would not stop this loop: it would log the entry recovered,
+    # carry on, and return 0 at the end. Recovery reporting success over an
+    # entry it failed to rewrite is the one outcome this function exists to
+    # prevent, so the return is propagated rather than assumed fatal.
     if [ "${observed}" = "${pre}" ]; then
-      harbor_journal_set_phase "${entry}" reverted
+      harbor_journal_set_phase "${entry}" reverted || return 1
       harbor_log recovery "${base} reverted (state equals pre_state)"
     elif [ "${observed}" = "${post}" ]; then
-      harbor_journal_set_phase "${entry}" applied
+      harbor_journal_set_phase "${entry}" applied || return 1
       harbor_log recovery "${base} applied (state equals post_state)"
     else
       harbor_journal_print_entry "${entry}" "${observed}"

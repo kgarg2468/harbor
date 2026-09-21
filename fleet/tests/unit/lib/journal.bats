@@ -438,6 +438,25 @@ refuse_malformed() {
   harbor_journal_validate "${full}"
 }
 
+@test "recovery reports a phase it could not write, even to a caller that wrote it on the left of ||" {
+  # Callers spell this "harbor_journal_recover ... || harbor_die 2 ...", which
+  # lib/access.sh does, and that suppresses set -e for everything inside
+  # recovery. A set_phase returning 1 would not stop the loop: recovery would
+  # log the entry recovered, carry on and return 0. Recovery reporting success
+  # over an entry it failed to rewrite is the one outcome it exists to prevent.
+  acquire
+  fixture_entry "${FIX_ROOT}" 0001 file "${BATS_TEST_TMPDIR}/a" created prepared '"absent"' '{"sha256":"ab","mode":"0644","owner":"root"}'
+  # Readable, so validate and the phase read still work; unwritable, so the
+  # rewrite cannot land.
+  chmod 0500 "${FIX_ROOT}/journal"
+  rc=0
+  harbor_journal_recover "${FIX_ROOT}" || rc=$?
+  chmod 0700 "${FIX_ROOT}/journal"
+  assert_equal "${rc}" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  harbor_lock_release "${FIX_ROOT}"
+}
+
 @test "recovery marks a pre-equal entry reverted, a post-equal entry applied, and refuses on an undecidable one with exit 2" {
   acquire
   printf 'landed\n' >"${BATS_TEST_TMPDIR}/b"

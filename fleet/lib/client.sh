@@ -350,16 +350,6 @@ harbor_client_include_add() {
     || exit "$?"
   entry="${HARBOR_JOURNAL_ENTRY:-}"
   harbor_step "client-include-prepared"
-  # The config is read once to build the staged copy and replaced wholesale at
-  # the end, so anything written to it in between would be overwritten without a
-  # word. The window is short and it is not empty -- the test hook can hold this
-  # function open across it, and so can a slow journal write -- and the thing
-  # lost is the operator's own edit to their own ssh config. Harbor refuses
-  # instead: the entry stays prepared, recovery will find the file at its
-  # pre_state and record it reverted, and nothing has been mutated yet.
-  if [ "$(harbor_journal_observe file "${config}")" != "${pre}" ]; then
-    harbor_die 1 client.config_moved "${config} changed while Harbor was preparing to add the include, so the copy it staged no longer contains what the file now holds and writing it would discard that change; nothing was written, and its journal entry is still prepared -- rerun once nothing else is editing the file"
-  fi
   # Copied beside the target and then renamed, rather than renamed straight out
   # of the staging directory: a rename across filesystems is not a rename, and
   # the whole reason for the two steps is that the last one is atomic.
@@ -377,6 +367,23 @@ harbor_client_include_add() {
   )"
   HARBOR_CLIENT_STAGE_TMP="${tmp}"
   install -m 0600 "${staged}" "${tmp}"
+  # The config was read once, to build the staged copy, and is replaced
+  # wholesale by the rename below -- so anything written to it in between would
+  # be discarded without a word, and what gets written to an operator's ssh
+  # config is the operator's own edit. Checked here, as late as it can be
+  # checked: everything slow is behind us, and only the rename is still ahead.
+  #
+  # This narrows the window to a single rename; it does not close it, and
+  # nothing available here can. Closing it needs a rename that fails if the
+  # destination changed, and POSIX has no such call. What it does rule out is
+  # the wide version -- the journal write, the fsyncs and the step hook all used
+  # to sit inside the window.
+  #
+  # Refusing leaves the entry prepared, which is the right state to leave: the
+  # file is still at its pre_state, so recovery decides it reverted.
+  if [ "$(harbor_journal_observe file "${config}")" != "${pre}" ]; then
+    harbor_die 1 client.config_moved "${config} changed while Harbor was preparing to add the include, so the copy it staged no longer contains what the file now holds and writing it would discard that change; nothing was written, and its journal entry is still prepared -- rerun once nothing else is editing the file"
+  fi
   mv -f "${tmp}" "${config}"
   # Read by harbor_on_exit in lib/log.sh, which shellcheck cannot see from here
   # because this file does not source that one -- the dispatcher sources both.
