@@ -10,10 +10,16 @@ regex = '''(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[
 
 [[rules]]
 id = "harbor-magicdns-suffix"
-description = "MagicDNS name other than the TAILNET.ts.net placeholder"
+description = "MagicDNS name other than the TAILNET.ts.net and SHARED.ts.net placeholders"
 regex = '''[A-Za-z0-9-]+\.ts\.net'''
+# Two placeholders, not one, because a machine shared in from another tailnet
+# appears in "tailscale status" carrying the sharer's suffix, and a fixture that
+# cannot spell a second tailnet cannot test that Harbor refuses to aim an ssh
+# block at someone else's node. Both are exact matches on an upper-case name no
+# tailnet can have -- Tailscale's own suffixes are lower case -- so this stays an
+# allowlist of two fixed strings rather than a pattern a real name could satisfy.
 [rules.allowlist]
-regexes = ['''^TAILNET\.ts\.net$''']
+regexes = ['''^TAILNET\.ts\.net$''', '''^SHARED\.ts\.net$''']
 
 [[rules]]
 id = "harbor-tailscale-auth-key"

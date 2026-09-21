@@ -1,0 +1,117 @@
+#!/usr/bin/env bats
+# fleet/tests/unit/lib/client_sshconf.bats
+setup() {
+  [ "$(uname -s)" = Darwin ] || skip 'the client runs on macOS only'
+  load '../test_helper'
+  harbor_load_libs
+  . "${HARBOR_ROOT}/lib/client.sh"
+}
+
+@test "the block is exactly the three directives section 5.5 names, and nothing else" {
+  # Compared whole rather than line by line. assert_line only proves the expected
+  # lines are present, so any directive added alongside them -- a ProxyCommand, a
+  # ForwardAgent, an IdentityFile pointing somewhere Harbor does not control --
+  # passes a per-line check while changing what ssh does. "Exactly" is the claim
+  # in the name of this test, so the assertion has to be able to fail on extras.
+  run harbor_client_conf_body harbor-node.TAILNET.ts.net harbor
+  assert_success
+  assert_equal "${output}" 'Host harbor-node
+  HostName harbor-node.TAILNET.ts.net
+  User harbor
+  IdentitiesOnly yes'
+}
+
+@test "a fifo where harbor.conf belongs is refused, not replaced" {
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  mkfifo "${out}"
+  run harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_failure 3
+  assert_output --partial 'not a regular file'
+  assert [ -p "${out}" ]
+}
+
+@test "a directory where harbor.conf belongs is refused rather than quietly written inside" {
+  # mv -f onto a directory succeeds by moving the staged file into it, so without
+  # this guard the run exits 0 with harbor.conf still a directory and the
+  # generated block sitting one level down where ssh will never read it.
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  mkdir "${out}"
+  run harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_failure 3
+  assert_output --partial 'not a regular file'
+  assert_equal 0 "$(find "${out}" -type f | wc -l | tr -d ' ')"
+}
+
+@test "the file is written 0600 and its bytes are the body" {
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_equal 600 "$(stat -f '%OLp' "${out}")"
+  assert_equal "$(harbor_client_conf_body harbor-node.TAILNET.ts.net harbor)" "$(cat "${out}")"
+}
+
+@test "a rewrite replaces the file rather than appending to it" {
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  # The two writes have to differ or this proves nothing, and the tailnet suffix
+  # cannot be the thing that differs: tests/lint/placeholder_scan.sh permits
+  # exactly one MagicDNS name in this repository. The node name carries it.
+  harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  harbor_client_conf_write "${out}" other-node.TAILNET.ts.net harbor
+  assert_equal 1 "$(grep -c '^Host harbor-node$' "${out}")"
+  assert_equal '  HostName other-node.TAILNET.ts.net' "$(sed -n 2p "${out}")"
+}
+
+@test "no temp file survives a successful write" {
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_equal 1 "$(find "${BATS_TEST_TMPDIR}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+}
+
+@test "a write that fails at the rename leaves no copy of the config beside the target" {
+  # The rename is made to fail for real rather than stubbed. The target is an
+  # unwritable directory, so mv cannot move into it, while the temp file -- which
+  # lives in the parent, not the target -- is created and chmodded exactly as it
+  # would be on a good run. That is the window the finding is about, and the one
+  # a successful-write test cannot reach.
+  #
+  # An earlier spelling made the target a non-empty directory and proved nothing:
+  # mv onto a directory succeeds, moving the file into it, so the write returned
+  # 0 and the only nonzero status came from harbor_on_exit's own
+  # "terminated before completion" rule. Measured; the mutation check caught it.
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  mkdir -p "${out}"
+  chmod 0500 "${out}"
+  run bash -c '
+    set -euo pipefail
+    . "${HARBOR_ROOT}/lib/log.sh"
+    . "${HARBOR_ROOT}/lib/client.sh"
+    harbor_install_traps
+    harbor_client_conf_write "${1}" harbor-node.TAILNET.ts.net harbor
+  ' bash "${out}"
+  chmod 0700 "${out}"
+  assert_failure
+  assert_equal 0 "$(find "${BATS_TEST_TMPDIR}" -maxdepth 1 -name '.harbor.*' | wc -l | tr -d ' ')"
+}
+
+@test "a symlink planted at the temp path does not redirect the write through it" {
+  # A predictable temp name is a write anyone who can guess it can aim. The
+  # redirection follows the link, so the victim was truncated, filled with the
+  # generated block and chmodded 0600, and harbor.conf was left as a symlink
+  # pointing at it -- with the write returning 0. mktemp refuses an existing
+  # path, which is the property that closes this; the unguessable name is spare.
+  local out="${BATS_TEST_TMPDIR}/harbor.conf" victim="${BATS_TEST_TMPDIR}/victim"
+  printf 'VICTIM DATA\n' >"${victim}"
+  ln -s "${victim}" "${BATS_TEST_TMPDIR}/harbor.conf.tmp.$$"
+  harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_equal 'VICTIM DATA' "$(cat "${victim}")"
+  assert [ ! -L "${out}" ]
+  assert_equal "$(harbor_client_conf_body harbor-node.TAILNET.ts.net harbor)" "$(cat "${out}")"
+}
+
+@test "a permissive umask does not make the file readable by anyone else" {
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  (
+    umask 000
+    harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  )
+  assert_equal 600 "$(stat -f '%OLp' "${out}")"
+}

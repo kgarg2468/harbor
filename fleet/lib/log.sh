@@ -129,6 +129,18 @@ harbor_on_interrupt() {
 }
 harbor_on_exit() {
   local rc=$?
+  # Staged content, before anything else: these two name a copy of a file the
+  # run was part way through replacing, and a run that ends here ends without
+  # replacing it. Set by lib/client.sh and cleared by it the moment the rename
+  # makes them stale, so a non-empty value at this point means the run stopped
+  # mid-write. Guarded on type as well as emptiness because the only thing worse
+  # than leaving a temp file behind is removing something that is not one.
+  if [ -f "${HARBOR_CLIENT_STAGE_TMP:-}" ]; then
+    rm -f "${HARBOR_CLIENT_STAGE_TMP}" || :
+  fi
+  if [ -d "${HARBOR_CLIENT_STAGE:-}" ]; then
+    rm -rf "${HARBOR_CLIENT_STAGE}" || :
+  fi
   if [ -n "${HARBOR_LOCK_ROOT:-}" ]; then
     harbor_lock_release "${HARBOR_LOCK_ROOT}" || :
   fi
@@ -149,6 +161,17 @@ harbor_on_exit() {
 }
 harbor_install_traps() {
   set -E
+  # Cleared before the trap that reads them is installed, so an inherited value
+  # can never reach it. Harbor never exports these -- only the run that made the
+  # staging sets them, and it sets them after this point -- so a non-empty value
+  # here came from outside the process, and outside the process is exactly where
+  # a path this run did not create comes from. Without this,
+  # "HARBOR_CLIENT_STAGE=/anything harbor status" is an rm -rf of the operator's
+  # choosing, wearing Harbor's exit trap and whatever privilege the command ran
+  # with. Emptiness is the whole check: there is no legitimate way for either to
+  # arrive already set.
+  HARBOR_CLIENT_STAGE=
+  HARBOR_CLIENT_STAGE_TMP=
   trap harbor_on_err ERR
   trap harbor_on_interrupt INT TERM HUP
   trap harbor_on_exit EXIT

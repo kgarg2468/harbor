@@ -282,10 +282,18 @@ harbor_journal_set_phase() {
   post="$(harbor_journal_raw "${entry}" post_state)"
   [ -z "${resolved_by}" ] || at="$(harbor_utc_now)"
   tmp="${dir}/.tmp.$(basename "${entry}").${HARBOR_LOCK_ID_PID}"
-  harbor_journal_render "${op}" "${target}" "${ownership}" "${phase}" "${pre}" "${post}" "${resolved_by}" "${at}" >"${tmp}"
-  harbor_journal_sync_path "${tmp}"
-  mv -f "${tmp}" "${entry}"
-  harbor_journal_sync_path "${dir}"
+  # Each mutating step says what it returns rather than leaning on set -e. A
+  # caller that writes "harbor_journal_set_phase ... || harbor_die ..." puts this
+  # function on the left of ||, and bash suppresses set -e for everything inside
+  # a function invoked there: a failing mv would not stop the function, execution
+  # would carry on to the log line, and the function would return that line's
+  # status -- 0. The guard would never fire, and Harbor would report an entry
+  # applied that is still prepared while the artifact had already changed.
+  # Measured, not inferred, and it is why these are spelled out.
+  harbor_journal_render "${op}" "${target}" "${ownership}" "${phase}" "${pre}" "${post}" "${resolved_by}" "${at}" >"${tmp}" || return 1
+  harbor_journal_sync_path "${tmp}" || return 1
+  mv -f "${tmp}" "${entry}" || return 1
+  harbor_journal_sync_path "${dir}" || return 1
   harbor_log journal "$(basename "${entry}") ${phase}${resolved_by:+ resolved_by=${resolved_by}}"
 }
 harbor_journal_recover() {
@@ -311,11 +319,18 @@ harbor_journal_recover() {
     post="$(harbor_journal_raw "${entry}" post_state)"
     # An observer that cannot observe fails closed with its own exit code.
     observed="$(harbor_journal_observe "${op}" "${target}")" || exit "$?"
+    # The same reason set_phase spells out its own steps, one level up. Callers
+    # write "harbor_journal_recover ... || harbor_die 2 ..." -- lib/access.sh
+    # does -- which suppresses set -e for everything in here, so a set_phase
+    # that returns 1 would not stop this loop: it would log the entry recovered,
+    # carry on, and return 0 at the end. Recovery reporting success over an
+    # entry it failed to rewrite is the one outcome this function exists to
+    # prevent, so the return is propagated rather than assumed fatal.
     if [ "${observed}" = "${pre}" ]; then
-      harbor_journal_set_phase "${entry}" reverted
+      harbor_journal_set_phase "${entry}" reverted || return 1
       harbor_log recovery "${base} reverted (state equals pre_state)"
     elif [ "${observed}" = "${post}" ]; then
-      harbor_journal_set_phase "${entry}" applied
+      harbor_journal_set_phase "${entry}" applied || return 1
       harbor_log recovery "${base} applied (state equals post_state)"
     else
       harbor_journal_print_entry "${entry}" "${observed}"
