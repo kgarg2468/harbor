@@ -264,6 +264,50 @@ refuse_malformed() {
   harbor_lock_release "${FIX_ROOT}"
 }
 
+@test "set_phase reports a failed rewrite even when the caller puts it on the left of ||" {
+  # bash suppresses set -e for everything inside a function invoked on the left
+  # of ||, which is how every caller spells the guard:
+  #
+  #   harbor_journal_set_phase "${e}" applied || harbor_die 2 ...
+  #
+  # So a failing mv inside does not stop the function; execution carries on to
+  # the log line and the function returns that line's status, 0. The guard never
+  # fires and Harbor reports an entry applied that is still prepared, with the
+  # artifact already changed. Each mutating step says what it returns instead.
+  acquire
+  harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '"absent"'
+  e="${HARBOR_JOURNAL_ENTRY}"
+  # Nothing can be renamed into a directory nobody may write.
+  chmod 0500 "${FIX_ROOT}/journal"
+  # Spelled exactly as a caller spells it, in this shell, with the lock held --
+  # a subshell would lose the lock identity and die of lock.lost long before the
+  # rewrite, testing nothing about the rewrite.
+  rc=0
+  harbor_journal_set_phase "${e}" applied || rc=$?
+  chmod 0700 "${FIX_ROOT}/journal"
+  assert_equal "${rc}" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  harbor_lock_release "${FIX_ROOT}"
+}
+
+@test "set_phase reports a rewrite that fails at the rename itself" {
+  # The test above provokes the first mutating step, so the later guards are
+  # never reached by it. This one lets the render and the sync succeed and makes
+  # only the rename fail: the entry is marked immutable, which mv cannot move
+  # over. Without the guard on that line the function would carry on to the log
+  # call and return 0, reporting a phase it had not written.
+  acquire
+  harbor_journal_create "${FIX_ROOT}" file /etc/a created prepared '"absent"' '"absent"'
+  e="${HARBOR_JOURNAL_ENTRY}"
+  chflags uchg "${e}"
+  rc=0
+  harbor_journal_set_phase "${e}" applied || rc=$?
+  chflags nouchg "${e}"
+  assert_equal "${rc}" 1
+  assert_equal "$(entry_phase "${FIX_ROOT}" 0001)" prepared
+  harbor_lock_release "${FIX_ROOT}"
+}
+
 @test "a holder whose lock was reclaimed exits 2 before creating or rewriting any entry" {
   sleep 30 3>&- &
   KEEP_PID=$!

@@ -282,10 +282,18 @@ harbor_journal_set_phase() {
   post="$(harbor_journal_raw "${entry}" post_state)"
   [ -z "${resolved_by}" ] || at="$(harbor_utc_now)"
   tmp="${dir}/.tmp.$(basename "${entry}").${HARBOR_LOCK_ID_PID}"
-  harbor_journal_render "${op}" "${target}" "${ownership}" "${phase}" "${pre}" "${post}" "${resolved_by}" "${at}" >"${tmp}"
-  harbor_journal_sync_path "${tmp}"
-  mv -f "${tmp}" "${entry}"
-  harbor_journal_sync_path "${dir}"
+  # Each mutating step says what it returns rather than leaning on set -e. A
+  # caller that writes "harbor_journal_set_phase ... || harbor_die ..." puts this
+  # function on the left of ||, and bash suppresses set -e for everything inside
+  # a function invoked there: a failing mv would not stop the function, execution
+  # would carry on to the log line, and the function would return that line's
+  # status -- 0. The guard would never fire, and Harbor would report an entry
+  # applied that is still prepared while the artifact had already changed.
+  # Measured, not inferred, and it is why these are spelled out.
+  harbor_journal_render "${op}" "${target}" "${ownership}" "${phase}" "${pre}" "${post}" "${resolved_by}" "${at}" >"${tmp}" || return 1
+  harbor_journal_sync_path "${tmp}" || return 1
+  mv -f "${tmp}" "${entry}" || return 1
+  harbor_journal_sync_path "${dir}" || return 1
   harbor_log journal "$(basename "${entry}") ${phase}${resolved_by:+ resolved_by=${resolved_by}}"
 }
 harbor_journal_recover() {

@@ -63,7 +63,22 @@ setup() {
   ' bash "${out}"
   chmod 0700 "${out}"
   assert_failure
-  assert_equal 0 "$(find "${BATS_TEST_TMPDIR}" -maxdepth 1 -name 'harbor.conf.tmp.*' | wc -l | tr -d ' ')"
+  assert_equal 0 "$(find "${BATS_TEST_TMPDIR}" -maxdepth 1 -name '.harbor.*' | wc -l | tr -d ' ')"
+}
+
+@test "a symlink planted at the temp path does not redirect the write through it" {
+  # A predictable temp name is a write anyone who can guess it can aim. The
+  # redirection follows the link, so the victim was truncated, filled with the
+  # generated block and chmodded 0600, and harbor.conf was left as a symlink
+  # pointing at it -- with the write returning 0. mktemp refuses an existing
+  # path, which is the property that closes this; the unguessable name is spare.
+  local out="${BATS_TEST_TMPDIR}/harbor.conf" victim="${BATS_TEST_TMPDIR}/victim"
+  printf 'VICTIM DATA\n' >"${victim}"
+  ln -s "${victim}" "${BATS_TEST_TMPDIR}/harbor.conf.tmp.$$"
+  harbor_client_conf_write "${out}" harbor-node.TAILNET.ts.net harbor
+  assert_equal 'VICTIM DATA' "$(cat "${victim}")"
+  assert [ ! -L "${out}" ]
+  assert_equal "$(harbor_client_conf_body harbor-node.TAILNET.ts.net harbor)" "$(cat "${out}")"
 }
 
 @test "a permissive umask does not make the file readable by anyone else" {

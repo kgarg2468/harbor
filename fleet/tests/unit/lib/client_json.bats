@@ -84,3 +84,42 @@ BODY
   run harbor_client_json_has "${BATS_TEST_TMPDIR}/only" access.mode
   assert_failure
 }
+
+@test "a key carrying a newline cannot forge a field the document does not have" {
+  # The flattener writes one path<TAB>value per line, so a key with a newline in
+  # it splits into two lines and the second reads exactly like a real top-level
+  # field. This document has no BackendState key at all; before the guard, the
+  # preflight read Running out of it and went on to write an ssh block.
+  run harbor_client_json_flatten <<'JSON'
+{"x\nBackendState":"Running","y\nMagicDNSSuffix":"TAILNET.ts.net"}
+JSON
+  assert_failure
+  refute_output --partial 'Running'
+}
+
+@test "a key carrying a tab cannot forge the boundary between a path and its value" {
+  run harbor_client_json_flatten <<'JSON'
+{"a\tb":"v"}
+JSON
+  assert_failure
+}
+
+@test "a document whose keys are ordinary is untouched by the control-character guard" {
+  run harbor_client_json_flatten <<'JSON'
+{"BackendState":"Running","Peer":{"k":{"HostName":"harbor-node"}}}
+JSON
+  assert_success
+  assert_line "$(printf 'BackendState\t"Running"')"
+  assert_line "$(printf 'Peer.k.HostName\t"harbor-node"')"
+}
+
+@test "the decoder handles every single-character JSON escape and leaves \\u alone" {
+  printf 'r\t"a\\rb"\nb\t"a\\bb"\nf\t"a\\ff"\ns\t"a\\/b"\nu\t"a\\u0041b"\n' >"${BATS_TEST_TMPDIR}/flat"
+  assert_equal "$(printf 'a\rb')" "$(harbor_client_json_field "${BATS_TEST_TMPDIR}/flat" r)"
+  assert_equal "$(printf 'a\bb')" "$(harbor_client_json_field "${BATS_TEST_TMPDIR}/flat" b)"
+  assert_equal "$(printf 'a\ff')" "$(harbor_client_json_field "${BATS_TEST_TMPDIR}/flat" f)"
+  assert_equal 'a/b' "$(harbor_client_json_field "${BATS_TEST_TMPDIR}/flat" s)"
+  # \u needs a UTF-8 encoder and a surrogate rule; it stays as written rather
+  # than being guessed at, because a wrong decoding is worse than a literal one.
+  assert_equal 'a\u0041b' "$(harbor_client_json_field "${BATS_TEST_TMPDIR}/flat" u)"
+}

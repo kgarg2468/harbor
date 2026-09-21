@@ -83,6 +83,74 @@ entry() {
   assert_equal 1 "$(find "${ROOT}/journal" -name '*.json' | wc -l | tr -d ' ')"
 }
 
+@test "a symlinked config is refused rather than replaced with a regular file" {
+  # The rename would put a regular file where the link was, orphaning whatever
+  # it pointed at -- a config symlinked into a dotfiles checkout silently
+  # becomes an unmanaged copy, and every edit made in the checkout afterwards
+  # reaches nothing. Harbor recorded that as ownership modified, phase applied.
+  local real="${BATS_TEST_TMPDIR}/dotfiles/sshconfig"
+  mkdir -p "$(dirname "${real}")"
+  printf 'Host example\n  User someone\n' >"${real}"
+  rm -f "${CONFIG}"
+  ln -s "${real}" "${CONFIG}"
+  run harbor_client_include_add "${ROOT}" "${CONFIG}"
+  assert_failure 3
+  assert_output --partial 'client.config_symlink'
+  assert [ -L "${CONFIG}" ]
+  assert_equal "$(printf 'Host example\n  User someone')" "$(cat "${real}")"
+  assert_equal 0 "$(find "${ROOT}/journal" -name '*.json' | wc -l | tr -d ' ')"
+}
+
+@test "a config edited while the entry was preparing is refused, not overwritten" {
+  # The staged copy was built from the file as it stood before the entry was
+  # written. Replacing the file wholesale now would discard whatever arrived in
+  # between without a word, and what arrives in between is the operator's own
+  # edit to their own ssh config.
+  printf 'Host example\n' >"${CONFIG}"
+  run bash -c '
+    set -euo pipefail
+    . "${HARBOR_ROOT}/lib/log.sh"
+    . "${HARBOR_ROOT}/lib/checks.sh"
+    . "${HARBOR_ROOT}/lib/lock.sh"
+    . "${HARBOR_ROOT}/lib/journal.sh"
+    . "${HARBOR_ROOT}/lib/client.sh"
+    HARBOR_LOCK_ID_PID=$$
+    harbor_lock_acquire "${1}" operator
+    # Stand in for the editor that saves between the read and the rename. The
+    # first call is the pre_state, taken before anything is staged; the edit
+    # lands after that and before the second call, which is the check. The tally
+    # is a file because both calls are inside command substitutions, and a
+    # variable incremented in a subshell is a variable the next call never sees.
+    tally="${3}"
+    harbor_journal_observe() {
+      printf "x" >>"${tally}"
+      if [ "$(wc -c <"${tally}" | tr -d " ")" = 2 ]; then
+        printf "Host example\nHost added-since\n" >"${2}"
+      fi
+      harbor_observe_file "${2}"
+    }
+    harbor_client_include_add "${1}" "${2}"
+  ' bash "${ROOT}" "${CONFIG}" "${BATS_TEST_TMPDIR}/tally"
+  assert_failure 1
+  assert_output --partial 'client.config_moved'
+  assert_equal "$(printf 'Host example\nHost added-since')" "$(cat "${CONFIG}")"
+}
+
+@test "a symlink planted at the include writer's temp path is not written through" {
+  # This writer uses install rather than a redirection, and measured, BSD install
+  # replaces a symlink at its destination instead of following it -- so unlike
+  # harbor_client_conf_write this one was never exploitable. The temp name is
+  # unguessable regardless, and this test is what would notice if the install
+  # ever became a "cat >", which is the one-character difference between the two
+  # writers that made only one of them a hole.
+  local victim="${BATS_TEST_TMPDIR}/victim"
+  printf 'VICTIM DATA\n' >"${victim}"
+  ln -s "${victim}" "${CONFIG}.tmp.$$"
+  harbor_client_include_add "${ROOT}" "${CONFIG}"
+  assert_equal 'VICTIM DATA' "$(cat "${victim}")"
+  assert_equal "$(harbor_client_include_line)" "$(sed -n 1p "${CONFIG}")"
+}
+
 @test "the entry is prepared before the file changes and applied after" {
   run /bin/bash -c '
     set -euo pipefail
@@ -110,7 +178,7 @@ entry() {
   run harbor_client_include_add "${ROOT}" "${CONFIG}"
   chmod 0700 "${ROOT}/journal"
   assert_failure
-  assert_equal 0 "$(find "$(dirname "${CONFIG}")" -maxdepth 1 -name 'config.tmp.*' | wc -l | tr -d ' ')"
+  assert_equal 0 "$(find "$(dirname "${CONFIG}")" -maxdepth 1 -name '.harbor.*' | wc -l | tr -d ' ')"
   assert_equal 'Host example' "$(cat "${CONFIG}")"
 }
 

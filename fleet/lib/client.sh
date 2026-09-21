@@ -28,6 +28,17 @@ harbor_client_json_flatten() {
     var doc = JSON.parse(input.js);
     var out = [];
     function walk(path, value) {
+      // A key carrying a newline or a tab would split one entry into two lines,
+      // or two fields into one, and the readers below work on lines and tabs.
+      // {"x\nBackendState":"Running"} flattens to a line that reads exactly
+      // like a real top-level BackendState, so a document with no such key
+      // answers Running to a caller that asks for it. The whole document is
+      // refused rather than the key sanitized: this parses remote input, and a
+      // status document with a control character in a key is not a document
+      // Harbor has any business interpreting the rest of.
+      if (/[\n\r\t]/.test(path)) {
+        throw new Error("key contains a control character");
+      }
       if (value !== null && typeof value === "object") {
         var keys = Array.isArray(value)
           ? value.map(function (_, i) { return String(i); })
@@ -86,10 +97,10 @@ harbor_client_json_field() {
       # the \n rule and come out as a real newline. Measured: the sed chain gets
       # "lit \\n not newline" wrong and this gets it right.
       #
-      # Only the escapes Harbor's own JSON writer emits (lib/journal.sh's
-      # harbor_json_escape) and the two whitespace ones a detail line can carry.
-      # An escape this does not know stays as written rather than being guessed
-      # at: a wrong decoding of a remote detail line is worse than a literal one.
+      # Every single-character escape JSON defines except \u, which needs a
+      # UTF-8 encoder and a surrogate pairing rule and is not something to write
+      # in awk. A \u sequence stays as written rather than being guessed at: a
+      # wrong decoding of a remote detail line is worse than a literal one.
       printf '%s' "${raw}" | awk '{
         s = $0; out = ""; i = 1
         while (i <= length(s)) {
@@ -98,6 +109,10 @@ harbor_client_json_field() {
             n = substr(s, i + 1, 1)
             if (n == "n") { out = out "\n"; i += 2; continue }
             if (n == "t") { out = out "\t"; i += 2; continue }
+            if (n == "r") { out = out "\r"; i += 2; continue }
+            if (n == "b") { out = out "\b"; i += 2; continue }
+            if (n == "f") { out = out "\f"; i += 2; continue }
+            if (n == "/") { out = out "/"; i += 2; continue }
             if (n == "\"") { out = out "\""; i += 2; continue }
             if (n == "\\") { out = out "\\"; i += 2; continue }
           }
@@ -196,20 +211,30 @@ harbor_client_conf_body() {
 # whatever umask the operator's shell happens to carry. The umask is set in a
 # subshell so it applies to the creation itself and does not outlive this write.
 #
-# The temp file is named for the exit trap before it exists, for the same reason
-# the include writer's is: a failure between the redirection and the rename
+# mktemp rather than "${path}.tmp.$$", which was a name anyone could work out in
+# advance. A redirection follows a symlink, so a symlink planted at that path
+# sent the write straight through it: measured, the target file was truncated,
+# filled with the generated block, chmodded 0600, and harbor.conf was left as a
+# symlink pointing at it -- with Harbor exiting 0. mktemp creates with O_EXCL and
+# refuses an existing path, which is the property that matters here; the
+# unguessable name is a bonus. The temp lands in the target's own directory
+# because the last step has to be a rename, and a rename across filesystems is
+# not one.
+#
+# The temp file is named for the exit trap as soon as it exists, for the same
+# reason the include writer's is: a failure between the write and the rename
 # leaves a copy of the generated configuration beside the target, unjournaled,
 # and recovery only ever looks at entries. The two writers share the one
 # variable because setup runs them in sequence, never at once, and a second name
 # would only be a second thing to forget.
 harbor_client_conf_write() {
   local path="${1}" tmp
-  tmp="${path}.tmp.$$"
-  HARBOR_CLIENT_STAGE_TMP="${tmp}"
-  (
+  tmp="$(
     umask 077
-    harbor_client_conf_body "${2}" "${3}" >"${tmp}"
-  )
+    mktemp "$(dirname "${path}")/.harbor.XXXXXX"
+  )"
+  HARBOR_CLIENT_STAGE_TMP="${tmp}"
+  harbor_client_conf_body "${2}" "${3}" >"${tmp}"
   chmod 0600 "${tmp}"
   mv -f "${tmp}" "${path}"
   # shellcheck disable=SC2034 # read by harbor_on_exit in lib/log.sh
@@ -251,6 +276,21 @@ harbor_client_include_add() {
     # Either way there is nothing to do and nothing to own, and a journal entry
     # for a mutation that did not happen is a claim recovery would act on.
     return 0
+  fi
+  # A symlinked config is refused rather than followed. The rename at the end of
+  # this function replaces whatever is at that path with a regular file, so a
+  # config symlinked into a dotfiles checkout is silently converted into an
+  # unmanaged copy: measured, the link was gone, the file it had pointed at was
+  # left untouched and orphaned, and the entry recorded ownership "modified",
+  # phase "applied", a symlink pre_state and a regular-file post_state -- Harbor
+  # calling a destroyed setup a success. Every edit the operator makes in their
+  # checkout from then on reaches nothing.
+  #
+  # Writing through the link instead was the other option and it is worse: it
+  # puts Harbor's include in a file Harbor was never pointed at, inside a
+  # repository it would then be committed to.
+  if [ -L "${config}" ]; then
+    harbor_die 3 client.config_symlink "${config} is a symlink to $(readlink "${config}"), and adding the include would replace the link with a regular file and orphan what it points at; add this line to the file the link points at yourself, then rerun: $(harbor_client_include_line)"
   fi
   if [ -f "${config}" ]; then ownership=modified; else ownership=created; fi
   pre="$(harbor_journal_observe file "${config}")"
@@ -310,29 +350,50 @@ harbor_client_include_add() {
     || exit "$?"
   entry="${HARBOR_JOURNAL_ENTRY:-}"
   harbor_step "client-include-prepared"
+  # The config is read once to build the staged copy and replaced wholesale at
+  # the end, so anything written to it in between would be overwritten without a
+  # word. The window is short and it is not empty -- the test hook can hold this
+  # function open across it, and so can a slow journal write -- and the thing
+  # lost is the operator's own edit to their own ssh config. Harbor refuses
+  # instead: the entry stays prepared, recovery will find the file at its
+  # pre_state and record it reverted, and nothing has been mutated yet.
+  if [ "$(harbor_journal_observe file "${config}")" != "${pre}" ]; then
+    harbor_die 1 client.config_moved "${config} changed while Harbor was preparing to add the include, so the copy it staged no longer contains what the file now holds and writing it would discard that change; nothing was written, and its journal entry is still prepared -- rerun once nothing else is editing the file"
+  fi
   # Copied beside the target and then renamed, rather than renamed straight out
   # of the staging directory: a rename across filesystems is not a rename, and
-  # the whole reason for the two steps is that the last one is atomic. install
-  # sets the mode as it copies, so the file the post-state describes is the file
-  # that lands.
-  tmp="${config}.tmp.$$"
+  # the whole reason for the two steps is that the last one is atomic.
+  #
+  # mktemp rather than "${config}.tmp.$$". Unlike harbor_client_conf_write, this
+  # one was not exploitable: measured, BSD install replaces a symlink at its
+  # destination rather than writing through it, so a planted link here was
+  # overwritten, not followed. The name is unguessable anyway, because the
+  # difference between the two writers is one character of shell and not a thing
+  # to rely on. install copies onto the file mktemp made, setting the mode as it
+  # goes, so the file the post-state describes is the file that lands.
+  tmp="$(
+    umask 077
+    mktemp "$(dirname "${config}")/.harbor.XXXXXX"
+  )"
   HARBOR_CLIENT_STAGE_TMP="${tmp}"
   install -m 0600 "${staged}" "${tmp}"
   mv -f "${tmp}" "${config}"
-  # Cleared before the removals, not after: once the rename has happened the
-  # temp path is gone and the trap has nothing left to do, and a trap that fires
-  # while these still name live paths during the removals below would race with
-  # them rather than help.
   # Read by harbor_on_exit in lib/log.sh, which shellcheck cannot see from here
   # because this file does not source that one -- the dispatcher sources both.
   # Not exported, deliberately: an exported value would be inherited by every
   # child this run spawns, and a child's own exit trap would then remove the
   # parent's staging out from under it.
+  #
+  # Cleared after the removal rather than before. Clearing first leaves a window
+  # in which the directory still exists and nothing names it, so an interrupt
+  # during the rm -rf leaks exactly what the trap is there to collect. The other
+  # order has no such window: rm -rf on a path already gone is a no-op, and the
+  # trap's own [ -d ] guard makes a second attempt free.
   # shellcheck disable=SC2034
   HARBOR_CLIENT_STAGE_TMP=
+  rm -rf "${work}"
   # shellcheck disable=SC2034
   HARBOR_CLIENT_STAGE=
-  rm -rf "${work}"
   harbor_journal_set_phase "${entry}" applied \
     || harbor_die 2 client.include_record "the include was added to ${config} but its journal entry could not be marked applied; inspect the journal before rerunning"
 }
