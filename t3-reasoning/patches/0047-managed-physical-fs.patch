@@ -1,0 +1,215 @@
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+index eca72c8b..3c13b781 100644
+--- a/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.test.ts
+@@ -9,6 +9,8 @@ import { crc32, deflateRawSync } from "node:zlib";
+ import type { ManagedDesktopArtifactDescriptor } from "@t3tools/contracts";
+ import { managedDesktopArtifactStorageSegments } from "@t3tools/contracts";
+ import { createManagedDesktopArtifactPreparer } from "./ManagedDesktopArtifact.ts";
++import { managedPhysicalFs } from "./managedPhysicalFs.ts";
++import { bundleDigest } from "./managedDesktopInstallHelper.ts";
+ 
+ // Minimal stored ZIP; fake ditto uses a fixture, never executes host tools.
+ function zip(
+@@ -137,6 +139,67 @@ async function fixture(archiveBytes = zip([{ name: "Product.app/Contents/Info.pl
+   return { root, source, installed, descriptor, archive, plist, env, behavior, calls, seams, make };
+ }
+ describe("managed desktop artifact preparation", () => {
++  it("uses physical archives for Electron preparation, helper digest and cleanup", async () => {
++    const f = await fixture();
++    // Electron exposes an ASAR root as a virtual directory through node:fs.
++    // Model that behavior in an isolated fixture; no Electron process is started.
++    const virtual = new Proxy(fs, {
++      get(target, key) {
++        if (key === "stat" || key === "lstat")
++          return async (entry: string) => {
++            const result = await target[key](entry);
++            if (!entry.endsWith("app.asar")) return result;
++            return new Proxy(result, {
++              get(stat, field) {
++                if (field === "isFile") return () => false;
++                if (field === "isDirectory") return () => true;
++                return Reflect.get(stat, field);
++              },
++            });
++          };
++        if (key === "readdir")
++          return async (entry: string) => (entry.endsWith("app.asar") ? [] : target.readdir(entry));
++        return Reflect.get(target, key);
++      },
++    });
++    const broken = createManagedDesktopArtifactPreparer(f.env, { ...f.seams, fs: virtual });
++    await expect(broken.prepare(f.descriptor)).rejects.toThrow("missing or empty app.asar");
++    const accessed: string[] = [];
++    const physical = new Proxy(fs, {
++      get(target, key) {
++        if (key === "open")
++          return async (...args: Parameters<typeof fs.open>) => {
++            accessed.push(String(args[0]));
++            return target.open(...args);
++          };
++        return Reflect.get(target, key);
++      },
++    });
++    const selected = managedPhysicalFs("44.1.0", (id) => {
++      expect(id).toBe("original-fs");
++      return { promises: physical };
++    });
++    const p = createManagedDesktopArtifactPreparer(f.env, { ...f.seams, fs: selected });
++    const token = await p.prepare(f.descriptor);
++    const handoff = await p.claim(token);
++    expect(accessed).toContain(path.join(handoff.stagedBundle, "Contents/Resources/app.asar"));
++    expect(handoff.digest).toBe(await bundleDigest(handoff.stagedBundle));
++    await handoff.cleanup();
++    await expect(fs.stat(handoff.stagedBundle)).rejects.toThrow();
++  });
++
++  it("keeps Node helper fs and fails closed when Electron original-fs cannot load", () => {
++    expect(
++      managedPhysicalFs("", () => {
++        throw new Error("must not load");
++      }),
++    ).toBe(fs);
++    expect(() =>
++      managedPhysicalFs("44.1.0", () => {
++        throw new Error("unavailable");
++      }),
++    ).toThrow("unavailable");
++  });
+   it.skipIf(process.platform !== "darwin")(
+     "extracts authenticated ZIP bytes through native ditto stdin",
+     async () => {
+@@ -200,7 +263,10 @@ describe("managed desktop artifact preparation", () => {
+     expect(removals).toEqual([[scratch, options]]);
+     await expect(fs.stat(scratch)).rejects.toThrow();
+     await handoff.cleanup();
+-    expect(removals).toEqual([[scratch, options], [handoff.stagedBundle, options]]);
++    expect(removals).toEqual([
++      [scratch, options],
++      [handoff.stagedBundle, options],
++    ]);
+     await expect(fs.stat(handoff.stagedBundle)).rejects.toThrow();
+     expect((await fs.stat(f.installed)).isDirectory()).toBe(true);
+   });
+diff --git a/apps/desktop/src/updates/ManagedDesktopArtifact.ts b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+index 1acced82..7d9e25ed 100644
+--- a/apps/desktop/src/updates/ManagedDesktopArtifact.ts
++++ b/apps/desktop/src/updates/ManagedDesktopArtifact.ts
+@@ -13,6 +13,7 @@ import {
+ import * as Schema from "effect/Schema";
+ import { bundleDigest, bundleOwner } from "./managedDesktopInstallHelper.ts";
+ import type { ManagedDesktopPresentationIdentity } from "../app/DesktopEnvironment.ts";
++import { managedPhysicalFs } from "./managedPhysicalFs.ts";
+ 
+ export interface ManagedDesktopArtifactEnvironment {
+   readonly baseDir: string;
+@@ -31,7 +32,7 @@ export interface ManagedDesktopArtifactSeams {
+   readonly temporaryDirectory: string;
+ }
+ const defaults: ManagedDesktopArtifactSeams = {
+-  fs,
++  fs: managedPhysicalFs(),
+   run: (command, args, options) =>
+     new Promise((resolve, reject) => {
+       let failure: Error | null = null;
+@@ -455,9 +456,9 @@ export function createManagedDesktopArtifactPreparer(
+         if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > 2 ** 31 - 1)
+           fail("invalid preparation TTL");
+         token = Object.freeze({}) as PreparedManagedDesktopArtifact;
+-        const digest = await bundleDigest(stagedBundle);
+-        const installedOwner = await bundleOwner(installedBundle);
+-        const stagedOwner = await bundleOwner(stagedBundle);
++        const digest = await bundleDigest(stagedBundle, io);
++        const installedOwner = await bundleOwner(installedBundle, io);
++        const stagedOwner = await bundleOwner(stagedBundle, io);
+         cancelled();
+         tokens.set(token, {
+           descriptor,
+@@ -495,9 +496,9 @@ export function createManagedDesktopArtifactPreparer(
+       tokens.delete(token);
+       prepared.detach();
+       try {
+-        const installedOwner = await bundleOwner(prepared.installedBundle);
+-        const stagedOwner = await bundleOwner(prepared.stagedBundle);
+-        const digest = await bundleDigest(prepared.stagedBundle);
++        const installedOwner = await bundleOwner(prepared.installedBundle, io);
++        const stagedOwner = await bundleOwner(prepared.stagedBundle, io);
++        const digest = await bundleDigest(prepared.stagedBundle, io);
+         if (
+           digest !== prepared.digest ||
+           installedOwner.dev !== prepared.installedOwner.dev ||
+diff --git a/apps/desktop/src/updates/managedDesktopInstallHelper.ts b/apps/desktop/src/updates/managedDesktopInstallHelper.ts
+index 68820283..6f59847c 100644
+--- a/apps/desktop/src/updates/managedDesktopInstallHelper.ts
++++ b/apps/desktop/src/updates/managedDesktopInstallHelper.ts
+@@ -38,11 +38,11 @@ export const nativeRun = (
+   );
+ // Snapshot checks detect substitution but do not defend against an active same-UID
+ // attacker racing filesystem operations; this matches the preparer cleanup boundary.
+-export async function bundleDigest(root: string): Promise<string> {
++export async function bundleDigest(root: string, io: typeof fs = fs): Promise<string> {
+   const hash = createHash("sha256");
+   const walk = async (entry: string): Promise<void> => {
+-    const stat = await fs.lstat(entry);
+-    const real = await fs.realpath(entry);
++    const stat = await io.lstat(entry);
++    const real = await io.realpath(entry);
+     if (real !== root && !real.startsWith(root + path.sep))
+       throw new Error("bundle symlink escape");
+     const relative = path.relative(root, entry);
+@@ -57,13 +57,13 @@ export async function bundleDigest(root: string): Promise<string> {
+       );
+     };
+     if (stat.isSymbolicLink()) {
+-      const target = Buffer.from(await fs.readlink(entry));
++      const target = Buffer.from(await io.readlink(entry));
+       record("symlink", target.length, createHash("sha256").update(target).digest("hex"));
+     } else if (stat.isDirectory()) {
+       record("directory", 0, "");
+-      for (const name of (await fs.readdir(entry)).sort()) await walk(path.join(entry, name));
++      for (const name of (await io.readdir(entry)).sort()) await walk(path.join(entry, name));
+     } else if (stat.isFile() && stat.nlink === 1) {
+-      const handle = await fs.open(entry, constants.O_RDONLY | constants.O_NOFOLLOW);
++      const handle = await io.open(entry, constants.O_RDONLY | constants.O_NOFOLLOW);
+       const payload = createHash("sha256");
+       let bytes = 0;
+       try {
+@@ -78,14 +78,14 @@ export async function bundleDigest(root: string): Promise<string> {
+       }
+     } else throw new Error("nonregular bundle entry");
+   };
+-  if ((await fs.realpath(root)) !== root || !(await fs.lstat(root)).isDirectory())
++  if ((await io.realpath(root)) !== root || !(await io.lstat(root)).isDirectory())
+     throw new Error("invalid bundle root");
+   await walk(root);
+   return hash.digest("hex");
+ }
+-export async function bundleOwner(entry: string): Promise<BundleOwner> {
+-  const stat = await fs.lstat(entry);
+-  if (!stat.isDirectory() || stat.isSymbolicLink() || (await fs.realpath(entry)) !== entry)
++export async function bundleOwner(entry: string, io: typeof fs = fs): Promise<BundleOwner> {
++  const stat = await io.lstat(entry);
++  if (!stat.isDirectory() || stat.isSymbolicLink() || (await io.realpath(entry)) !== entry)
+     throw new Error("unsafe bundle path");
+   return { dev: stat.dev, ino: stat.ino };
+ }
+diff --git a/apps/desktop/src/updates/managedPhysicalFs.ts b/apps/desktop/src/updates/managedPhysicalFs.ts
+new file mode 100644
+index 00000000..08a86538
+--- /dev/null
++++ b/apps/desktop/src/updates/managedPhysicalFs.ts
+@@ -0,0 +1,14 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Bundle verification needs physical archive files.
++import * as fs from "node:fs/promises";
++import { createRequire } from "node:module";
++
++/** Electron's normal fs treats app.asar as a virtual directory. Installation
++ * must inspect, hash and remove the physical archive, just like the Node helper. */
++export function managedPhysicalFs(
++  electronVersion = process.versions.electron,
++  load: (id: string) => unknown = createRequire(import.meta.url),
++): typeof fs {
++  if (!electronVersion) return fs;
++  // Do not fall back to virtual fs if original-fs is unavailable in Electron.
++  return (load("original-fs") as { promises: typeof fs }).promises;
++}

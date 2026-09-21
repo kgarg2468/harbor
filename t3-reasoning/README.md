@@ -202,3 +202,9 @@ reproduce the port commit's tree recorded in `docs/nightly-port.md`. Later
 patches add incremental features beyond that baseline. The admission
 primitive's focused check in a prepared checkout is
 `pnpm --filter t3 test src/updateAdmission.test.ts` (11 tests).
+
+Managed desktop preparation uses Electron's `original-fs` for physical bundle
+verification, hashing, ownership checks, and cleanup. Electron's normal `fs`
+exposes `app.asar` as a virtual directory; using it for installation can reject
+a valid archive and leave cleanup pending. The detached Node installer keeps
+Node's normal filesystem and computes the same physical bundle digest.
