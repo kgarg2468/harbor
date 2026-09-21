@@ -151,6 +151,22 @@ harbor_client_tailscale_status() {
   [ -s "${1}" ] || return 1
 }
 
+# harbor_client_magicdns_suffix FLATFILE: this tailnet's MagicDNS suffix, with no
+# surrounding dots, or the empty string when the document names none.
+#
+# CurrentTailnet.MagicDNSSuffix first because the top-level one is marked
+# "Deprecated: use CurrentTailnet.MagicDNSSuffix instead" in the pinned Tailscale
+# (1.102.3, ipn/ipnstate/ipnstate.go); the legacy field is still read, because a
+# client too old to carry the current-tailnet object still has to name the tailnet
+# somewhere, and this is a precondition check rather than a place to insist on a
+# shape.
+harbor_client_magicdns_suffix() {
+  local suffix
+  suffix="$(harbor_client_json_field "${1}" CurrentTailnet.MagicDNSSuffix)"
+  [ -n "${suffix}" ] || suffix="$(harbor_client_json_field "${1}" MagicDNSSuffix)"
+  printf '%s' "${suffix}"
+}
+
 # harbor_client_preflight FLATFILE: the three things that must be true of this
 # Mac before anything is written or reached (design section 5.5).
 harbor_client_preflight() {
@@ -178,11 +194,10 @@ harbor_client_preflight() {
     [ "$(harbor_client_json_field "${flat}" CurrentTailnet.MagicDNSEnabled)" = true ] \
       || harbor_die 3 client.magicdns_off "this tailnet has MagicDNS turned off, so the node has no name this Mac can use; turn MagicDNS on in the Tailscale admin console, then rerun"
   fi
-  # Read after the flag, and from the current-tailnet field first: a client too
-  # old to report the flag at all still has to name the tailnet, and an empty
-  # suffix is a tailnet with no names in it whatever the flag says.
-  suffix="$(harbor_client_json_field "${flat}" CurrentTailnet.MagicDNSSuffix)"
-  [ -n "${suffix}" ] || suffix="$(harbor_client_json_field "${flat}" MagicDNSSuffix)"
+  # Read after the flag: a client too old to report the flag at all still has to
+  # name the tailnet, and an empty suffix is a tailnet with no names in it
+  # whatever the flag says.
+  suffix="$(harbor_client_magicdns_suffix "${flat}")"
   [ -n "${suffix}" ] \
     || harbor_die 3 client.magicdns_off "this tailnet has MagicDNS turned off, so the node has no name this Mac can use; turn MagicDNS on in the Tailscale admin console, then rerun"
 }
@@ -192,9 +207,9 @@ harbor_client_preflight() {
 # an empty string is the point: an empty HostName in an ssh block is a block that
 # silently connects somewhere else.
 #
-# Matched on the first label of DNSName, not on HostName. The pinned Tailscale
-# (1.102.3, ipn/ipnstate/ipnstate.go) documents PeerStatus.HostName as "HostInfo's
-# Hostname (not a DNS name or necessarily unique)" -- two machines that both call
+# Matched on DNSName, not on HostName. The pinned Tailscale (1.102.3,
+# ipn/ipnstate/ipnstate.go) documents PeerStatus.HostName as "HostInfo's Hostname
+# (not a DNS name or necessarily unique)" -- two machines that both call
 # themselves harbor-node are a status document Tailscale considers valid, and it
 # resolves the collision in DNSName, where one becomes harbor-node and the other
 # harbor-node-1. Keying off HostName returns whichever of the two the flattener
@@ -202,25 +217,45 @@ harbor_client_preflight() {
 # chosen by map iteration order. DNSName is unique by construction and is the
 # name the operator sees in the admin console, which is where the message below
 # sends them.
+#
+# Matched on the whole name rather than its first label, because a machine shared
+# in from another tailnet appears in this same Peer map carrying that tailnet's
+# suffix -- "It has the form host.<MagicDNSSuffix>.", and the suffix is the
+# sharer's. A first-label match would answer with the shared machine whenever its
+# owner happened to name it the same thing, and an ssh block or an HTTPS check
+# aimed at someone else's node is the worst answer this function has. The suffix
+# has to be this tailnet's, which is what preflight established.
 harbor_client_magicdns() {
-  local flat="${1}" want="${2}" key name
+  local flat="${1}" want="${2}" key name fqdn
+  fqdn="${want}.$(harbor_client_magicdns_suffix "${flat}")"
   # The tab in the sed pattern is written with printf rather than typed: a literal
   # tab in a source file is invisible and the next editor to touch this line will
   # turn it into spaces.
   for key in $(sed -n "s/^Peer\.\([^.]*\)\.DNSName$(printf '\t').*\$/\1/p" "${flat}"); do
     name="$(harbor_client_json_field "${flat}" "Peer.${key}.DNSName")"
     name="${name%.}"
-    if [ "${name%%.*}" = "${want}" ]; then
+    if [ "${name}" = "${fqdn}" ]; then
       printf '%s' "${name}"
       return 0
     fi
   done
-  # No peer answers to that name, but one calls itself that. Reporting it as
-  # absent would send the operator to re-register a node that is already there;
-  # what it is missing is the MagicDNS name, which is a different thing to fix.
+  # No peer answers to that name, and one that calls itself that has no MagicDNS
+  # name at all. Reporting it as absent would send the operator to re-register a
+  # node that is already there; what it is missing is the name, which is a
+  # different thing to fix.
+  #
+  # The empty test is the whole of the difference between the two verdicts. A peer
+  # whose HostName is still harbor-node after its machine was renamed in the admin
+  # console does have a MagicDNS name -- a different one -- and telling the
+  # operator it has none would send them to check MagicDNS and registration over a
+  # node that is registered and named. Under this function's contract that node is
+  # absent, because the name asked for is not in the tailnet.
   for key in $(sed -n "s/^Peer\.\([^.]*\)\.HostName$(printf '\t').*\$/\1/p" "${flat}"); do
     if [ "$(harbor_client_json_field "${flat}" "Peer.${key}.HostName")" = "${want}" ]; then
-      harbor_die 3 client.node_unnamed "this Mac's tailnet has a node named ${want} but reports no MagicDNS name for it; check that MagicDNS is on and that the node has finished registering, then rerun"
+      name="$(harbor_client_json_field "${flat}" "Peer.${key}.DNSName")"
+      if [ -z "${name%.}" ]; then
+        harbor_die 3 client.node_unnamed "this Mac's tailnet has a node named ${want} but reports no MagicDNS name for it; check that MagicDNS is on and that the node has finished registering, then rerun"
+      fi
     fi
   done
   harbor_die 3 client.node_absent "this Mac's tailnet has no node named ${want}; run 'harbor auth tailscale' on the node first, and check it appears in the Tailscale admin console"

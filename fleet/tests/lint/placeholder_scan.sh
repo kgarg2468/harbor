@@ -20,7 +20,13 @@ while IFS= read -r f; do
   if grep -nIEH -f "${patterns}" -- "${f}"; then
     status=1
   fi
-  bad="$(grep -oIE '[A-Za-z0-9-]+\.ts\.net' -- "${f}" | grep -vx 'TAILNET\.ts\.net' || true)"
+  # Two placeholders, not one. A machine shared in from another tailnet appears in
+  # "tailscale status" carrying the sharer's MagicDNS suffix, so a fixture that can
+  # only spell one tailnet cannot test that Harbor refuses to aim an ssh block at
+  # someone else's node. Both are exact matches on an upper-case name no tailnet
+  # can have, Tailscale's own suffixes being lower case, so this stays a list of
+  # two fixed strings rather than a pattern a real name could satisfy.
+  bad="$(grep -oIE '[A-Za-z0-9-]+\.ts\.net' -- "${f}" | grep -vxE 'TAILNET\.ts\.net|SHARED\.ts\.net' || true)"
   if [ -n "${bad}" ]; then
     printf '%s: MagicDNS name outside the placeholder list: %s\n' "${f}" "${bad}"
     status=1

@@ -21,7 +21,7 @@ Every task's requirements implicitly include this section. Values are copied ver
 - **Harbor never writes, creates or removes anything under the vendor's `~/.t3`.**
 - **Harbor never invokes `tailscale funnel` in any code path, and never runs `tailscale serve reset`.** The client is read-only towards Tailscale: it runs `status` and `ping` and nothing else.
 - **PR 6 must not depend on PR 7.** No CI job may require a real node or a node that has `harbor status`. Every remote reply in the test lane is a fixture.
-- **CI-exact static gate.** ShellCheck: `shellcheck -s bash -x -a -S warning -P 'SCRIPTDIR/..:SCRIPTDIR/../..' --enable=require-variable-braces <explicit list>`. shfmt: `shfmt -i 2 -ci -bn -d <same list, with fleet/lib and fleet/node as directories>`. `shfmt` lives at `$HOME/go/bin/shfmt`. Also `fleet/tests/lint/placeholder_scan.sh` (walks **tracked** files, so `git add` first; it permits exactly one MagicDNS name, `TAILNET.ts.net`) and `fleet/tests/lint/engines_check.sh`. markdownlint: `npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '*.md' 'docs/**/*.md' 'fleet/**/*.md' --ignore fleet/tests/vendor`.
+- **CI-exact static gate.** ShellCheck: `shellcheck -s bash -x -a -S warning -P 'SCRIPTDIR/..:SCRIPTDIR/../..' --enable=require-variable-braces <explicit list>`. shfmt: `shfmt -i 2 -ci -bn -d <same list, with fleet/lib and fleet/node as directories>`. `shfmt` lives at `$HOME/go/bin/shfmt`. Also `fleet/tests/lint/placeholder_scan.sh` (walks **tracked** files, so `git add` first; it permits exactly two MagicDNS names, `TAILNET.ts.net` for this tailnet and `SHARED.ts.net` for a tailnet a machine was shared in from) and `fleet/tests/lint/engines_check.sh`. markdownlint: `npx --yes markdownlint-cli@0.41.0 --config .markdownlint.yml '*.md' 'docs/**/*.md' 'fleet/**/*.md' --ignore fleet/tests/vendor`.
 - **Unit tests must never touch** `/var/lib`, `/etc`, `/usr/local`, `/opt`, the real `~/.local/state/harbor`, the real `~/.ssh`, the real `~/.t3`, or the real `~/.config/systemd/user/`, and must never use `sudo`.
 - **bats-assert has no `refute_equal`.** A new worktree needs `git submodule update --init --recursive`.
 
@@ -454,8 +454,7 @@ harbor_client_preflight() {
     [ "$(harbor_client_json_field "${flat}" CurrentTailnet.MagicDNSEnabled)" = true ] \
       || harbor_die 3 client.magicdns_off "this tailnet has MagicDNS turned off, so the node has no name this Mac can use; turn MagicDNS on in the Tailscale admin console, then rerun"
   fi
-  suffix="$(harbor_client_json_field "${flat}" CurrentTailnet.MagicDNSSuffix)"
-  [ -n "${suffix}" ] || suffix="$(harbor_client_json_field "${flat}" MagicDNSSuffix)"
+  suffix="$(harbor_client_magicdns_suffix "${flat}")"
   [ -n "${suffix}" ] \
     || harbor_die 3 client.magicdns_off "this tailnet has MagicDNS turned off, so the node has no name this Mac can use; turn MagicDNS on in the Tailscale admin console, then rerun"
 }
@@ -474,24 +473,32 @@ harbor_client_preflight() {
 # machine chosen by iteration order. DNSName is unique by construction and is the
 # name the operator sees in the admin console.
 harbor_client_magicdns() {
-  local flat="${1}" want="${2}" key name
+  local flat="${1}" want="${2}" key name fqdn
+  # Matched on the whole name, not its first label: a machine shared in from
+  # another tailnet sits in this same Peer map under the sharer's suffix, and a
+  # first-label match answers with it whenever its owner named it the same thing.
+  fqdn="${want}.$(harbor_client_magicdns_suffix "${flat}")"
   # The tab in the sed pattern is written with printf rather than typed: a literal
   # tab in a source file is invisible and the next editor to touch this line will
   # turn it into spaces.
   for key in $(sed -n "s/^Peer\.\([^.]*\)\.DNSName$(printf '\t').*\$/\1/p" "${flat}"); do
     name="$(harbor_client_json_field "${flat}" "Peer.${key}.DNSName")"
     name="${name%.}"
-    if [ "${name%%.*}" = "${want}" ]; then
+    if [ "${name}" = "${fqdn}" ]; then
       printf '%s' "${name}"
       return 0
     fi
   done
-  # No peer answers to that name, but one calls itself that: a node that is there
-  # and has not been given a MagicDNS name is a different thing to fix than one
-  # that is absent.
+  # No peer answers to that name, and one that calls itself that has no MagicDNS
+  # name at all: a node that is there and unnamed is a different thing to fix than
+  # one that is absent. A peer whose HostName did not follow a rename in the admin
+  # console does have a name, a different one, and is absent rather than unnamed.
   for key in $(sed -n "s/^Peer\.\([^.]*\)\.HostName$(printf '\t').*\$/\1/p" "${flat}"); do
     if [ "$(harbor_client_json_field "${flat}" "Peer.${key}.HostName")" = "${want}" ]; then
-      harbor_die 3 client.node_unnamed "this Mac's tailnet has a node named ${want} but reports no MagicDNS name for it; check that MagicDNS is on and that the node has finished registering, then rerun"
+      name="$(harbor_client_json_field "${flat}" "Peer.${key}.DNSName")"
+      if [ -z "${name%.}" ]; then
+        harbor_die 3 client.node_unnamed "this Mac's tailnet has a node named ${want} but reports no MagicDNS name for it; check that MagicDNS is on and that the node has finished registering, then rerun"
+      fi
     fi
   done
   harbor_die 3 client.node_absent "this Mac's tailnet has no node named ${want}; run 'harbor auth tailscale' on the node first, and check it appears in the Tailscale admin console"
@@ -501,7 +508,7 @@ harbor_client_magicdns() {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `fleet/tests/run_unit.sh fleet/tests/unit/lib/client_tailscale.bats`
-Expected: PASS, 13 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Mutation-check the MagicDNS refusal**
 
@@ -1101,7 +1108,7 @@ setup() {
 - [ ] **Step 1: Add the two commands to the README's honest status section**, including the sentence that matters: until PR 7 ships `harbor status`, `client verify` against a real node reports the node's release as predating it, exit 3, and this is the designed answer rather than a gap.
 - [ ] **Step 2: Run markdownlint with the exact CI command line.**
 - [ ] **Step 3: Run the full unit lane and the complete static gate.** Record the test count.
-- [ ] **Step 4: Walk the merge gate for section 8's PR 6 row** and write each answer into the PR body: both macOS jobs green; no job requires a real node or PR 7; fixtures exist for exit 0 through 4 including the exit-4 `interrupted` object, the no-body transport cases, the non-JSON body, the undocumented code, and the pre-PR-7 unknown-subcommand reply; no `jq` invocation anywhere in `fleet/client/` or `fleet/lib/client.sh`; `fleet/client/` and `fleet/lib/client.sh` contain no MagicDNS suffix at all, because both take theirs from `harbor_client_magicdns`; and the only MagicDNS name anywhere in the branch is the canonical `TAILNET.ts.net`, which the fixtures in this plan do use and which `fleet/tests/lint/placeholder_scan.sh:23` permits in any tracked file. Check that last one with `gitleaks` as well as the placeholder scan, and check it before pushing: the `harbor-magicdns-suffix` rule reads the branch's whole history, so a real tailnet name in any commit stays red until the branch is squashed, and a follow-up commit does not clear it.
+- [ ] **Step 4: Walk the merge gate for section 8's PR 6 row** and write each answer into the PR body: both macOS jobs green; no job requires a real node or PR 7; fixtures exist for exit 0 through 4 including the exit-4 `interrupted` object, the no-body transport cases, the non-JSON body, the undocumented code, and the pre-PR-7 unknown-subcommand reply; no `jq` invocation anywhere in `fleet/client/` or `fleet/lib/client.sh`; `fleet/client/` and `fleet/lib/client.sh` contain no MagicDNS suffix at all, because both take theirs from `harbor_client_magicdns`; and the only MagicDNS names anywhere in the branch are the two placeholders `TAILNET.ts.net` and `SHARED.ts.net`, which the fixtures in this plan do use and which `fleet/tests/lint/placeholder_scan.sh` permits in any tracked file. `SHARED.ts.net` stands for the sharer's tailnet in the shared-machine fixtures: a machine shared in from another tailnet appears in `tailscale status` under that tailnet's suffix, so a single placeholder cannot express the case at all. Both are exact matches on an upper-case name no real tailnet can have. Check that last one with `gitleaks` as well as the placeholder scan, and check it before pushing: the `harbor-magicdns-suffix` rule reads the branch's whole history, so a real tailnet name in any commit stays red until the branch is squashed, and a follow-up commit does not clear it.
 - [ ] **Step 5: Commit and open the PR.**
 
 ---

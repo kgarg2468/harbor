@@ -132,6 +132,44 @@ EOF
   assert_output 'harbor-node-1.TAILNET.ts.net'
 }
 
+@test "a machine shared in from another tailnet is not mistaken for this tailnet's node" {
+  # A shared-in machine sits in the same Peer map and carries the *sharer's*
+  # MagicDNS suffix, because DNSName "has the form host.<MagicDNSSuffix>." and the
+  # suffix is theirs. Matched on the first label alone, a colleague who happens to
+  # have named a machine harbor-node wins whenever the flattener emits them first,
+  # and Harbor writes an ssh block -- and later points an HTTPS check -- at a node
+  # in someone else's tailnet. The shared peer is listed first here for that
+  # reason.
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","CurrentTailnet":{"MagicDNSSuffix":"TAILNET.ts.net","MagicDNSEnabled":true},"Peer":{"k1":{"HostName":"harbor-node","DNSName":"harbor-node.SHARED.ts.net."},"k2":{"HostName":"harbor-node","DNSName":"harbor-node.TAILNET.ts.net."}}}'
+  harbor_client_preflight "${FLAT}"
+  run harbor_client_magicdns "${FLAT}" harbor-node
+  assert_success
+  assert_output 'harbor-node.TAILNET.ts.net'
+}
+
+@test "a tailnet holding only the shared machine has no node of that name at all" {
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","CurrentTailnet":{"MagicDNSSuffix":"TAILNET.ts.net","MagicDNSEnabled":true},"Peer":{"k1":{"HostName":"harbor-node","DNSName":"harbor-node.SHARED.ts.net."}}}'
+  harbor_client_preflight "${FLAT}"
+  run harbor_client_magicdns "${FLAT}" harbor-node
+  assert_failure 3
+  assert_output --partial 'client.node_absent'
+}
+
+@test "a node renamed in the admin console is absent, not unnamed" {
+  # HostName is whatever the machine calls itself and does not follow a rename, so
+  # a peer can hold HostName harbor-node and a DNSName under a different name for
+  # as long as nobody changes the machine's own hostname. It has a MagicDNS name;
+  # telling the operator it has none sends them to check MagicDNS and registration
+  # over a node that is registered and named. The name they asked for is simply
+  # not in this tailnet.
+  fixture '{"BackendState":"Running","MagicDNSSuffix":"TAILNET.ts.net","CurrentTailnet":{"MagicDNSSuffix":"TAILNET.ts.net","MagicDNSEnabled":true},"Peer":{"k1":{"HostName":"harbor-node","DNSName":"renamed-node.TAILNET.ts.net."}}}'
+  harbor_client_preflight "${FLAT}"
+  run harbor_client_magicdns "${FLAT}" harbor-node
+  assert_failure 3
+  assert_output --partial 'client.node_absent'
+  refute_output --partial 'client.node_unnamed'
+}
+
 @test "a peer that matches but carries no MagicDNS name is a precondition, not an empty name" {
   # The peer is present, so the "no such node" arm never fires -- and returning
   # the empty string here would put an empty HostName in the ssh block, which is
