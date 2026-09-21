@@ -129,6 +129,18 @@ harbor_on_interrupt() {
 }
 harbor_on_exit() {
   local rc=$?
+  # Staged content, before anything else: these two name a copy of a file the
+  # run was part way through replacing, and a run that ends here ends without
+  # replacing it. Set by lib/client.sh and cleared by it the moment the rename
+  # makes them stale, so a non-empty value at this point means the run stopped
+  # mid-write. Guarded on type as well as emptiness because the only thing worse
+  # than leaving a temp file behind is removing something that is not one.
+  if [ -f "${HARBOR_CLIENT_STAGE_TMP:-}" ]; then
+    rm -f "${HARBOR_CLIENT_STAGE_TMP}" || :
+  fi
+  if [ -d "${HARBOR_CLIENT_STAGE:-}" ]; then
+    rm -rf "${HARBOR_CLIENT_STAGE}" || :
+  fi
   if [ -n "${HARBOR_LOCK_ROOT:-}" ]; then
     harbor_lock_release "${HARBOR_LOCK_ROOT}" || :
   fi

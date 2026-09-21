@@ -214,9 +214,15 @@ harbor_client_include_line() {
   printf 'Include ~/.ssh/harbor.conf'
 }
 
+# -F and -x, not an anchored pattern: the line carries a dot, and as a regular
+# expression that dot matches any character -- so a config holding
+# "Include ~/.ssh/harborAconf" would answer yes here. That answer is the
+# expensive one. harbor_client_include_add would return success having written
+# nothing and journaled nothing, and ssh would go on never loading harbor.conf,
+# with every visible sign saying setup had succeeded.
 harbor_client_include_present() {
   [ -f "${1}" ] || return 1
-  grep -q "^$(harbor_client_include_line)\$" "${1}"
+  grep -Fqx "$(harbor_client_include_line)" "${1}"
 }
 
 # harbor_client_include_add STATE_ROOT CONFIG: the include, once, prepended.
@@ -229,7 +235,7 @@ harbor_client_include_present() {
 # Ownership is the honest word, and the whole of --remove turns on it: modified
 # when the operator already had a config, created when Harbor made the file.
 harbor_client_include_add() {
-  local root="${1}" config="${2}" ownership pre post tmp entry work staged
+  local root="${1}" config="${2}" ownership pre post tmp entry work staged tmpdir
   if harbor_client_include_present "${config}"; then
     # Already there, by Harbor's hand on an earlier run or by the operator's.
     # Either way there is nothing to do and nothing to own, and a journal entry
@@ -246,7 +252,31 @@ harbor_client_include_add() {
   # which is the one class of artifact nothing in Harbor ever collects, because
   # recovery only ever looks at entries. Measured, not reasoned about: a test
   # seeds an unwritable journal and asserts nothing is left beside the config.
-  work="$(mktemp -d -t harbor-client)"
+  #
+  # An explicit template rather than "mktemp -d -t harbor-client": measured, BSD
+  # mktemp's -t form ignores TMPDIR entirely and always answers with the per-user
+  # /var/folders directory, which is both a surprise and untestable. Interpolating
+  # the directory keeps this consistent with harbor_test_pause_sentinel, which
+  # already reads TMPDIR, and lets a test say where the staging goes. mktemp
+  # creates the directory itself, atomically, at 0700 and owned by this user, so
+  # the fallback to a shared /tmp is still not somewhere another user can read.
+  tmpdir="${TMPDIR:-/tmp}"
+  work="$(mktemp -d "${tmpdir%/}/harbor-client.XXXXXX")"
+  # Named for the exit trap before anything is written into it. Both of these
+  # hold a copy of the operator's ssh config, and every path out of the rest of
+  # this function that is not the last line is an exit rather than a return:
+  # harbor_journal_create exits, harbor_die exits, set -e exits, and an operator
+  # pressing ^C between the install and the rename exits through
+  # harbor_on_interrupt. A cleanup written inline runs on none of them, which is
+  # how the staging directory and a config.tmp.NNNN beside the target survive a
+  # failure. harbor_on_exit is the one place all of those meet, and it is
+  # already where HARBOR_LOCK_ROOT is released for the same reason.
+  #
+  # It does not cover SIGKILL, and nothing can: the test hook's fail-after kills
+  # this process outright, exactly as a power cut would, and leaves the staging
+  # directory behind in TMPDIR. That is the one leak Harbor accepts, because the
+  # alternative is a sweep of paths Harbor cannot prove it created.
+  HARBOR_CLIENT_STAGE="${work}"
   staged="${work}/config"
   (
     umask 077
@@ -276,8 +306,22 @@ harbor_client_include_add() {
   # sets the mode as it copies, so the file the post-state describes is the file
   # that lands.
   tmp="${config}.tmp.$$"
+  HARBOR_CLIENT_STAGE_TMP="${tmp}"
   install -m 0600 "${staged}" "${tmp}"
   mv -f "${tmp}" "${config}"
+  # Cleared before the removals, not after: once the rename has happened the
+  # temp path is gone and the trap has nothing left to do, and a trap that fires
+  # while these still name live paths during the removals below would race with
+  # them rather than help.
+  # Read by harbor_on_exit in lib/log.sh, which shellcheck cannot see from here
+  # because this file does not source that one -- the dispatcher sources both.
+  # Not exported, deliberately: an exported value would be inherited by every
+  # child this run spawns, and a child's own exit trap would then remove the
+  # parent's staging out from under it.
+  # shellcheck disable=SC2034
+  HARBOR_CLIENT_STAGE_TMP=
+  # shellcheck disable=SC2034
+  HARBOR_CLIENT_STAGE=
   rm -rf "${work}"
   harbor_journal_set_phase "${entry}" applied \
     || harbor_die 2 client.include_record "the include was added to ${config} but its journal entry could not be marked applied; inspect the journal before rerunning"
