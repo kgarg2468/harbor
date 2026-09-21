@@ -195,15 +195,25 @@ harbor_client_conf_body() {
 # redirection is exactly that instant, because the shell creates the file with
 # whatever umask the operator's shell happens to carry. The umask is set in a
 # subshell so it applies to the creation itself and does not outlive this write.
+#
+# The temp file is named for the exit trap before it exists, for the same reason
+# the include writer's is: a failure between the redirection and the rename
+# leaves a copy of the generated configuration beside the target, unjournaled,
+# and recovery only ever looks at entries. The two writers share the one
+# variable because setup runs them in sequence, never at once, and a second name
+# would only be a second thing to forget.
 harbor_client_conf_write() {
   local path="${1}" tmp
   tmp="${path}.tmp.$$"
+  HARBOR_CLIENT_STAGE_TMP="${tmp}"
   (
     umask 077
     harbor_client_conf_body "${2}" "${3}" >"${tmp}"
   )
   chmod 0600 "${tmp}"
   mv -f "${tmp}" "${path}"
+  # shellcheck disable=SC2034 # read by harbor_on_exit in lib/log.sh
+  HARBOR_CLIENT_STAGE_TMP=
 }
 
 # The literal design section 5.5 names. Spelled with ~ rather than an expanded

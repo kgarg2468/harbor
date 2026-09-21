@@ -40,6 +40,32 @@ setup() {
   assert_equal 1 "$(find "${BATS_TEST_TMPDIR}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
 }
 
+@test "a write that fails at the rename leaves no copy of the config beside the target" {
+  # The rename is made to fail for real rather than stubbed. The target is an
+  # unwritable directory, so mv cannot move into it, while the temp file -- which
+  # lives in the parent, not the target -- is created and chmodded exactly as it
+  # would be on a good run. That is the window the finding is about, and the one
+  # a successful-write test cannot reach.
+  #
+  # An earlier spelling made the target a non-empty directory and proved nothing:
+  # mv onto a directory succeeds, moving the file into it, so the write returned
+  # 0 and the only nonzero status came from harbor_on_exit's own
+  # "terminated before completion" rule. Measured; the mutation check caught it.
+  local out="${BATS_TEST_TMPDIR}/harbor.conf"
+  mkdir -p "${out}"
+  chmod 0500 "${out}"
+  run bash -c '
+    set -euo pipefail
+    . "${HARBOR_ROOT}/lib/log.sh"
+    . "${HARBOR_ROOT}/lib/client.sh"
+    harbor_install_traps
+    harbor_client_conf_write "${1}" harbor-node.TAILNET.ts.net harbor
+  ' bash "${out}"
+  chmod 0700 "${out}"
+  assert_failure
+  assert_equal 0 "$(find "${BATS_TEST_TMPDIR}" -maxdepth 1 -name 'harbor.conf.tmp.*' | wc -l | tr -d ' ')"
+}
+
 @test "a permissive umask does not make the file readable by anyone else" {
   local out="${BATS_TEST_TMPDIR}/harbor.conf"
   (
